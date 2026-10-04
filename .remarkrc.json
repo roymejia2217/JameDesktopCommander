@@ -1,0 +1,13 @@
+{
+  "plugins": [
+    "standard-readme-preset",
+    [
+      "standard-readme-preset/rules/require-sections.js",
+      {
+        "installable": true
+      }
+    ],
+    "remark-preset-lint-recommended",
+    "remark-preset-lint-consistent"
+  ]
+}

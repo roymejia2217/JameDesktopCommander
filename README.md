@@ -1,27 +1,20 @@
-# Desktop Commander MCP
-### Search, update, manage files and run terminal commands with AI
+# JameDesktopCommander
 
-[![npm downloads](https://img.shields.io/npm/dw/@wonderwhy-er/desktop-commander)](https://www.npmjs.com/package/@wonderwhy-er/desktop-commander)
-[![AgentAudit Verified](https://agentaudit.dev/api/badge/desktop-commander)](https://agentaudit.dev/skills/desktop-commander)
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/wonderwhy-er/DesktopCommanderMCP)](https://archestra.ai/mcp-catalog/wonderwhy-er__desktopcommandermcp)
-[![smithery badge](https://smithery.ai/badge/@wonderwhy-er/desktop-commander)](https://smithery.ai/server/@wonderwhy-er/desktop-commander)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow.svg)](https://www.buymeacoffee.com/wonderwhyer)
+[![standard-readme compliant](https://img.shields.io/badge/readme%20style-standard-brightgreen.svg?style=flat-square)](https://github.com/RichardLitt/standard-readme)
 
+Production-grade MCP orchestration for local desktop automation and development.
 
-[![Discord](https://img.shields.io/badge/Join%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/kQ27sNnZr7)
-
-
-Work with code and text, run processes, and automate tasks, going far beyond other AI editors - while using host client subscriptions instead of API token costs.
-
-<a href="https://glama.ai/mcp/servers/zempur9oh4">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/zempur9oh4/badge" alt="Desktop Commander MCP" />
-</a>
+JameDesktopCommander (JDC) is an independent fork of
+[wonderwhy-er/DesktopCommanderMCP](https://github.com/wonderwhy-er/DesktopCommanderMCP).
+The source tree temporarily retains upstream npm and MCP Registry identifiers for compatibility
+while the fork is under active development. JDC does not publish to upstream-owned namespaces.
 
 ## Table of Contents
-- [Features](#features)
-- [How to install](#how-to-install)
-- [Getting Started](#getting-started)
+- [Background](#background)
+- [Install](#install)
 - [Usage](#usage)
+- [Features](#features)
+- [Getting Started](#getting-started)
 - [File Preview UI & Markdown Editor](#file-preview-ui--markdown-editor)
 - [Handling Long-Running Commands](#handling-long-running-commands)
 - [Work in Progress and TODOs](#roadmap)
@@ -30,59 +23,48 @@ Work with code and text, run processes, and automate tasks, going far beyond oth
 - [Media](#media)
 - [Testimonials](#testimonials)
 - [Frequently Asked Questions](#frequently-asked-questions)
+- [Data Collection & Privacy](#data-collection--privacy)
+- [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [License](#license)
 
-All of your AI development tools in one place.
-Desktop Commander puts all dev tools in one chat.
-Execute long-running terminal commands on your computer and manage processes through Model Context Protocol (MCP). Built on top of [MCP Filesystem Server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) to provide additional search and replace file editing capabilities.
+JameDesktopCommander brings local development, automation, process control, OpenCode orchestration,
+and desktop interaction into one MCP surface. It remains compatible with the upstream Desktop
+Commander architecture while adding JDC-specific runtime, security, and governance layers.
 
-## Features
+## Background
 
-- **Remote AI Control** - Use Desktop Commander from ChatGPT, Claude web, and other AI services via [Remote MCP](https://mcp.desktopcommander.app)
-- **File Preview UI** - Visual file previews in Claude Desktop with rendered markdown, inline images, expandable content, built-in markdown editor, and quick "Open in folder" access
-- **Enhanced terminal commands with interactive process control**
-- **Execute code in memory (Python, Node.js, R) without saving files**
-- **Instant data analysis - just ask to analyze CSV/JSON/Excel files**
-- **Native Excel file support** - Read, write, edit, and search Excel files (.xlsx, .xls, .xlsm) without external tools
-- **PDF support** - Read PDFs with text extraction, create new PDFs from markdown, modify existing PDFs
-- **DOCX support** - Read, create, edit, and search Word documents (.docx) with surgical XML editing and markdown-to-DOCX conversion
-- **Interact with running processes (SSH, databases, development servers)**
-- Execute terminal commands with output streaming
-- Command timeout and background execution support
-- Process management (list and kill processes)
-- Session management for long-running commands
-- **Process output pagination** - Read terminal output with offset/length controls to prevent context overflow
-- Server configuration management:
-  - Get/set configuration values
-  - Update multiple settings at once
-  - Dynamic configuration changes without server restart
-- Full filesystem operations:
-  - Read/write files (text, Excel, PDF, DOCX)
-  - Create/list directories
-  - **Recursive directory listing** with configurable depth and context overflow protection for large folders
-  - Move files/directories
-  - Search files and content (including Excel content)
-  - Get file metadata
-  - **Negative offset file reading**: Read from end of files using negative offset values (like Unix tail)
-- Code editing capabilities:
-  - Surgical text replacements for small changes
-  - Full file rewrites for major changes
-  - Multiple file support
-  - Pattern-based replacements
-  - vscode-ripgrep based recursive code or text search in folders
-- Local tool-call history and audit logs:
-  - Tool calls and arguments are recorded locally on the machine running Desktop Commander
-  - Recent call history with bounded output previews is available through `get_recent_tool_calls`
-  - Size-based rotation/trimming keeps the active history files bounded
-- Safety guardrails (not a sandbox — see [SECURITY.md](SECURITY.md)):
-  - Symlink traversal prevention on file operations
-  - Command blocklist for accidental execution
-  - [Docker isolation](#option-6-docker-installation--auto-updates-no-nodejs-required) for complete isolation
+JameDesktopCommander extends Desktop Commander MCP with production-oriented Windows runtime
+integration, OpenCode orchestration, semantic Computer Use foundations, OpenAI Secure MCP Tunnel
+lifecycle management, and enforceable repository governance. Linux remains a planned first-class
+platform rather than a compatibility afterthought.
 
-## How to install
+The project preserves upstream architecture where doing so keeps synchronization practical while
+deliberately diverging where JDC requires stronger Windows lifecycle, security, testing, or release
+guarantees. Its intellectual provenance is
+[wonderwhy-er/DesktopCommanderMCP](https://github.com/wonderwhy-er/DesktopCommanderMCP), licensed
+under MIT.
 
-### Install in Claude Desktop
+The intended repository identity is `JameDesktopCommander`. The inherited npm package
+`@wonderwhy-er/desktop-commander` and MCP Registry identifier are transitional metadata only;
+they belong to upstream and are not publication targets for JDC.
+
+## Install
+
+JameDesktopCommander is not yet published to npm or the MCP Registry. For the current development
+line, install dependencies and build from a checked-out JDC source tree:
+
+```sh
+npm ci
+npm run build
+node dist/index.js --help
+```
+
+The inherited installation examples below install upstream Desktop Commander, not JDC. They are
+retained temporarily as compatibility reference while JDC establishes its own publication
+namespaces.
+
+### Upstream compatibility reference
 
 Desktop Commander offers multiple installation methods for Claude Desktop.
 
@@ -479,91 +461,6 @@ On first run, complete browser authentication, then connect your AI at **[mcp.de
 
 </details>
 
-## Updating & Uninstalling Desktop Commander
-
-### Automatic Updates (Options 1, 2, 3, 4 & 6)
-**Options 1 (npx), Option 2 (bash installer), 3 (Smithery), 4 (manual config), and 6 (Docker)** automatically update to the latest version whenever you restart Claude. No manual intervention needed.
-
-### Manual Updates (Option 5)
-- **Option 5 (local checkout):** `cd DesktopCommanderMCP && git pull && npm run setup`
-
-### Uninstalling Desktop Commander
-#### 🤖 Automatic Uninstallation (Recommended)
-
-The easiest way to completely remove Desktop Commander:
-
-```bash
-npx @wonderwhy-er/desktop-commander@latest remove
-```
-
-This automatic uninstaller will:
-- ✅ Remove Desktop Commander from Claude's MCP server configuration
-- ✅ Create a backup of your Claude config before making changes
-- ✅ Provide guidance for complete package removal
-- ✅ Restore from backup if anything goes wrong
-
-#### 🔧 Manual Uninstallation
-
-If the automatic uninstaller doesn't work or you prefer manual removal:
-
-##### Remove from Claude Configuration
-
-1. **Locate your Claude Desktop config file:**
-  - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-  - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-  - **Linux:** `~/.config/Claude/claude_desktop_config.json`
-
-2. **Edit the config file:**
-  - Open the file in a text editor
-  - Find and remove the `"desktop-commander"` entry from the `"mcpServers"` section
-  - Save the file
-
-  **Example - Remove this section:**
-  ```json
-  {
-      "desktop-commander": {
-        "command": "npx",
-        "args": ["@wonderwhy-er/desktop-commander@latest"]
-      }
-  }
-  ```
-
-Close and restart Claude Desktop to complete the removal.
-
-#### 🆘 Troubleshooting
-
-**If automatic uninstallation fails:**
-- Use manual uninstallation as a fallback
-
-**If Claude won't start after uninstalling:**
-- Restore the backup config file created by the uninstaller
-- Or manually fix the JSON syntax in your claude_desktop_config.json
-
-**Need help?**
-- Join our Discord community: https://discord.com/invite/kQ27sNnZr7
-
-## Getting Started
-
-Once Desktop Commander is installed and Claude Desktop is restarted, you're ready to supercharge your Claude experience!
-
-### 🚀 New User Onboarding
-
-Desktop Commander includes intelligent onboarding to help you discover what's possible:
-
-**For New Users:** When you're just getting started (fewer than 10 successful commands), Claude will automatically offer helpful getting-started guidance and practical tutorials after you use Desktop Commander successfully.
-
-**Request Help Anytime:** You can ask for onboarding assistance at any time by simply saying:
-- *"Help me get started with Desktop Commander"*
-- *"Show me Desktop Commander examples"* 
-- *"What can I do with Desktop Commander?"*
-
-Claude will then show you beginner-friendly tutorials and examples, including:
-- 📁 Organizing your Downloads folder automatically
-- 📊 Analyzing CSV/Excel files with Python
-- ⚙️ Setting up GitHub Actions CI/CD
-- 🔍 Exploring and understanding codebases
-- 🤖 Running interactive development environments
-
 ## Usage
 
 The server provides a comprehensive set of tools organized into several categories:
@@ -661,7 +558,7 @@ Desktop Commander can be run in Docker containers for **complete isolation from 
    - Download and install Docker Desktop from [docker.com](https://www.docker.com/products/docker-desktop/)
 
 2. **Get Desktop Commander Docker Configuration**
-   - Visit: https://hub.docker.com/mcp/server/desktop-commander/manual
+   - Visit: https://hub.docker.com/mcp/server/desktop-commander/overview
    - **Option A:** Use the provided terminal command for automated setup
    - **Option B:** Click "Standalone" to get the config JSON and add it manually to your Claude Desktop config
  ![docker-config.png](screenshots/docker-config.png)
@@ -675,6 +572,137 @@ Desktop Commander can be run in Docker containers for **complete isolation from 
 - **Consistent environment** across different machines
 - **Easy cleanup** - just remove the container when done
 - **Perfect for testing** new features or configurations
+
+## Features
+
+- **Remote AI Control** - Use Desktop Commander from ChatGPT, Claude web, and other AI services via [Remote MCP](https://mcp.desktopcommander.app)
+- **File Preview UI** - Visual file previews in Claude Desktop with rendered markdown, inline images, expandable content, built-in markdown editor, and quick "Open in folder" access
+- **Enhanced terminal commands with interactive process control**
+- **Execute code in memory (Python, Node.js, R) without saving files**
+- **Instant data analysis - just ask to analyze CSV/JSON/Excel files**
+- **Native Excel file support** - Read, write, edit, and search Excel files (.xlsx, .xls, .xlsm) without external tools
+- **PDF support** - Read PDFs with text extraction, create new PDFs from markdown, modify existing PDFs
+- **DOCX support** - Read, create, edit, and search Word documents (.docx) with surgical XML editing and markdown-to-DOCX conversion
+- **Interact with running processes (SSH, databases, development servers)**
+- Execute terminal commands with output streaming
+- Command timeout and background execution support
+- Process management (list and kill processes)
+- Session management for long-running commands
+- **Process output pagination** - Read terminal output with offset/length controls to prevent context overflow
+- Server configuration management:
+  - Get/set configuration values
+  - Update multiple settings at once
+  - Dynamic configuration changes without server restart
+- Full filesystem operations:
+  - Read/write files (text, Excel, PDF, DOCX)
+  - Create/list directories
+  - **Recursive directory listing** with configurable depth and context overflow protection for large folders
+  - Move files/directories
+  - Search files and content (including Excel content)
+  - Get file metadata
+  - **Negative offset file reading**: Read from end of files using negative offset values (like Unix tail)
+- Code editing capabilities:
+  - Surgical text replacements for small changes
+  - Full file rewrites for major changes
+  - Multiple file support
+  - Pattern-based replacements
+  - vscode-ripgrep based recursive code or text search in folders
+- Local tool-call history and audit logs:
+  - Tool calls and arguments are recorded locally on the machine running Desktop Commander
+  - Recent call history with bounded output previews is available through `get_recent_tool_calls`
+  - Size-based rotation/trimming keeps the active history files bounded
+- Safety guardrails (not a sandbox — see [SECURITY.md](SECURITY.md)):
+  - Symlink traversal prevention on file operations
+  - Command blocklist for accidental execution
+  - [Docker isolation](#option-6-docker-installation--auto-updates-no-nodejs-required) for complete isolation
+
+## Updating & Uninstalling Desktop Commander
+
+### Automatic Updates (Options 1, 2, 3, 4 & 6)
+**Options 1 (npx), Option 2 (bash installer), 3 (Smithery), 4 (manual config), and 6 (Docker)** automatically update to the latest version whenever you restart Claude. No manual intervention needed.
+
+### Manual Updates (Option 5)
+- **Option 5 (local checkout):** `cd DesktopCommanderMCP && git pull && npm run setup`
+
+### Uninstalling Desktop Commander
+#### 🤖 Automatic Uninstallation (Recommended)
+
+The easiest way to completely remove Desktop Commander:
+
+```bash
+npx @wonderwhy-er/desktop-commander@latest remove
+```
+
+This automatic uninstaller will:
+- ✅ Remove Desktop Commander from Claude's MCP server configuration
+- ✅ Create a backup of your Claude config before making changes
+- ✅ Provide guidance for complete package removal
+- ✅ Restore from backup if anything goes wrong
+
+#### 🔧 Manual Uninstallation
+
+If the automatic uninstaller doesn't work or you prefer manual removal:
+
+##### Remove from Claude Configuration
+
+1. **Locate your Claude Desktop config file.**
+
+   **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+   **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+   **Linux:** `~/.config/Claude/claude_desktop_config.json`
+
+2. **Edit the config file.**
+
+   Open the file in a text editor, remove the `"desktop-commander"` entry from
+   the `"mcpServers"` section, and save the file.
+
+  **Example - Remove this section:**
+  ```json
+  {
+      "desktop-commander": {
+        "command": "npx",
+        "args": ["@wonderwhy-er/desktop-commander@latest"]
+      }
+  }
+  ```
+
+Close and restart Claude Desktop to complete the removal.
+
+#### 🆘 Troubleshooting
+
+**If automatic uninstallation fails:**
+- Use manual uninstallation as a fallback
+
+**If Claude won't start after uninstalling:**
+- Restore the backup config file created by the uninstaller
+- Or manually fix the JSON syntax in your claude_desktop_config.json
+
+**Need help?**
+- Join our Discord community: https://discord.com/invite/kQ27sNnZr7
+
+## Getting Started
+
+Once Desktop Commander is installed and Claude Desktop is restarted, you're ready to supercharge your Claude experience!
+
+### 🚀 New User Onboarding
+
+Desktop Commander includes intelligent onboarding to help you discover what's possible:
+
+**For New Users:** When you're just getting started (fewer than 10 successful commands), Claude will automatically offer helpful getting-started guidance and practical tutorials after you use Desktop Commander successfully.
+
+**Request Help Anytime:** You can ask for onboarding assistance at any time by simply saying:
+- *"Help me get started with Desktop Commander"*
+- *"Show me Desktop Commander examples"*
+- *"What can I do with Desktop Commander?"*
+
+Claude will then show you beginner-friendly tutorials and examples, including:
+- 📁 Organizing your Downloads folder automatically
+- 📊 Analyzing CSV/Excel files with Python
+- ⚙️ Setting up GitHub Actions CI/CD
+- 🔍 Exploring and understanding codebases
+- 🤖 Running interactive development environments
 
 ## URL Support
 - `read_file` can now fetch content from both local files and URLs
@@ -751,8 +779,6 @@ npm run logs:export -- --format json --output analysis.json
 # Clear all logs (with confirmation)
 npm run logs:clear
 ```
-
-For detailed documentation on these scripts, see [scripts/README.md](scripts/README.md).
 
 ## Fuzzy Search Logs
 
@@ -1094,17 +1120,6 @@ https://medium.com/@pharmx/you-sir-are-my-hero-62cff5836a3e](https://medium.com/
 
 If you find this project useful, please consider giving it a ⭐ star on GitHub! This helps others discover the project and encourages further development.
 
-We welcome contributions from the community! Whether you've found a bug, have a feature request, or want to contribute code, here's how you can help:
-
-- **Found a bug?** Open an issue at [github.com/wonderwhy-er/DesktopCommanderMCP/issues](https://github.com/wonderwhy-er/DesktopCommanderMCP/issues)
-- **Have a feature idea?** Submit a feature request in the issues section
-- **Want to contribute code?** Fork the repository, create a branch, and submit a pull request
-- **Questions or discussions?** Start a discussion in the GitHub Discussions tab
-
-All contributions, big or small, are greatly appreciated!
-
-If you find this tool valuable for your workflow, please consider [supporting the project](https://www.buymeacoffee.com/wonderwhyer).
-
 ## Frequently Asked Questions
 
 Here are answers to some common questions. For a more comprehensive FAQ, see our [detailed FAQ document](FAQ.md).
@@ -1144,8 +1159,17 @@ This is separate from the [local tool history and audit logs](#local-tool-histor
 
 For complete details, see our [Privacy Policy](PRIVACY.md).
 
-## Verifications
-[![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/25ff7a06-58bc-40b8-bd79-ebb715140f1a)
+## Maintainers
+
+- [Roy Mejía](https://github.com/roymejia2217) — JameDesktopCommander maintainer.
+- [Eduards Ruzga](https://github.com/wonderwhy-er) — upstream Desktop Commander author.
+
+## Contributing
+
+Pull requests are accepted. Read [CONTRIBUTING.md](CONTRIBUTING.md) before creating commits or a
+pull request; it defines the enforced Commitlint, Husky, PR-body, CI, squash-merge, and release
+contracts. JDC-specific questions and defects belong in the JameDesktopCommander repository once
+its public remote is created. Upstream-specific issues should continue to be reported upstream.
 
 ## License
 

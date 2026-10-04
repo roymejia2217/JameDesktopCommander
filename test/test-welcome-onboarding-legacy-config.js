@@ -16,7 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_INDEX = path.join(__dirname, '..', 'dist', 'index.js');
-const TIMEOUT_MS = 10_000;
+// Harness watchdog only, not a startup-latency SLA. Windows CI and developer
+// hosts can be heavily contended while spawning Node + loading the MCP server.
+// Functional assertions below still require a valid initialize response.
+const TIMEOUT_MS = 30_000;
 
 class ExistingConfigClaudeCodeMigrationTest {
   constructor() {

@@ -43,6 +43,19 @@ Additional practical steps:
 - The command blocklist can be circumvented via substitution, absolute paths, or alternate interpreters.
 - Desktop Commander does not protect against a compromised AI account or prompt injection reaching a trusted client. For that threat model, use OS-level isolation.
 
+## Known dependency advisories
+
+### GHSA-w5hq-g745-h8pq — uuid via exceljs
+
+- **Severity:** Moderate.
+- **Dependency path:** exceljs@4.4.0 -> uuid@8.3.2.
+- **Status:** Accepted temporarily; the vulnerable API is not reachable through Desktop Commander's use of ExcelJS.
+- **Reachability evidence:** the affected uuid advisory applies to v3(), v5(), and v6() when a caller supplies an output buffer. ExcelJS imports only v4 in lib/xlsx/xform/sheet/cf-ext/cf-rule-ext-xform.js and invokes uuidv4() without a caller-supplied buffer. Desktop Commander does not import uuid directly.
+- **Upstream constraint:** exceljs@4.4.0 is the current release and still declares uuid@^8.3.0. Forcing a patched uuid major through an override would violate the dependency's declared compatibility range, while npm audit fix --force proposes a breaking ExcelJS downgrade.
+- **Exit condition:** remove this exception as soon as an upstream ExcelJS release consumes a patched uuid version. Re-evaluate immediately if Desktop Commander begins calling affected UUID APIs directly.
+
+This exception does not suppress audit output. CI/security review should continue to report the advisory and fail on any high or critical runtime vulnerability.
+
 ## License and responsibility
 
 Desktop Commander is free, open-source software released under the MIT License. As is standard for MIT-licensed software, it is provided "as is," without warranty, and you are responsible for how you deploy and secure it in your environment. This security model describes how the tool is designed to behave; it does not transfer responsibility for your accounts, machines, or connected AI clients to the project.

@@ -1,7 +1,8 @@
 import fs from 'fs/promises';
 import { existsSync, readdirSync } from 'fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
-import { mdToPdf } from 'md-to-pdf';
+import MarkdownIt from 'markdown-it';
+import type { LaunchOptions, PDFOptions } from 'puppeteer-core';
 import type { PageRange } from './lib/pdf2md.js';
 import { PdfParseResult, pdf2md } from './lib/pdf2md.js';
 import { CONFIG_FILE } from '../../config.js';
@@ -284,35 +285,121 @@ export async function parsePdfToMarkdown(source: string, pageNumbers: number[] |
     }
 }
 
-export async function parseMarkdownToPdf(markdown: string, options: any = {}): Promise<Buffer> {
-    try {
-        // Find Chrome: puppeteer cache -> system Chrome -> install
-        const chromePath = await getChromePath();
-        
-        if (chromePath) {
-            options = {
-                ...options,
-                launch_options: {
-                    ...options.launch_options,
-                    executablePath: chromePath,
-                }
-            };
-        }
-        
-        const pdf = await mdToPdf({ content: markdown }, options);
+export interface MarkdownPdfOptions {
+    launch_options?: Partial<Omit<LaunchOptions, 'executablePath'>>;
+    pdf_options?: PDFOptions;
+    css?: string;
+    document_title?: string;
+    body_class?: string[];
+    page_media_type?: 'screen' | 'print';
+}
 
-        return pdf.content;
-    } catch (error) {
-        // Provide helpful error message if Chrome is not found
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (errorMessage.includes('Could not find Chrome')) {
-            throw new Error(
-                'PDF generation requires Chrome or Chromium browser. ' +
-                'Please install Google Chrome from https://www.google.com/chrome/ ' +
-                'or Chromium, then try again.'
-            );
-        }
-        console.error('Error creating PDF:', error);
-        throw error;
+const DEFAULT_PDF_OPTIONS: PDFOptions = {
+    printBackground: true,
+    format: 'A4',
+    margin: {
+        top: '30mm',
+        right: '40mm',
+        bottom: '30mm',
+        left: '20mm',
+    },
+};
+
+const DEFAULT_MARKDOWN_CSS = [
+    ':root { color-scheme: light; }',
+    'body { margin: 0; color: #1f2328; background: #ffffff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }',
+    'h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.25em 0 0.5em; }',
+    'h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; }',
+    'pre, code { font-family: Consolas, "Liberation Mono", monospace; }',
+    'code { background: #f6f8fa; border-radius: 4px; padding: 0.15em 0.35em; }',
+    'pre { background: #f6f8fa; border-radius: 6px; padding: 16px; overflow: auto; }',
+    'pre code { padding: 0; background: transparent; }',
+    'blockquote { margin: 0; padding: 0 1em; color: #59636e; border-left: 0.25em solid #d0d7de; }',
+    'table { border-collapse: collapse; width: 100%; }',
+    'th, td { border: 1px solid #d0d7de; padding: 6px 13px; text-align: left; }',
+    'img { max-width: 100%; height: auto; }',
+].join('\n');
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function sanitizeBodyClasses(classes: string[] | undefined): string {
+    if (!classes) return '';
+    return classes
+        .filter(value => /^[A-Za-z0-9_-]+$/.test(value))
+        .join(' ');
+}
+
+export function renderMarkdownDocument(
+    markdown: string,
+    options: Pick<MarkdownPdfOptions, 'css' | 'document_title' | 'body_class'> = {},
+): string {
+    const renderer = new MarkdownIt({
+        html: false,
+        linkify: true,
+        typographer: false,
+    });
+    const title = escapeHtml(options.document_title ?? 'Document');
+    const bodyClass = sanitizeBodyClasses(options.body_class);
+    const classAttribute = bodyClass ? ' class="' + bodyClass + '"' : '';
+    const content = renderer.render(markdown);
+
+    return [
+        '<!doctype html>',
+        '<html>',
+        '<head>',
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<title>' + title + '</title>',
+        '<style>' + DEFAULT_MARKDOWN_CSS + '\n' + (options.css ?? '') + '</style>',
+        '</head>',
+        '<body' + classAttribute + '>',
+        content,
+        '</body>',
+        '</html>',
+    ].join('\n');
+}
+
+export async function parseMarkdownToPdf(
+    markdown: string,
+    options: MarkdownPdfOptions = {},
+): Promise<Buffer> {
+    const chromePath = await getChromePath();
+    if (!chromePath) {
+        throw new Error(
+            'PDF generation requires Chrome or Chromium browser. ' +
+            'Please install Google Chrome or Chromium, then try again.'
+        );
+    }
+
+    const { launch } = await import('puppeteer-core');
+    const browser = await launch({
+        ...(options.launch_options ?? {}),
+        executablePath: chromePath,
+        headless: true,
+    });
+
+    try {
+        const page = await browser.newPage();
+        await page.setJavaScriptEnabled(false);
+        await page.emulateMediaType(options.page_media_type ?? 'screen');
+        await page.setContent(renderMarkdownDocument(markdown, options), {
+            waitUntil: 'load',
+        });
+
+        const pdf = await page.pdf({
+            ...DEFAULT_PDF_OPTIONS,
+            ...(options.pdf_options ?? {}),
+        });
+
+        return Buffer.from(pdf);
+    } finally {
+        await browser.close();
     }
 }

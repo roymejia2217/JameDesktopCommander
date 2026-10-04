@@ -241,6 +241,41 @@ export const TrackUiEventArgsSchema = z.object({
   params: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().default({}),
 });
 
+
+const OpenCodeProjectSchema = z.string().regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
+const OpenCodeSessionSchema = z.string().min(1).max(256);
+
+export const OpenCodeReadArgsSchema = z.object({
+  action: z.enum(['health', 'projects', 'sessions', 'status', 'messages', 'diff']),
+  project: OpenCodeProjectSchema.optional(),
+  sessionId: OpenCodeSessionSchema.optional(),
+  offset: z.number().int().min(0).optional(),
+}).superRefine((data, ctx) => {
+  if (['sessions', 'status', 'messages', 'diff'].includes(data.action) && !data.project) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['project'], message: 'project is required for this action' });
+  }
+  if (['status', 'messages', 'diff'].includes(data.action) && !data.sessionId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sessionId'], message: 'sessionId is required for this action' });
+  }
+});
+
+export const OpenCodeTaskArgsSchema = z.object({
+  action: z.enum(['start', 'run', 'continue', 'abort']),
+  project: OpenCodeProjectSchema,
+  sessionId: OpenCodeSessionSchema.optional(),
+  prompt: z.string().min(1).optional(),
+  agent: z.string().min(1).max(128).optional(),
+  timeout_ms: z.number().int().min(1000).max(1800000).optional(),
+  poll_ms: z.number().int().min(250).max(10000).optional(),
+}).superRefine((data, ctx) => {
+  if (['start', 'run', 'continue'].includes(data.action) && !data.prompt) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: 'prompt is required for this action' });
+  }
+  if (['continue', 'abort'].includes(data.action) && !data.sessionId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sessionId'], message: 'sessionId is required for this action' });
+  }
+});
+
 /**
  * Map of tool name -> argument schema, used by the dispatcher to detect and warn
  * about parameters a caller sent that the tool does not support. Keep in sync
@@ -274,4 +309,6 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   give_feedback_to_desktop_commander: GiveFeedbackArgsSchema,
   get_prompts: GetPromptsArgsSchema,
   track_ui_event: TrackUiEventArgsSchema,
+  opencode_read: OpenCodeReadArgsSchema,
+  opencode_task: OpenCodeTaskArgsSchema,
 };

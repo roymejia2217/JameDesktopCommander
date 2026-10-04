@@ -96,6 +96,14 @@
       "description": "Apply targeted text replacements for text and DOCX files, or range-based cell updates for Excel files."
     },
     {
+      "name": "opencode_read",
+      "description": "Inspect the protected local OpenCode gateway, allowlisted projects, sessions, status, messages, and diffs."
+    },
+    {
+      "name": "opencode_task",
+      "description": "Delegate development tasks to OpenCode through the protected local MCP gateway, including start, run, continue, and abort operations."
+    },
+    {
       "name": "start_process",
       "description": "Start a new terminal process with intelligent state detection. Primary tool for local file analysis (CSV, JSON, logs, etc.)."
     },

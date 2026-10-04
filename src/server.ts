@@ -51,6 +51,8 @@ import {
     GetPromptsArgsSchema,
     GetRecentToolCallsArgsSchema,
     WritePdfArgsSchema,
+    OpenCodeReadArgsSchema,
+    OpenCodeTaskArgsSchema,
     toolArgSchemas,
 } from './tools/schemas.js';
 import {
@@ -62,6 +64,7 @@ import { getConfig, setConfigValue } from './tools/config.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
+import { handleOpenCodeRead, handleOpenCodeTask } from './tools/opencode.js';
 import { trackToolCall } from './utils/trackTools.js';
 import { usageTracker } from './utils/usageTracker.js';
 import { processDockerPrompt } from './utils/dockerPrompt.js';
@@ -873,6 +876,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
             },
 
+            // OpenCode agent tools
+            {
+                name: "opencode_read",
+                description: "Inspect the protected local OpenCode gateway. Actions: health, projects, sessions, status, messages, diff. Prefer this structured tool over shell commands or TUI inspection for OpenCode state.",
+                inputSchema: zodToJsonSchema(OpenCodeReadArgsSchema),
+                annotations: {
+                    title: "OpenCode Read",
+                    readOnlyHint: true,
+                    destructiveHint: false,
+                    idempotentHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "opencode_task",
+                description: "Delegate work to OpenCode through the protected loopback MCP gateway. start returns a session immediately; run and continue wait internally for completion to minimize remote tool calls; abort stops a session. Use project aliases from opencode_read action projects, never filesystem paths.",
+                inputSchema: zodToJsonSchema(OpenCodeTaskArgsSchema),
+                annotations: {
+                    title: "OpenCode Task",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    idempotentHint: false,
+                    openWorldHint: false,
+                },
+            },
+
             // Terminal tools
             {
                 name: "start_process",
@@ -1398,6 +1427,14 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 break;
 
             // Terminal tools
+            case "opencode_read":
+                result = await handleOpenCodeRead(args);
+                break;
+
+            case "opencode_task":
+                result = await handleOpenCodeTask(args);
+                break;
+
             case "start_process":
                 result = await handlers.handleStartProcess(args);
                 break;

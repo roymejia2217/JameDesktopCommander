@@ -44,6 +44,19 @@ assert.deepEqual(createArgs, [
   '/F',
 ]);
 
+const failClosedCreateArgs = buildSchtasksCreateArgs(
+  'Desktop Commander Windows Tunnel',
+  'C:\\Temp\\jdc-task.xml',
+  false,
+);
+assert.deepEqual(failClosedCreateArgs, [
+  '/Create',
+  '/TN',
+  'Desktop Commander Windows Tunnel',
+  '/XML',
+  'C:\\Temp\\jdc-task.xml',
+]);
+
 const escaped = buildWindowsTunnelTaskXml({
   ...base,
   author: 'DOMAIN\\A&B',

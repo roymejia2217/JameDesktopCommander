@@ -81,6 +81,32 @@ assert.deepEqual(calls, [
 ]);
 assert.deepEqual(removals, ['C:\\Temp\\jdc-task-123']);
 
+const failClosedCalls = [];
+await installWindowsTunnelTask(
+  {
+    taskName: 'Desktop Commander Windows Tunnel',
+    task,
+    replaceExisting: false,
+  },
+  {
+    environment: { SystemRoot: 'C:\\Windows' },
+    makeTempDirectory: async () => 'C:\\Temp\\jdc-task-no-force',
+    writeFile: async () => {},
+    removeDirectory: async () => {},
+    runExecutable: async (executable, args) => {
+      failClosedCalls.push({ executable, args: [...args] });
+      return { stdout: '', stderr: '' };
+    },
+  },
+);
+assert.deepEqual(failClosedCalls[0].args, [
+  '/Create',
+  '/TN',
+  'Desktop Commander Windows Tunnel',
+  '/XML',
+  'C:\\Temp\\jdc-task-no-force\\task.xml',
+]);
+
 const cleanupAfterFailure = [];
 await assert.rejects(
   installWindowsTunnelTask(

@@ -33,6 +33,7 @@ export interface WindowsTunnelLifecycleDependencies {
 export interface InstallWindowsTunnelTaskOptions {
     taskName: string;
     task: WindowsTunnelTaskOptions;
+    replaceExisting?: boolean;
 }
 
 function requireTaskName(taskName: string): string {
@@ -130,7 +131,11 @@ export async function installWindowsTunnelTask(
         await deps.writeFile(xmlPath, encodeWindowsTaskXml(xml));
         return await deps.runExecutable(
             schtasksExecutable,
-            buildSchtasksCreateArgs(taskName, xmlPath),
+            buildSchtasksCreateArgs(
+                taskName,
+                xmlPath,
+                options.replaceExisting ?? true,
+            ),
         );
     } finally {
         await deps.removeDirectory(tempDirectory);

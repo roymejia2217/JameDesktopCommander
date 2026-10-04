@@ -104,16 +104,25 @@ export function buildWindowsTunnelTaskXml(options: WindowsTunnelTaskOptions): st
     ].join('\r\n');
 }
 
-export function buildSchtasksCreateArgs(taskName: string, xmlPath: string): string[] {
+export function buildSchtasksCreateArgs(
+    taskName: string,
+    xmlPath: string,
+    replaceExisting = true,
+): string[] {
     const normalizedTaskName = requireNonEmpty('Task name', taskName);
     const normalizedXmlPath = requireAbsoluteWindowsPath('Task XML path', xmlPath);
 
-    return [
+    const args = [
         '/Create',
         '/TN',
         normalizedTaskName,
         '/XML',
         normalizedXmlPath,
-        '/F',
     ];
+
+    if (replaceExisting) {
+        args.push('/F');
+    }
+
+    return args;
 }

@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 const TEST_FILE = fileURLToPath(import.meta.url);
 const WORKERS = 8;
 const TIMEOUT_MS = 8_000;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function worker() {
   const { configManager } = await import('../dist/config-manager.js');
@@ -19,7 +18,7 @@ async function worker() {
     if (message.type !== 'track') return;
     try {
       await usageTracker.trackSuccess('list_processes');
-      await sleep(400);
+      await configManager.flushPendingWrites();
       process.send?.({ type: 'done' });
     } catch (error) {
       process.send?.({ type: 'error', message: error.stack || error.message });

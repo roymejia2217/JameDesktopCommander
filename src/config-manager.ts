@@ -416,6 +416,51 @@ class ConfigManager {
     return next;
   }
 
+  /**
+   * Wait until all queued non-blocking mutations are durably persisted.
+   *
+   * Normal high-frequency callers should keep using the non-blocking APIs.
+   * This barrier is for lifecycle boundaries and tests that must observe
+   * durable state before proceeding or exiting.
+   */
+  async flushPendingWrites(timeoutMs = 5_000): Promise<void> {
+    await this.init();
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new RangeError('flushPendingWrites timeout must be a positive finite number');
+    }
+
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      if (this.pendingMutations.length > 0 && !this.saveScheduled) {
+        this.scheduleSave();
+      }
+
+      const observedChain = this.writeChain;
+      await observedChain;
+
+      const isStable =
+        this.pendingMutations.length === 0 &&
+        !this.saveScheduled &&
+        observedChain === this.writeChain;
+
+      if (isStable) {
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        const error = new Error(
+          `Timed out waiting for pending config writes after ${timeoutMs}ms`
+        ) as NodeJS.ErrnoException;
+        error.code = 'ETIMEDOUT';
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   /** Update multiple configuration values at once. */
   async updateConfig(updates: Partial<ServerConfig>): Promise<ServerConfig> {
     await this.init();

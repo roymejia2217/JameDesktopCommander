@@ -14,6 +14,7 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { runTunnel } from './npm-scripts/tunnel.js';
+import { runUiBridge } from './npm-scripts/ui-bridge.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 
 // Store messages to defer until after initialization
@@ -45,6 +46,12 @@ async function runServer() {
     // Check if first argument is "tunnel"
     if (process.argv[2] === 'tunnel') {
       await runTunnel(process.argv.slice(3));
+      return;
+    }
+
+    // Check if first argument is "ui-bridge"
+    if (process.argv[2] === 'ui-bridge') {
+      await runUiBridge(process.argv.slice(3));
       return;
     }
 

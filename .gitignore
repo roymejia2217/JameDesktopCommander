@@ -8,6 +8,10 @@ yarn-error.log*
 dist/
 *.tsbuildinfo
 
+# .NET build output
+**/bin/
+**/obj/
+
 # IDE and editor files
 .idea/
 .vscode/

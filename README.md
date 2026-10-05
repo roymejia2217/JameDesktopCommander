@@ -572,7 +572,7 @@ Desktop Commander can be run in Docker containers for **complete isolation from 
 ## Features
 
 - **Remote AI Control** - Use Desktop Commander from ChatGPT, Claude web, and other AI services via [Remote MCP](https://mcp.desktopcommander.app)
-- **File Preview UI** - Visual file previews in Claude Desktop with rendered markdown, inline images, expandable content, built-in markdown editor, and quick "Open in folder" access
+- **File Preview UI** - Optional interactive previews through explicit render tools (`preview_file`, `render_directory`, `render_config_editor`) so ordinary data operations stay lightweight
 - **Enhanced terminal commands with interactive process control**
 - **Execute code in memory (Python, Node.js, R) without saving files**
 - **Instant data analysis - just ask to analyze CSV/JSON/Excel files**
@@ -710,7 +710,7 @@ Claude will then show you beginner-friendly tutorials and examples, including:
 
 ## File Preview UI & Markdown Editor
 
-Desktop Commander includes a rich file preview widget in Claude Desktop that renders files visually as AI works with them.
+JameDesktopCommander keeps ordinary data/action tools lightweight and exposes rich UI only through explicit render tools. `read_file`, `list_directory`, `get_config`, and write/edit operations do not mount an iframe by default; use `preview_file`, `render_directory`, or `render_config_editor` when an interactive view is useful.
 
 ### Supported file types
 - **Markdown** — rendered preview with a built-in editor
@@ -722,10 +722,10 @@ Desktop Commander includes a rich file preview widget in Claude Desktop that ren
 
 ### Markdown Editor
 
-When viewing a `.md` file in Claude Desktop, you can edit it directly inside the preview panel — no need to open a separate app.
+When `preview_file` renders a `.md` file in a compatible MCP Apps host, you can edit it directly inside the preview panel — no need to open a separate app.
 
 **How to use:**
-1. Ask Claude to read or create a markdown file
+1. Ask your AI client to preview the markdown file with `preview_file`
 2. Expand the file preview to fullscreen using the **⤢ Expand** button
 3. The editor activates automatically in fullscreen mode
 4. Edit your content with a live preview toggle, copy, undo, and save controls
@@ -742,7 +742,7 @@ When viewing a `.md` file in Claude Desktop, you can edit it directly inside the
 
 ### Directory Browser
 
-When Claude runs `list_directory`, the result opens as an interactive file tree inside the preview panel — not just raw text output.
+`list_directory` returns a model-facing directory listing without mounting UI. Use `render_directory` when you want the same path opened as an interactive file tree inside the preview panel.
 
 **Features:**
 - **Expandable tree** — folders expand and collapse on click; top-level contents shown immediately

@@ -13,6 +13,7 @@ while the fork is under active development. JDC does not publish to upstream-own
 - [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
+- [Windows UI Bridge Lifecycle](#windows-ui-bridge-lifecycle)
 - [Features](#features)
 - [Getting Started](#getting-started)
 - [File Preview UI & Markdown Editor](#file-preview-ui--markdown-editor)
@@ -459,7 +460,27 @@ On first run, complete browser authentication, then connect your AI at **[mcp.de
 
 ## Usage
 
-The server provides a comprehensive set of tools organized into several categories:
+The server provides a comprehensive set of tools organized into several categories.
+
+### Windows UI Bridge Lifecycle
+
+On Windows, the read-only `computer_inspect` tool uses the JameDesktopCommander UI bridge to inspect
+the foreground application through UI Automation. The bridge must run in the owning user's interactive
+session; it does not use coordinate guessing and this lifecycle does not enable click or type actions.
+
+Build or obtain `DesktopCommander.UiBridge.exe`, place it at a durable absolute path, then register
+and control its Scheduled Task through the JDC CLI:
+
+```powershell
+node dist/index.js ui-bridge install --bridge-exe C:\path\to\DesktopCommander.UiBridge.exe
+node dist/index.js ui-bridge start
+node dist/index.js ui-bridge stop
+node dist/index.js ui-bridge uninstall
+```
+
+`ui-bridge install` registers the task but does not copy or relocate the executable. Replacing an
+existing `JameDesktopCommander UI Bridge` task is fail-closed and requires an explicit `--force`.
+The task uses least privilege, an interactive-token principal, and a per-user logon trigger.
 
 ### Available Tools
 
@@ -487,6 +508,7 @@ The server provides a comprehensive set of tools organized into several categori
 | | `list_searches` | List all active search sessions |
 | | `get_file_info` | Retrieve detailed metadata about a file or directory (includes sheet info for Excel files) |
 | **Text Editing** | `edit_block` | Apply targeted text replacements for text files, or range-based cell updates for Excel files |
+| **Computer Use** | `computer_inspect` | Read-only Windows desktop inspection through bounded UI Automation snapshots and optional screenshots |
 | **Analytics** | `get_usage_stats` | Get usage statistics for your own insight |
 | | `get_recent_tool_calls` | Get recent tool call history with arguments and outputs for debugging and context recovery |
 | | `give_feedback_to_desktop_commander` | Open feedback form in browser to provide feedback to Desktop Commander Team |

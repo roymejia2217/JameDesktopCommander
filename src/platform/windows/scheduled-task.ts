@@ -101,6 +101,10 @@ export function resolveSchtasksExecutable(
     return path.win32.join(systemRoot, 'System32', 'schtasks.exe');
 }
 
+export function buildSchtasksQueryXmlArgs(taskName: string): string[] {
+    return ['/Query', '/TN', requireTaskName(taskName), '/XML'];
+}
+
 export function buildSchtasksLifecycleArgs(
     action: WindowsScheduledTaskLifecycleAction,
     taskName: string,

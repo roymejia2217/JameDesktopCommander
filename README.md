@@ -13,6 +13,7 @@ while the fork is under active development. JDC does not publish to upstream-own
 - [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
+- [Windows Secure MCP Tunnel Lifecycle](#windows-secure-mcp-tunnel-lifecycle)
 - [Windows UI Bridge Lifecycle](#windows-ui-bridge-lifecycle)
 - [Features](#features)
 - [Getting Started](#getting-started)
@@ -461,6 +462,25 @@ On first run, complete browser authentication, then connect your AI at **[mcp.de
 ## Usage
 
 The server provides a comprehensive set of tools organized into several categories.
+
+### Windows Secure MCP Tunnel Lifecycle
+
+On Windows, JDC manages the OpenAI Secure MCP Tunnel through a least-privilege Scheduled Task.
+The lifecycle uses the official `tunnel-client` binary and validates configuration with
+`tunnel-client doctor` before registration.
+
+```powershell
+node dist/index.js tunnel install --tunnel-client-bin C:\path\to\tunnel-client.exe --profile-dir C:\path\to\profiles --profile profile-name
+node dist/index.js tunnel start
+node dist/index.js tunnel status
+node dist/index.js tunnel stop
+node dist/index.js tunnel uninstall
+```
+
+`tunnel status` discovers the registered executable and profile from Task Scheduler, resolves the
+profile through `tunnel-client profiles list --json`, and delegates liveness/readiness checks to
+`tunnel-client health --json --require-control-plane-poll`. JDC does not hardcode the dynamic
+health port and does not read secret file contents.
 
 ### Windows UI Bridge Lifecycle
 

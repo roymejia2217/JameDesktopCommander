@@ -18,9 +18,8 @@ await fs.writeFile(
   Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl9sAAAAASUVORK5CYII=', 'base64'),
 );
 
-function getAssignedHandlerCalls(sourceText, handlerName) {
-  const source = ts.createSourceFile('app.ts', sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const calls = [];
+function findAssignedHandler(source, handlerName) {
+  let handler;
   const visit = (node) => {
     if (
       ts.isBinaryExpression(node)
@@ -28,18 +27,77 @@ function getAssignedHandlerCalls(sourceText, handlerName) {
       && ts.isPropertyAccessExpression(node.left)
       && node.left.name.text === handlerName
     ) {
-      const scan = (child) => {
-        if (ts.isCallExpression(child) && ts.isIdentifier(child.expression)) {
-          calls.push(child.expression.text);
-        }
-        ts.forEachChild(child, scan);
-      };
-      scan(node.right);
+      handler = node.right;
+      return;
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
+  return handler;
+}
+
+function getAssignedHandlerCalls(sourceText, handlerName) {
+  const source = ts.createSourceFile('app.ts', sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const handler = findAssignedHandler(source, handlerName);
+  const calls = [];
+  if (!handler) return calls;
+
+  const scan = (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      calls.push(node.expression.text);
+    }
+    ts.forEachChild(node, scan);
+  };
+  scan(handler);
   return calls;
+}
+
+function directPayloadDeliveryRejectsMutations(sourceText) {
+  const source = ts.createSourceFile('app.ts', sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const handler = findAssignedHandler(source, 'ontoolresult');
+  if (!handler) return false;
+
+  let guarded = false;
+  const containsDirectDelivery = (node) => {
+    let found = false;
+    const scan = (child) => {
+      if (
+        ts.isCallExpression(child)
+        && ts.isIdentifier(child.expression)
+        && child.expression.text === 'deliver'
+        && child.arguments.some((arg) => ts.isIdentifier(arg) && arg.text === 'directPayload')
+      ) {
+        found = true;
+      }
+      ts.forEachChild(child, scan);
+    };
+    scan(node);
+    return found;
+  };
+  const conditionRejectsMutation = (node) => {
+    let found = false;
+    const scan = (child) => {
+      if (
+        ts.isPrefixUnaryExpression(child)
+        && child.operator === ts.SyntaxKind.ExclamationToken
+        && ts.isIdentifier(child.operand)
+        && child.operand.text === 'lastMutationTool'
+      ) {
+        found = true;
+      }
+      ts.forEachChild(child, scan);
+    };
+    scan(node);
+    return found;
+  };
+  const visit = (node) => {
+    if (ts.isIfStatement(node) && containsDirectDelivery(node.thenStatement)) {
+      guarded = conditionRejectsMutation(node.expression);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(handler);
+  return guarded;
 }
 
 const client = new Client(
@@ -134,6 +192,10 @@ try {
   const resultCalls = getAssignedHandlerCalls(previewSource, 'ontoolresult');
   assert.ok(!inputCalls.includes('pullPayloadByArgs'), 'ontoolinput must never eager-pull file content');
   assert.ok(resultCalls.includes('extractRenderPayload'), 'ontoolresult must hydrate from the correlated MCP Apps result');
+  assert.ok(
+    directPayloadDeliveryRejectsMutations(previewSource),
+    'direct tool-result hydration must reject write_file/edit_block mutation results',
+  );
 
   const configEditorBundle = await fs.readFile(
     path.resolve(testDirectory, '..', 'dist', 'ui', 'config-editor', 'config-editor-runtime.js'),

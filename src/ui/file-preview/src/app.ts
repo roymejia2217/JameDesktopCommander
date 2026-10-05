@@ -644,7 +644,7 @@ export function bootstrapApp(): void {
             }
         };
 
-        if (!isError && directPayload) {
+        if (!isError && directPayload && !lastMutationTool) {
             deliver(directPayload);
             return;
         }

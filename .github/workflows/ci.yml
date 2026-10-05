@@ -54,6 +54,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Validate prospective squash commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npm run --silent lint:commit
+
       - name: Validate protected-branch commit
         if: github.event_name == 'push'
         run: >-

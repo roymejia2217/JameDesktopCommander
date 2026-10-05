@@ -116,6 +116,10 @@
       "description": "Delegate development tasks to OpenCode through the protected local MCP gateway, including start, run, continue, and abort operations."
     },
     {
+      "name": "computer_inspect",
+      "description": "Inspect the active Windows desktop through a semantic UI Automation tree and optional screenshot, using the protected interactive UI bridge."
+    },
+    {
       "name": "start_process",
       "description": "Start a new terminal process with intelligent state detection. Primary tool for local file analysis (CSV, JSON, logs, etc.)."
     },

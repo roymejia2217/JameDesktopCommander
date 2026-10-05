@@ -53,6 +53,7 @@ import {
     WritePdfArgsSchema,
     OpenCodeReadArgsSchema,
     OpenCodeTaskArgsSchema,
+    ComputerInspectArgsSchema,
     toolArgSchemas,
 } from './tools/schemas.js';
 import {
@@ -65,6 +66,7 @@ import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
 import { handleOpenCodeRead, handleOpenCodeTask } from './tools/opencode.js';
+import { handleComputerInspect } from './tools/computer-use.js';
 import { trackToolCall } from './utils/trackTools.js';
 import { usageTracker } from './utils/usageTracker.js';
 import { processDockerPrompt } from './utils/dockerPrompt.js';
@@ -950,6 +952,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
             },
 
+            // Semantic computer inspection (Windows interactive session)
+            {
+                name: "computer_inspect",
+                description: "Inspect the active Windows desktop semantically through the protected interactive UI bridge. health reports bridge readiness; snapshot returns the foreground window, a bounded UI Automation tree, and optionally a screenshot. This tool is read-only and never falls back to coordinate guessing.",
+                inputSchema: zodToJsonSchema(ComputerInspectArgsSchema),
+                annotations: {
+                    title: "Computer Inspect",
+                    readOnlyHint: true,
+                    destructiveHint: false,
+                    idempotentHint: true,
+                    openWorldHint: false,
+                },
+            },
+
             // Terminal tools
             {
                 name: "start_process",
@@ -1479,7 +1495,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 }
                 break;
 
-            // Terminal tools
+            // Agent and computer tools
             case "opencode_read":
                 result = await handleOpenCodeRead(args);
                 break;
@@ -1488,6 +1504,11 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 result = await handleOpenCodeTask(args);
                 break;
 
+            case "computer_inspect":
+                result = await handleComputerInspect(args);
+                break;
+
+            // Terminal tools
             case "start_process":
                 result = await handlers.handleStartProcess(args);
                 break;

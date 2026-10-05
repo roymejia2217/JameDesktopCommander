@@ -259,6 +259,14 @@ export const OpenCodeReadArgsSchema = z.object({
   }
 });
 
+export const ComputerInspectArgsSchema = z.object({
+  action: z.enum(['health', 'snapshot']),
+  maxDepth: z.number().int().min(1).max(8).optional(),
+  maxElements: z.number().int().min(1).max(500).optional(),
+  includeScreenshot: z.boolean().optional().default(true),
+  screenshotMaxWidth: z.number().int().min(320).max(1920).optional().default(1280),
+});
+
 export const OpenCodeTaskArgsSchema = z.object({
   action: z.enum(['start', 'run', 'continue', 'abort']),
   project: OpenCodeProjectSchema,
@@ -311,4 +319,5 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   track_ui_event: TrackUiEventArgsSchema,
   opencode_read: OpenCodeReadArgsSchema,
   opencode_task: OpenCodeTaskArgsSchema,
+  computer_inspect: ComputerInspectArgsSchema,
 };

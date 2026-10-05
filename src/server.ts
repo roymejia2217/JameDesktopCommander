@@ -76,11 +76,11 @@ import { capture, capture_call_tool, runInUiOriginCallContext } from "./utils/ca
 import { logToStderr, logger } from './utils/logger.js';
 import {
     buildUiToolMeta,
+    buildWidgetAccessibleToolMeta,
     CONFIG_EDITOR_RESOURCE_URI,
     FILE_PREVIEW_RESOURCE_URI,
 } from './ui/contracts.js';
 import { listUiResources, readUiResource } from './ui/resources.js';
-import { shouldShowMcpUiPreviews } from './utils/mcp-ui-ab-test.js';
 
 // Store startup messages to send after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -303,7 +303,6 @@ function shouldIncludeTool(toolName: string): boolean {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
         // logToStderr('debug', 'Generating tools list...');
-        const showMcpUiPreviews = await shouldShowMcpUiPreviews();
 
         // Build complete tools array
         const allTools = [
@@ -324,9 +323,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - systemInfo (operating system and environment details)
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(GetConfigArgsSchema),
-                _meta: buildUiToolMeta(CONFIG_EDITOR_RESOURCE_URI, true, showMcpUiPreviews),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Get Configuration",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "render_config_editor",
+                description: `
+                        Render the interactive Desktop Commander configuration editor.
+                        Use this only when an interactive configuration UI is useful or explicitly requested.
+                        For programmatic inspection or changes, prefer get_config and set_config_value.
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(GetConfigArgsSchema),
+                _meta: buildUiToolMeta(CONFIG_EDITOR_RESOURCE_URI),
+                annotations: {
+                    title: "Render Configuration Editor",
                     readOnlyHint: true,
                 },
             },
@@ -351,6 +365,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(SetConfigValueArgsSchema),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Set Configuration Value",
                     readOnlyHint: false,
@@ -418,9 +433,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ReadFileArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, true, showMcpUiPreviews),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Read File or URL",
+                    readOnlyHint: true,
+                    openWorldHint: true,
+                },
+            },
+            {
+                name: "preview_file",
+                description: `
+                        Render an interactive preview for a file or URL.
+                        Use read_file for analysis, extraction, or ordinary file access.
+                        Call preview_file only when a visual/interactive preview is useful or explicitly requested.
+
+                        ${PATH_GUIDANCE}
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(ReadFileArgsSchema),
+                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI),
+                annotations: {
+                    title: "Preview File or URL",
                     readOnlyHint: true,
                     openWorldHint: true,
                 },
@@ -486,7 +518,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(WriteFileArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, true, showMcpUiPreviews),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Write File",
                     readOnlyHint: false,
@@ -607,9 +639,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ListDirectoryArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, true, showMcpUiPreviews),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "List Directory Contents",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "render_directory",
+                description: `
+                        Render an interactive directory browser for a path.
+                        Use list_directory for ordinary inspection and automation.
+                        Call render_directory only when a visual/interactive directory view is useful or explicitly requested.
+
+                        ${PATH_GUIDANCE}
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(ListDirectoryArgsSchema),
+                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI),
+                annotations: {
+                    title: "Render Directory",
                     readOnlyHint: true,
                 },
             },
@@ -867,7 +915,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(EditBlockArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, true, showMcpUiPreviews),
+                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Edit Block",
                     readOnlyHint: false,
@@ -1320,6 +1368,11 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                     };
                 }
                 break;
+
+            case "render_config_editor":
+                result = await getConfig();
+                break;
+
             case "set_config_value":
                 try {
                     result = await setConfigValue(args);
@@ -1471,6 +1524,10 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 result = await handlers.handleReadFile(args);
                 break;
 
+            case "preview_file":
+                result = await handlers.handleReadFile(args);
+                break;
+
             case "read_multiple_files":
                 result = await handlers.handleReadMultipleFiles(args);
                 break;
@@ -1488,6 +1545,10 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 break;
 
             case "list_directory":
+                result = await handlers.handleListDirectory(args);
+                break;
+
+            case "render_directory":
                 result = await handlers.handleListDirectory(args);
                 break;
 

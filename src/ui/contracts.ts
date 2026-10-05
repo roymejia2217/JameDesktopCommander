@@ -13,6 +13,16 @@ export interface UiToolMeta extends Record<string, unknown> {
   'openai/widgetAccessible'?: boolean;
 }
 
+export interface WidgetAccessibleToolMeta extends Record<string, unknown> {
+  'openai/widgetAccessible': true;
+}
+
+export function buildWidgetAccessibleToolMeta(): WidgetAccessibleToolMeta {
+  return {
+    'openai/widgetAccessible': true,
+  };
+}
+
 export function buildUiToolMeta(resourceUri: string, widgetAccessible = false, showMcpUiPreviews = true): UiToolMeta | undefined {
   if (!showMcpUiPreviews) {
     return undefined;

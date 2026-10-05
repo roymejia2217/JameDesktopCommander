@@ -33,6 +33,29 @@ const dependencies = {
     calls.push({ kind: 'uninstall', taskName });
     return { stdout: '', stderr: '' };
   },
+  statusTunnel: async (taskName) => {
+    calls.push({ kind: 'status', taskName });
+    return {
+      taskName,
+      task: {
+        registered: true,
+        executable: tunnelBin,
+        profileDir,
+        profileName: 'desktop-commander-poc',
+      },
+      profile: {
+        path: profileDir + '\\desktop-commander-poc.yaml',
+        healthUrlFile: 'C:\\health.url',
+      },
+      health: {
+        result: 'ok',
+        baseUrl: 'http://127.0.0.1:53637',
+        live: true,
+        ready: true,
+        controlPlanePoll: true,
+      },
+    };
+  },
 };
 
 const installResult = await runWindowsTunnelCommand(
@@ -104,11 +127,16 @@ calls.length = 0;
 await runWindowsTunnelCommand(['start'], dependencies);
 await runWindowsTunnelCommand(['stop'], dependencies);
 await runWindowsTunnelCommand(['uninstall'], dependencies);
+const statusResult = await runWindowsTunnelCommand(['status'], dependencies);
 assert.deepEqual(calls, [
   { kind: 'start', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
   { kind: 'stop', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
   { kind: 'uninstall', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
+  { kind: 'status', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
 ]);
+assert.equal(statusResult.action, 'status');
+assert.equal(statusResult.status.health.ready, true);
+assert.doesNotMatch(formatWindowsTunnelCommandResult(statusResult), /api_key/i);
 
 await assert.rejects(
   runWindowsTunnelCommand(
@@ -138,6 +166,11 @@ await assert.rejects(
 await assert.rejects(
   runWindowsTunnelCommand(['start'], { ...dependencies, platform: 'linux' }),
   /Windows/i,
+);
+
+await assert.rejects(
+  runWindowsTunnelCommand(['status', '--extra'], dependencies),
+  /does not accept additional arguments/i,
 );
 
 console.log('Windows tunnel CLI contract: PASS');

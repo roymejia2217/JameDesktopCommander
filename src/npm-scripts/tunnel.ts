@@ -11,6 +11,10 @@ import {
     type RunExecutable,
     type RunExecutableResult,
 } from '../platform/windows/tunnel-lifecycle.js';
+import {
+    getWindowsTunnelStatus,
+    type WindowsTunnelStatus,
+} from '../platform/windows/tunnel-status.js';
 
 export const DEFAULT_WINDOWS_TUNNEL_TASK_NAME = 'Desktop Commander Windows Tunnel';
 
@@ -28,12 +32,19 @@ export interface WindowsTunnelCommandDependencies {
     startTask?: (taskName: string) => Promise<RunExecutableResult>;
     stopTask?: (taskName: string) => Promise<RunExecutableResult>;
     uninstallTask?: (taskName: string) => Promise<RunExecutableResult>;
+    statusTunnel?: (taskName: string) => Promise<WindowsTunnelStatus>;
 }
 
-export interface WindowsTunnelCommandResult {
-    action: 'install' | 'start' | 'stop' | 'uninstall';
-    taskName: string;
-}
+export type WindowsTunnelCommandResult =
+    | {
+        action: 'install' | 'start' | 'stop' | 'uninstall';
+        taskName: string;
+    }
+    | {
+        action: 'status';
+        taskName: string;
+        status: WindowsTunnelStatus;
+    };
 
 interface InstallArguments {
     tunnelClientBin: string;
@@ -203,6 +214,9 @@ function resolveDependencies(
         uninstallTask:
             dependencies.uninstallTask ??
             ((taskName) => uninstallWindowsTunnelTask(taskName)),
+        statusTunnel:
+            dependencies.statusTunnel ??
+            ((taskName) => getWindowsTunnelStatus(taskName)),
     };
 }
 
@@ -215,7 +229,7 @@ export async function runWindowsTunnelCommand(
 
     const [action, ...actionArgs] = args;
     if (!action) {
-        throw new Error('Tunnel action is required: install, start, stop, or uninstall.');
+        throw new Error('Tunnel action is required: install, start, stop, status, or uninstall.');
     }
 
     const taskName = DEFAULT_WINDOWS_TUNNEL_TASK_NAME;
@@ -245,6 +259,16 @@ export async function runWindowsTunnelCommand(
             });
 
             return { action, taskName };
+        }
+        case 'status': {
+            if (actionArgs.length > 0) {
+                throw new Error('Tunnel status does not accept additional arguments.');
+            }
+            return {
+                action,
+                taskName,
+                status: await deps.statusTunnel(taskName),
+            };
         }
         case 'start':
         case 'stop':
@@ -280,6 +304,8 @@ export function formatWindowsTunnelCommandResult(
             return `Stopped Windows tunnel task "${result.taskName}".`;
         case 'uninstall':
             return `Uninstalled Windows tunnel task "${result.taskName}".`;
+        case 'status':
+            return JSON.stringify(result.status, null, 2);
     }
 }
 
@@ -290,6 +316,7 @@ Usage:
   desktop-commander tunnel install --tunnel-client-bin <absolute-path> --profile-dir <absolute-path> --profile <name> [--force]
   desktop-commander tunnel start
   desktop-commander tunnel stop
+  desktop-commander tunnel status
   desktop-commander tunnel uninstall
 
 Notes:

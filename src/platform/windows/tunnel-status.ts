@@ -22,7 +22,7 @@ export interface WindowsTunnelTaskRegistration {
     profileName: string;
 }
 
-export interface WindowsTunnelStatus {
+export interface WindowsTunnelRegistration {
     taskName: string;
     task: {
         registered: true;
@@ -34,6 +34,9 @@ export interface WindowsTunnelStatus {
         path: string;
         healthUrlFile: string;
     };
+}
+
+export interface WindowsTunnelStatus extends WindowsTunnelRegistration {
     health: {
         result: string;
         baseUrl: string;
@@ -212,10 +215,10 @@ function resolveDependencies(
             ((filePath) => readTextFile(filePath, { encoding: 'utf8' })),
     };
 }
-export async function getWindowsTunnelStatus(
+export async function getWindowsTunnelRegistration(
     taskName: string,
     dependencies: WindowsTunnelStatusDependencies = {},
-): Promise<WindowsTunnelStatus> {
+): Promise<WindowsTunnelRegistration> {
     const deps = resolveDependencies(dependencies);
     const schtasksExecutable = resolveSchtasksExecutable(deps.environment);
     const taskQuery = await deps.runExecutable(
@@ -238,15 +241,6 @@ export async function getWindowsTunnelStatus(
     const profileText = await deps.readFile(profilePath);
     const healthUrlFile = parseHealthUrlFile(profileText);
 
-    const healthProbe = await deps.runExecutable(registration.executable, [
-        'health',
-        '--json',
-        '--url-file',
-        healthUrlFile,
-        '--require-control-plane-poll',
-    ]);
-    const health = parseHealthOutput(healthProbe.stdout);
-
     return {
         taskName,
         task: {
@@ -259,6 +253,30 @@ export async function getWindowsTunnelStatus(
             path: profilePath,
             healthUrlFile,
         },
+    };
+}
+
+export async function getWindowsTunnelStatus(
+    taskName: string,
+    dependencies: WindowsTunnelStatusDependencies = {},
+): Promise<WindowsTunnelStatus> {
+    const deps = resolveDependencies(dependencies);
+    const registration = await getWindowsTunnelRegistration(
+        taskName,
+        dependencies,
+    );
+
+    const healthProbe = await deps.runExecutable(registration.task.executable, [
+        'health',
+        '--json',
+        '--url-file',
+        registration.profile.healthUrlFile,
+        '--require-control-plane-poll',
+    ]);
+    const health = parseHealthOutput(healthProbe.stdout);
+
+    return {
+        ...registration,
         health,
     };
 }

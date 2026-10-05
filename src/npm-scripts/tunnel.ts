@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
     installWindowsTunnelTask,
@@ -15,6 +16,15 @@ import {
     getWindowsTunnelStatus,
     type WindowsTunnelStatus,
 } from '../platform/windows/tunnel-status.js';
+import {
+    installWindowsTunnelRestartSupervisorTask,
+    startWindowsTunnelRestartSupervisorTask,
+    uninstallWindowsTunnelRestartSupervisorTask,
+    type InstallWindowsTunnelRestartSupervisorTaskOptions,
+} from '../platform/windows/tunnel-restart-lifecycle.js';
+import {
+    DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+} from '../platform/windows/tunnel-restart-supervisor-task.js';
 
 export const DEFAULT_WINDOWS_TUNNEL_TASK_NAME = 'Desktop Commander Windows Tunnel';
 
@@ -22,6 +32,12 @@ const PROFILE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 type InstallTask = (
     options: InstallWindowsTunnelTaskOptions & { replaceExisting: boolean },
+) => Promise<RunExecutableResult>;
+
+type InstallRestartSupervisorTask = (
+    options: InstallWindowsTunnelRestartSupervisorTaskOptions & {
+        replaceExisting: boolean;
+    },
 ) => Promise<RunExecutableResult>;
 
 export interface WindowsTunnelCommandDependencies {
@@ -33,12 +49,26 @@ export interface WindowsTunnelCommandDependencies {
     stopTask?: (taskName: string) => Promise<RunExecutableResult>;
     uninstallTask?: (taskName: string) => Promise<RunExecutableResult>;
     statusTunnel?: (taskName: string) => Promise<WindowsTunnelStatus>;
+    nodeExecutable?: () => string;
+    restartWorkerScript?: () => string;
+    installRestartSupervisorTask?: InstallRestartSupervisorTask;
+    startRestartSupervisorTask?: (
+        taskName: string,
+    ) => Promise<RunExecutableResult>;
+    uninstallRestartSupervisorTask?: (
+        taskName: string,
+    ) => Promise<RunExecutableResult>;
 }
 
 export type WindowsTunnelCommandResult =
     | {
         action: 'install' | 'start' | 'stop' | 'uninstall';
         taskName: string;
+    }
+    | {
+        action: 'restart';
+        taskName: string;
+        supervisorTaskName: string;
     }
     | {
         action: 'status';
@@ -195,6 +225,13 @@ function resolveCurrentUserId(): string {
     return domain ? `${domain}\\${username}` : username;
 }
 
+function resolveRestartWorkerScript(): string {
+    return path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        'tunnel-restart-worker.js',
+    );
+}
+
 function resolveDependencies(
     dependencies: WindowsTunnelCommandDependencies,
 ): Required<WindowsTunnelCommandDependencies> {
@@ -217,6 +254,24 @@ function resolveDependencies(
         statusTunnel:
             dependencies.statusTunnel ??
             ((taskName) => getWindowsTunnelStatus(taskName)),
+        nodeExecutable:
+            dependencies.nodeExecutable ??
+            (() => process.execPath),
+        restartWorkerScript:
+            dependencies.restartWorkerScript ??
+            resolveRestartWorkerScript,
+        installRestartSupervisorTask:
+            dependencies.installRestartSupervisorTask ??
+            ((options) =>
+                installWindowsTunnelRestartSupervisorTask(options)),
+        startRestartSupervisorTask:
+            dependencies.startRestartSupervisorTask ??
+            ((taskName) =>
+                startWindowsTunnelRestartSupervisorTask(taskName)),
+        uninstallRestartSupervisorTask:
+            dependencies.uninstallRestartSupervisorTask ??
+            ((taskName) =>
+                uninstallWindowsTunnelRestartSupervisorTask(taskName)),
     };
 }
 
@@ -229,7 +284,7 @@ export async function runWindowsTunnelCommand(
 
     const [action, ...actionArgs] = args;
     if (!action) {
-        throw new Error('Tunnel action is required: install, start, stop, status, or uninstall.');
+        throw new Error('Tunnel action is required: install, start, stop, restart, status, or uninstall.');
     }
 
     const taskName = DEFAULT_WINDOWS_TUNNEL_TASK_NAME;
@@ -247,18 +302,57 @@ export async function runWindowsTunnelCommand(
                 '--explain',
             ]);
 
+            const author = deps.currentUserId();
             await deps.installTask({
                 taskName,
                 replaceExisting: options.force,
                 task: {
-                    author: deps.currentUserId(),
+                    author,
                     executable: options.tunnelClientBin,
                     profileDir: options.profileDir,
                     profileName: options.profile,
                 },
             });
 
+            await deps.installRestartSupervisorTask({
+                taskName:
+                    DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+                replaceExisting: options.force,
+                task: {
+                    author,
+                    nodeExecutable: deps.nodeExecutable(),
+                    workerScript: deps.restartWorkerScript(),
+                    tunnelTaskName: taskName,
+                },
+            });
+
             return { action, taskName };
+        }
+        case 'restart': {
+            if (actionArgs.length > 0) {
+                throw new Error('Tunnel restart does not accept additional arguments.');
+            }
+
+            await deps.installRestartSupervisorTask({
+                taskName:
+                    DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+                replaceExisting: true,
+                task: {
+                    author: deps.currentUserId(),
+                    nodeExecutable: deps.nodeExecutable(),
+                    workerScript: deps.restartWorkerScript(),
+                    tunnelTaskName: taskName,
+                },
+            });
+            await deps.startRestartSupervisorTask(
+                DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+            );
+            return {
+                action,
+                taskName,
+                supervisorTaskName:
+                    DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+            };
         }
         case 'status': {
             if (actionArgs.length > 0) {
@@ -282,6 +376,9 @@ export async function runWindowsTunnelCommand(
             } else if (action === 'stop') {
                 await deps.stopTask(taskName);
             } else {
+                await deps.uninstallRestartSupervisorTask(
+                    DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+                );
                 await deps.uninstallTask(taskName);
             }
 
@@ -302,6 +399,8 @@ export function formatWindowsTunnelCommandResult(
             return `Started Windows tunnel task "${result.taskName}".`;
         case 'stop':
             return `Stopped Windows tunnel task "${result.taskName}".`;
+        case 'restart':
+            return `Scheduled Windows tunnel restart through supervisor "${result.supervisorTaskName}".`;
         case 'uninstall':
             return `Uninstalled Windows tunnel task "${result.taskName}".`;
         case 'status':
@@ -316,12 +415,14 @@ Usage:
   desktop-commander tunnel install --tunnel-client-bin <absolute-path> --profile-dir <absolute-path> --profile <name> [--force]
   desktop-commander tunnel start
   desktop-commander tunnel stop
+  desktop-commander tunnel restart
   desktop-commander tunnel status
   desktop-commander tunnel uninstall
 
 Notes:
   install runs the official tunnel-client doctor before registering the task.
-  Existing tasks are not replaced unless --force is supplied.
+  restart re-registers and launches an external Windows Task Scheduler supervisor so it survives the tunnel process tree.
+  Existing tunnel tasks are not replaced unless --force is supplied.
   Secrets remain owned by tunnel-client profiles via env: or file: references.`);
 }
 

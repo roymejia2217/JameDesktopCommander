@@ -5,6 +5,9 @@ import {
   formatWindowsTunnelCommandResult,
   runWindowsTunnelCommand,
 } from '../dist/npm-scripts/tunnel.js';
+import {
+  DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+} from '../dist/platform/windows/tunnel-restart-supervisor-task.js';
 
 const tunnelBin = 'C:\\OpenAI\\tunnel-client.exe';
 const profileDir = 'C:\\Users\\Roy\\AppData\\Local\\OpenAI\\tunnel-client\\profiles';
@@ -31,6 +34,21 @@ const dependencies = {
   },
   uninstallTask: async (taskName) => {
     calls.push({ kind: 'uninstall', taskName });
+    return { stdout: '', stderr: '' };
+  },
+  nodeExecutable: () => 'C:\\Program Files\\nodejs\\node.exe',
+  restartWorkerScript: () =>
+    'E:\\JameDesktopCommander\\dist\\npm-scripts\\tunnel-restart-worker.js',
+  installRestartSupervisorTask: async (options) => {
+    calls.push({ kind: 'install-restart-supervisor', options });
+    return { stdout: '', stderr: '' };
+  },
+  startRestartSupervisorTask: async (taskName) => {
+    calls.push({ kind: 'restart', taskName });
+    return { stdout: '', stderr: '' };
+  },
+  uninstallRestartSupervisorTask: async (taskName) => {
+    calls.push({ kind: 'uninstall-restart-supervisor', taskName });
     return { stdout: '', stderr: '' };
   },
   statusTunnel: async (taskName) => {
@@ -71,7 +89,7 @@ const installResult = await runWindowsTunnelCommand(
   dependencies,
 );
 
-assert.deepEqual(calls.slice(0, 2), [
+assert.deepEqual(calls.slice(0, 3), [
   {
     kind: 'exec',
     executable: tunnelBin,
@@ -94,6 +112,20 @@ assert.deepEqual(calls.slice(0, 2), [
         executable: tunnelBin,
         profileDir,
         profileName: 'desktop-commander-poc',
+      },
+    },
+  },
+  {
+    kind: 'install-restart-supervisor',
+    options: {
+      taskName: DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+      replaceExisting: false,
+      task: {
+        author: 'DESKTOP-TEST\\Roy',
+        nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+        workerScript:
+          'E:\\JameDesktopCommander\\dist\\npm-scripts\\tunnel-restart-worker.js',
+        tunnelTaskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME,
       },
     },
   },
@@ -122,18 +154,51 @@ await runWindowsTunnelCommand(
   dependencies,
 );
 assert.equal(calls[1].options.replaceExisting, true);
+assert.equal(calls[2].options.replaceExisting, true);
 
 calls.length = 0;
 await runWindowsTunnelCommand(['start'], dependencies);
 await runWindowsTunnelCommand(['stop'], dependencies);
-await runWindowsTunnelCommand(['uninstall'], dependencies);
+const restartResult = await runWindowsTunnelCommand(['restart'], dependencies);
 const statusResult = await runWindowsTunnelCommand(['status'], dependencies);
+await runWindowsTunnelCommand(['uninstall'], dependencies);
 assert.deepEqual(calls, [
   { kind: 'start', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
   { kind: 'stop', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
-  { kind: 'uninstall', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
+  {
+    kind: 'install-restart-supervisor',
+    options: {
+      taskName: DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+      replaceExisting: true,
+      task: {
+        author: 'DESKTOP-TEST\\Roy',
+        nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+        workerScript:
+          'E:\\JameDesktopCommander\\dist\\npm-scripts\\tunnel-restart-worker.js',
+        tunnelTaskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME,
+      },
+    },
+  },
+  {
+    kind: 'restart',
+    taskName: DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+  },
   { kind: 'status', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
+  {
+    kind: 'uninstall-restart-supervisor',
+    taskName: DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+  },
+  { kind: 'uninstall', taskName: DEFAULT_WINDOWS_TUNNEL_TASK_NAME },
 ]);
+assert.equal(restartResult.action, 'restart');
+assert.equal(
+  restartResult.supervisorTaskName,
+  DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
+);
+assert.match(
+  formatWindowsTunnelCommandResult(restartResult),
+  /restart supervisor/i,
+);
 assert.equal(statusResult.action, 'status');
 assert.equal(statusResult.status.health.ready, true);
 assert.doesNotMatch(formatWindowsTunnelCommandResult(statusResult), /api_key/i);
@@ -170,6 +235,11 @@ await assert.rejects(
 
 await assert.rejects(
   runWindowsTunnelCommand(['status', '--extra'], dependencies),
+  /does not accept additional arguments/i,
+);
+
+await assert.rejects(
+  runWindowsTunnelCommand(['restart', '--extra'], dependencies),
   /does not accept additional arguments/i,
 );
 

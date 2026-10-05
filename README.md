@@ -473,9 +473,18 @@ The lifecycle uses the official `tunnel-client` binary and validates configurati
 node dist/index.js tunnel install --tunnel-client-bin C:\path\to\tunnel-client.exe --profile-dir C:\path\to\profiles --profile profile-name
 node dist/index.js tunnel start
 node dist/index.js tunnel status
+node dist/index.js tunnel restart
 node dist/index.js tunnel stop
 node dist/index.js tunnel uninstall
 ```
+
+`tunnel install` registers both the tunnel task and a least-privilege
+`JameDesktopCommander Tunnel Restart Supervisor` task. The supervisor has no automatic trigger and
+runs outside the tunnel process tree. `tunnel restart` starts only that supervisor; the worker
+captures the registered `tunnel-client` process tree through Windows CIM, requests Task Scheduler
+to stop the tunnel task, terminates only captured survivors with the native
+`taskkill.exe /T /F`, starts a fresh task instance, and requires a new tunnel process plus a fully
+healthy control-plane poll before reporting success.
 
 `tunnel status` discovers the registered executable and profile from Task Scheduler, resolves the
 profile through `tunnel-client profiles list --json`, and delegates liveness/readiness checks to

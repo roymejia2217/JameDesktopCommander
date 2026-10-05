@@ -3,19 +3,19 @@
 // MUST be first: raises the libuv threadpool size before any fs work is
 // submitted. See src/bootstrap.ts for why import order matters.
 import './bootstrap.js';
-import { FilteredStdioServerTransport } from './custom-stdio.js';
-import { server, flushDeferredMessages } from './server.js';
-import { commandManager } from './command-manager.js';
-import { configManager } from './config-manager.js';
-import { featureFlagManager } from './utils/feature-flags.js';
-import { runSetup } from './npm-scripts/setup.js';
-import { runUninstall } from './npm-scripts/uninstall.js';
-import { capture } from './utils/capture.js';
-import { logToStderr, logger } from './utils/logger.js';
-import { runRemote } from './npm-scripts/remote.js';
-import { runTunnel } from './npm-scripts/tunnel.js';
-import { runUiBridge } from './npm-scripts/ui-bridge.js';
-import { ensureChromeAvailable } from './tools/pdf/markdown.js';
+
+type RuntimeLogger = {
+  error(message: string): void;
+  debug(message: string): void;
+};
+
+type RuntimeCapture = (
+  event: string,
+  data?: Record<string, unknown>,
+) => unknown;
+
+let runtimeLogger: RuntimeLogger | undefined;
+let runtimeCapture: RuntimeCapture | undefined;
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -25,35 +25,62 @@ function deferLog(level: string, message: string) {
 
 async function runServer() {
   try {
-    // Check if first argument is "setup"
+    // Maintenance commands intentionally load only their own runtime
+    // dependencies. This keeps lifecycle recovery independent from the full
+    // MCP server, PDF stack, browser tooling, and configuration bootstrap.
     if (process.argv[2] === 'setup') {
+      const { runSetup } = await import('./npm-scripts/setup.js');
       await runSetup();
       return;
     }
 
-    // Check if first argument is "remove"
     if (process.argv[2] === 'remove') {
+      const { runUninstall } = await import('./npm-scripts/uninstall.js');
       await runUninstall();
       return;
     }
 
-    // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
+      const { runRemote } = await import('./npm-scripts/remote.js');
       await runRemote();
       return;
     }
 
-    // Check if first argument is "tunnel"
     if (process.argv[2] === 'tunnel') {
+      const { runTunnel } = await import('./npm-scripts/tunnel.js');
       await runTunnel(process.argv.slice(3));
       return;
     }
 
-    // Check if first argument is "ui-bridge"
     if (process.argv[2] === 'ui-bridge') {
+      const { runUiBridge } = await import('./npm-scripts/ui-bridge.js');
       await runUiBridge(process.argv.slice(3));
       return;
     }
+
+    const [
+      { FilteredStdioServerTransport },
+      { server, flushDeferredMessages },
+      { configManager },
+      { featureFlagManager },
+      captureModule,
+      loggerModule,
+      { ensureChromeAvailable },
+    ] = await Promise.all([
+      import('./custom-stdio.js'),
+      import('./server.js'),
+      import('./config-manager.js'),
+      import('./utils/feature-flags.js'),
+      import('./utils/capture.js'),
+      import('./utils/logger.js'),
+      import('./tools/pdf/markdown.js'),
+    ]);
+    await import('./command-manager.js');
+
+    runtimeCapture = captureModule.capture;
+    runtimeLogger = loggerModule.logger;
+    const { capture } = captureModule;
+    const { logToStderr, logger } = loggerModule;
 
     // Parse command line arguments for onboarding control
     const DISABLE_ONBOARDING = process.argv.includes('--no-onboarding');
@@ -152,9 +179,16 @@ async function runServer() {
     await server.connect(transport);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error(`FATAL ERROR: ${errorMessage}`);
-    if (error instanceof Error && error.stack) {
-      logger.debug(error.stack);
+    if (runtimeLogger) {
+      runtimeLogger.error(`FATAL ERROR: ${errorMessage}`);
+      if (error instanceof Error && error.stack) {
+        runtimeLogger.debug(error.stack);
+      }
+    } else {
+      console.error(`FATAL ERROR: ${errorMessage}`);
+      if (error instanceof Error && error.stack) {
+        console.error(error.stack);
+      }
     }
 
     // Send a structured error notification
@@ -169,7 +203,7 @@ async function runServer() {
     };
     process.stdout.write(JSON.stringify(errorNotification) + '\n');
 
-    capture('run_server_failed_start_error', {
+    runtimeCapture?.('run_server_failed_start_error', {
       error: errorMessage
     });
     process.exit(1);
@@ -187,7 +221,7 @@ runServer().catch(async (error) => {
   }) + '\n');
 
 
-  capture('run_server_fatal_error', {
+  runtimeCapture?.('run_server_fatal_error', {
     error: errorMessage
   });
   process.exit(1);

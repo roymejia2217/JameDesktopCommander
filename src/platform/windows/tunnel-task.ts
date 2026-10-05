@@ -20,6 +20,26 @@ export interface WindowsTunnelTaskOptions {
 
 const PROFILE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+export function buildWindowsTunnelRunArguments(
+    profileDirValue: string,
+    profileNameValue: string,
+): string {
+    const profileDir = requireAbsoluteWindowsPath(
+        'Tunnel profile directory',
+        profileDirValue,
+    );
+    const profileName = requireNonEmpty(
+        'Tunnel profile name',
+        profileNameValue,
+    );
+
+    if (!PROFILE_NAME_PATTERN.test(profileName)) {
+        throw new Error('Tunnel profile name may contain only letters, digits, dot, underscore, and hyphen.');
+    }
+
+    return `run --profile-dir "${profileDir}" --profile ${profileName}`;
+}
+
 export function buildWindowsTunnelTaskXml(options: WindowsTunnelTaskOptions): string {
     const author = requireNonEmpty('Task author', options.author);
     const executable = requireAbsoluteWindowsPath('Tunnel executable', options.executable);
@@ -31,7 +51,7 @@ export function buildWindowsTunnelTaskXml(options: WindowsTunnelTaskOptions): st
     }
 
     const workingDirectory = path.win32.dirname(executable);
-    const argumentsText = `run --profile-dir "${profileDir}" --profile ${profileName}`;
+    const argumentsText = buildWindowsTunnelRunArguments(profileDir, profileName);
 
     return [
         '<?xml version="1.0" encoding="UTF-16"?>',

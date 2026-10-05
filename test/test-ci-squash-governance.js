@@ -41,16 +41,26 @@ assert.match(
 
 const script = defaultsStep.with?.script ?? '';
 for (const fragment of [
-  'allow_squash_merge: true',
-  'allow_merge_commit: false',
-  'allow_rebase_merge: false',
-  "squash_merge_commit_title: 'PR_TITLE'",
-  "squash_merge_commit_message: 'BLANK'",
+  'squashMergeAllowed',
+  'mergeCommitAllowed',
+  'rebaseMergeAllowed',
+  'squashMergeCommitTitle',
+  'squashMergeCommitMessage',
+  "squashMergeAllowed: true",
+  "mergeCommitAllowed: false",
+  "rebaseMergeAllowed: false",
+  "squashMergeCommitTitle: 'PR_TITLE'",
+  "squashMergeCommitMessage: 'BLANK'",
 ]) {
   assert.ok(script.includes(fragment), `missing squash-default assertion: ${fragment}`);
 }
 
-assert.match(script, /github\.rest\.repos\.get\(/, 'CI must read live repository settings');
+assert.match(script, /github\.graphql\(/, 'CI must read live repository settings through GraphQL');
+assert.doesNotMatch(
+  script,
+  /github\.rest\.repos\.get\(/,
+  'CI must not rely on REST merge settings omitted by the Actions token',
+);
 assert.match(script, /core\.setFailed\(/, 'CI must fail closed on repository drift');
 
 console.log('CI squash governance contract: PASS');

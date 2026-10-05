@@ -754,6 +754,8 @@ Claude will then show you beginner-friendly tutorials and examples, including:
 
 JameDesktopCommander keeps ordinary data/action tools lightweight and exposes rich UI only through explicit render tools. `read_file`, `list_directory`, `get_config`, and write/edit operations do not mount an iframe by default; use `preview_file`, `render_directory`, or `render_config_editor` when an interactive view is useful.
 
+Render tools follow the MCP Apps result flow: the initial tool result carries the structured data needed by the view, so mounting a preview does not immediately issue a second filesystem read. Follow-up tool calls are reserved for explicit refresh, navigation, editing, or compatibility fallback behavior. UI resources use versioned URIs so incompatible view revisions do not reuse a stale host cache entry.
+
 ### Supported file types
 - **Markdown** — rendered preview with a built-in editor
 - **Images** — inline display (PNG, JPEG, GIF, WebP, etc.)

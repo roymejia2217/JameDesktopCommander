@@ -1,8 +1,8 @@
 /**
  * Central constants and shape contracts for UI resource identifiers. It gives one source of truth for URIs/tool metadata shared between server handlers and UI loaders.
  */
-export const FILE_PREVIEW_RESOURCE_URI = 'ui://desktop-commander/file-preview';
-export const CONFIG_EDITOR_RESOURCE_URI = 'ui://desktop-commander/config-editor';
+export const FILE_PREVIEW_RESOURCE_URI = 'ui://desktop-commander/file-preview/v2';
+export const CONFIG_EDITOR_RESOURCE_URI = 'ui://desktop-commander/config-editor/v2';
 
 export interface UiToolMeta extends Record<string, unknown> {
   'ui/resourceUri': string;
@@ -10,35 +10,14 @@ export interface UiToolMeta extends Record<string, unknown> {
   ui: {
     resourceUri: string;
   };
-  'openai/widgetAccessible'?: boolean;
 }
 
-export interface WidgetAccessibleToolMeta extends Record<string, unknown> {
-  'openai/widgetAccessible': true;
-}
-
-export function buildWidgetAccessibleToolMeta(): WidgetAccessibleToolMeta {
+export function buildUiToolMeta(resourceUri: string): UiToolMeta {
   return {
-    'openai/widgetAccessible': true,
-  };
-}
-
-export function buildUiToolMeta(resourceUri: string, widgetAccessible = false, showMcpUiPreviews = true): UiToolMeta | undefined {
-  if (!showMcpUiPreviews) {
-    return undefined;
-  }
-
-  const meta: UiToolMeta = {
     'ui/resourceUri': resourceUri,
     'openai/outputTemplate': resourceUri,
     ui: {
       resourceUri,
     },
   };
-
-  if (widgetAccessible) {
-    meta['openai/widgetAccessible'] = true;
-  }
-
-  return meta;
 }

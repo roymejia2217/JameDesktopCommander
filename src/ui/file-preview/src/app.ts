@@ -198,16 +198,16 @@ function inferMutationTool(args: unknown): 'write_file' | 'edit_block' | undefin
 // gets its chance to fail before the failure row appears.
 const PULL_TIMEOUT_MS = 8000;
 
-// One in-flight pull per path — the input-time pull and a tool-result-triggered
-// pull for the same call would otherwise read the file twice.
+// One fallback/refresh pull per path. Initial v2 renders hydrate from the
+// correlated MCP Apps tool result; this path remains for explicit refreshes,
+// navigation, mutations, and compatibility with incomplete hosts.
 let pullInFlightPath: string | undefined;
 
 /**
- * The widget's render path: pull content + metadata over the RPC channel
- * (`app.callServerTool` with origin:'ui'). The notification channel is not used
- * for rendering — the host may strip structuredContent from it or swallow it
- * entirely (images). `args` reproduces the original read exactly
- * (offset/length/sheet/range/isUrl) so partial reads stay faithful.
+ * Read the current file state through the standard MCP Apps tool-call API.
+ * This is not used eagerly during initial v2 hydration. `args` reproduces the
+ * original read exactly (offset/length/sheet/range/isUrl) so explicit refresh
+ * and mutation recovery remain faithful.
  */
 async function pullPayloadByArgs(
     args: Record<string, unknown>,
@@ -601,48 +601,30 @@ export function bootstrapApp(): void {
         onRender?.();
         renderedForCurrentInput = false;
 
-        // All previews render from the widget's own origin:'ui' RPC read — the
-        // notification channel is unreliable (the host strips structuredContent,
-        // and for images swallows the tool-result entirely to inline-render).
-        // tool-input always fires and carries the path + read args, so pull here.
-        // Exception: mutations (write_file/edit_block) — their tool-input arrives
-        // before the file changes, so they pull at tool-result time instead.
-        if (readArgs && !lastMutationTool) {
-            void pullPayloadByArgs(
-                readArgs,
-                (p) => {
-                    renderedForCurrentInput = true;
-                    if (initialStateResolved) {
-                        renderAndSync(getEffectiveIncomingPayload(p));
-                    } else {
-                        resolveInitialState(getEffectiveIncomingPayload(p));
-                    }
-                },
-                // Pull failed/timed out — the loading watchdog shows the failure row.
-                () => {},
-            );
-        }
+        // MCP Apps delivers the associated tool result through ontoolresult.
+        // Do not issue an eager read_file here: doing so makes every mounted
+        // historical widget perform network/filesystem work during chat hydration.
+        // A compatibility pull remains available only after ontoolresult if a host
+        // omits the structured payload required by this v2 resource.
     };
 
     app.ontoolresult = (result) => {
         pendingCachedPayload = undefined;
 
-        // Host-facing responses carry no structuredContent, so this notification
-        // only signals completion. Reads already rendered from their input-time
-        // pull; mutations (write_file/edit_block) pull now that the file changed.
         if (renderedForCurrentInput) {
             return;
         }
 
         const message = extractToolText(result as unknown as Record<string, unknown>);
         const isError = (result as { isError?: boolean })?.isError === true;
+        const directPayload = extractRenderPayload(result);
         const pullArgs = lastToolInputArgs
             ?? (currentPayload?.filePath ? { path: currentPayload.filePath } : undefined);
 
         const deliver = (pulled: RenderPayload): void => {
             renderedForCurrentInput = true;
-            // The pull is always a read_file; re-stamp the originating mutation
-            // tool so telemetry attributes to write_file/edit_block.
+            // Mutation recovery uses read_file; re-stamp the originating mutation
+            // so telemetry remains attributed to write_file/edit_block.
             const p = lastMutationTool ? { ...pulled, sourceTool: lastMutationTool } : pulled;
             if (initialStateResolved) {
                 renderAndSync(getEffectiveIncomingPayload(p));
@@ -662,7 +644,14 @@ export function bootstrapApp(): void {
             }
         };
 
-        // A failed tool call has nothing worth re-reading — show its message.
+        if (!isError && directPayload && !lastMutationTool) {
+            deliver(directPayload);
+            return;
+        }
+
+        // Compatibility fallback for hosts that do not deliver structuredContent.
+        // It runs only after the associated tool result arrives, never eagerly
+        // during iframe mount/chat hydration.
         if (!isError && pullArgs) {
             renderLoadingState(container);
             onRender?.();

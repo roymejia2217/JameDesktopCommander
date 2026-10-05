@@ -4,6 +4,7 @@ import {
   isAllowedImageMimeType,
   normalizeImageMimeType
 } from '../dist/ui/file-preview/src/image-preview.js';
+import { extractRenderPayload } from '../dist/ui/file-preview/src/payload-utils.js';
 
 async function testAllowedImageMimeTypes() {
   console.log('\n--- Test: image preview allowlist ---');
@@ -39,11 +40,34 @@ async function testMimeNormalization() {
   console.log('✓ MIME normalization is stable');
 }
 
+async function testInitialImageToolResultHydration() {
+  console.log('\n--- Test: initial image tool result hydrates without a second read ---');
+
+  const payload = extractRenderPayload({
+    content: [
+      { type: 'text', text: 'Image file: C:\\tmp\\pixel.png (image/png)\n' },
+      { type: 'image', data: 'aW1hZ2UtYnl0ZXM=', mimeType: 'image/png' },
+    ],
+    structuredContent: {
+      fileName: 'pixel.png',
+      filePath: 'C:\\tmp\\pixel.png',
+      fileType: 'image',
+      mimeType: 'image/png',
+    },
+  });
+
+  assert.ok(payload, 'structured initial result should produce a render payload');
+  assert.strictEqual(payload.fileType, 'image');
+  assert.strictEqual(payload.content, 'aW1hZ2UtYnl0ZXM=', 'image bytes should come from the existing MCP image block');
+  console.log('✓ initial image result reuses the MCP image block');
+}
+
 export default async function runTests() {
   try {
     await testAllowedImageMimeTypes();
     await testDisallowedImageMimeTypes();
     await testMimeNormalization();
+    await testInitialImageToolResultHydration();
     console.log('\n✅ File preview image runtime tests passed!');
     return true;
   } catch (error) {

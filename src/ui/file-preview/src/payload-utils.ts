@@ -80,6 +80,23 @@ function extractJoinedToolText(value: unknown): string | undefined {
     return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
+function extractImageData(value: unknown): string | undefined {
+    if (!isObjectRecord(value) || !Array.isArray(value.content)) {
+        return undefined;
+    }
+    for (const item of value.content) {
+        if (
+            isObjectRecord(item)
+            && item.type === 'image'
+            && typeof item.data === 'string'
+            && item.data.length > 0
+        ) {
+            return item.data;
+        }
+    }
+    return undefined;
+}
+
 export function extractRenderPayload(value: unknown): RenderPayload | undefined {
     if (!isObjectRecord(value)) {
         return undefined;
@@ -90,11 +107,13 @@ export function extractRenderPayload(value: unknown): RenderPayload | undefined 
             ? value
             : null;
     if (!meta) return undefined;
-    // Content always comes from the read output's content[] text blocks; the
-    // structuredContent alongside it is metadata-only. Images arrive as a base64
-    // text block too (origin:'ui' reads carry no image block, so the host won't
-    // inline-render and stall the RPC).
-    return buildRenderPayload(meta, extractJoinedToolText(value) ?? '');
+    // Explicit render tools preserve normal model-facing content and attach
+    // metadata alongside it. For images, reuse the existing MCP image block as
+    // the preview payload; UI-origin refresh reads still arrive as base64 text.
+    const content = meta.fileType === 'image'
+        ? extractImageData(value) ?? extractJoinedToolText(value) ?? ''
+        : extractJoinedToolText(value) ?? '';
+    return buildRenderPayload(meta, content);
 }
 
 export function assertSuccessfulEditBlockResult(result: unknown): void {

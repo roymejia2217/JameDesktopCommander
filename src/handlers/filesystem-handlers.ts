@@ -67,10 +67,17 @@ function getErrorFromPath(path: string): string {
     return path.substring('__ERROR__:'.length).trim();
 }
 
+export interface PreviewPayloadOptions {
+    includeStructuredContent?: boolean;
+}
+
 /**
  * Handle read_file command
  */
-export async function handleReadFile(args: unknown): Promise<ServerResult> {
+export async function handleReadFile(
+    args: unknown,
+    previewOptions: PreviewPayloadOptions = {},
+): Promise<ServerResult> {
     // Backstop for the whole handler operation. The real control is the
     // 3-minute cancellable read timeout inside readFileFromDisk; this sits just
     // above it (so that one fires first, with cleanup + a useful error) but
@@ -83,6 +90,8 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
     }
     const readFileOperation = async () => {
         const parsed = ReadFileArgsSchema.parse(args);
+        const includeStructuredContent =
+            parsed.origin === 'ui' || previewOptions.includeStructuredContent === true;
 
         // Get the configuration for file read limits
         const config = await configManager.getConfig();
@@ -139,7 +148,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
                     },
                     ...pdfContent
                 ],
-                ...(parsed.origin === 'ui' ? {
+                ...(includeStructuredContent ? {
                     structuredContent: {
                         fileName: path.basename(resolvedFilePath),
                         filePath: resolvedFilePath,
@@ -152,9 +161,9 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
 
         // Handle image files
         if (fileResult.metadata?.isImage) {
-            // Return the image bytes in the MCP content array so the host model can
-            // actually see the image. The preview widget gets its copy from its own
-            // origin:'ui' read — structuredContent stays metadata-only.
+            // Keep image bytes in the MCP content array so the host model can
+            // see the image. Explicit render tools attach metadata alongside this
+            // same result, so the MCP App can hydrate without a second read.
             const imageData = typeof fileResult.content === 'string'
                 ? fileResult.content
                 : fileResult.content.toString('base64');
@@ -178,9 +187,10 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
                     structuredContent: imageStructuredContent,
                 };
             }
-            // Model-facing read: keep the image block so the host/model sees it.
-            // No structuredContent — the widget renders from its own origin:'ui'
-            // read, and nothing else consumes it.
+            // Model-facing read/render: keep the image block so the host/model sees it.
+            // Explicit render tools additionally attach metadata for the MCP App,
+            // allowing the initial tool-result notification to hydrate the view
+            // without a second read_file RPC.
             return {
                 content: [
                     {
@@ -193,24 +203,26 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
                         mimeType: fileResult.mimeType
                     }
                 ],
+                ...(includeStructuredContent ? {
+                    structuredContent: imageStructuredContent,
+                } : {}),
             };
         } else {
-            // For all other files, return as text.
-            // structuredContent carries only file metadata (no content duplication);
-            // the widget reads text from the MCP content array (over the RPC read).
+            // For all other files, return text normally. Explicit render tools
+            // attach metadata only; the MCP App reuses this same text content from
+            // the correlated tool result rather than issuing an eager second read.
             let textContent = typeof fileResult.content === 'string'
                 ? fileResult.content
                 : fileResult.content.toString('utf8');
             const fileType = fileResult.metadata?.isDirectory ? 'directory' as const : resolvePreviewFileType(resolvedFilePath);
-            // The directory fallback prefixes a "use list_directory instead" hint
-            // for the LLM. The widget's own read (a list_directory preview pulls
-            // read_file on the dir path) would render that hint as a notice — strip it.
+            // UI-origin compatibility reads should not surface the LLM-only
+            // "use list_directory instead" hint as preview content.
             if (parsed.origin === 'ui' && fileType === 'directory') {
                 textContent = textContent.replace(/^This is a directory, not a file\.[^\n]*\n+/, '');
             }
             return {
                 content: [{ type: "text", text: textContent }],
-                ...(parsed.origin === 'ui' ? {
+                ...(includeStructuredContent ? {
                     structuredContent: {
                         fileName: path.basename(resolvedFilePath),
                         filePath: resolvedFilePath,
@@ -384,10 +396,15 @@ export async function handleCreateDirectory(args: unknown): Promise<ServerResult
 /**
  * Handle list_directory command
  */
-export async function handleListDirectory(args: unknown): Promise<ServerResult> {
+export async function handleListDirectory(
+    args: unknown,
+    previewOptions: PreviewPayloadOptions = {},
+): Promise<ServerResult> {
     try {
         const startTime = Date.now();
         const parsed = ListDirectoryArgsSchema.parse(args);
+        const includeStructuredContent =
+            parsed.origin === 'ui' || previewOptions.includeStructuredContent === true;
         const entries = await listDirectory(parsed.path, parsed.depth);
         const duration = Date.now() - startTime;
 
@@ -396,7 +413,7 @@ export async function handleListDirectory(args: unknown): Promise<ServerResult> 
 
         return {
             content: [{ type: "text", text: resultText }],
-            ...(parsed.origin === 'ui' ? {
+            ...(includeStructuredContent ? {
                 structuredContent: {
                     fileName: path.basename(resolvedPath),
                     filePath: resolvedPath,

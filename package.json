@@ -60,7 +60,7 @@
     "verify:push": "npm run lint:readme && npm run audit:runtime && npm run verify",
     "lint:readme": "remark --file-path JameDesktopCommander/README.md --frail --no-stdout < README.md",
     "prepack": "npm run build",
-    "verify": "npm run build && node scripts/validate-tools-sync.js && node test/run-all-tests.js"
+    "verify": "npm run build && node dist/npm-scripts/verify-ripgrep.js && node scripts/validate-tools-sync.js && node test/run-all-tests.js"
   },
   "keywords": [
     "mcp",

@@ -63,6 +63,21 @@ const gitignore = await fs.readFile(path.join(repoRoot, '.gitignore'), 'utf8');
 assert.match(gitignore, /^\*\*\/bin\/$/m, '.NET bin directories must be ignored');
 assert.match(gitignore, /^\*\*\/obj\/$/m, '.NET obj directories must be ignored');
 
+const codespellConfig = await fs.readFile(path.join(repoRoot, '.codespellrc'), 'utf8');
+const ignoreWordsLine = codespellConfig
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('ignore-words-list = '));
+assert.ok(ignoreWordsLine, 'codespell ignore-word configuration must exist');
+const ignoredWords = ignoreWordsLine
+  .slice('ignore-words-list = '.length)
+  .split(',')
+  .map((word) => word.trim())
+  .filter(Boolean);
+assert.ok(
+  ignoredWords.includes('InOut'),
+  'codespell must ignore the .NET PipeDirection.InOut API identifier',
+);
+
 const ciWorkflow = await fs.readFile(
   path.join(repoRoot, '.github', 'workflows', 'ci.yml'),
   'utf8',

@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
@@ -82,6 +82,13 @@ interface ShellSpawnConfig {
   windowsVerbatim?: boolean;
 }
 
+export interface CommandExecutionControl {
+  signal?: AbortSignal;
+  onStarted?: (pid: number) => void;
+  onOutput?: (source: 'stdout' | 'stderr') => void;
+  onRunning?: (elapsedMs: number) => void;
+}
+
 /**
  * Get the appropriate spawn configuration for a given shell
  * This handles login shell flags for different shell types
@@ -144,6 +151,39 @@ function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig
   };
 }
 
+export function terminateProcessTree(pid: number, ownsProcessGroup: boolean = false): boolean {
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+    const taskkillPath = systemRoot
+      ? path.win32.join(systemRoot, 'System32', 'taskkill.exe')
+      : 'taskkill.exe';
+    const result = spawnSync(taskkillPath, ['/PID', String(pid), '/T', '/F'], {
+      windowsHide: true,
+      shell: false,
+      stdio: 'ignore',
+      timeout: 5000,
+    });
+
+    if (!result.error && result.status === 0) {
+      return true;
+    }
+
+    try {
+      process.kill(pid, 'SIGKILL');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    process.kill(ownsProcessGroup ? -pid : pid, 'SIGKILL');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
@@ -174,7 +214,13 @@ export class TerminalManager {
     }
   }
   
-  async executeCommand(command: string, timeoutMs: number = DEFAULT_COMMAND_TIMEOUT, shell?: string, collectTiming: boolean = false): Promise<CommandExecutionResult> {
+  async executeCommand(
+    command: string,
+    timeoutMs: number = DEFAULT_COMMAND_TIMEOUT,
+    shell?: string,
+    collectTiming: boolean = false,
+    control: CommandExecutionControl = {},
+  ): Promise<CommandExecutionResult> {
     // Get the shell from config if not specified
     let shellToUse: string | boolean | undefined = shell;
     if (!shellToUse) {
@@ -252,6 +298,20 @@ export class TerminalManager {
       spawnOptions.windowsVerbatimArguments = true;
     }
 
+    const ownsProcessGroup = process.platform !== 'win32' && !!control.signal;
+    if (ownsProcessGroup) {
+      spawnOptions.detached = true;
+    }
+
+    if (control.signal?.aborted) {
+      return {
+        pid: -1,
+        output: 'Process start cancelled by caller before launch.',
+        isBlocked: false,
+        cancelled: true,
+      };
+    }
+
     // Spawn the process with appropriate arguments
     const childProcess = spawn(spawnConfig.executable, spawnConfig.args, spawnOptions);
     let output = '';
@@ -297,13 +357,16 @@ export class TerminalManager {
       startTime: new Date(),
       bufferedChars: 0,
       evictedLines: 0,
-      evictedChars: 0
+      evictedChars: 0,
+      ownsProcessGroup
     };
 
     this.sessions.set(childProcess.pid, session);
+    control.onStarted?.(childProcess.pid);
 
     // Timing telemetry
     const startTime = Date.now();
+    let lastRunningProgressAt = startTime;
     let firstOutputTime: number | undefined;
     let lastOutputTime: number | undefined;
     const outputEvents: OutputEvent[] = [];
@@ -312,6 +375,8 @@ export class TerminalManager {
     return new Promise((resolve) => {
       let resolved = false;
       let periodicCheck: NodeJS.Timeout | null = null;
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      let abortHandler: (() => void) | null = null;
 
       // Quick prompt patterns for immediate detection
       const quickPromptPatterns = />>>\s*$|>\s*$|\$\s*$|#\s*$/;
@@ -320,6 +385,10 @@ export class TerminalManager {
         if (resolved) return;
         resolved = true;
         if (periodicCheck) clearInterval(periodicCheck);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (abortHandler && control.signal) {
+          control.signal.removeEventListener('abort', abortHandler);
+        }
 
         // Add timing info if requested
         if (collectTiming) {
@@ -374,6 +443,7 @@ export class TerminalManager {
         }
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        if (!resolved) control.onOutput?.('stdout');
 
         // Record output event if collecting timing
         if (collectTiming) {
@@ -418,6 +488,7 @@ export class TerminalManager {
         }
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        if (!resolved) control.onOutput?.('stderr');
 
         // Record output event if collecting timing
         if (collectTiming) {
@@ -433,6 +504,12 @@ export class TerminalManager {
 
       // Periodic comprehensive check every 100ms
       periodicCheck = setInterval(() => {
+        const now = Date.now();
+        if (control.onRunning && now - lastRunningProgressAt >= 10_000) {
+          lastRunningProgressAt = now;
+          control.onRunning(now - startTime);
+        }
+
         if (output.trim()) {
           const processState = analyzeProcessState(output, childProcess.pid);
           if (processState.isWaitingForInput) {
@@ -448,7 +525,7 @@ export class TerminalManager {
       }, 100);
 
       // Timeout fallback
-      setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         session.isBlocked = true;
         exitReason = 'timeout';
         resolveOnce({
@@ -486,6 +563,25 @@ export class TerminalManager {
           isBlocked: false
         });
       });
+
+      if (control.signal) {
+        abortHandler = () => {
+          if (resolved || !childProcess.pid) return;
+          exitReason = 'cancelled';
+          output += (output ? '\n' : '') + 'Process cancelled by caller.';
+          terminateProcessTree(childProcess.pid, session.ownsProcessGroup);
+          resolveOnce({
+            pid: childProcess.pid,
+            output,
+            isBlocked: false,
+            cancelled: true,
+          });
+        };
+        control.signal.addEventListener('abort', abortHandler, { once: true });
+        if (control.signal.aborted) {
+          abortHandler();
+        }
+      }
     });
   }
 
@@ -760,20 +856,14 @@ export class TerminalManager {
       return false;
     }
 
-    try {
-        session.process.kill('SIGINT');
-        setTimeout(() => {
-          if (this.sessions.has(pid)) {
-            session.process.kill('SIGKILL');
-          }
-        }, 1000);
-        return true;
-      } catch (error) {
-        // Convert error to string, handling both Error objects and other types
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        capture('server_request_error', {error: errorMessage, message: `Failed to terminate process ${pid}:`});
-        return false;
-      }
+    const terminated = terminateProcessTree(pid, session.ownsProcessGroup);
+    if (!terminated) {
+      capture('server_request_error', {
+        error: 'process tree termination failed',
+        message: `Failed to terminate process ${pid}:`,
+      });
+    }
+    return terminated;
   }
 
   listActiveSessions(): ActiveSession[] {

@@ -14,22 +14,28 @@ import {
     ListSessionsArgsSchema
 } from '../tools/schemas.js';
 
-import { ServerResult } from '../types.js';
+import { ServerResult, type ToolExecutionContext } from '../types.js';
 
 /**
  * Handle start_process command (improved execute_command)
  */
-export async function handleStartProcess(args: unknown): Promise<ServerResult> {
+export async function handleStartProcess(
+    args: unknown,
+    context?: ToolExecutionContext,
+): Promise<ServerResult> {
     const parsed = StartProcessArgsSchema.parse(args);
-    return startProcess(parsed);
+    return startProcess(parsed, context);
 }
 
 /**
  * Handle read_process_output command (improved read_output)
  */
-export async function handleReadProcessOutput(args: unknown): Promise<ServerResult> {
+export async function handleReadProcessOutput(
+    args: unknown,
+    context?: ToolExecutionContext,
+): Promise<ServerResult> {
     const parsed = ReadProcessOutputArgsSchema.parse(args);
-    return readProcessOutput(parsed);
+    return readProcessOutput(parsed, context);
 }
 
 /**

@@ -24,12 +24,14 @@ export interface TerminalSession {
   bufferedChars: number;      // Joined length of outputLines (content + separators)
   evictedLines: number;       // Lines dropped from the front to enforce the buffer cap
   evictedChars: number;       // Joined length of evicted lines (keeps snapshot offsets absolute)
+  ownsProcessGroup?: boolean;  // POSIX: spawned as its own process-group leader for tree-safe cancellation
 }
 
 export interface CommandExecutionResult {
   pid: number;
   output: string;
   isBlocked: boolean;
+  cancelled?: boolean;
   timingInfo?: TimingInfo;
 }
 
@@ -37,7 +39,7 @@ export interface TimingInfo {
   startTime: number;
   endTime: number;
   totalDurationMs: number;
-  exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_exit' | 'timeout';
+  exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_exit' | 'timeout' | 'cancelled';
   firstOutputTime?: number;
   lastOutputTime?: number;
   timeToFirstOutputMs?: number;
@@ -93,6 +95,17 @@ export interface ServerResult {
   structuredContent?: FilePreviewStructuredContent | Record<string, unknown>;
   isError?: boolean;
   _meta?: Record<string, unknown>;
+}
+
+export interface ToolProgressUpdate {
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
+  reportProgress?: (update: ToolProgressUpdate) => Promise<void>;
 }
 
 // Define a helper type for tool handler functions

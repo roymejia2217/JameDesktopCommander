@@ -1286,10 +1286,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 import * as handlers from './handlers/index.js';
-import { ServerResult } from './types.js';
+import { ServerResult, type ToolExecutionContext } from './types.js';
+import { createToolExecutionContext } from './tools/tool-execution-context.js';
 
-server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest): Promise<ServerResult> => {
+server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
     const args = request.params.arguments;
+    const executionContext = createToolExecutionContext(extra);
+
     // Calls fired programmatically by the widget UIs (file preview, config
     // editor) carry origin:'ui'. They are real tool executions but not agent
     // actions, so they must produce zero telemetry: running them inside the
@@ -1298,12 +1301,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
     // UI interactions are tracked separately via mcp_ui_event.
     const isUiOriginCall = !!(args && typeof args === 'object' && (args as any).origin === 'ui');
     if (isUiOriginCall) {
-        return runInUiOriginCallContext(() => handleCallToolRequest(request));
+        return runInUiOriginCallContext(() => handleCallToolRequest(request, executionContext));
     }
-    return handleCallToolRequest(request);
+    return handleCallToolRequest(request, executionContext);
 });
 
-async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {
+async function handleCallToolRequest(
+    request: CallToolRequest,
+    executionContext: ToolExecutionContext,
+): Promise<ServerResult> {
     const { name, arguments: args } = request.params;
     const startTime = Date.now();
     // Hoisted above the try so the finally block can read them when emitting the
@@ -1503,11 +1509,11 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
 
             // Terminal tools
             case "start_process":
-                result = await handlers.handleStartProcess(args);
+                result = await handlers.handleStartProcess(args, executionContext);
                 break;
 
             case "read_process_output":
-                result = await handlers.handleReadProcessOutput(args);
+                result = await handlers.handleReadProcessOutput(args, executionContext);
                 break;
 
             case "interact_with_process":

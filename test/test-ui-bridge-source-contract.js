@@ -74,8 +74,8 @@ const ignoredWords = ignoreWordsLine
   .map((word) => word.trim())
   .filter(Boolean);
 assert.ok(
-  ignoredWords.includes('InOut'),
-  'codespell must ignore the .NET PipeDirection.InOut API identifier',
+  ignoredWords.includes('inout'),
+  'codespell must ignore the .NET PipeDirection.InOut dictionary entry',
 );
 
 const ciWorkflow = await fs.readFile(

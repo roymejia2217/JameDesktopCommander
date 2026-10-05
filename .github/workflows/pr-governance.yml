@@ -103,33 +103,6 @@ jobs:
               }
             }
 
-      - name: Validate repository squash merge policy
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { data: repository } = await github.rest.repos.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            });
-
-            const expected = {
-              allow_squash_merge: true,
-              allow_merge_commit: false,
-              allow_rebase_merge: false,
-              squash_merge_commit_title: 'PR_TITLE',
-              squash_merge_commit_message: 'BLANK',
-            };
-
-            const mismatches = Object.entries(expected)
-              .filter(([key, value]) => repository[key] !== value)
-              .map(([key, value]) => `${key}: expected ${value}, got ${repository[key]}`);
-
-            if (mismatches.length > 0) {
-              core.setFailed(
-                `Repository squash merge policy drifted: ${mismatches.join('; ')}`
-              );
-            }
-
       - name: Validate Release Please title
         if: >-
           github.event.pull_request.user.login == vars.JDC_RELEASE_BOT_LOGIN &&

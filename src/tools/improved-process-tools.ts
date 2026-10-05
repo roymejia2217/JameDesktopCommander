@@ -2,7 +2,7 @@ import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS } from '../terminal-manager.
 import { commandManager } from '../command-manager.js';
 import { StartProcessArgsSchema, ReadProcessOutputArgsSchema, InteractWithProcessArgsSchema, ForceTerminateArgsSchema, ListSessionsArgsSchema } from './schemas.js';
 import { capture } from "../utils/capture.js";
-import { ServerResult } from '../types.js';
+import { ServerResult, type ToolExecutionContext } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
 import * as os from 'os';
 import { configManager } from '../config-manager.js';
@@ -95,7 +95,10 @@ async function executeNodeCode(code: string, timeout_ms: number = 30000): Promis
  * Start a new process (renamed from execute_command)
  * Includes early detection of process waiting for input
  */
-export async function startProcess(args: unknown): Promise<ServerResult> {
+export async function startProcess(
+  args: unknown,
+  context?: ToolExecutionContext,
+): Promise<ServerResult> {
   const parsed = StartProcessArgsSchema.safeParse(args);
   if (!parsed.success) {
     capture('server_start_process_failed');
@@ -104,6 +107,26 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
       isError: true,
     };
   }
+
+  if (context?.signal?.aborted) {
+    return {
+      content: [{ type: "text", text: 'Process start cancelled by caller.' }],
+      isError: true,
+    };
+  }
+
+  let progressValue = 0;
+  let progressQueue: Promise<void> = Promise.resolve();
+  const queueProgress = (message: string) => {
+    const reporter = context?.reportProgress;
+    if (!reporter) return;
+    const progress = ++progressValue;
+    progressQueue = progressQueue
+      .then(() => reporter({ progress, message }))
+      .catch(() => {
+        capture('server_progress_notification_failed', { tool_name: 'start_process' });
+      });
+  };
 
   try {
     const commands = commandManager.extractCommands(parsed.data.command).join(', ');
@@ -126,11 +149,14 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
   }
 
   const commandToRun = parsed.data.command;
+  queueProgress('Starting process');
 
   // Handle node:local - runs Node.js code directly on MCP server
   if (commandToRun.trim() === 'node:local') {
     const virtualPid = virtualPidCounter--;
     virtualNodeSessions.set(virtualPid, { timeout_ms: parsed.data.timeout_ms || 30000 });
+    queueProgress(`Process started (PID ${virtualPid})`);
+    await progressQueue;
 
     return {
       content: [{
@@ -168,12 +194,33 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     }
   }
 
+  let outputReported = false;
   const result = await terminalManager.executeCommand(
     commandToRun,
     parsed.data.timeout_ms,
     shellUsed,
-    parsed.data.verbose_timing || false
+    parsed.data.verbose_timing || false,
+    {
+      signal: context?.signal,
+      onStarted: (pid) => queueProgress(`Process started (PID ${pid})`),
+      onOutput: (source) => {
+        if (outputReported) return;
+        outputReported = true;
+        queueProgress(`Process produced ${source} output`);
+      },
+      onRunning: (elapsedMs) => {
+        queueProgress(`Process is still running (${Math.round(elapsedMs / 1000)}s)`);
+      },
+    },
   );
+  await progressQueue;
+
+  if (result.cancelled) {
+    return {
+      content: [{ type: "text", text: result.output || 'Process cancelled by caller.' }],
+      isError: true,
+    };
+  }
 
   if (result.pid === -1) {
     return {
@@ -239,7 +286,10 @@ function formatTimingInfo(timing: any): string {
  * Read output from a running process with file-like pagination
  * Supports offset/length parameters for controlled reading
  */
-export async function readProcessOutput(args: unknown): Promise<ServerResult> {
+export async function readProcessOutput(
+  args: unknown,
+  context?: ToolExecutionContext,
+): Promise<ServerResult> {
   const parsed = ReadProcessOutputArgsSchema.safeParse(args);
   if (!parsed.success) {
     return {
@@ -263,51 +313,95 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   // Timing telemetry
   const startTime = Date.now();
 
+  if (context?.signal?.aborted) {
+    return {
+      content: [{ type: "text", text: `Reading process ${pid} output was cancelled by caller.` }],
+      isError: true,
+    };
+  }
+
+  let progressValue = 0;
+  let progressQueue: Promise<void> = Promise.resolve();
+  const queueProgress = (message: string) => {
+    const reporter = context?.reportProgress;
+    if (!reporter) return;
+    const progress = ++progressValue;
+    progressQueue = progressQueue
+      .then(() => reporter({ progress, message }))
+      .catch(() => {
+        capture('server_progress_notification_failed', { tool_name: 'read_process_output' });
+      });
+  };
+
   // For active sessions with no new output yet, optionally wait for output
   const session = terminalManager.getSession(pid);
   if (session && offset === 0) {
-    // Wait for new output to arrive (only for "new output" reads, not absolute/tail)
-    const waitForOutput = (): Promise<void> => {
+    queueProgress(`Waiting for output from process ${pid}`);
+
+    type WaitResult = 'output' | 'timeout' | 'cancelled';
+    const waitForOutput = (): Promise<WaitResult> => {
       return new Promise((resolve) => {
-        // Check if there's already new output
         const currentLines = terminalManager.getOutputLineCount(pid) || 0;
         if (currentLines > session.lastReadIndex) {
-          resolve();
+          resolve('output');
           return;
         }
 
         let resolved = false;
         let interval: NodeJS.Timeout | null = null;
         let timeout: NodeJS.Timeout | null = null;
+        let abortHandler: (() => void) | null = null;
 
         const cleanup = () => {
           if (interval) clearInterval(interval);
           if (timeout) clearTimeout(timeout);
+          if (abortHandler && context?.signal) {
+            context.signal.removeEventListener('abort', abortHandler);
+          }
         };
 
-        const resolveOnce = () => {
+        const resolveOnce = (result: WaitResult) => {
           if (resolved) return;
           resolved = true;
           cleanup();
-          resolve();
+          resolve(result);
         };
 
-        // Poll for new output
         interval = setInterval(() => {
           const newLineCount = terminalManager.getOutputLineCount(pid) || 0;
-          if (newLineCount > session.lastReadIndex) {
-            resolveOnce();
+          if (newLineCount > session.lastReadIndex || !terminalManager.getSession(pid)) {
+            resolveOnce('output');
           }
         }, 50);
 
-        // Timeout
         timeout = setTimeout(() => {
-          resolveOnce();
+          resolveOnce('timeout');
         }, timeout_ms);
+
+        if (context?.signal) {
+          abortHandler = () => resolveOnce('cancelled');
+          context.signal.addEventListener('abort', abortHandler, { once: true });
+          if (context.signal.aborted) {
+            abortHandler();
+          }
+        }
       });
     };
 
-    await waitForOutput();
+    const waitResult = await waitForOutput();
+    await progressQueue;
+
+    if (waitResult === 'cancelled') {
+      return {
+        content: [{ type: "text", text: `Reading process ${pid} output was cancelled by caller.` }],
+        isError: true,
+      };
+    }
+
+    if (waitResult === 'output') {
+      queueProgress(`Output is available from process ${pid}`);
+      await progressQueue;
+    }
   }
 
   // Read output with pagination

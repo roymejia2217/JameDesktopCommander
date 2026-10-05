@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * Verify ripgrep binary availability after installation
- * This runs after npm install to warn users if ripgrep is not available
+ * Verify ripgrep binary availability using the same resolver as production.
+ *
+ * @vscode/ripgrep 1.18+ ships platform binaries through optionalDependencies,
+ * so verification must work even when npm lifecycle scripts are disabled.
  */
 
 import { getRipgrepPath } from '../utils/ripgrep-resolver.js';
@@ -18,12 +20,12 @@ async function verifyRipgrep() {
     console.error(`${message}`);
     console.error('');
     console.error('Desktop Commander will not work until ripgrep is available.');
-    console.error('This usually happens when npm postinstall scripts fail during npx execution.');
+    console.error('The bundled @vscode/ripgrep platform package or a supported system fallback is missing.');
     console.error('');
-    console.error('To fix this, install ripgrep manually:');
+    console.error('Reinstall the locked dependencies first. If a system fallback is intentional:');
     console.error('  macOS: brew install ripgrep');
     console.error('  Linux: See https://github.com/BurntSushi/ripgrep#installation');
-    console.error('  Windows: choco install ripgrep or download from https://github.com/BurntSushi/ripgrep/releases');
+    console.error('  Windows: winget install BurntSushi.ripgrep.MSVC');
     process.exit(1);
   }
 }

@@ -1,0 +1,13 @@
+# Lychee checks all normal README links. These narrowly scoped exclusions are
+# endpoints verified separately but known to reject or rate-limit automated clients.
+timeout = 20
+max_retries = 3
+method = "get"
+
+exclude = [
+  '^https://www\.npmjs\.com/package/@wonderwhy-er/desktop-commander$',
+  '^https://cursor\.directory/mcp/desktop-commander-mcp$',
+  '^https://smithery\.ai/badge/@wonderwhy-er/desktop-commander$',
+  '^https://wonderwhy-er\.medium\.com/claude-with-mcps-replaced-cursor-windsurf-how-did-that-happen-c1d1e2795e96$',
+  '^https://medium\.com/@pharmx/you-sir-are-my-hero-62cff5836a3e$',
+]

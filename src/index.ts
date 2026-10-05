@@ -13,6 +13,7 @@ import { runUninstall } from './npm-scripts/uninstall.js';
 import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
+import { runTunnel } from './npm-scripts/tunnel.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 
 // Store messages to defer until after initialization
@@ -38,6 +39,12 @@ async function runServer() {
     // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
       await runRemote();
+      return;
+    }
+
+    // Check if first argument is "tunnel"
+    if (process.argv[2] === 'tunnel') {
+      await runTunnel(process.argv.slice(3));
       return;
     }
 

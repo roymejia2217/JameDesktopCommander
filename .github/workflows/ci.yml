@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  HUSKY: 0
+  PUPPETEER_SKIP_DOWNLOAD: '1'
+
+jobs:
+  required-ci:
+    name: Required CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Review dependency changes
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          vulnerability-check: true
+          license-check: false
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate protected-branch commit
+        if: github.event_name == 'push'
+        run: >-
+          npm run --silent lint:commit --
+          --from HEAD~1
+          --to HEAD
+          --verbose
+
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          curl -fsSLo actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check -
+          tar -xzf actionlint.tar.gz actionlint
+
+      - name: Lint GitHub Actions
+        run: ./actionlint -color
+
+      - name: Enforce Standard Readme and remark-lint
+        run: npm run lint:readme
+
+      - name: Check README links
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace:ro" \
+            --workdir /workspace \
+            lycheeverse/lychee:0.24.2@sha256:e2d19e57cf6ab037026f20b8e449a1f30d9d7f81eef4194763aab2eab20bd28d \
+            --no-progress --root-dir . README.md
+
+      - name: Audit runtime dependencies
+        run: npm run audit:runtime
+
+      - name: Run repository verification
+        run: npm run verify
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run

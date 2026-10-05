@@ -5,9 +5,22 @@
 
 import path from 'path';
 import fs from 'fs/promises';
+import os from 'os';
 import { fileURLToPath } from 'url';
-import { handleStartSearch, handleGetMoreSearchResults, handleStopSearch } from '../dist/handlers/search-handlers.js';
-import { configManager } from '../dist/config-manager.js';
+
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-search-edge-home-'));
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
+
+const [
+  { handleStartSearch, handleGetMoreSearchResults, handleStopSearch },
+  { configManager },
+] = await Promise.all([
+  import('../dist/handlers/search-handlers.js'),
+  import('../dist/config-manager.js'),
+]);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -505,28 +518,30 @@ export async function testSearchCodeEdgeCases() {
     console.error(error.stack);
     throw error;
   } finally {
-    // Cleanup
-    if (originalConfig) {
-      await teardownEdgeCases(originalConfig);
-    }
-    
-    // Force cleanup of search manager to ensure process can exit
     try {
-      const { searchManager, stopSearchManagerCleanup } = await import('../dist/search-manager.js');
-      
-      // Terminate all active sessions
-      const activeSessions = searchManager.listSearchSessions();
-      for (const session of activeSessions) {
-        searchManager.terminateSearch(session.id);
+      if (originalConfig) {
+        await teardownEdgeCases(originalConfig);
       }
-      
-      // Stop the cleanup interval
-      stopSearchManagerCleanup();
-      
-      // Clear the sessions map
-      searchManager.sessions?.clear?.();
-    } catch (e) {
-      // Ignore import errors
+
+      try {
+        const { searchManager, stopSearchManagerCleanup } = await import('../dist/search-manager.js');
+        const activeSessions = searchManager.listSearchSessions();
+        for (const session of activeSessions) {
+          searchManager.terminateSearch(session.id);
+        }
+        stopSearchManagerCleanup();
+        searchManager.sessions?.clear?.();
+      } catch {
+        // Best-effort cleanup only; functional assertions remain authoritative.
+      }
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+
+      if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = originalUserProfile;
+
+      await fs.rm(isolatedHome, { recursive: true, force: true });
     }
   }
 }

@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { writeFile as writeFileAtomically } from 'atomically';
 import path from 'path';
 import { existsSync, watch, type FSWatcher } from 'fs';
 import { mkdir } from 'fs/promises';
@@ -6,6 +7,7 @@ import os from 'os';
 import lockfile from 'proper-lockfile';
 import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
+import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
 
 export interface ServerConfig {
   blockedCommands?: string[];
@@ -196,13 +198,30 @@ class ConfigManager {
 
   private async readConfigFromDisk(): Promise<ServerConfig> {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    const maxAttempts = process.platform === 'win32' ? 50 : 5;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return JSON.parse(await fs.readFile(this.configPath, 'utf8'));
       } catch (error: any) {
         lastError = error;
-        if (error?.code === 'ENOENT') throw error;
-        if (!(error instanceof SyntaxError) || attempt === 4) throw error;
+        const code = error?.code;
+        const transientWindowsRead =
+          process.platform === 'win32' &&
+          (code === 'EACCES' || code === 'EPERM' || code === 'EBUSY');
+        const transientWindowsMissing =
+          process.platform === 'win32' &&
+          code === 'ENOENT' &&
+          attempt < 4;
+        const transientJsonSnapshot = error instanceof SyntaxError;
+
+        if (
+          attempt === maxAttempts - 1 ||
+          (!transientWindowsRead && !transientWindowsMissing && !transientJsonSnapshot)
+        ) {
+          throw error;
+        }
+
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
@@ -210,11 +229,23 @@ class ConfigManager {
   }
 
   private async writeConfigAtomically(config: ServerConfig): Promise<void> {
+    const serialized = JSON.stringify(config, null, 2);
+    if (process.platform !== 'win32') {
+      await writeFileAtomically(this.configPath, serialized, 'utf8');
+      return;
+    }
+
     const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
     try {
-      await fs.writeFile(tempPath, JSON.stringify(config, null, 2), 'utf8');
-      await fs.rename(tempPath, this.configPath);
+      handle = await fs.open(tempPath, 'wx');
+      await handle.writeFile(serialized, 'utf8');
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await replaceFileWin32(this.configPath, tempPath);
     } finally {
+      if (handle) await handle.close().catch(() => {});
       await fs.unlink(tempPath).catch(() => {});
     }
   }
@@ -383,6 +414,51 @@ class ConfigManager {
     this.config[key] = next;
     this.queueMutation((latest) => { latest[key] = updater(latest[key]); });
     return next;
+  }
+
+  /**
+   * Wait until all queued non-blocking mutations are durably persisted.
+   *
+   * Normal high-frequency callers should keep using the non-blocking APIs.
+   * This barrier is for lifecycle boundaries and tests that must observe
+   * durable state before proceeding or exiting.
+   */
+  async flushPendingWrites(timeoutMs = 5_000): Promise<void> {
+    await this.init();
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new RangeError('flushPendingWrites timeout must be a positive finite number');
+    }
+
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      if (this.pendingMutations.length > 0 && !this.saveScheduled) {
+        this.scheduleSave();
+      }
+
+      const observedChain = this.writeChain;
+      await observedChain;
+
+      const isStable =
+        this.pendingMutations.length === 0 &&
+        !this.saveScheduled &&
+        observedChain === this.writeChain;
+
+      if (isStable) {
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        const error = new Error(
+          `Timed out waiting for pending config writes after ${timeoutMs}ms`
+        ) as NodeJS.ErrnoException;
+        error.code = 'ETIMEDOUT';
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   /** Update multiple configuration values at once. */

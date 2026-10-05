@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { startProcess, readProcessOutput, forceTerminate, interactWithProcess } from '../dist/tools/improved-process-tools.js';
 
 /**
@@ -7,19 +7,22 @@ import { startProcess, readProcessOutput, forceTerminate, interactWithProcess } 
  * @returns {string} 'python3' or 'python'
  */
 function getPythonCommand() {
-  try {
-    // Prefer python3 if available
-    execSync('command -v python3', { stdio: 'ignore' });
-    return 'python3';
-  } catch (e) {
-    // Fallback to python
-    try {
-      execSync('command -v python', { stdio: 'ignore' });
-      return 'python';
-    } catch (error) {
-      throw new Error('Neither python3 nor python command is available in the PATH');
-    }
+  const candidates = process.platform === 'win32'
+    ? [
+        { command: 'py', args: ['-3', '--version'], invocation: 'py -3' },
+        { command: 'python', args: ['--version'], invocation: 'python' },
+      ]
+    : [
+        { command: 'python3', args: ['--version'], invocation: 'python3' },
+        { command: 'python', args: ['--version'], invocation: 'python' },
+      ];
+
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate.command, candidate.args, { stdio: 'ignore' });
+    if (result.status === 0) return candidate.invocation;
   }
+
+  throw new Error('No supported Python launcher is available in PATH');
 }
 
 
@@ -31,13 +34,14 @@ async function testEnhancedREPL() {
   
   const pythonCommand = getPythonCommand();
   console.log(`Using python command: ${pythonCommand}`);
+  const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash';
 
   // Start Python in interactive mode
   console.log('Starting Python REPL...');
   const result = await startProcess({
     command: `${pythonCommand} -i`,
     timeout_ms: 10000,
-    shell: '/bin/bash'
+    shell
   });
   
   console.log('Result from start_process:', result);

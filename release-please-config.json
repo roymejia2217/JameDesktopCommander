@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "package-name": "JameDesktopCommander",
+      "component": "JameDesktopCommander",
+      "bump-minor-pre-major": true,
+      "include-component-in-tag": false,
+      "force-tag-creation": true,
+      "pull-request-title-pattern": "chore(main): release ${version}",
+      "pull-request-header": "This release pull request is generated and maintained by Release Please. Do not rewrite this body.",
+      "pull-request-footer": "This pull request is managed by Release Please.",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "server.json",
+          "jsonpath": "$..version"
+        },
+        {
+          "type": "generic",
+          "path": "src/version.ts"
+        }
+      ]
+    }
+  }
+}

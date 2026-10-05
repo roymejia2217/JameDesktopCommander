@@ -1,0 +1,150 @@
+name: Pull Request Governance
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  governance:
+    name: PR Governance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate Conventional Commits pull request title
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            style
+            test
+            build
+            ci
+            chore
+            revert
+          scopes: |
+            core
+            config
+            filesystem
+            process
+            remote
+            opencode
+            computer-use
+            tunnel
+            ui
+            windows
+            linux
+            macos
+            security
+            server
+            tools
+            packaging
+            ci
+            deps
+            docs
+            governance
+            release
+            main
+          requireScope: true
+
+      - name: Validate ordinary pull request body
+        if: >-
+          !(
+            github.event.pull_request.user.login == vars.JDC_RELEASE_BOT_LOGIN &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.head.ref ==
+              'release-please--branches--main--components--JameDesktopCommander'
+          )
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const body = context.payload.pull_request?.body ?? '';
+            const expected = ['What', 'Why', 'Testing', 'Related issues'];
+            const headings = [...body.matchAll(/^##[ \t]+(.+?)[ \t]*$/gm)]
+              .map((match) => match[1]);
+
+            if (JSON.stringify(headings) !== JSON.stringify(expected)) {
+              core.setFailed(
+                `PR body must contain exactly these level-two sections in order: ${expected.join(', ')}`
+              );
+              return;
+            }
+
+            for (let index = 0; index < expected.length; index += 1) {
+              const heading = expected[index];
+              const start = body.indexOf(`## ${heading}`) + `## ${heading}`.length;
+              const end = index + 1 < expected.length
+                ? body.indexOf(`## ${expected[index + 1]}`, start)
+                : body.length;
+              const content = body
+                .slice(start, end)
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .trim();
+
+              if (!content) {
+                core.setFailed(`PR body section "${heading}" must contain substantive content.`);
+                return;
+              }
+            }
+
+      - name: Validate Release Please title
+        if: >-
+          github.event.pull_request.user.login == vars.JDC_RELEASE_BOT_LOGIN &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.head.ref ==
+            'release-please--branches--main--components--JameDesktopCommander'
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            chore
+          scopes: |
+            main
+          requireScope: true
+          subjectPattern: '^release [0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
+          subjectPatternError: 'Release Please title must be chore(main): release <SemVer>.'
+
+      - name: Validate Release Please generated body
+        if: >-
+          github.event.pull_request.user.login == vars.JDC_RELEASE_BOT_LOGIN &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.head.ref ==
+            'release-please--branches--main--components--JameDesktopCommander'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const body = context.payload.pull_request?.body ?? '';
+            const header =
+              'This release pull request is generated and maintained by Release Please. Do not rewrite this body.';
+            const footer = 'This pull request is managed by Release Please.';
+
+            if (!body.startsWith(header)) {
+              core.setFailed('Release Please body must retain the configured generated header.');
+              return;
+            }
+
+            if (!body.trimEnd().endsWith(footer)) {
+              core.setFailed('Release Please body must retain the configured generated footer.');
+              return;
+            }
+
+            if (!/^##\s+\[[0-9]+\.[0-9]+\.[0-9]+/m.test(body)) {
+              core.setFailed('Release Please body must contain the generated SemVer release section.');
+            }

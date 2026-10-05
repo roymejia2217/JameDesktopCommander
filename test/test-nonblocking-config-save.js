@@ -1,7 +1,7 @@
 import assert from 'assert';
-import { readFileSync } from 'fs';
-import { configManager } from '../dist/config-manager.js';
-import { CONFIG_FILE } from '../dist/config.js';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import os from 'os';
+import path from 'path';
 
 /**
  * Regression test for the parallel-load tool-call hang.
@@ -20,16 +20,29 @@ import { CONFIG_FILE } from '../dist/config.js';
  *
  * This test is fast and cross-platform (no FIFO/python); the FIFO-based proof
  * that the response no longer blocks under a starved pool lives in test/repro/.
+ *
+ * The persistence test must never mutate the operator's real Desktop Commander
+ * configuration. It therefore boots the compiled config singleton under an
+ * isolated temporary home before importing any module that calls os.homedir().
  */
 
 const KEY = '__nonblockingSaveRegressionTest';
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const isolatedHome = mkdtempSync(path.join(os.tmpdir(), 'dc-nonblocking-config-save-'));
 let passed = 0;
 
 async function run() {
-  await configManager.getConfig(); // warm init so disk read is cached
+  process.env.HOME = isolatedHome;
+  process.env.USERPROFILE = isolatedHome;
 
-  // 1) A burst of non-blocking saves must resolve effectively immediately —
-  //    they must not each wait on a disk write.
+  const [{ configManager }, { CONFIG_FILE }] = await Promise.all([
+    import('../dist/config-manager.js'),
+    import('../dist/config.js'),
+  ]);
+
+  await configManager.getConfig();
+
   const BURST = 100;
   const t0 = Date.now();
   await Promise.all(
@@ -37,25 +50,51 @@ async function run() {
   );
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 200, `burst of ${BURST} non-blocking saves took ${elapsed}ms (expected < 200ms)`);
-  passed++; console.log(`✓ ${BURST} non-blocking saves resolved in ${elapsed}ms`);
+  passed++;
+  console.log(`✓ ${BURST} non-blocking saves resolved in ${elapsed}ms`);
 
-  // 2) The in-memory value is visible immediately (synchronously updated).
   assert.strictEqual(await configManager.getValue(KEY), BURST - 1);
-  passed++; console.log('✓ in-memory value reflects the latest write immediately');
+  passed++;
+  console.log('✓ in-memory value reflects the latest write immediately');
 
-  // 3) After the background flush window, config.json is valid JSON (no torn
-  //    write from overlapping saves) and holds the final coalesced value.
-  await new Promise((r) => setTimeout(r, 300));
+  await configManager.flushPendingWrites();
+
   let parsed;
-  assert.doesNotThrow(() => { parsed = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); },
-    'config.json must remain valid JSON after concurrent writes');
+  assert.doesNotThrow(
+    () => {
+      parsed = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+    },
+    'config.json must remain valid JSON after concurrent writes'
+  );
   assert.strictEqual(parsed[KEY], BURST - 1, 'final value must be persisted to disk');
-  passed++; console.log('✓ config.json is valid and holds the coalesced final value');
+  passed++;
+  console.log('✓ config.json is valid and holds the coalesced final value');
+}
 
-  // cleanup: remove the test key (undefined is dropped by JSON.stringify)
-  await configManager.setValue(KEY, undefined);
+function restoreEnvironment() {
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+
+  if (originalUserProfile === undefined) {
+    delete process.env.USERPROFILE;
+  } else {
+    process.env.USERPROFILE = originalUserProfile;
+  }
+
+  rmSync(isolatedHome, { recursive: true, force: true });
 }
 
 run()
-  .then(() => { console.log(`\nPASS (${passed}/3)`); process.exit(0); })
-  .catch((e) => { console.error(`\nFAIL: ${e.message}`); process.exit(1); });
+  .then(() => {
+    restoreEnvironment();
+    console.log(`\nPASS (${passed}/3)`);
+    process.exit(0);
+  })
+  .catch((error) => {
+    restoreEnvironment();
+    console.error(`\nFAIL: ${error.message}`);
+    process.exit(1);
+  });

@@ -1,5 +1,16 @@
 // Test script to verify search result behavior using new streaming API
-import { handleStartSearch, handleGetMoreSearchResults } from '../dist/handlers/search-handlers.js';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
+
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-search-size-home-'));
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
+
+const { handleStartSearch, handleGetMoreSearchResults, handleStopSearch } =
+  await import('../dist/handlers/search-handlers.js');
 
 /**
  * Helper function to wait for search completion and get all results
@@ -89,6 +100,15 @@ async function testSearchTruncation() {
         
     } catch (error) {
         console.error('Test failed:', error);
+        throw error;
+    } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+
+        if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = originalUserProfile;
+
+        await fs.rm(isolatedHome, { recursive: true, force: true });
     }
 }
 

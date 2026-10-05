@@ -17,6 +17,9 @@ const { handleStartSearch, handleGetMoreSearchResults, handleStopSearch } =
  */
 async function searchAndWaitForCompletion(searchArgs, timeout = 30000) {
   const result = await handleStartSearch(searchArgs);
+  if (result.isError === true) {
+    throw new Error(`Search failed to start: ${result.content[0].text}`);
+  }
   
   // Extract session ID from result with tighter regex
   const sessionIdMatch = result.content[0].text.match(/Started .* session:\s*([a-zA-Z0-9_-]+)/);
@@ -35,7 +38,7 @@ async function searchAndWaitForCompletion(searchArgs, timeout = 30000) {
         return { initialResult: result, finalResult: moreResults, sessionId };
       }
       
-      if (moreResults.content[0].text.includes('❌ ERROR')) {
+      if (moreResults.isError === true) {
         throw new Error(`Search failed: ${moreResults.content[0].text}`);
       }
       

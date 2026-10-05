@@ -19,6 +19,7 @@ assert.equal(result.error, undefined);
 assert.equal(result.status, 0, result.stderr);
 assert.match(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
 assert.match(result.stdout, /desktop-commander tunnel install/);
+assert.match(result.stdout, /desktop-commander tunnel restart/);
 assert.match(result.stdout, /desktop-commander tunnel status/);
 assert.doesNotMatch(result.stdout, /jsonrpc/);
 

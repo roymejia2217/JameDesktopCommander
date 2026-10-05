@@ -13,11 +13,21 @@ const entrypoint = path.resolve(testDirectory, '..', 'dist', 'index.js');
 const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'jdc-progress-'));
 const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
 
-function nodeEval(source) {
-  const payload = Buffer.from(source, 'utf8').toString('base64');
-  const executable = JSON.stringify(process.execPath);
-  const invocation = process.platform === 'win32' ? `& ${executable}` : executable;
-  return `${invocation} -e "eval(Buffer.from('${payload}','base64').toString('utf8'))"`;
+function shellQuote(value) {
+  return process.platform === 'win32'
+    ? `'${value.replaceAll("'", "''")}'`
+    : `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+async function writeNodeFixture(name, source) {
+  const scriptPath = path.join(isolatedHome, `${name}.cjs`);
+  await fs.writeFile(scriptPath, source, 'utf8');
+  return scriptPath;
+}
+
+function nodeCommand(scriptPath, args = []) {
+  const parts = [process.execPath, scriptPath, ...args].map(shellQuote);
+  return process.platform === 'win32' ? `& ${parts.join(' ')}` : parts.join(' ');
 }
 
 function textOf(result) {
@@ -83,7 +93,12 @@ try {
     {
       name: 'start_process',
       arguments: {
-        command: nodeEval("let i=0;const t=setInterval(()=>{console.log(++i);if(i===3)clearInterval(t)},100)"),
+        command: nodeCommand(
+          await writeNodeFixture(
+            'progress',
+            "let i=0;const t=setInterval(()=>{console.log(++i);if(i===3)clearInterval(t)},100)",
+          ),
+        ),
         timeout_ms: 5000,
         shell,
       },
@@ -113,7 +128,9 @@ try {
   const fallbackResult = await client.callTool({
     name: 'start_process',
     arguments: {
-      command: nodeEval("console.log('fallback-ok')"),
+      command: nodeCommand(
+        await writeNodeFixture('fallback', "console.log('fallback-ok')"),
+      ),
       timeout_ms: 5000,
       shell,
     },
@@ -126,8 +143,12 @@ try {
     {
       name: 'start_process',
       arguments: {
-        command: nodeEval(
-          `require('node:fs').writeFileSync(${JSON.stringify(childPidPath)}, String(process.pid));setInterval(()=>{},1000)`,
+        command: nodeCommand(
+          await writeNodeFixture(
+            'cancel-child',
+            "require('node:fs').writeFileSync(process.argv[2], String(process.pid));setInterval(()=>{},1000)",
+          ),
+          [childPidPath],
         ),
         timeout_ms: 30000,
         shell,
@@ -158,7 +179,9 @@ try {
   const backgroundResult = await client.callTool({
     name: 'start_process',
     arguments: {
-      command: nodeEval("setInterval(()=>{},1000)"),
+      command: nodeCommand(
+        await writeNodeFixture('background', "setInterval(()=>{},1000)"),
+      ),
       timeout_ms: 150,
       shell,
     },

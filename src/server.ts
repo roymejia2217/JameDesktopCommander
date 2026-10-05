@@ -78,7 +78,6 @@ import { capture, capture_call_tool, runInUiOriginCallContext } from "./utils/ca
 import { logToStderr, logger } from './utils/logger.js';
 import {
     buildUiToolMeta,
-    buildWidgetAccessibleToolMeta,
     CONFIG_EDITOR_RESOURCE_URI,
     FILE_PREVIEW_RESOURCE_URI,
 } from './ui/contracts.js';
@@ -325,7 +324,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - systemInfo (operating system and environment details)
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(GetConfigArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Get Configuration",
                     readOnlyHint: true,
@@ -367,7 +365,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(SetConfigValueArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Set Configuration Value",
                     readOnlyHint: false,
@@ -435,7 +432,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ReadFileArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Read File or URL",
                     readOnlyHint: true,
@@ -520,7 +516,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(WriteFileArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Write File",
                     readOnlyHint: false,
@@ -641,7 +636,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ListDirectoryArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "List Directory Contents",
                     readOnlyHint: true,
@@ -917,7 +911,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(EditBlockArgsSchema),
-                _meta: buildWidgetAccessibleToolMeta(),
                 annotations: {
                     title: "Edit Block",
                     readOnlyHint: false,
@@ -1546,7 +1539,9 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 break;
 
             case "preview_file":
-                result = await handlers.handleReadFile(args);
+                result = await handlers.handleReadFile(args, {
+                    includeStructuredContent: true,
+                });
                 break;
 
             case "read_multiple_files":
@@ -1570,7 +1565,9 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 break;
 
             case "render_directory":
-                result = await handlers.handleListDirectory(args);
+                result = await handlers.handleListDirectory(args, {
+                    includeStructuredContent: true,
+                });
                 break;
 
             case "move_file":

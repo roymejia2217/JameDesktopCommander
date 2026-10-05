@@ -1,5 +1,4 @@
 import { App } from '@modelcontextprotocol/ext-apps';
-import { createToolBridge } from '../../shared/tool-bridge.js';
 import { createCompactRowShellController, type ToolShellController } from '../../shared/tool-shell.js';
 import { renderCompactRow } from '../../shared/compact-row.js';
 import { escapeHtml } from '../../shared/escape-html.js';
@@ -808,16 +807,23 @@ export function bootstrapConfigEditorApp(): void {
         return;
     }
 
-    const bridge = createToolBridge();
+    const app = new App(
+        { name: 'Desktop Commander Config Editor', version: '1.0.0' },
+        {},
+        { autoResize: true },
+    );
+    const callServerTool: ToolCall = (name, args) => (
+        app.callServerTool({ name, arguments: args ?? {} })
+    );
     const trackConfigUiEvent = createUiEventTracker(
-        (name, args) => bridge.callTool(name, args),
+        callServerTool,
         {
             component: CONFIG_EDITOR_COMPONENT,
             baseParams: { origin: 'ui' },
         }
     );
     const controller = createConfigEditorController(
-        (name, args) => bridge.callTool(name, args),
+        callServerTool,
         trackConfigUiEvent
     );
     const widgetState = createWidgetStateStorage<ConfigEditorPayload>(isConfigEditorPayload);
@@ -902,12 +908,6 @@ export function bootstrapConfigEditorApp(): void {
 
     scheduleRender();
 
-    const app = new App(
-        { name: 'Desktop Commander Config Editor', version: '1.0.0' },
-        {},
-        { autoResize: true },
-    );
-
     app.onteardown = async () => {
         shellController?.dispose();
         if (renderFrameId !== null) {
@@ -926,7 +926,7 @@ export function bootstrapConfigEditorApp(): void {
 
     const refreshConfigFromServer = async (): Promise<void> => {
         try {
-            const result = await bridge.callTool('get_config', { origin: 'ui' });
+            const result = await callServerTool('get_config', { origin: 'ui' });
             const payload = controller.extractPayload(result);
             if (payload) {
                 applyPayload(payload);

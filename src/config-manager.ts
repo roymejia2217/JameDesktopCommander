@@ -9,6 +9,8 @@ import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
 
+const LEGACY_TEST_CONFIG_KEYS = ['__nonblockingSaveRegressionTest'] as const;
+
 export interface ServerConfig {
   blockedCommands?: string[];
   defaultShell?: string;
@@ -87,8 +89,14 @@ class ConfigManager {
         this.config = await this.readConfigFromDisk();
         this._isFirstRun = false;
 
-        if (this.config['welcomeOnboardingEligible'] === undefined) {
+        const needsWelcomeMigration = this.config['welcomeOnboardingEligible'] === undefined;
+        const hasLegacyTestArtifact = LEGACY_TEST_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(this.config, key));
+
+        if (needsWelcomeMigration || hasLegacyTestArtifact) {
           await this.performConfigMutation((latest) => {
+            for (const key of LEGACY_TEST_CONFIG_KEYS) {
+              delete latest[key];
+            }
             if (latest['welcomeOnboardingEligible'] === undefined) {
               latest['welcomeOnboardingEligible'] = false;
               latest['pendingWelcomeOnboarding'] = false;

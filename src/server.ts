@@ -934,7 +934,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "opencode_task",
-                description: "Delegate work to OpenCode through the protected loopback MCP gateway. start returns a session immediately; run and continue wait internally for completion to minimize remote tool calls; abort stops a session. Use project aliases from opencode_read action projects, never filesystem paths.",
+                description: "Delegate work to OpenCode through the protected loopback MCP gateway. start returns a session immediately; run and continue wait for completion through the gateway's native OpenCode event stream; abort stops a session. Use project aliases from opencode_read action projects, never filesystem paths.",
                 inputSchema: zodToJsonSchema(OpenCodeTaskArgsSchema),
                 annotations: {
                     title: "OpenCode Task",
@@ -1500,7 +1500,7 @@ async function handleCallToolRequest(
                 break;
 
             case "opencode_task":
-                result = await handleOpenCodeTask(args);
+                result = await handleOpenCodeTask(args, executionContext);
                 break;
 
             case "computer_inspect":

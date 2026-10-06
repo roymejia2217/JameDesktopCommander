@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
-import type { ServerResult } from '../types.js';
+import type { ServerResult, ToolExecutionContext } from '../types.js';
 import { OpenCodeReadArgsSchema, OpenCodeTaskArgsSchema } from './schemas.js';
 
 const BridgeTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43,256}$/);
@@ -72,7 +72,6 @@ const AbortSchema = z.object({
 });
 
 type McpToolResult = Awaited<ReturnType<Client['callTool']>>;
-type TaskStatus = z.infer<typeof StatusSchema>;
 
 function asServerResult(payload: Record<string, unknown>, isError = false): ServerResult {
     return {
@@ -166,42 +165,24 @@ async function withGateway<T>(operation: (client: Client) => Promise<T>): Promis
     }
 }
 
+type GatewayCallOptions = {
+    signal?: AbortSignal;
+    timeout?: number;
+};
+
 async function callGateway(
     client: Client,
     name: string,
     args: Record<string, unknown>,
+    options?: GatewayCallOptions,
 ): Promise<Record<string, unknown>> {
-    return structured(await client.callTool({ name, arguments: args }));
-}
-
-async function readStatus(
-    client: Client,
-    project: string,
-    sessionId: string,
-): Promise<TaskStatus> {
-    return StatusSchema.parse(
-        await callGateway(client, 'task_status', { project, sessionId }),
+    return structured(
+        await client.callTool(
+            { name, arguments: args },
+            undefined,
+            options,
+        ),
     );
-}
-
-async function waitForTerminal(
-    client: Client,
-    project: string,
-    sessionId: string,
-    timeoutMs: number,
-    pollMs: number,
-): Promise<TaskStatus> {
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-        const status = await readStatus(client, project, sessionId);
-        if (['completed', 'failed', 'aborted'].includes(status.result.state)) {
-            return status;
-        }
-        if (Date.now() >= deadline) {
-            throw new Error('OpenCode task timed out after ' + timeoutMs + 'ms');
-        }
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
-    }
 }
 
 async function finalTaskResult(
@@ -210,11 +191,26 @@ async function finalTaskResult(
     project: string,
     sessionId: string,
     timeoutMs: number,
-    pollMs: number,
+    context: ToolExecutionContext,
 ): Promise<ServerResult> {
-    const status = await waitForTerminal(client, project, sessionId, timeoutMs, pollMs);
+    const status = StatusSchema.parse(
+        await callGateway(
+            client,
+            'task_wait',
+            { project, sessionId },
+            {
+                ...(context.signal === undefined ? {} : { signal: context.signal }),
+                timeout: timeoutMs,
+            },
+        ),
+    );
     const messages = MessagesSchema.parse(
-        await callGateway(client, 'task_messages', { project, sessionId }),
+        await callGateway(
+            client,
+            'task_messages',
+            { project, sessionId },
+            context.signal === undefined ? undefined : { signal: context.signal },
+        ),
     );
     const latestAssistant =
         messages.result.messages.length > 0
@@ -287,10 +283,12 @@ export async function handleOpenCodeRead(rawArgs: unknown): Promise<ServerResult
     });
 }
 
-export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult> {
+export async function handleOpenCodeTask(
+    rawArgs: unknown,
+    context: ToolExecutionContext = {},
+): Promise<ServerResult> {
     const input = OpenCodeTaskArgsSchema.parse(rawArgs ?? {});
     const timeoutMs = input.timeout_ms ?? 180000;
-    const pollMs = input.poll_ms ?? 1500;
 
     return withGateway(async (client) => {
         switch (input.action) {
@@ -303,7 +301,14 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                 };
                 if (input.agent) args.agent = input.agent;
                 return asServerResult(
-                    StartSchema.parse(await callGateway(client, 'task_start', args)),
+                    StartSchema.parse(
+                        await callGateway(
+                            client,
+                            'task_start',
+                            args,
+                            context.signal === undefined ? undefined : { signal: context.signal },
+                        ),
+                    ),
                 );
             }
             case 'run': {
@@ -315,7 +320,12 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                 };
                 if (input.agent) args.agent = input.agent;
                 const started = StartSchema.parse(
-                    await callGateway(client, 'task_start', args),
+                    await callGateway(
+                        client,
+                        'task_start',
+                        args,
+                        context.signal === undefined ? undefined : { signal: context.signal },
+                    ),
                 );
                 return finalTaskResult(
                     client,
@@ -323,7 +333,7 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                     input.project,
                     started.sessionId,
                     timeoutMs,
-                    pollMs,
+                    context,
                 );
             }
             case 'continue': {
@@ -338,7 +348,12 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                 };
                 if (input.agent) args.agent = input.agent;
                 ContinueSchema.parse(
-                    await callGateway(client, 'task_continue', args),
+                    await callGateway(
+                        client,
+                        'task_continue',
+                        args,
+                        context.signal === undefined ? undefined : { signal: context.signal },
+                    ),
                 );
                 return finalTaskResult(
                     client,
@@ -346,7 +361,7 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                     input.project,
                     sessionId,
                     timeoutMs,
-                    pollMs,
+                    context,
                 );
             }
             case 'abort': {
@@ -354,10 +369,15 @@ export async function handleOpenCodeTask(rawArgs: unknown): Promise<ServerResult
                 if (!sessionId) throw new Error('sessionId is required for abort');
                 return asServerResult(
                     AbortSchema.parse(
-                        await callGateway(client, 'task_abort', {
-                            project: input.project,
-                            sessionId,
-                        }),
+                        await callGateway(
+                            client,
+                            'task_abort',
+                            {
+                                project: input.project,
+                                sessionId,
+                            },
+                            context.signal === undefined ? undefined : { signal: context.signal },
+                        ),
                     ),
                 );
             }

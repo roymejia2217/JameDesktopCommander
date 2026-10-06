@@ -274,7 +274,6 @@ export const OpenCodeTaskArgsSchema = z.object({
   prompt: z.string().min(1).optional(),
   agent: z.string().min(1).max(128).optional(),
   timeout_ms: z.number().int().min(1000).max(1800000).optional(),
-  poll_ms: z.number().int().min(250).max(10000).optional(),
 }).superRefine((data, ctx) => {
   if (['start', 'run', 'continue'].includes(data.action) && !data.prompt) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: 'prompt is required for this action' });

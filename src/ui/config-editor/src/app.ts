@@ -909,6 +909,7 @@ export function bootstrapConfigEditorApp(): void {
     scheduleRender();
 
     app.onteardown = async () => {
+        trackConfigUiEvent.cancel();
         shellController?.dispose();
         if (renderFrameId !== null) {
             window.cancelAnimationFrame(renderFrameId);
@@ -980,6 +981,7 @@ export function bootstrapConfigEditorApp(): void {
     });
 
     window.addEventListener('beforeunload', () => {
+        trackConfigUiEvent.cancel();
         shellController?.dispose();
         clearTooltipTimer();
     }, { once: true });

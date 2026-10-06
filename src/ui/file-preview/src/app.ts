@@ -21,6 +21,11 @@ import {
 } from './markdown/conflict-dialog.js';
 import type { RenderPayload } from './model.js';
 import {
+    recordPresentationMount,
+    recordPresentationRender,
+} from './presentation-metrics.js';
+import { createLatestRenderScheduler } from './presentation-scheduler.js';
+import {
     MARKDOWN_EDITOR_CACHE_LIMIT,
     areRenderPayloadsEquivalent,
     setBoundedMapEntry,
@@ -300,6 +305,7 @@ export function renderApp(
     htmlMode: HtmlPreviewMode = 'rendered',
     expandedState = false
 ): void {
+    recordPresentationRender();
     clearPreviewWatchdog();
     isExpanded = expandedState;
     currentHtmlMode = htmlMode;
@@ -459,6 +465,7 @@ export function bootstrapApp(): void {
     if (!container) {
         return;
     }
+    recordPresentationMount();
     renderLoadingState(container);
 
     // Mount the conflict dialog once at body level. It's position: fixed and
@@ -493,14 +500,31 @@ export function bootstrapApp(): void {
         (value): value is RenderPayload => isPreviewStructuredContent(value) && typeof (value as any).content === 'string'
     );
 
+    const renderScheduler = createLatestRenderScheduler<RenderPayload>({
+        schedule: (callback) => (
+            typeof window.requestAnimationFrame === 'function'
+                ? window.requestAnimationFrame(callback)
+                : window.setTimeout(callback, 0)
+        ),
+        cancel: (id) => {
+            if (typeof window.cancelAnimationFrame === 'function') {
+                window.cancelAnimationFrame(id);
+            } else {
+                window.clearTimeout(id);
+            }
+        },
+        getCurrent: () => currentPayload,
+        equivalent: areRenderPayloadsEquivalent,
+        render: (payload) => {
+            renderApp(container, payload, 'rendered', isExpanded);
+        },
+    });
+
     const renderAndSync = (payload?: RenderPayload): void => {
         if (payload) {
             widgetState.write(payload);
-            if (areRenderPayloadsEquivalent(currentPayload, payload)) {
-                return;
-            }
         }
-        renderApp(container, payload, 'rendered', isExpanded);
+        renderScheduler.enqueue(payload);
     };
     const syncFromPersistedWidgetState = (): void => {
         const persistedPayload = widgetState.read();
@@ -693,6 +717,8 @@ export function bootstrapApp(): void {
     };
 
     const teardown = (): void => {
+        renderScheduler.cancel();
+        filePreviewUiEvent.cancel();
         clearPreviewWatchdog();
         shellController?.dispose();
         shellController = undefined;

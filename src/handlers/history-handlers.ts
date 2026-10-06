@@ -56,13 +56,25 @@ export async function handleGetRecentToolCalls(args: unknown): Promise<ServerRes
 export async function handleTrackUiEvent(args: unknown): Promise<ServerResult> {
   try {
     const parsed = TrackUiEventArgsSchema.parse(args);
+    const events = parsed.events ?? [{
+      event: parsed.event!,
+      component: parsed.component ?? 'file_preview',
+      params: parsed.params ?? {},
+    }];
 
-    await capture_ui_event('mcp_ui_event', buildTrackUiEventCapturePayload(parsed.event, parsed.component, parsed.params));
+    await Promise.all(events.map((event) =>
+      capture_ui_event(
+        'mcp_ui_event',
+        buildTrackUiEventCapturePayload(event.event, event.component, event.params),
+      )
+    ));
 
     return {
       content: [{
         type: "text",
-        text: `Tracked UI event: ${parsed.event}`
+        text: events.length === 1
+          ? `Tracked UI event: ${events[0].event}`
+          : `Tracked ${events.length} UI events`,
       }]
     };
   } catch (error) {

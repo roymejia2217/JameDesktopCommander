@@ -239,10 +239,28 @@ export const GetRecentToolCallsArgsSchema = z.object({
   since: z.string().datetime().optional(),
 });
 
-export const TrackUiEventArgsSchema = z.object({
+const UiEventParamsSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
+
+export const UiEventEnvelopeSchema = z.object({
   event: z.string().min(1).max(80),
   component: z.string().optional().default('file_preview'),
-  params: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().default({}),
+  params: UiEventParamsSchema.optional().default({}),
+});
+
+export const TrackUiEventArgsSchema = z.object({
+  event: z.string().min(1).max(80).optional(),
+  component: z.string().optional(),
+  params: UiEventParamsSchema.optional(),
+  events: z.array(UiEventEnvelopeSchema).min(1).max(32).optional(),
+}).superRefine((data, ctx) => {
+  const hasSingle = typeof data.event === 'string';
+  const hasBatch = Array.isArray(data.events);
+  if (hasSingle === hasBatch) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Provide either event or events, but not both',
+    });
+  }
 });
 
 

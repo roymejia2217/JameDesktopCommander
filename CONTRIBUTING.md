@@ -78,9 +78,14 @@ remain the enforcement authority.
 ## Squash merge contract
 
 Squash merge is the only allowed merge method. Repository merge settings must use the pull-request
-title as the squash commit title and the pull-request body as the squash commit message. This
-keeps the protected `main` history linear and ensures the final commit is governed by the same
-Conventional Commit title and reviewed description as the pull request.
+title as the squash commit title, and the squash commit message must remain blank. Pull-request
+bodies retain the reviewed rationale and verification evidence in the pull request itself; they are
+not copied into the protected-branch commit body.
+
+Automation, agents, and maintainers must not override the squash commit message when completing a
+merge. This preserves the repository setting `squashMergeCommitMessage: BLANK` and ensures the
+protected-branch Commitlint gate validates the same governed Conventional Commit title that passed
+PR Governance.
 
 The initial fork migration may contain older topic-branch commits. They are reviewed and tested in
 the pull request but enter `main` only through the single governed squash commit.

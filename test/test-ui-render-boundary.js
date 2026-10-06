@@ -121,22 +121,39 @@ try {
   const { tools } = await client.listTools();
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
-  const renderTools = new Map([
-    ['preview_file', 'ui://desktop-commander/file-preview/v2'],
-    ['render_directory', 'ui://desktop-commander/file-preview/v2'],
+  const modelVisibleRenderTools = new Map([
+    ['render_workspace', 'ui://desktop-commander/file-preview/v2'],
     ['render_config_editor', 'ui://desktop-commander/config-editor/v2'],
   ]);
+  const compatibilityRenderTools = new Map([
+    ['preview_file', 'ui://desktop-commander/file-preview/v2'],
+    ['render_directory', 'ui://desktop-commander/file-preview/v2'],
+  ]);
+  const allRenderTools = new Map([
+    ...modelVisibleRenderTools,
+    ...compatibilityRenderTools,
+  ]);
 
-  for (const [name, resourceUri] of renderTools) {
+  for (const [name, resourceUri] of modelVisibleRenderTools) {
     const tool = byName.get(name);
-    assert.ok(tool, `missing explicit render tool: ${name}`);
-    assert.equal(tool._meta?.['ui/resourceUri'], resourceUri);
+    assert.ok(tool, `missing model-visible render tool: ${name}`);
+    assert.equal(tool._meta?.['ui/resourceUri'], undefined, `${name} must not use the non-standard flat ui/resourceUri key`);
     assert.equal(tool._meta?.['openai/outputTemplate'], resourceUri);
     assert.equal(tool._meta?.ui?.resourceUri, resourceUri);
+    assert.deepEqual(tool._meta?.ui?.visibility, ['model', 'app']);
+  }
+
+  for (const [name, resourceUri] of compatibilityRenderTools) {
+    const tool = byName.get(name);
+    assert.ok(tool, `missing compatibility render tool: ${name}`);
+    assert.equal(tool._meta?.['ui/resourceUri'], undefined, `${name} must not use the non-standard flat ui/resourceUri key`);
+    assert.equal(tool._meta?.['openai/outputTemplate'], resourceUri);
+    assert.equal(tool._meta?.ui?.resourceUri, resourceUri);
+    assert.deepEqual(tool._meta?.ui?.visibility, ['app']);
   }
 
   for (const tool of tools) {
-    if (renderTools.has(tool.name)) {
+    if (allRenderTools.has(tool.name)) {
       continue;
     }
     assert.equal(tool._meta?.['ui/resourceUri'], undefined, `${tool.name} must not mount UI`);
@@ -150,22 +167,34 @@ try {
   }
 
   const preview = await client.callTool({
-    name: 'preview_file',
+    name: 'render_workspace',
     arguments: { path: previewImage },
   });
-  assert.ok(!preview.isError, 'preview_file should read the selected file');
-  assert.ok(preview.content?.some((item) => item.type === 'image'), 'preview_file must preserve model image content');
+  assert.ok(!preview.isError, 'render_workspace should read the selected file');
+  assert.ok(preview.content?.some((item) => item.type === 'image'), 'render_workspace must preserve model image content');
   assert.equal(preview.structuredContent?.fileType, 'image');
   assert.equal(preview.structuredContent?.filePath, previewImage);
 
   const directory = await client.callTool({
-    name: 'render_directory',
+    name: 'render_workspace',
     arguments: { path: isolatedHome, depth: 1 },
   });
-  assert.ok(!directory.isError, 'render_directory should list the selected directory');
+  assert.ok(!directory.isError, 'render_workspace should list the selected directory');
   assert.match(directory.content?.[0]?.text ?? '', /pixel\.png/);
   assert.equal(directory.structuredContent?.fileType, 'directory');
   assert.equal(directory.structuredContent?.filePath, isolatedHome);
+
+  const legacyPreview = await client.callTool({
+    name: 'preview_file',
+    arguments: { path: previewImage },
+  });
+  assert.ok(!legacyPreview.isError, 'preview_file compatibility alias should remain callable');
+
+  const legacyDirectory = await client.callTool({
+    name: 'render_directory',
+    arguments: { path: isolatedHome, depth: 1 },
+  });
+  assert.ok(!legacyDirectory.isError, 'render_directory compatibility alias should remain callable');
 
   const configEditor = await client.callTool({ name: 'render_config_editor', arguments: {} });
   assert.ok(configEditor.structuredContent?.config, 'render_config_editor should provide config state');

@@ -24,6 +24,7 @@ import {
     WriteFileArgsSchema,
     CreateDirectoryArgsSchema,
     ListDirectoryArgsSchema,
+    RenderWorkspaceArgsSchema,
     MoveFileArgsSchema,
     GetFileInfoArgsSchema,
     WritePdfArgsSchema
@@ -246,6 +247,31 @@ export async function handleReadFile(
         throw new Error('Failed to read the file');
     }
     return result;
+}
+
+/**
+ * Render the shared file/directory workspace without duplicating filesystem logic.
+ * Local paths are classified once, then delegated to the existing data handlers.
+ */
+export async function handleRenderWorkspace(args: unknown): Promise<ServerResult> {
+    try {
+        const parsed = RenderWorkspaceArgsSchema.parse(args);
+
+        if (!parsed.isUrl) {
+            const info = await getFileInfo(parsed.path);
+            if (info.isDirectory) {
+                return handleListDirectory(
+                    { path: parsed.path, depth: parsed.depth, origin: parsed.origin },
+                    { includeStructuredContent: true },
+                );
+            }
+        }
+
+        return handleReadFile(parsed, { includeStructuredContent: true });
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return createErrorResponse(errorMessage);
+    }
 }
 
 /**

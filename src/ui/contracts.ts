@@ -4,20 +4,25 @@
 export const FILE_PREVIEW_RESOURCE_URI = 'ui://desktop-commander/file-preview/v2';
 export const CONFIG_EDITOR_RESOURCE_URI = 'ui://desktop-commander/config-editor/v2';
 
+export type UiToolVisibility = 'model' | 'app';
+
 export interface UiToolMeta extends Record<string, unknown> {
-  'ui/resourceUri': string;
   'openai/outputTemplate': string;
   ui: {
     resourceUri: string;
+    visibility: UiToolVisibility[];
   };
 }
 
-export function buildUiToolMeta(resourceUri: string): UiToolMeta {
+export function buildUiToolMeta(
+  resourceUri: string,
+  visibility: UiToolVisibility[] = ['model', 'app'],
+): UiToolMeta {
   return {
-    'ui/resourceUri': resourceUri,
     'openai/outputTemplate': resourceUri,
     ui: {
       resourceUri,
+      visibility,
     },
   };
 }

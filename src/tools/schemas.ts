@@ -131,6 +131,10 @@ export const ListDirectoryArgsSchema = z.object({
   origin: z.enum(['ui', 'llm']).optional(),
 });
 
+export const RenderWorkspaceArgsSchema = ReadFileArgsSchema.extend({
+  depth: z.number().optional().default(2),
+});
+
 export const MoveFileArgsSchema = z.object({
   source: z.string(),
   destination: z.string(),
@@ -290,13 +294,17 @@ export const OpenCodeTaskArgsSchema = z.object({
  */
 export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   get_config: GetConfigArgsSchema,
+  render_config_editor: GetConfigArgsSchema,
   set_config_value: SetConfigValueArgsSchema,
   read_file: ReadFileArgsSchema,
+  preview_file: ReadFileArgsSchema,
+  render_workspace: RenderWorkspaceArgsSchema,
   read_multiple_files: ReadMultipleFilesArgsSchema,
   write_file: WriteFileArgsSchema,
   write_pdf: WritePdfArgsSchema,
   create_directory: CreateDirectoryArgsSchema,
   list_directory: ListDirectoryArgsSchema,
+  render_directory: ListDirectoryArgsSchema,
   move_file: MoveFileArgsSchema,
   start_search: StartSearchArgsSchema,
   get_more_search_results: GetMoreSearchResultsArgsSchema,

@@ -52,6 +52,10 @@
       "description": "Read contents from local filesystem, URLs, Excel files (.xlsx, .xls, .xlsm), PDFs, and DOCX files with line/page-based pagination."
     },
     {
+      "name": "render_workspace",
+      "description": "Render the shared interactive workspace for a file, URL, or directory when visual interaction is explicitly useful."
+    },
+    {
       "name": "preview_file",
       "description": "Render an interactive file or URL preview when a visual preview is explicitly useful."
     },

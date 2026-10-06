@@ -20,6 +20,11 @@ import {
     type ConflictDialogController,
 } from './markdown/conflict-dialog.js';
 import type { RenderPayload } from './model.js';
+import {
+    MARKDOWN_EDITOR_CACHE_LIMIT,
+    areRenderPayloadsEquivalent,
+    setBoundedMapEntry,
+} from './presentation-state.js';
 import { attachPanelActions } from './panel-actions.js';
 import { extractRenderPayload, extractToolText, getFileExtensionForAnalytics, isLikelyUrl, isPreviewStructuredContent } from './payload-utils.js';
 import type { HtmlPreviewMode } from './types.js';
@@ -337,10 +342,15 @@ export function renderApp(
     }).canFullscreen;
 
     if (payload.fileType === 'markdown' && payload.defaultEditorName) {
-        markdownEditorAppCache.set(payload.filePath, {
-            appName: payload.defaultEditorName,
-            appPath: payload.defaultEditorPath,
-        });
+        setBoundedMapEntry(
+            markdownEditorAppCache,
+            payload.filePath,
+            {
+                appName: payload.defaultEditorName,
+                appPath: payload.defaultEditorPath,
+            },
+            MARKDOWN_EDITOR_CACHE_LIMIT,
+        );
     }
 
     const defaultMarkdownEditor = payload.fileType === 'markdown'
@@ -486,6 +496,9 @@ export function bootstrapApp(): void {
     const renderAndSync = (payload?: RenderPayload): void => {
         if (payload) {
             widgetState.write(payload);
+            if (areRenderPayloadsEquivalent(currentPayload, payload)) {
+                return;
+            }
         }
         renderApp(container, payload, 'rendered', isExpanded);
     };

@@ -51,17 +51,17 @@ function waitFor(child, type) {
   });
 }
 
-function spawnWorker(home) {
-  return fork(TEST_FILE, [], { env: { ...process.env, HOME: home, USERPROFILE: home, DC_WATCH_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+function spawnWorker(configDir) {
+  return fork(TEST_FILE, [], { env: { ...process.env, DESKTOP_COMMANDER_CONFIG_DIR: configDir, DC_WATCH_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
 }
 
 async function parent() {
   const value = `watch-${Date.now()}`;
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dc-watch-'));
-  const configPath = path.join(home, '.claude-server-commander', 'config.json');
-  mkdirSync(path.dirname(configPath), { recursive: true });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), 'dc-watch-'));
+  const configPath = path.join(configDir, 'config.json');
+  mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({ telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }));
-  const a = spawnWorker(home), b = spawnWorker(home);
+  const a = spawnWorker(configDir), b = spawnWorker(configDir);
   try {
     await Promise.all([waitFor(a, 'ready'), waitFor(b, 'ready')]);
     const observed = waitFor(a, 'observed');
@@ -80,7 +80,7 @@ async function parent() {
       : new Promise((resolve) => child.once('exit', resolve)));
     a.kill('SIGTERM'); b.kill('SIGTERM');
     await Promise.all(exits);
-    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
   }
 }
 

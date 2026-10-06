@@ -19,7 +19,10 @@ const client = new Client(
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [entrypoint],
-  env: { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome },
+  env: {
+    ...process.env,
+    DESKTOP_COMMANDER_CONFIG_DIR: path.join(isolatedHome, '.claude-server-commander'),
+  },
 });
 
 await client.connect(transport);

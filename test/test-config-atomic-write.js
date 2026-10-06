@@ -18,11 +18,11 @@ async function writer() {
 }
 
 async function parent() {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dc-atomic-'));
-  const configPath = path.join(home, '.claude-server-commander', 'config.json');
-  mkdirSync(path.dirname(configPath), { recursive: true });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), 'dc-atomic-'));
+  const configPath = path.join(configDir, 'config.json');
+  mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({ telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }));
-  const child = fork(TEST_FILE, [], { env: { ...process.env, HOME: home, USERPROFILE: home, DC_ATOMIC_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+  const child = fork(TEST_FILE, [], { env: { ...process.env, DESKTOP_COMMANDER_CONFIG_DIR: configDir, DC_ATOMIC_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
   let done = false, parseFailures = 0, transientReadFailures = 0, successfulReads = 0, reads = 0;
   child.on('message', (m) => { if (m.type === 'done') done = true; });
   const deadline = Date.now() + TIMEOUT_MS;
@@ -58,7 +58,7 @@ async function parent() {
     );
   } finally {
     child.kill('SIGTERM');
-    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
   }
 }
 

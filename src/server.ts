@@ -73,6 +73,8 @@ import { usageTracker } from './utils/usageTracker.js';
 import { processDockerPrompt } from './utils/dockerPrompt.js';
 import { toolHistory } from './utils/toolHistory.js';
 import { handleWelcomePageOnboarding, skipWelcomePageOnboarding } from './utils/welcome-onboarding.js';
+import { configManager } from './config-manager.js';
+import { featureFlagManager } from './utils/feature-flags.js';
 
 import { VERSION } from './version.js';
 import { capture, capture_call_tool, runInUiOriginCallContext } from "./utils/capture.js";
@@ -210,6 +212,54 @@ async function updateCurrentClient(clientInfo: { name?: string, version?: string
     return false;
 }
 
+let operationalInitialization: Promise<void> | null = null;
+
+async function initializeOperationalRuntime(): Promise<void> {
+    try {
+        logToStderr('info', 'Loading configuration...');
+        await configManager.loadConfig();
+        logToStderr('info', 'Configuration loaded successfully');
+
+        logToStderr('info', 'Initializing feature flags...');
+        await featureFlagManager.initialize();
+
+        const isWelcomePageEligibleClient = currentClient.name !== 'desktop-commander-app'
+            && currentClient.name !== 'desktop-commander'
+            && !isRemoteClientContext(currentClient.name)
+            && !(global as any).disableOnboarding;
+
+        if (isWelcomePageEligibleClient) {
+            await handleWelcomePageOnboarding(currentClient.name);
+        } else {
+            await skipWelcomePageOnboarding();
+        }
+
+        capture('run_server_start');
+        capture('run_server_mcp_initialized', {
+            host_entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT?.substring(0, 100),
+            host_agent: process.env.AI_AGENT?.substring(0, 100),
+            host_plugin_id: process.env.CLAUDE_PLUGIN_DATA
+                ? path.basename(process.env.CLAUDE_PLUGIN_DATA).substring(0, 100)
+                : undefined,
+        });
+
+    } catch (error) {
+        logToStderr(
+            'warning',
+            `Operational runtime initialization failed; continuing with lazy defaults: ${
+                error instanceof Error ? error.message : String(error)
+            }`,
+        );
+    }
+}
+
+export async function ensureOperationalRuntimeInitialized(): Promise<void> {
+    if (!operationalInitialization) {
+        operationalInitialization = initializeOperationalRuntime();
+    }
+    await operationalInitialization;
+}
+
 // Add handler for initialization method - capture client info
 server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequest) => {
     try {
@@ -217,42 +267,7 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
         const clientInfo = request.params?.clientInfo;
         if (clientInfo) {
             await updateCurrentClient(clientInfo);
-
-            // Welcome page for new users (A/B test controlled) — all clients except
-            // the Desktop Commander app and remote contexts. Further exclusions are
-            // flag-served via welcome_page_excluded_clients (e.g. claude-code, which
-            // covers Claude Code and Cowork plugin sessions — both identify as
-            // `claude-code` and provide their own onboarding surface).
-            const isWelcomePageEligibleClient = currentClient.name !== 'desktop-commander-app'
-                && currentClient.name !== 'desktop-commander'
-                && !isRemoteClientContext(currentClient.name)
-                && !(global as any).disableOnboarding;
-
-            if (isWelcomePageEligibleClient) {
-                await handleWelcomePageOnboarding(currentClient.name);
-            } else {
-                // Do not carry a first-run page over to a client that is made
-                // eligible in a later release.
-                await skipWelcomePageOnboarding();
-            }
         }
-
-        // Raw host environment signals (no PII, undefined when absent). Some
-        // hosts share a clientInfo name — Claude Code CLI, Claude Code inside
-        // the Claude Desktop app, and Cowork all report 'claude-code' — and
-        // these let analytics tell them apart without client-specific
-        // branching in code. Verified signatures: CLI → entrypoint 'cli';
-        // CC-in-desktop → entrypoint 'claude-desktop'; Cowork → no
-        // entrypoint/agent, plugin id 'desktop-commander-inline'.
-        // Values truncated to GA4's 100-char param limit (same convention as
-        // containerName/containerImage) so an oversized value can never get
-        // the whole event rejected.
-        capture('run_server_mcp_initialized', {
-            host_entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT?.substring(0, 100),
-            host_agent: process.env.AI_AGENT?.substring(0, 100),
-            host_plugin_id: process.env.CLAUDE_PLUGIN_DATA
-                ? path.basename(process.env.CLAUDE_PLUGIN_DATA).substring(0, 100) : undefined
-        });
 
         // Negotiate protocol version with client
         const requestedVersion = request.params?.protocolVersion;
@@ -1307,6 +1322,8 @@ import { ServerResult, type ToolExecutionContext } from './types.js';
 import { createToolExecutionContext } from './tools/tool-execution-context.js';
 
 server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
+    await ensureOperationalRuntimeInitialized();
+
     const args = request.params.arguments;
     const executionContext = createToolExecutionContext(extra);
 

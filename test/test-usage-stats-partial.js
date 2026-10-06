@@ -31,11 +31,11 @@ async function worker() {
 }
 
 async function parent() {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dc-partial-stats-'));
-  const configPath = path.join(home, '.claude-server-commander', 'config.json');
-  mkdirSync(path.dirname(configPath), { recursive: true });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), 'dc-partial-stats-'));
+  const configPath = path.join(configDir, 'config.json');
+  mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({ telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false, usageStats: { toolCounts: {} } }));
-  const child = fork(TEST_FILE, [], { env: { ...process.env, HOME: home, USERPROFILE: home, DC_PARTIAL_STATS_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+  const child = fork(TEST_FILE, [], { env: { ...process.env, DESKTOP_COMMANDER_CONFIG_DIR: configDir, DC_PARTIAL_STATS_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
   try {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('timeout waiting for partial stats test')), TIMEOUT_MS + 1_000);
@@ -47,7 +47,7 @@ async function parent() {
     const exited = child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise((resolve) => child.once('exit', resolve));
     child.kill('SIGTERM');
     await exited;
-    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
   }
 }
 

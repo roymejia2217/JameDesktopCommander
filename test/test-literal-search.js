@@ -428,7 +428,7 @@ export async function testLiteralSearch() {
   }
 }
 
-// Export for use in run-all-tests.js
+// Export for direct reuse by focused test tooling.
 export default testLiteralSearch;
 
 // Run tests if this file is executed directly

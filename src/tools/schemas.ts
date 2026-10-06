@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(JsonValueSchema),
+  z.record(JsonValueSchema),
+]));
+
 // Config tools schemas
 export const GetConfigArgsSchema = z.object({
   // 'ui' marks calls the config-editor widget fires programmatically; they are
@@ -60,7 +77,7 @@ export const ReadFileArgsSchema = z.object({
   length: z.number().optional().default(1000),
   sheet: z.string().optional(),  // String only for MCP client compatibility (Cursor doesn't support union types in JSON Schema)
   range: z.string().optional(),
-  options: z.record(z.any()).optional(),
+  options: z.record(JsonValueSchema).optional(),
   // Whether the call came from the file-preview UI (refresh/navigation) or the
   // LLM. 'ui' calls are excluded from tool-call telemetry; see isUiOriginCall
   // in server.ts.
@@ -157,8 +174,8 @@ export const EditBlockArgsSchema = z.object({
   expected_replacements: z.number().optional().default(1),
   // Structured file range rewrite (Excel, etc.)
   range: z.string().optional(),
-  content: z.any().optional(),
-  options: z.record(z.any()).optional(),
+  content: JsonValueSchema.optional(),
+  options: z.record(JsonValueSchema).optional(),
   // 'ui' when fired by the file-preview UI, else 'llm'. 'ui' calls are
   // excluded from tool-call telemetry; see isUiOriginCall in server.ts.
   origin: z.enum(['ui', 'llm']).optional(),

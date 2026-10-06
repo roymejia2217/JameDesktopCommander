@@ -58,6 +58,12 @@ npm run build
 node dist/index.js --help
 ```
 
+JDC requires Node.js 22.19.0 or newer. By default, runtime configuration remains in
+`~/.claude-server-commander`. Managed deployments can override only the configuration root with
+`--config-dir <path>` or `DESKTOP_COMMANDER_CONFIG_DIR=<path>`; the CLI option takes precedence
+over the environment variable. These explicit boundaries are also used by CI so verification never
+needs to replace the operator's `HOME` or `USERPROFILE`.
+
 The inherited installation examples below install upstream Desktop Commander, not JDC. They are
 retained temporarily as compatibility reference while JDC establishes its own publication
 namespaces.

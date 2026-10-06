@@ -52,7 +52,7 @@ export function isTelemetryDisabledValue(value: unknown): boolean {
 /**
  * Singleton config manager for the server
  */
-class ConfigManager {
+export class ConfigManager {
   private configPath: string;
   private config: ServerConfig = {};
   private initialized = false;
@@ -65,10 +65,8 @@ class ConfigManager {
   private watcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
-    // Get user's home directory
-    // Define config directory and file paths
-    this.configPath = CONFIG_FILE;
+  constructor(configPath = CONFIG_FILE) {
+    this.configPath = configPath;
   }
 
   /**
@@ -466,6 +464,27 @@ class ConfigManager {
       }
 
       await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /**
+   * Release filesystem resources owned by this manager.
+   *
+   * ConfigManager instances are reusable only for their active lifecycle. Close
+   * the watcher first so final persistence cannot schedule reload work against a
+   * directory that a caller is about to remove.
+   */
+  async close(): Promise<void> {
+    if (this.reloadTimer) {
+      clearTimeout(this.reloadTimer);
+      this.reloadTimer = null;
+    }
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    if (this.initialized) {
+      await this.flushPendingWrites();
     }
   }
 

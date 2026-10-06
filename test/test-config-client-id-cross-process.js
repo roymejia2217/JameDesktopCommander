@@ -36,11 +36,11 @@ function waitFor(child, type) {
 }
 
 async function parent() {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dc-client-id-race-'));
-  const configPath = path.join(home, '.claude-server-commander', 'config.json');
-  mkdirSync(path.dirname(configPath), { recursive: true });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), 'dc-client-id-race-'));
+  const configPath = path.join(configDir, 'config.json');
+  mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({ telemetryEnabled: false, welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false }));
-  const children = Array.from({ length: WORKERS }, () => fork(TEST_FILE, [], { env: { ...process.env, HOME: home, USERPROFILE: home, DC_CLIENT_ID_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] }));
+  const children = Array.from({ length: WORKERS }, () => fork(TEST_FILE, [], { env: { ...process.env, DESKTOP_COMMANDER_CONFIG_DIR: configDir, DC_CLIENT_ID_WORKER: '1' }, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] }));
   try {
     await Promise.all(children.map((child) => waitFor(child, 'ready')));
     const results = children.map((child) => waitFor(child, 'result'));
@@ -55,7 +55,7 @@ async function parent() {
       : new Promise((resolve) => child.once('exit', resolve)));
     children.forEach((child) => child.kill('SIGTERM'));
     await Promise.all(exits);
-    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
   }
 }
 

@@ -27,6 +27,7 @@ const README_LINES = README_TEXT
 assert.ok(README_LINES.length > 0, 'README fixture source should contain usable text lines');
 
 const TEST_DIR = path.join(__dirname, 'test_edit_block_performance');
+const CONFIG_DIR = path.join(PROJECT_ROOT, '.tmp', 'integration-config', 'edit-block-performance');
 const LARGE_FILE_LINES = 1500;
 const READ_LINE_LIMIT = 200;
 const PERFORMANCE_LIMITS_MS = {
@@ -759,7 +760,12 @@ async function runResponsivenessProbe(client, stopProbe) {
 async function createMcpClient() {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(PROJECT_ROOT, 'dist/index.js'), '--no-onboarding'],
+    args: [
+      path.join(PROJECT_ROOT, 'dist/index.js'),
+      '--config-dir',
+      CONFIG_DIR,
+      '--no-onboarding',
+    ],
     cwd: PROJECT_ROOT,
     stderr: 'pipe',
     env: {

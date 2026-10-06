@@ -19,21 +19,17 @@ let passed = 0;
 const ok = (msg) => { passed++; console.log(`✓ ${msg}`); };
 
 async function withIsolatedHome(operation) {
-  const originalUserProfile = process.env.USERPROFILE;
-  const originalHome = process.env.HOME;
+  const originalConfigDir = process.env.DESKTOP_COMMANDER_CONFIG_DIR;
   const isolatedHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'dc-read-abort-home-'));
+  const isolatedConfigDir = path.join(isolatedHome, '.claude-server-commander');
 
-  process.env.USERPROFILE = isolatedHome;
-  process.env.HOME = isolatedHome;
+  process.env.DESKTOP_COMMANDER_CONFIG_DIR = isolatedConfigDir;
 
   try {
     return await operation(isolatedHome);
   } finally {
-    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = originalUserProfile;
-
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    if (originalConfigDir === undefined) delete process.env.DESKTOP_COMMANDER_CONFIG_DIR;
+    else process.env.DESKTOP_COMMANDER_CONFIG_DIR = originalConfigDir;
 
     await fsp.rm(isolatedHome, { recursive: true, force: true });
   }

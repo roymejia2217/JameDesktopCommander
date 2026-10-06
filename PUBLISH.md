@@ -14,6 +14,8 @@ Manual version bumps, direct pushes to `main`, and hand-created release tags are
 5. Release Please creates the immutable `vX.Y.Z` tag and GitHub Release.
 6. Package, MCP Registry, and MCPB publication remain disabled until JameDesktopCommander owns
    dedicated publication namespaces and the bundle metadata is rebranded away from upstream.
+   Legacy MCPB packaging scripts are intentionally absent while publication is disabled; restore a
+   maintained packaging path only after namespace ownership and supply-chain review are complete.
 
 The release pull request title is governed as:
 

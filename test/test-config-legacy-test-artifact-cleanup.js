@@ -4,13 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const LEGACY_KEY = '__nonblockingSaveRegressionTest';
-const originalHome = process.env.HOME;
-const originalUserProfile = process.env.USERPROFILE;
-const isolatedHome = mkdtempSync(path.join(os.tmpdir(), 'dc-config-hygiene-'));
-const configDir = path.join(isolatedHome, '.claude-server-commander');
-const configPath = path.join(configDir, 'config.json');
+const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'dc-config-hygiene-'));
+const configPath = path.join(tempRoot, 'config.json');
+let configManager;
 
-mkdirSync(configDir, { recursive: true });
+mkdirSync(path.dirname(configPath), { recursive: true });
 writeFileSync(
   configPath,
   JSON.stringify({
@@ -22,18 +20,12 @@ writeFileSync(
   }, null, 2),
 );
 
-process.env.HOME = isolatedHome;
-process.env.USERPROFILE = isolatedHome;
-
-async function run() {
-  const [{ configManager }, { CONFIG_FILE }] = await Promise.all([
-    import('../dist/config-manager.js'),
-    import('../dist/config.js'),
-  ]);
-
-  assert.equal(CONFIG_FILE, configPath, 'test must use only the isolated config path');
+try {
+  const { ConfigManager } = await import('../dist/config-manager.js');
+  configManager = new ConfigManager(configPath);
 
   const config = await configManager.getConfig();
+
   assert.equal(
     Object.hasOwn(config, LEGACY_KEY),
     false,
@@ -52,21 +44,9 @@ async function run() {
     'legacy regression-test key must be removed durably from disk',
   );
   assert.deepEqual(persisted.customPluginState, { enabled: true });
-}
 
-function cleanup() {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
-
-  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
-  else process.env.USERPROFILE = originalUserProfile;
-
-  rmSync(isolatedHome, { recursive: true, force: true });
-}
-
-try {
-  await run();
-  console.log('Legacy config test-artifact cleanup contract: PASS');
+  console.log('Explicit config-path migration contract: PASS');
 } finally {
-  cleanup();
+  await configManager?.close();
+  rmSync(tempRoot, { recursive: true, force: true });
 }

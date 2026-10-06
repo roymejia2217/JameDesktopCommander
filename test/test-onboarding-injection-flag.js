@@ -79,8 +79,7 @@ function callToolOnFreshServer({ home, flagUrl, followUpDelayMs = null }) {
     const child = spawn('node', [DIST_INDEX], {
       env: {
         ...process.env,
-        HOME: home,
-        USERPROFILE: home, // Windows homedir
+        DESKTOP_COMMANDER_CONFIG_DIR: path.join(home, '.claude-server-commander'),
         DC_FLAG_URL: flagUrl,
       },
       stdio: ['pipe', 'pipe', 'pipe'],

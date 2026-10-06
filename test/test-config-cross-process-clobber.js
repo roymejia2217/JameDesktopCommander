@@ -74,16 +74,16 @@ function waitFor(child, type) {
   });
 }
 
-function startWorker(home) {
+function startWorker(configDir) {
   return fork(TEST_FILE, [], {
-    env: { ...process.env, HOME: home, USERPROFILE: home, DC_ISSUE_678_WORKER: '1' },
+    env: { ...process.env, DESKTOP_COMMANDER_CONFIG_DIR: configDir, DC_ISSUE_678_WORKER: '1' },
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   });
 }
 async function runParent() {
-  const home = mkdtempSync(path.join(os.tmpdir(), 'dc-issue-678-'));
-  const configPath = path.join(home, '.claude-server-commander', 'config.json');
-  mkdirSync(path.dirname(configPath), { recursive: true });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), 'dc-issue-678-'));
+  const configPath = path.join(configDir, 'config.json');
+  mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify({
     allowedDirectories: [],
     telemetryEnabled: false,
@@ -91,8 +91,8 @@ async function runParent() {
     pendingWelcomeOnboarding: false,
   }, null, 2));
 
-  const a = startWorker(home);
-  const b = startWorker(home);
+  const a = startWorker(configDir);
+  const b = startWorker(configDir);
   try {
     await Promise.all([waitFor(a, 'ready'), waitFor(b, 'ready')]);
 
@@ -123,7 +123,7 @@ async function runParent() {
       child.kill('SIGTERM');
     }
     await Promise.all(exits);
-    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
   }
 }
 

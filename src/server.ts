@@ -36,6 +36,7 @@ import {
     WriteFileArgsSchema,
     CreateDirectoryArgsSchema,
     ListDirectoryArgsSchema,
+    RenderWorkspaceArgsSchema,
     MoveFileArgsSchema,
     GetFileInfoArgsSchema,
     GetConfigArgsSchema,
@@ -439,16 +440,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
             },
             {
+                name: "render_workspace",
+                description: `
+                        Render the shared interactive workspace for a file, URL, or directory.
+                        Use read_file or list_directory for ordinary analysis and automation.
+                        Call render_workspace only when a visual/interactive workspace is useful or explicitly requested.
+                        The mounted workspace can navigate files and directories internally without additional render-tool calls.
+
+                        ${PATH_GUIDANCE}
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(RenderWorkspaceArgsSchema),
+                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI),
+                annotations: {
+                    title: "Render File Workspace",
+                    readOnlyHint: true,
+                    openWorldHint: true,
+                },
+            },
+            {
                 name: "preview_file",
                 description: `
-                        Render an interactive preview for a file or URL.
-                        Use read_file for analysis, extraction, or ordinary file access.
-                        Call preview_file only when a visual/interactive preview is useful or explicitly requested.
+                        Compatibility alias for the file workspace.
+                        Apps may call this directly; model callers should use render_workspace.
 
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ReadFileArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI),
+                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, ['app']),
                 annotations: {
                     title: "Preview File or URL",
                     readOnlyHint: true,
@@ -644,14 +662,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             {
                 name: "render_directory",
                 description: `
-                        Render an interactive directory browser for a path.
-                        Use list_directory for ordinary inspection and automation.
-                        Call render_directory only when a visual/interactive directory view is useful or explicitly requested.
+                        Compatibility alias for the shared file workspace.
+                        Apps may call this directly; model callers should use render_workspace.
 
                         ${PATH_GUIDANCE}
                         ${CMD_PREFIX_DESCRIPTION}`,
                 inputSchema: zodToJsonSchema(ListDirectoryArgsSchema),
-                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI),
+                _meta: buildUiToolMeta(FILE_PREVIEW_RESOURCE_URI, ['app']),
                 annotations: {
                     title: "Render Directory",
                     readOnlyHint: true,
@@ -1542,6 +1559,10 @@ async function handleCallToolRequest(
             // Filesystem tools
             case "read_file":
                 result = await handlers.handleReadFile(args);
+                break;
+
+            case "render_workspace":
+                result = await handlers.handleRenderWorkspace(args);
                 break;
 
             case "preview_file":

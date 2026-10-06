@@ -54,6 +54,44 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Validate repository squash defaults
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const result = await github.graphql(
+              `query RepositoryMergeSettings($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) {
+                  squashMergeAllowed
+                  mergeCommitAllowed
+                  rebaseMergeAllowed
+                  squashMergeCommitTitle
+                  squashMergeCommitMessage
+                }
+              }`,
+              {
+                owner: context.repo.owner,
+                name: context.repo.repo,
+              },
+            );
+            const repository = result.repository;
+            const expected = {
+              squashMergeAllowed: true,
+              mergeCommitAllowed: false,
+              rebaseMergeAllowed: false,
+              squashMergeCommitTitle: 'PR_TITLE',
+              squashMergeCommitMessage: 'BLANK',
+            };
+
+            for (const [key, value] of Object.entries(expected)) {
+              if (repository[key] !== value) {
+                core.setFailed(
+                  `Repository setting ${key} must be ${JSON.stringify(value)}; ` +
+                    `received ${JSON.stringify(repository[key])}.`,
+                );
+              }
+            }
+
       - name: Validate prospective squash commit
         if: github.event_name == 'pull_request'
         env:

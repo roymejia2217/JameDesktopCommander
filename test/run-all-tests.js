@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
+import { createIsolatedHomeEnvironment } from '../scripts/isolated-home.js';
 
 // Get directory name
 const __filename = fileURLToPath(import.meta.url);
@@ -59,13 +60,16 @@ function runTestFile(testFile) {
     console.log(`\n${colors.cyan}Running test module: ${testFile}${colors.reset}`);
     
     const startTime = Date.now();
+    const isolatedHome = createIsolatedHomeEnvironment('dc-test-file-');
     const proc = spawn('node', [testFile], {
       cwd: __dirname,
       stdio: 'inherit',
-      shell: false
+      shell: false,
+      env: isolatedHome.env
     });
     
     proc.on('close', (code) => {
+      isolatedHome.cleanup();
       const duration = Date.now() - startTime;
       if (code === 0) {
         console.log(`${colors.green}✓ Test passed: ${testFile} (${duration}ms)${colors.reset}`);
@@ -77,6 +81,7 @@ function runTestFile(testFile) {
     });
     
     proc.on('error', (err) => {
+      isolatedHome.cleanup();
       const duration = Date.now() - startTime;
       console.error(`${colors.red}✗ Error running ${testFile}: ${err.message}${colors.reset}`);
       resolve({ success: false, file: testFile, duration, error: err.message });

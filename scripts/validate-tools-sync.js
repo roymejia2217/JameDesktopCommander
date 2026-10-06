@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createIsolatedHomeEnvironment } from './isolated-home.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -48,19 +49,14 @@ async function extractToolsFromManifest() {
   return manifest.tools.map((tool) => tool.name).sort();
 }
 
-function inheritedEnvironment() {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([, value]) => value !== undefined),
-  );
-}
-
 async function extractToolsFromServer() {
   const serverPath = join(rootDir, 'dist', 'index.js');
+  const isolatedHome = createIsolatedHomeEnvironment('dc-tools-sync-');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath],
     cwd: rootDir,
-    env: inheritedEnvironment(),
+    env: isolatedHome.env,
     stderr: 'pipe',
   });
   const client = new Client(
@@ -93,6 +89,7 @@ async function extractToolsFromServer() {
     );
   } finally {
     await client.close().catch(() => {});
+    isolatedHome.cleanup();
   }
 }
 

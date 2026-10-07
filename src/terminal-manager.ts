@@ -42,6 +42,7 @@ interface CompletedSession {
   exitCode: number | null;
   startTime: Date;
   endTime: Date;
+  bufferedChars: number;       // Joined retained-buffer length at completion
   evictedLines: number;        // Carried over from the active session (see TerminalSession)
   evictedChars: number;
 }
@@ -58,6 +59,7 @@ export const MAX_BUFFERED_OUTPUT_CHARS = 50 * 1024 * 1024;  // per session; olde
 const MAX_LINE_CHARS = 1024 * 1024;                  // force-split longer lines so eviction can work
 const MAX_WAIT_OUTPUT_CHARS = 2 * 1024 * 1024;       // start_process wait buffer (prompt/state detection)
 const PROCESS_STATE_TAIL_CHARS = 16 * 1024;          // prompt detection only needs the recent output tail
+export const REPL_PROMPT_QUIESCENCE_MS = 100;         // drain independent stdout/stderr pipes before prompt handoff
 
 // Result type for paginated output reading
 export interface PaginatedOutputResult {
@@ -244,8 +246,7 @@ export class TerminalManager {
   ): Promise<TerminalSessionChange> {
     const currentState = (): TerminalSessionChange | null => {
       if (signal?.aborted) return 'cancelled';
-      const newOutput = this.getOutputSinceSnapshot(pid, snapshot);
-      if (newOutput) return 'output';
+      if (this.hasOutputSinceSnapshot(pid, snapshot)) return 'output';
       // PID values can be reused by the OS. While a current active session
       // exists, it is authoritative over any stale completed-session entry
       // carrying the same numeric PID.
@@ -457,6 +458,8 @@ export class TerminalManager {
       let resolved = false;
       let timeoutHandle: NodeJS.Timeout | null = null;
       let stateAnalysisImmediate: NodeJS.Immediate | null = null;
+      let promptQuiescenceHandle: NodeJS.Timeout | null = null;
+      let pendingPromptExitReason: 'early_exit_quick_pattern' | 'early_exit_event_state' | null = null;
       let abortHandler: (() => void) | null = null;
 
       // Quick prompt patterns for immediate detection
@@ -467,6 +470,7 @@ export class TerminalManager {
         resolved = true;
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (stateAnalysisImmediate) clearImmediate(stateAnalysisImmediate);
+        if (promptQuiescenceHandle) clearTimeout(promptQuiescenceHandle);
         if (abortHandler && control.signal) {
           control.signal.removeEventListener('abort', abortHandler);
         }
@@ -509,18 +513,40 @@ export class TerminalManager {
         forwardProcessError(pendingProcessError);
       }
 
+      const schedulePromptResolution = (
+        reason: 'early_exit_quick_pattern' | 'early_exit_event_state',
+      ) => {
+        if (resolved) return;
+        pendingPromptExitReason = reason;
+        if (promptQuiescenceHandle) clearTimeout(promptQuiescenceHandle);
+        promptQuiescenceHandle = setTimeout(() => {
+          promptQuiescenceHandle = null;
+          if (resolved || !pendingPromptExitReason) return;
+          session.isBlocked = true;
+          exitReason = pendingPromptExitReason;
+          resolveOnce({
+            pid: childProcess.pid!,
+            output,
+            isBlocked: true
+          });
+        }, REPL_PROMPT_QUIESCENCE_MS);
+      };
+
       const analyzeWaitingState = () => {
         if (resolved || !output.trim()) return;
         const recentOutput = output.slice(-PROCESS_STATE_TAIL_CHARS);
         const processState = analyzeProcessState(recentOutput, childProcess.pid);
-        if (!processState.isWaitingForInput) return;
-        session.isBlocked = true;
-        exitReason = 'early_exit_event_state';
-        resolveOnce({
-          pid: childProcess.pid!,
-          output,
-          isBlocked: true
-        });
+        if (processState.isWaitingForInput) {
+          schedulePromptResolution('early_exit_event_state');
+          return;
+        }
+
+        // A prompt seen on one pipe remains authoritative while trailing data
+        // from the other pipe drains. New output resets the quiet window rather
+        // than discarding the already-observed prompt.
+        if (pendingPromptExitReason) {
+          schedulePromptResolution(pendingPromptExitReason);
+        }
       };
 
       const scheduleStateAnalysis = () => {
@@ -538,6 +564,10 @@ export class TerminalManager {
         const text = data.toString();
         const now = Date.now();
 
+        if (promptQuiescenceHandle) {
+          clearTimeout(promptQuiescenceHandle);
+          promptQuiescenceHandle = null;
+        }
         if (!firstOutputTime) firstOutputTime = now;
         lastOutputTime = now;
 
@@ -565,20 +595,13 @@ export class TerminalManager {
           });
         }
 
-        // Immediate check for obvious prompts
+        // A prompt starts a short quiescence window rather than resolving
+        // immediately, so trailing output from the other stdio pipe can drain.
         if (quickPromptPatterns.test(text)) {
-          session.isBlocked = true;
-          exitReason = 'early_exit_quick_pattern';
-
           if (collectTiming && outputEvents.length > 0) {
             outputEvents[outputEvents.length - 1].matchedPattern = 'quick_pattern';
           }
-
-          resolveOnce({
-            pid: childProcess.pid!,
-            output,
-            isBlocked: true
-          });
+          schedulePromptResolution('early_exit_quick_pattern');
           return;
         }
 
@@ -589,6 +612,10 @@ export class TerminalManager {
         const text = data.toString();
         const now = Date.now();
 
+        if (promptQuiescenceHandle) {
+          clearTimeout(promptQuiescenceHandle);
+          promptQuiescenceHandle = null;
+        }
         if (!firstOutputTime) firstOutputTime = now;
         lastOutputTime = now;
 
@@ -643,6 +670,7 @@ export class TerminalManager {
             exitCode: code,
             startTime: session.startTime,
             endTime: new Date(),
+            bufferedChars: session.bufferedChars,
             evictedLines: session.evictedLines,
             evictedChars: session.evictedChars
           });
@@ -954,56 +982,150 @@ export class TerminalManager {
 
   /**
    * Capture a snapshot of current output state for interaction tracking.
-   * Used by interactWithProcess to know what output existed before sending input.
+   * Uses maintained counters, so snapshotting is O(1) regardless of retained
+   * output size.
    */
   captureOutputSnapshot(pid: number): { totalChars: number; lineCount: number } | null {
     const session = this.sessions.get(pid);
     if (session) {
-      const fullOutput = session.outputLines.join('\n');
       return {
         // Absolute since process start (includes evicted output), so the
-        // offset stays valid even if the cap evicts lines between
-        // snapshot and read.
-        totalChars: session.evictedChars + fullOutput.length,
+        // offset stays valid even if the cap evicts lines between reads.
+        totalChars: session.evictedChars + session.bufferedChars,
         lineCount: session.evictedLines + session.outputLines.length
       };
     }
+
+    const completedSession = this.completedSessions.get(pid);
+    if (completedSession) {
+      return {
+        totalChars: completedSession.evictedChars + completedSession.bufferedChars,
+        lineCount: completedSession.evictedLines + completedSession.outputLines.length
+      };
+    }
+
     return null;
+  }
+
+  hasOutputSinceSnapshot(
+    pid: number,
+    snapshot: { totalChars: number; lineCount: number },
+  ): boolean {
+    const session = this.sessions.get(pid);
+    if (session) {
+      return session.evictedChars + session.bufferedChars > snapshot.totalChars;
+    }
+
+    const completedSession = this.completedSessions.get(pid);
+    if (completedSession) {
+      return completedSession.evictedChars + completedSession.bufferedChars > snapshot.totalChars;
+    }
+
+    return false;
+  }
+
+  getOutputTail(pid: number, maxChars: number = PROCESS_STATE_TAIL_CHARS): string {
+    if (!Number.isFinite(maxChars) || maxChars <= 0) return '';
+    const session = this.sessions.get(pid);
+    if (session) {
+      return TerminalManager.tailFromLineBuffer(session.outputLines, Math.floor(maxChars));
+    }
+
+    const completedSession = this.completedSessions.get(pid);
+    if (completedSession) {
+      return TerminalManager.tailFromLineBuffer(completedSession.outputLines, Math.floor(maxChars));
+    }
+
+    return '';
   }
 
   /**
    * Get output that appeared since a snapshot was taken.
-   * This handles the case where output is appended to the last line (REPL prompts).
-   * Also checks completed sessions in case process finished between snapshot and poll.
+   * This handles appends to partial lines and avoids joining the full retained
+   * buffer; only the unseen tail is materialized.
    */
   getOutputSinceSnapshot(pid: number, snapshot: { totalChars: number; lineCount: number }): string | null {
-    // Check active session first
+    return this.getOutputSinceSnapshotLimited(pid, snapshot, Number.POSITIVE_INFINITY);
+  }
+
+  getOutputTailSinceSnapshot(
+    pid: number,
+    snapshot: { totalChars: number; lineCount: number },
+    maxChars: number = PROCESS_STATE_TAIL_CHARS,
+  ): string | null {
+    return this.getOutputSinceSnapshotLimited(pid, snapshot, maxChars);
+  }
+
+  private getOutputSinceSnapshotLimited(
+    pid: number,
+    snapshot: { totalChars: number; lineCount: number },
+    maxChars: number,
+  ): string | null {
     const session = this.sessions.get(pid);
     if (session) {
-      return TerminalManager.outputSinceSnapshot(session.outputLines, session.evictedChars, snapshot.totalChars);
+      return TerminalManager.outputSinceSnapshot(
+        session.outputLines,
+        session.evictedChars,
+        session.bufferedChars,
+        snapshot.totalChars,
+        maxChars,
+      );
     }
 
-    // Fallback to completed sessions - process may have finished between snapshot and poll
     const completedSession = this.completedSessions.get(pid);
     if (completedSession) {
-      return TerminalManager.outputSinceSnapshot(completedSession.outputLines, completedSession.evictedChars, snapshot.totalChars);
+      return TerminalManager.outputSinceSnapshot(
+        completedSession.outputLines,
+        completedSession.evictedChars,
+        completedSession.bufferedChars,
+        snapshot.totalChars,
+        maxChars,
+      );
     }
 
     return null;
   }
 
-  /**
-   * New output since a snapshot, in absolute (since process start) offsets.
-   * If eviction dropped part of the unseen output, returns what the buffer
-   * still holds — the oldest unseen chars are lost to the cap.
-   */
-  private static outputSinceSnapshot(outputLines: string[], evictedChars: number, snapshotTotalChars: number): string {
-    const fullOutput = outputLines.join('\n');
-    const newChars = evictedChars + fullOutput.length - snapshotTotalChars;
-    if (newChars <= 0) {
-      return ''; // No new output
+  private static outputSinceSnapshot(
+    outputLines: string[],
+    evictedChars: number,
+    bufferedChars: number,
+    snapshotTotalChars: number,
+    maxChars: number,
+  ): string {
+    const newChars = evictedChars + bufferedChars - snapshotTotalChars;
+    if (newChars <= 0) return '';
+    const boundedMaxChars = Number.isFinite(maxChars)
+      ? Math.max(0, Math.floor(maxChars))
+      : bufferedChars;
+    return TerminalManager.tailFromLineBuffer(
+      outputLines,
+      Math.min(newChars, bufferedChars, boundedMaxChars),
+    );
+  }
+
+  private static tailFromLineBuffer(outputLines: string[], maxChars: number): string {
+    if (maxChars <= 0 || outputLines.length === 0) return '';
+
+    let remaining = maxChars;
+    const reverseChunks: string[] = [];
+    for (let index = outputLines.length - 1; index >= 0 && remaining > 0; index--) {
+      const line = outputLines[index];
+      const take = Math.min(line.length, remaining);
+      if (take > 0) {
+        reverseChunks.push(line.slice(line.length - take));
+        remaining -= take;
+      }
+
+      if (index > 0 && remaining > 0) {
+        reverseChunks.push('\n');
+        remaining -= 1;
+      }
+
+      if (take < line.length) break;
     }
-    return fullOutput.substring(Math.max(0, fullOutput.length - newChars));
+
+    return reverseChunks.reverse().join('');
   }
 
     /**

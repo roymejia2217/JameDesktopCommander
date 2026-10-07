@@ -168,6 +168,38 @@ test('start_process reconciliation is event-driven and returns on process output
   }
 });
 
+test('start_process drains cross-stream startup output before returning on a prompt', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'startup-cross-stream-prompt',
+    "process.stderr.write('>>> '); setTimeout(() => process.stdout.write('startup-cross-stream-output\\n'), 40); setTimeout(() => {}, 2_000);",
+  );
+
+  let pid = -1;
+  try {
+    const result = await withIntervalForbidden(async () => {
+      const value = await terminalManager.executeCommand(
+        nodeCommand(fixture),
+        2_000,
+        shell,
+        false,
+      );
+      pid = value.pid;
+      return value;
+    });
+
+    assert.ok(pid > 0);
+    assert.equal(result.isBlocked, true);
+    assert.match(
+      result.output,
+      /startup-cross-stream-output/,
+      'start_process must drain late output from the other stdio stream before prompt handoff',
+    );
+  } finally {
+    terminate(pid);
+  }
+});
+
 test('read_process_output waits on terminal events without polling', async () => {
   await configManager.resetConfig();
   const fixture = await writeFixture(
@@ -257,6 +289,122 @@ test('interact_with_process waits on terminal events without polling', async () 
     assert.match(textOf(result), /interaction-ok/);
   } finally {
     terminate(start.pid);
+  }
+});
+
+test('interact_with_process drains cross-stream output before returning on a prompt', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'cross-stream-prompt',
+    "process.stdin.setEncoding('utf8'); process.stderr.write('>>> '); process.stdin.on('data', () => { process.stderr.write('>>> '); setTimeout(() => process.stdout.write('cross-stream-output\\n'), 40); });",
+  );
+
+  const start = await terminalManager.executeCommand(
+    nodeCommand(fixture),
+    1_000,
+    shell,
+    false,
+  );
+  assert.ok(start.pid > 0);
+
+  try {
+    const result = await withIntervalForbidden(() =>
+      interactWithProcess({
+        pid: start.pid,
+        input: 'go',
+        timeout_ms: 2_000,
+        wait_for_prompt: true,
+      }),
+    );
+
+    assert.match(
+      textOf(result),
+      /cross-stream-output/,
+      'a prompt arriving on stderr must not hide stdout that follows in the same interaction',
+    );
+  } finally {
+    terminate(start.pid);
+  }
+});
+
+test('snapshot and state-change checks do not materialize the full retained output', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'bounded-state-inspection',
+    "process.stdout.write('x'.repeat(20000) + 'TAIL_MARKER'); setTimeout(() => {}, 2_000);",
+  );
+
+  const started = await terminalManager.executeCommand(
+    nodeCommand(fixture),
+    25,
+    shell,
+    false,
+  );
+  assert.ok(started.pid > 0);
+
+  const session = terminalManager.getSession(started.pid);
+  assert.ok(session);
+
+  let tail = terminalManager.getOutputTail(started.pid, 64);
+  if (!/TAIL_MARKER$/.test(tail)) {
+    const arrivalSnapshot = terminalManager.captureOutputSnapshot(started.pid);
+    assert.ok(arrivalSnapshot);
+    const arrival = await terminalManager.waitForSessionChange(
+      started.pid,
+      arrivalSnapshot,
+      1_000,
+    );
+    assert.equal(arrival, 'output', 'fixture output must arrive before O(1) inspection assertions');
+    tail = terminalManager.getOutputTail(started.pid, 64);
+  }
+  assert.match(tail, /TAIL_MARKER$/);
+
+  const originalJoin = session.outputLines.join;
+  session.outputLines.join = () => {
+    throw new Error('full output materialization is forbidden for state inspection');
+  };
+
+  try {
+    const snapshot = terminalManager.captureOutputSnapshot(started.pid);
+    assert.ok(snapshot, 'snapshot capture must be O(1) over retained output');
+
+    tail = terminalManager.getOutputTail(started.pid, 64);
+    assert.ok(tail.length <= 64);
+    assert.match(tail, /TAIL_MARKER$/);
+  } finally {
+    session.outputLines.join = originalJoin;
+    terminate(started.pid);
+  }
+
+  const silentFixture = await writeFixture(
+    'state-change-no-materialize',
+    'setTimeout(() => {}, 2_000);',
+  );
+  const silent = await terminalManager.executeCommand(
+    nodeCommand(silentFixture),
+    25,
+    shell,
+    false,
+  );
+  assert.ok(silent.pid > 0);
+
+  const snapshot = terminalManager.captureOutputSnapshot(silent.pid);
+  assert.ok(snapshot);
+  const originalGetOutputSinceSnapshot = terminalManager.getOutputSinceSnapshot;
+  terminalManager.getOutputSinceSnapshot = () => {
+    throw new Error('waitForSessionChange must not materialize process output');
+  };
+
+  try {
+    const change = await terminalManager.waitForSessionChange(
+      silent.pid,
+      snapshot,
+      80,
+    );
+    assert.equal(change, 'timeout');
+  } finally {
+    terminalManager.getOutputSinceSnapshot = originalGetOutputSinceSnapshot;
+    terminate(silent.pid);
   }
 });
 

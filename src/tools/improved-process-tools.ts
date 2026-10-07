@@ -1,4 +1,4 @@
-import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS, resolveProcessWaitMs } from '../terminal-manager.js';
+import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS, REPL_PROMPT_QUIESCENCE_MS, resolveProcessWaitMs } from '../terminal-manager.js';
 import { commandManager } from '../command-manager.js';
 import { StartProcessArgsSchema, ReadProcessOutputArgsSchema, InteractWithProcessArgsSchema, ForceTerminateArgsSchema, ListSessionsArgsSchema } from './schemas.js';
 import { capture } from "../utils/capture.js";
@@ -414,9 +414,10 @@ export async function readProcessOutput(
       : '';
     processStateMessage = `\n✅ Process completed with exit code ${result.exitCode}${runtimeStr}`;
   } else if (session) {
-    // Analyze state for running processes
-    const fullOutput = session.outputLines.join('\n');
-    const processState = analyzeProcessState(fullOutput, pid);
+    // State detection only needs recent terminal context; avoid joining the
+    // entire retained buffer (which can be tens of megabytes).
+    const recentOutput = terminalManager.getOutputTail(pid);
+    const processState = analyzeProcessState(recentOutput, pid);
     if (processState.isWaitingForInput) {
       processStateMessage = `\n🔄 ${formatProcessStateMessage(processState, pid)}`;
     }
@@ -542,8 +543,6 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
     let earlyExit = false;
     const quickPromptPatterns = />>>\s*$|>\s*$|\$\s*$|#\s*$/;
     const deadline = Date.now() + effectiveWaitMs;
-    let waitSnapshot = outputSnapshot;
-    let lastOutputLength = 0;
 
     if (!outputSnapshot) {
       return {
@@ -552,6 +551,10 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
       };
     }
 
+    let waitSnapshot = outputSnapshot;
+    let observedTotalChars = outputSnapshot.totalChars;
+    let promptExitReason: 'early_exit_quick_pattern' | 'early_exit_event_state' | null = null;
+
     while (true) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
@@ -559,47 +562,57 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
         break;
       }
 
+      // Once a prompt is visible, wait for a short quiet period instead of
+      // returning immediately. stdout/stderr are independent pipes, so useful
+      // output from one stream may arrive just after the prompt on the other.
+      // Any new process event resets this one-shot quiescence window.
+      const waitMs = promptExitReason
+        ? Math.min(remainingMs, REPL_PROMPT_QUIESCENCE_MS)
+        : remainingMs;
       const change = await terminalManager.waitForSessionChange(
         pid,
-        waitSnapshot ?? outputSnapshot,
-        remainingMs,
+        waitSnapshot,
+        waitMs,
       );
 
       if (change === 'timeout') {
-        exitReason = 'timeout';
+        if (promptExitReason) {
+          earlyExit = true;
+          exitReason = promptExitReason;
+        } else {
+          exitReason = 'timeout';
+        }
         break;
       }
 
-      const newOutput = terminalManager.getOutputSinceSnapshot(pid, outputSnapshot) ?? '';
-      if (newOutput.length > lastOutputLength) {
+      const currentSnapshot = terminalManager.captureOutputSnapshot(pid);
+      if (currentSnapshot && currentSnapshot.totalChars > observedTotalChars) {
         const now = Date.now();
+        const deltaChars = currentSnapshot.totalChars - observedTotalChars;
         if (!firstOutputTime) firstOutputTime = now;
         lastOutputTime = now;
+        observedTotalChars = currentSnapshot.totalChars;
 
+        const recentOutput = terminalManager.getOutputTail(pid);
         if (verbose_timing) {
           outputEvents.push({
             timestamp: now,
             deltaMs: now - startTime,
             source: 'process_event',
-            length: newOutput.length - lastOutputLength,
-            snippet: newOutput.slice(lastOutputLength, lastOutputLength + 50).replace(/\n/g, '\\n')
+            length: deltaChars,
+            snippet: recentOutput.slice(-50).replace(/\n/g, '\\n')
           });
         }
 
-        output = newOutput;
-        lastOutputLength = newOutput.length;
-        processState = analyzeProcessState(output, pid);
-
-        if (quickPromptPatterns.test(output) || processState.isWaitingForInput) {
-          earlyExit = true;
-          exitReason = quickPromptPatterns.test(output)
+        processState = analyzeProcessState(recentOutput, pid);
+        if (quickPromptPatterns.test(recentOutput) || processState.isWaitingForInput) {
+          promptExitReason = quickPromptPatterns.test(recentOutput)
             ? 'early_exit_quick_pattern'
             : 'early_exit_event_state';
           if (verbose_timing && outputEvents.length > 0) {
             outputEvents[outputEvents.length - 1].matchedPattern =
-              exitReason === 'early_exit_quick_pattern' ? 'quick_pattern' : 'event_state';
+              promptExitReason === 'early_exit_quick_pattern' ? 'quick_pattern' : 'event_state';
           }
-          break;
         }
 
         if (processState.isFinished) {
@@ -609,17 +622,22 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
       }
 
       if (change === 'exit') {
-        processState = analyzeProcessState(output, pid);
+        processState = analyzeProcessState(terminalManager.getOutputTail(pid), pid);
         exitReason = 'process_finished';
         break;
       }
 
-      waitSnapshot = terminalManager.captureOutputSnapshot(pid);
-      if (!waitSnapshot) {
+      if (!currentSnapshot) {
         exitReason = 'process_finished';
         break;
       }
+      waitSnapshot = currentSnapshot;
     }
+
+    // Materialize the interaction delta once after reconciliation, not on every
+    // output event. This keeps event handling cheap while preserving response
+    // compatibility for the final returned output.
+    output = terminalManager.getOutputSinceSnapshot(pid, outputSnapshot) ?? '';
 
     // Clean and format output
     let cleanOutput = cleanProcessOutput(output, input);
@@ -635,18 +653,20 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
       truncationMessage = `\n\n⚠️ Output truncated: showing ${maxOutputLines} of ${outputLines.length} lines (${remainingLines} hidden). Use read_process_output with offset/length for full output.`;
     }
     
-    // Determine final state
-    if (!processState) {
-      processState = analyzeProcessState(output, pid);
+    // Determine final state. If this interaction hit its bounded deadline
+    // without producing new output, do not reclassify it from historical tail
+    // content (for example, the prompt that existed before input was sent).
+    if (!processState && !timeoutReached) {
+      processState = analyzeProcessState(terminalManager.getOutputTail(pid), pid);
     }
     
     let statusMessage = '';
-    if (processState.isWaitingForInput) {
-      statusMessage = `\n🔄 ${formatProcessStateMessage(processState, pid)}`;
-    } else if (processState.isFinished) {
-      statusMessage = `\n✅ ${formatProcessStateMessage(processState, pid)}`;
-    } else if (timeoutReached) {
+    if (timeoutReached) {
       statusMessage = '\n⏱️ Response may be incomplete (timeout reached)';
+    } else if (processState?.isWaitingForInput) {
+      statusMessage = `\n🔄 ${formatProcessStateMessage(processState, pid)}`;
+    } else if (processState?.isFinished) {
+      statusMessage = `\n✅ ${formatProcessStateMessage(processState, pid)}`;
     }
 
     // Add timing information if requested

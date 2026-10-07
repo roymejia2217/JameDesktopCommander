@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from 'child_process';
+import { EventEmitter } from 'node:events';
 import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
-import { configManager } from './config-manager.js';
+import { configManager, DEFAULT_MAX_PROCESS_WAIT_MS, normalizeMaxProcessWaitMs } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
 
@@ -50,16 +51,18 @@ interface CompletedSession {
  * string concatenation throw "RangeError: Invalid string length" at V8's max
  * string size (~536M chars) inside a stdout 'data' handler — an uncaught
  * exception that kills the whole server (index.ts exits on uncaughtException).
- * The cap also bounds the join() cost in snapshot reads and the periodic
- * process-state scan, both of which are O(total output).
+ * The cap also bounds the join() cost in snapshot reads and event-driven
+ * process-state analysis, both of which are O(total output).
  */
 export const MAX_BUFFERED_OUTPUT_CHARS = 50 * 1024 * 1024;  // per session; oldest lines evicted first
 const MAX_LINE_CHARS = 1024 * 1024;                  // force-split longer lines so eviction can work
 const MAX_WAIT_OUTPUT_CHARS = 2 * 1024 * 1024;       // start_process wait buffer (prompt/state detection)
+const PROCESS_STATE_TAIL_CHARS = 16 * 1024;          // prompt detection only needs the recent output tail
 
 // Result type for paginated output reading
 export interface PaginatedOutputResult {
   lines: string[];
+  rawOutput?: string;            // Exact incremental output for offset=0, preserving partial-line appends
   totalLines: number;
   readFrom: number;            // Starting line of this read
   readCount: number;           // Number of lines returned
@@ -86,7 +89,21 @@ export interface CommandExecutionControl {
   signal?: AbortSignal;
   onStarted?: (pid: number) => void;
   onOutput?: (source: 'stdout' | 'stderr') => void;
-  onRunning?: (elapsedMs: number) => void;
+}
+
+export type TerminalSessionChange = 'output' | 'exit' | 'timeout' | 'cancelled';
+
+export function resolveProcessWaitMs(
+  requestedTimeoutMs: number,
+  configuredWaitMs: unknown,
+): number {
+  const configured = normalizeMaxProcessWaitMs(configuredWaitMs);
+
+  if (!Number.isFinite(requestedTimeoutMs) || requestedTimeoutMs <= 0) {
+    return Math.min(DEFAULT_COMMAND_TIMEOUT, configured);
+  }
+
+  return Math.min(requestedTimeoutMs, configured);
 }
 
 /**
@@ -187,6 +204,7 @@ export function terminateProcessTree(pid: number, ownsProcessGroup: boolean = fa
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
+  private sessionEvents: Map<number, EventEmitter> = new Map();
   
   /**
    * Send input to a running process
@@ -213,6 +231,69 @@ export class TerminalManager {
       return false;
     }
   }
+
+  private emitSessionChange(pid: number, change: Exclude<TerminalSessionChange, 'timeout' | 'cancelled'>): void {
+    this.sessionEvents.get(pid)?.emit('change', change);
+  }
+
+  async waitForSessionChange(
+    pid: number,
+    snapshot: { totalChars: number; lineCount: number },
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<TerminalSessionChange> {
+    const currentState = (): TerminalSessionChange | null => {
+      if (signal?.aborted) return 'cancelled';
+      const newOutput = this.getOutputSinceSnapshot(pid, snapshot);
+      if (newOutput) return 'output';
+      // PID values can be reused by the OS. While a current active session
+      // exists, it is authoritative over any stale completed-session entry
+      // carrying the same numeric PID.
+      if (this.sessions.has(pid)) return null;
+      return 'exit';
+    };
+
+    const immediate = currentState();
+    if (immediate) return immediate;
+
+    const emitter = this.sessionEvents.get(pid);
+    if (!emitter) return 'exit';
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: NodeJS.Timeout | null = null;
+      let abortHandler: (() => void) | null = null;
+
+      const cleanup = () => {
+        emitter.removeListener('change', onChange);
+        if (timeout) clearTimeout(timeout);
+        if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
+      };
+
+      const settle = (change: TerminalSessionChange) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(change);
+      };
+
+      const onChange = (change: 'output' | 'exit') => settle(change);
+      emitter.on('change', onChange);
+
+      const afterSubscribe = currentState();
+      if (afterSubscribe) {
+        settle(afterSubscribe);
+        return;
+      }
+
+      timeout = setTimeout(() => settle('timeout'), Math.max(0, timeoutMs));
+      if (signal) {
+        abortHandler = () => settle('cancelled');
+        signal.addEventListener('abort', abortHandler, { once: true });
+        if (signal.aborted) abortHandler();
+      }
+    });
+  }
   
   async executeCommand(
     command: string,
@@ -221,17 +302,16 @@ export class TerminalManager {
     collectTiming: boolean = false,
     control: CommandExecutionControl = {},
   ): Promise<CommandExecutionResult> {
-    // Get the shell from config if not specified
     let shellToUse: string | boolean | undefined = shell;
-    if (!shellToUse) {
-      try {
-        const config = await configManager.getConfig();
-        shellToUse = config.defaultShell || true;
-      } catch (error) {
-        // If there's an error getting the config, fall back to default
-        shellToUse = true;
-      }
+    let configuredWaitMs: unknown = DEFAULT_MAX_PROCESS_WAIT_MS;
+    try {
+      const config = await configManager.getConfig();
+      configuredWaitMs = config.maxProcessWaitMs;
+      if (!shellToUse) shellToUse = config.defaultShell || true;
+    } catch {
+      if (!shellToUse) shellToUse = true;
     }
+    const effectiveTimeoutMs = resolveProcessWaitMs(timeoutMs, configuredWaitMs);
 
     // For REPL interactions, we need to ensure stdin, stdout, and stderr are properly configured
     // Note: No special stdio options needed here, Node.js handles pipes by default
@@ -352,7 +432,8 @@ export class TerminalManager {
       pid: childProcess.pid,
       process: childProcess,
       outputLines: [],           // Line-based buffer
-      lastReadIndex: 0,          // Track where "new" output starts
+      lastReadIndex: 0,          // Line cursor for offset=0 incremental reads
+      lastReadLineLength: 0,     // Tracks appends to the last consumed unterminated line
       isBlocked: false,
       startTime: new Date(),
       bufferedChars: 0,
@@ -362,11 +443,11 @@ export class TerminalManager {
     };
 
     this.sessions.set(childProcess.pid, session);
+    this.sessionEvents.set(childProcess.pid, new EventEmitter());
     control.onStarted?.(childProcess.pid);
 
     // Timing telemetry
     const startTime = Date.now();
-    let lastRunningProgressAt = startTime;
     let firstOutputTime: number | undefined;
     let lastOutputTime: number | undefined;
     const outputEvents: OutputEvent[] = [];
@@ -374,8 +455,8 @@ export class TerminalManager {
 
     return new Promise((resolve) => {
       let resolved = false;
-      let periodicCheck: NodeJS.Timeout | null = null;
       let timeoutHandle: NodeJS.Timeout | null = null;
+      let stateAnalysisImmediate: NodeJS.Immediate | null = null;
       let abortHandler: (() => void) | null = null;
 
       // Quick prompt patterns for immediate detection
@@ -384,8 +465,8 @@ export class TerminalManager {
       const resolveOnce = (result: CommandExecutionResult) => {
         if (resolved) return;
         resolved = true;
-        if (periodicCheck) clearInterval(periodicCheck);
         if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (stateAnalysisImmediate) clearImmediate(stateAnalysisImmediate);
         if (abortHandler && control.signal) {
           control.signal.removeEventListener('abort', abortHandler);
         }
@@ -412,7 +493,9 @@ export class TerminalManager {
       // a successful spawn means the process is gone, so the caller must not sit
       // waiting for output that will never arrive.
       forwardProcessError = (err: Error) => {
+        this.emitSessionChange(childProcess.pid!, 'exit');
         this.sessions.delete(childProcess.pid!);
+        this.sessionEvents.delete(childProcess.pid!);
         exitReason = 'process_exit';
         resolveOnce({
           pid: childProcess.pid!,
@@ -425,6 +508,31 @@ export class TerminalManager {
       if (pendingProcessError) {
         forwardProcessError(pendingProcessError);
       }
+
+      const analyzeWaitingState = () => {
+        if (resolved || !output.trim()) return;
+        const recentOutput = output.slice(-PROCESS_STATE_TAIL_CHARS);
+        const processState = analyzeProcessState(recentOutput, childProcess.pid);
+        if (!processState.isWaitingForInput) return;
+        session.isBlocked = true;
+        exitReason = 'early_exit_event_state';
+        resolveOnce({
+          pid: childProcess.pid!,
+          output,
+          isBlocked: true
+        });
+      };
+
+      const scheduleStateAnalysis = () => {
+        if (resolved || stateAnalysisImmediate) return;
+        // Coalesce bursty stdout/stderr notifications into one analysis turn.
+        // setImmediate yields to timers/I/O, so the bounded process deadline and
+        // cancellation cannot be starved by a high-throughput child process.
+        stateAnalysisImmediate = setImmediate(() => {
+          stateAnalysisImmediate = null;
+          analyzeWaitingState();
+        });
+      };
 
       childProcess.stdout.on('data', (data: any) => {
         const text = data.toString();
@@ -441,8 +549,9 @@ export class TerminalManager {
             output = output.slice(-Math.floor(MAX_WAIT_OUTPUT_CHARS / 2));
           }
         }
-        // Append to line-based buffer
+        // Append to line-based buffer and wake event-driven waiters.
         this.appendToLineBuffer(session, text);
+        this.emitSessionChange(childProcess.pid!, 'output');
         if (!resolved) control.onOutput?.('stdout');
 
         // Record output event if collecting timing
@@ -470,7 +579,10 @@ export class TerminalManager {
             output,
             isBlocked: true
           });
+          return;
         }
+
+        scheduleStateAnalysis();
       });
 
       childProcess.stderr.on('data', (data: any) => {
@@ -486,8 +598,9 @@ export class TerminalManager {
             output = output.slice(-Math.floor(MAX_WAIT_OUTPUT_CHARS / 2));
           }
         }
-        // Append to line-based buffer
+        // Append to line-based buffer and wake event-driven waiters.
         this.appendToLineBuffer(session, text);
+        this.emitSessionChange(childProcess.pid!, 'output');
         if (!resolved) control.onOutput?.('stderr');
 
         // Record output event if collecting timing
@@ -500,30 +613,13 @@ export class TerminalManager {
             snippet: text.slice(0, 50).replace(/\n/g, '\\n')
           });
         }
+
+        scheduleStateAnalysis();
       });
 
-      // Periodic comprehensive check every 100ms
-      periodicCheck = setInterval(() => {
-        const now = Date.now();
-        if (control.onRunning && now - lastRunningProgressAt >= 10_000) {
-          lastRunningProgressAt = now;
-          control.onRunning(now - startTime);
-        }
-
-        if (output.trim()) {
-          const processState = analyzeProcessState(output, childProcess.pid);
-          if (processState.isWaitingForInput) {
-            session.isBlocked = true;
-            exitReason = 'early_exit_periodic_check';
-            resolveOnce({
-              pid: childProcess.pid!,
-              output,
-              isBlocked: true
-            });
-          }
-        }
-      }, 100);
-
+      // One-shot deadline: long-running processes remain active, but the MCP
+      // call returns before the client-side request ceiling is reached.
+      // This is a deadline, not state polling.
       // Timeout fallback
       timeoutHandle = setTimeout(() => {
         session.isBlocked = true;
@@ -533,14 +629,17 @@ export class TerminalManager {
           output,
           isBlocked: true
         });
-      }, timeoutMs);
+      }, effectiveTimeoutMs);
 
-      childProcess.on('exit', (code: any) => {
+      // Finalize on `close`, not `exit`: Node emits `close` only after the
+      // child has ended AND its stdio streams are closed. Finalizing on `exit`
+      // can copy the session buffer before trailing stdout/stderr data has been
+      // delivered under heavy output, which loses the newest output permanently.
+      childProcess.on('close', (code: any) => {
         if (childProcess.pid) {
-          // Store completed session before removing active session
           this.completedSessions.set(childProcess.pid, {
             pid: childProcess.pid,
-            outputLines: [...session.outputLines], // Copy line buffer
+            outputLines: [...session.outputLines],
             exitCode: code,
             startTime: session.startTime,
             endTime: new Date(),
@@ -555,6 +654,8 @@ export class TerminalManager {
           }
 
           this.sessions.delete(childProcess.pid);
+          this.emitSessionChange(childProcess.pid, 'exit');
+          this.sessionEvents.delete(childProcess.pid);
         }
         exitReason = 'process_exit';
         resolveOnce({
@@ -636,7 +737,10 @@ export class TerminalManager {
       session.bufferedChars -= droppedJoinedChars;
       session.evictedChars += droppedJoinedChars;
       session.evictedLines++;
-      if (session.lastReadIndex > 0) session.lastReadIndex--;
+      if (session.lastReadIndex > 0) {
+        session.lastReadIndex--;
+        if (session.lastReadIndex === 0) session.lastReadLineLength = 0;
+      }
     }
   }
 
@@ -648,18 +752,20 @@ export class TerminalManager {
    * @param updateReadIndex Whether to update lastReadIndex (default: true for offset=0)
    */
   readOutputPaginated(pid: number, offset: number = 0, length: number = 1000): PaginatedOutputResult | null {
-    // First check active sessions
+    // First check active sessions.
     const session = this.sessions.get(pid);
     if (session) {
-      const result = this.readFromLineBuffer(
-        session.outputLines,
-        offset,
-        length,
-        session.lastReadIndex,
-        (newIndex) => { session.lastReadIndex = newIndex; },
-        false,
-        undefined
-      );
+      const result = offset === 0
+        ? this.readIncrementalOutput(session, length)
+        : this.readFromLineBuffer(
+            session.outputLines,
+            offset,
+            length,
+            session.lastReadIndex,
+            () => {},
+            false,
+            undefined,
+          );
       result.evictedLines = session.evictedLines;
       return result;
     }
@@ -683,6 +789,49 @@ export class TerminalManager {
     }
 
     return null;
+  }
+
+  private readIncrementalOutput(
+    session: TerminalSession,
+    length: number,
+  ): PaginatedOutputResult {
+    const totalLines = session.outputLines.length;
+    const startIndex = Math.min(session.lastReadIndex, totalLines);
+    let appendedFragment = '';
+
+    if (startIndex > 0) {
+      const lastConsumedLine = session.outputLines[startIndex - 1] ?? '';
+      if (lastConsumedLine.length > session.lastReadLineLength) {
+        appendedFragment = lastConsumedLine.slice(session.lastReadLineLength);
+      }
+    }
+
+    const fragmentBudget = appendedFragment ? 1 : 0;
+    const lineBudget = Math.max(0, length - fragmentBudget);
+    const newLines = lineBudget > 0
+      ? session.outputLines.slice(startIndex, startIndex + lineBudget)
+      : [];
+    const lines = appendedFragment ? [appendedFragment, ...newLines] : newLines;
+    const nextIndex = startIndex + newLines.length;
+
+    session.lastReadIndex = nextIndex;
+    if (newLines.length > 0) {
+      session.lastReadLineLength = session.outputLines[nextIndex - 1]?.length ?? 0;
+    } else if (appendedFragment && startIndex > 0) {
+      session.lastReadLineLength = session.outputLines[startIndex - 1]?.length ?? 0;
+    } else if (nextIndex === 0) {
+      session.lastReadLineLength = 0;
+    }
+
+    return {
+      lines,
+      rawOutput: lines.join('\n'),
+      totalLines,
+      readFrom: appendedFragment ? Math.max(0, startIndex - 1) : startIndex,
+      readCount: lines.length,
+      remaining: Math.max(0, totalLines - nextIndex),
+      isComplete: false,
+    };
   }
 
   /**
@@ -736,6 +885,22 @@ export class TerminalManager {
       exitCode,
       runtimeMs
     };
+  }
+
+  hasUnreadOutput(pid: number): boolean {
+    const session = this.sessions.get(pid);
+    if (!session) return false;
+
+    if (session.outputLines.length > session.lastReadIndex) {
+      return true;
+    }
+
+    if (session.lastReadIndex > 0) {
+      const lastConsumedLine = session.outputLines[session.lastReadIndex - 1] ?? '';
+      return lastConsumedLine.length > session.lastReadLineLength;
+    }
+
+    return false;
   }
 
   /**

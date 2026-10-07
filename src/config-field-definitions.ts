@@ -38,6 +38,11 @@ export const CONFIG_FIELD_DEFINITIONS = {
     description: 'Maximum number of lines that can be written in one edit operation. This helps prevent accidental oversized writes and keeps file changes predictable.',
     valueType: 'number',
   },
+  maxProcessWaitMs: {
+    label: 'Process Wait Limit',
+    description: 'Maximum milliseconds a terminal tool call may block while waiting for process output, a prompt, or exit. When reached, the process keeps running and control returns so the client does not hit its own request timeout.',
+    valueType: 'number',
+  },
 } as const satisfies Record<string, ConfigFieldDefinition>;
 
 export type ConfigFieldKey = keyof typeof CONFIG_FIELD_DEFINITIONS;

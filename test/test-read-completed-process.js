@@ -1,98 +1,118 @@
 import assert from 'assert';
 import { startProcess, readProcessOutput } from '../dist/tools/improved-process-tools.js';
 
-/**
- * Proper test for read_process_output on completed processes
- * 
- * This test should:
- * - FAIL when the bug exists (current behavior)  
- * - PASS when the bug is fixed (desired behavior)
- */
+function extractPid(startResult) {
+  const text = startResult.content?.[0]?.text ?? '';
+  const pidMatch = text.match(/Process started with PID (\d+)/);
+  assert(pidMatch, 'Should get PID from start_process');
+  return Number(pidMatch[1]);
+}
+
+function resultText(result) {
+  return result.content?.map((item) => item.text ?? '').join('\n') ?? '';
+}
+
+async function readUntilCompleted(pid, expectedOutput) {
+  const firstRead = await readProcessOutput({
+    pid,
+    timeout_ms: 5_000,
+    offset: 0,
+  });
+
+  assert(!firstRead.isError, 'Should read process output without error');
+  assert(
+    resultText(firstRead).includes(expectedOutput),
+    `Should contain expected output: ${expectedOutput}`,
+  );
+
+  const firstText = resultText(firstRead);
+  if (firstText.includes('Process completed with exit code')) {
+    return firstRead;
+  }
+
+  const completionRead = await readProcessOutput({
+    pid,
+    timeout_ms: 5_000,
+    offset: 0,
+  });
+
+  assert(!completionRead.isError, 'Should observe process completion without error');
+  assert(
+    resultText(completionRead).includes('Process completed with exit code 0'),
+    'Should observe successful process completion',
+  );
+  return completionRead;
+}
+
+async function assertCompletedOutputRemainsReadable(pid, expectedOutput) {
+  const completedRead = await readProcessOutput({
+    pid,
+    timeout_ms: 1_000,
+    offset: 0,
+  });
+
+  assert(!completedRead.isError, 'Should be able to read from completed process');
+  const text = resultText(completedRead);
+  assert(
+    text.includes(expectedOutput),
+    'Completed session must retain the final process output',
+  );
+  assert(
+    text.includes('Process completed with exit code 0'),
+    'Completed session must retain completion metadata',
+  );
+}
+
 async function testReadCompletedProcessOutput() {
   console.log('Testing read_process_output on completed process...');
-  
-  // Start echo command with delay, but timeout before echo happens
+
   const startResult = await startProcess({
-    // Cross-platform delay + output using Node
     command: 'node -e "setTimeout(() => console.log(\'SUCCESS MESSAGE\'), 1000)"',
-    timeout_ms: 500  // Returns before the output happens
+    timeout_ms: 500,
   });
-  
-  // Extract PID
-  const pidMatch = startResult.content[0].text.match(/Process started with PID (\d+)/);
-  assert(pidMatch, 'Should get PID from start_process');
-  const pid = parseInt(pidMatch[1]);
-  
-  // Wait for the actual command to complete
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  
-  // Try to read the output - this should work when fixed
-  const readResult = await readProcessOutput({ pid, timeout_ms: 1000 });
-  
-  // ASSERT: Should be able to read from completed process
-  assert(!readResult.isError, 
-    'Should be able to read from completed process without error');
-    
-  // ASSERT: Should contain the echo output
-  assert(readResult.content[0].text.includes('SUCCESS MESSAGE'), 
-    'Should contain the echo output from completed process');
-    
-  console.log('✅ Successfully read from completed process');
-  console.log('✅ Retrieved echo output:', readResult.content[0].text);
+  const pid = extractPid(startResult);
+
+  await readUntilCompleted(pid, 'SUCCESS MESSAGE');
+  await assertCompletedOutputRemainsReadable(pid, 'SUCCESS MESSAGE');
+
+  console.log('PASS delayed process output remains readable after completion');
 }
 
-/**
- * Test immediate completion scenario
- */
 async function testImmediateCompletion() {
   console.log('Testing immediate completion...');
-  
+
   const startResult = await startProcess({
     command: 'node -e "console.log(\'IMMEDIATE OUTPUT\')"',
-    timeout_ms: 2000
+    timeout_ms: 2_000,
   });
-  
-  // Extract PID
-  const pidMatch = startResult.content[0].text.match(/Process started with PID (\d+)/);
-  assert(pidMatch, 'Should get PID from start_process');
-  const pid = parseInt(pidMatch[1]);
-  
-  // Small delay to ensure process completed
-  await new Promise(resolve => setTimeout(resolve, 100));
-  
-  // Should be able to read from immediately completed process
-  const readResult = await readProcessOutput({ pid, timeout_ms: 1000 });
-  
-  assert(!readResult.isError, 
-    'Should be able to read from immediately completed process');
-    
-  assert(readResult.content[0].text.includes('IMMEDIATE OUTPUT'), 
-    'Should contain immediate output from completed process');
-    
-  console.log('✅ Successfully read from immediately completed process');
+  const pid = extractPid(startResult);
+
+  await readUntilCompleted(pid, 'IMMEDIATE OUTPUT');
+  await assertCompletedOutputRemainsReadable(pid, 'IMMEDIATE OUTPUT');
+
+  console.log('PASS immediate process output remains readable after completion');
 }
 
-// Run tests
 async function runTests() {
   try {
     await testReadCompletedProcessOutput();
     await testImmediateCompletion();
-    console.log('\n🎉 All tests passed - read_process_output works on completed processes!');
+    console.log('\nAll completed-process output tests passed.');
     return true;
   } catch (error) {
-    console.log('\n❌ Test failed:', error.message);
-    console.log('\n💡 This indicates the bug still exists:');
-    console.log('   read_process_output cannot read from completed processes');
-    console.log('   Expected behavior: Should return completion info and final output');
+    console.error('\nCompleted-process output test failed:', error.message);
+    if (error instanceof Error && error.stack) {
+      console.error(error.stack);
+    }
     return false;
   }
 }
 
 runTests()
-  .then(success => {
+  .then((success) => {
     process.exit(success ? 0 : 1);
   })
-  .catch(error => {
+  .catch((error) => {
     console.error('Test error:', error);
     process.exit(1);
   });

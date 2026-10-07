@@ -397,6 +397,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         Read PDF files and extract content as markdown and images.
                         
                         Suitable for reading authorized local files directly without starting a shell command.
+                        For two or more already-known file paths, prefer read_multiple_files instead of issuing separate read_file calls.
+                        This tool is for model analysis and does not mount a Presentation widget.
                         
                         Supports partial file reading with:
                         - 'offset' (start line, default: 0)
@@ -460,6 +462,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         Render the shared interactive workspace for a file, URL, or directory.
                         Use read_file or list_directory for ordinary analysis and automation.
                         Call render_workspace only when a visual/interactive workspace is useful or explicitly requested.
+                        Do not call render_workspace merely because the model needs file contents.
+                        Use offset and length to render only the relevant range when full-file visualization is unnecessary.
                         The mounted workspace can navigate files and directories internally without additional render-tool calls.
 
                         ${PATH_GUIDANCE}
@@ -492,6 +496,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 name: "read_multiple_files",
                 description: `
                         Read the contents of multiple files simultaneously.
+                        Prefer this tool when two or more file paths are already known.
+                        One MCP call batches those reads and reduces remote round-trips.
+                        This tool is for model analysis and does not mount a Presentation widget.
                         
                         Each file's content is returned with its path as a reference.
                         Handles text files normally and renders images as viewable content.

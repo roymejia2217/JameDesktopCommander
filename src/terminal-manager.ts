@@ -45,6 +45,8 @@ interface CompletedSession {
   bufferedChars: number;       // Joined retained-buffer length at completion
   evictedLines: number;        // Carried over from the active session (see TerminalSession)
   evictedChars: number;
+  lastReadIndex: number;       // Preserve offset=0 cursor across active -> completed
+  lastReadLineLength: number;  // Preserve partial-line cursor across completion
 }
 
 /**
@@ -672,7 +674,9 @@ export class TerminalManager {
             endTime: new Date(),
             bufferedChars: session.bufferedChars,
             evictedLines: session.evictedLines,
-            evictedChars: session.evictedChars
+            evictedChars: session.evictedChars,
+            lastReadIndex: session.lastReadIndex,
+            lastReadLineLength: session.lastReadLineLength
           });
 
           // Keep only last 100 completed sessions
@@ -798,20 +802,26 @@ export class TerminalManager {
       return result;
     }
 
-    // Then check completed sessions
+    // Then check completed sessions.
     const completedSession = this.completedSessions.get(pid);
     if (completedSession) {
       const runtimeMs = completedSession.endTime.getTime() - completedSession.startTime.getTime();
-      const result = this.readFromLineBuffer(
-        completedSession.outputLines,
-        offset,
-        length,
-        0,  // Completed sessions don't track read position
-        () => {},  // No-op for completed sessions
-        true,
-        completedSession.exitCode,
-        runtimeMs
-      );
+      const result = offset === 0
+        ? this.readIncrementalOutput(completedSession, length)
+        : this.readFromLineBuffer(
+            completedSession.outputLines,
+            offset,
+            length,
+            completedSession.lastReadIndex,
+            () => {},
+            true,
+            completedSession.exitCode,
+            runtimeMs,
+          );
+
+      result.isComplete = true;
+      result.exitCode = completedSession.exitCode;
+      result.runtimeMs = runtimeMs;
       result.evictedLines = completedSession.evictedLines;
       return result;
     }
@@ -820,7 +830,7 @@ export class TerminalManager {
   }
 
   private readIncrementalOutput(
-    session: TerminalSession,
+    session: TerminalSession | CompletedSession,
     length: number,
   ): PaginatedOutputResult {
     const totalLines = session.outputLines.length;

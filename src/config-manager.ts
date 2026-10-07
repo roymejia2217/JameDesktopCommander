@@ -11,6 +11,15 @@ import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
 
 const LEGACY_TEST_CONFIG_KEYS = ['__nonblockingSaveRegressionTest'] as const;
 
+export const DEFAULT_MAX_PROCESS_WAIT_MS = 180_000;
+
+export function normalizeMaxProcessWaitMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_PROCESS_WAIT_MS;
+  }
+  return Math.min(value, DEFAULT_MAX_PROCESS_WAIT_MS);
+}
+
 export interface ServerConfig {
   blockedCommands?: string[];
   defaultShell?: string;
@@ -18,6 +27,7 @@ export interface ServerConfig {
   telemetryEnabled?: boolean; // New field for telemetry control
   fileWriteLineLimit?: number; // Line limit for file write operations
   fileReadLineLimit?: number; // Default line limit for file read operations (changed from character-based)
+  maxProcessWaitMs?: number; // Maximum blocking wait for terminal tool calls before handing control back
   clientId?: string; // Unique client identifier for analytics
   currentClient?: ClientInfo; // Current connected client information
   [key: string]: any; // Allow for arbitrary configuration keys (including abTest_* keys)
@@ -197,6 +207,7 @@ export class ConfigManager {
       telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
       fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      maxProcessWaitMs: DEFAULT_MAX_PROCESS_WAIT_MS,
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
       welcomeOnboardingEligible: true // Distinguishes new installs from migrated legacy configs
     };
@@ -339,14 +350,23 @@ export class ConfigManager {
   }
 
   private async reloadConfigFromDisk(): Promise<void> {
-    try {
-      const latest = await this.readConfigFromDisk();
-      for (const mutate of this.pendingMutations) mutate(latest);
-      latest['version'] = VERSION;
-      this.config = latest;
-    } catch (error: any) {
-      if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);
-    }
+    // Serialize watcher reloads with durable mutations. Without this, a reload
+    // can begin reading an older snapshot, a setValue/resetConfig can commit a
+    // newer value, and then the stale reload can finish last and overwrite the
+    // fresh in-memory config. Keeping both operations on one chain preserves
+    // disk/in-memory ordering without sleeps or polling.
+    const reload = this.writeChain.then(async () => {
+      try {
+        const latest = await this.readConfigFromDisk();
+        for (const mutate of this.pendingMutations) mutate(latest);
+        latest['version'] = VERSION;
+        this.config = latest;
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);
+      }
+    });
+    this.writeChain = reload.then(() => {}, () => {});
+    await reload;
   }
 
   /**
@@ -354,7 +374,10 @@ export class ConfigManager {
    */
   async getConfig(): Promise<ServerConfig> {
     await this.init();
-    return { ...this.config };
+    return {
+      ...this.config,
+      maxProcessWaitMs: normalizeMaxProcessWaitMs(this.config.maxProcessWaitMs),
+    };
   }
 
   /**

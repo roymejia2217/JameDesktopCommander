@@ -1023,7 +1023,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         SMART DETECTION:
                         - Detects REPL prompts (>>>, >, $, etc.)
                         - Identifies when a process is waiting for input
-                        - Recognizes process completion vs timeout
+                        - Reacts to native process output/exit events instead of fixed-interval status polling
+                        - Recognizes process completion vs bounded wait deadlines
                         - Early exit prevents unnecessary waiting
                         
                         STATES DETECTED:
@@ -1033,7 +1034,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
                         PERFORMANCE DEBUGGING (verbose_timing parameter):
                         Set verbose_timing: true to get detailed timing information including:
-                        - Exit reason (early_exit_quick_pattern, early_exit_periodic_check, process_exit, timeout)
+                        - Exit reason (early_exit_quick_pattern, early_exit_event_state, process_exit, timeout)
                         - Total duration and time to first output
                         - Complete timeline of all output events with timestamps
                         - Which detection mechanism triggered early exit
@@ -1073,7 +1074,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - Prevents context overflow from verbose processes
                         
                         SMART FEATURES:
-                        - For offset=0, waits up to timeout_ms for new output to arrive
+                        - For offset=0, waits on native process output/exit events; it does not poll process state on a fixed interval
+                        - Blocking waits are bounded by min(timeout_ms, maxProcessWaitMs); the process keeps running when that deadline is reached
                         - Detects REPL prompts and process completion
                         - Shows process state (waiting for input, finished, etc.)
                         
@@ -1103,8 +1105,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - Interactive sessions can return newly available output while they remain active.
                         
                         SMART DETECTION:
-                        - Automatically waits for a recognized prompt when requested
+                        - Waits on native process output/exit events rather than fixed-interval status polling
+                        - Automatically returns when a recognized prompt is observed
                         - Detects errors and completion states
+                        - Blocking waits are bounded by min(timeout_ms, maxProcessWaitMs) without terminating the session
                         - Early exit prevents unnecessary waiting
                         - Cleans common REPL prompt text from returned output
                         

@@ -18,7 +18,8 @@ export interface TerminalSession {
   pid: number;
   process: ChildProcess;
   outputLines: string[];      // Line-based buffer (persistent, capped — oldest lines evicted)
-  lastReadIndex: number;      // Track where "new" output starts for default reads
+  lastReadIndex: number;      // Line cursor for offset=0 incremental reads
+  lastReadLineLength: number; // Consumed length of the last-read line, so later appends are not lost
   isBlocked: boolean;
   startTime: Date;
   bufferedChars: number;      // Joined length of outputLines (content + separators)
@@ -39,7 +40,7 @@ export interface TimingInfo {
   startTime: number;
   endTime: number;
   totalDurationMs: number;
-  exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_exit' | 'timeout' | 'cancelled';
+  exitReason: 'early_exit_quick_pattern' | 'early_exit_event_state' | 'process_exit' | 'timeout' | 'cancelled';
   firstOutputTime?: number;
   lastOutputTime?: number;
   timeToFirstOutputMs?: number;

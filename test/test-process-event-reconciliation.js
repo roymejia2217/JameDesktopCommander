@@ -168,6 +168,32 @@ test('start_process reconciliation is event-driven and returns on process output
   }
 });
 
+test('percentage progress does not look like an interactive prompt', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'percentage-progress',
+    "process.stderr.write('Updating files:  42% (166/394)\\r'); setTimeout(() => process.exit(0), 180);",
+  );
+
+  let pid = -1;
+  try {
+    const result = await terminalManager.executeCommand(
+      nodeCommand(fixture),
+      2_000,
+      shell,
+      true,
+    );
+    pid = result.pid;
+
+    assert.ok(pid > 0);
+    assert.equal(result.isBlocked, false);
+    assert.equal(result.timingInfo?.exitReason, 'process_exit');
+    assert.match(result.output, /Updating files:\s+42% \(166\/394\)/);
+  } finally {
+    terminate(pid);
+  }
+});
+
 test('start_process drains cross-stream startup output before returning on a prompt', async () => {
   await configManager.resetConfig();
   const fixture = await writeFixture(

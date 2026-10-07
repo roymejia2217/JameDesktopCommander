@@ -44,22 +44,34 @@ async function readUntilCompleted(pid, expectedOutput) {
   return completionRead;
 }
 
-async function assertCompletedOutputRemainsReadable(pid, expectedOutput) {
-  const completedRead = await readProcessOutput({
+async function assertCompletedCursorAndHistory(pid, expectedOutput) {
+  const incrementalRead = await readProcessOutput({
     pid,
     timeout_ms: 1_000,
     offset: 0,
   });
 
-  assert(!completedRead.isError, 'Should be able to read from completed process');
-  const text = resultText(completedRead);
+  assert(!incrementalRead.isError, 'Should be able to read from completed process');
+  const incrementalText = resultText(incrementalRead);
   assert(
-    text.includes(expectedOutput),
-    'Completed session must retain the final process output',
+    !incrementalText.includes(expectedOutput),
+    'Completed session must not replay output already consumed by offset=0',
   );
   assert(
-    text.includes('Process completed with exit code 0'),
+    incrementalText.includes('Process completed with exit code 0'),
     'Completed session must retain completion metadata',
+  );
+
+  const historicalRead = await readProcessOutput({
+    pid,
+    timeout_ms: 1_000,
+    offset: -1_000,
+  });
+
+  assert(!historicalRead.isError, 'Should support explicit completed-session history reads');
+  assert(
+    resultText(historicalRead).includes(expectedOutput),
+    'Completed session must retain output for explicit history reads',
   );
 }
 
@@ -73,7 +85,7 @@ async function testReadCompletedProcessOutput() {
   const pid = extractPid(startResult);
 
   await readUntilCompleted(pid, 'SUCCESS MESSAGE');
-  await assertCompletedOutputRemainsReadable(pid, 'SUCCESS MESSAGE');
+  await assertCompletedCursorAndHistory(pid, 'SUCCESS MESSAGE');
 
   console.log('PASS delayed process output remains readable after completion');
 }
@@ -88,7 +100,7 @@ async function testImmediateCompletion() {
   const pid = extractPid(startResult);
 
   await readUntilCompleted(pid, 'IMMEDIATE OUTPUT');
-  await assertCompletedOutputRemainsReadable(pid, 'IMMEDIATE OUTPUT');
+  await assertCompletedCursorAndHistory(pid, 'IMMEDIATE OUTPUT');
 
   console.log('PASS immediate process output remains readable after completion');
 }

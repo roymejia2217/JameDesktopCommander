@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "desktop-commander-test": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "dist/index.js",
+        "--no-onboarding"
+      ],
+      "env": {
+        "DESKTOP_COMMANDER_CONFIG_DIR": ".tmp/tool-validation",
+        "DESKTOP_COMMANDER_DISABLE_TELEMETRY": "1",
+        "PUPPETEER_SKIP_DOWNLOAD": "1",
+        "DC_FLAG_URL": "http://127.0.0.1:9/"
+      }
+    }
+  }
+}

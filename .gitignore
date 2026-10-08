@@ -34,6 +34,9 @@ coverage/
 # Optional npm cache directory
 .npm
 
+# Ephemeral repository-local verification state
+.tmp/
+
 # Optional eslint cache
 .eslintcache
 

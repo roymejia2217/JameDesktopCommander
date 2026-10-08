@@ -62,14 +62,15 @@ export function analyzeProcessState(output: string, pid?: number): ProcessState 
   }
 
   const lines = output.split('\n');
-  const lastLine = lines[lines.length - 1] || '';
+  const lastLine = (lines[lines.length - 1] || '').replace(/\r$/, '');
   const lastFewLines = lines.slice(-3).join('\n');
 
-  // Check for REPL prompts (waiting for input)
-  const allPrompts = Object.values(REPL_PROMPTS).flat();
-  const detectedPrompt = allPrompts.find(prompt => 
-    lastLine.endsWith(prompt) || lastLine.includes(prompt)
-  );
+  // Check only terminal prompt suffixes and prefer specific prompts over
+  // generic tokens such as "> " or "% ".
+  const allPrompts = Object.values(REPL_PROMPTS)
+    .flat()
+    .sort((left, right) => right.length - left.length);
+  const detectedPrompt = allPrompts.find(prompt => lastLine.endsWith(prompt));
 
   if (detectedPrompt) {
     return {

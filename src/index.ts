@@ -61,19 +61,13 @@ async function runServer() {
     const [
       { FilteredStdioServerTransport },
       { server, flushDeferredMessages },
-      { configManager },
-      { featureFlagManager },
       captureModule,
       loggerModule,
-      { ensureChromeAvailable },
     ] = await Promise.all([
       import('./custom-stdio.js'),
       import('./server.js'),
-      import('./config-manager.js'),
-      import('./utils/feature-flags.js'),
       import('./utils/capture.js'),
       import('./utils/logger.js'),
-      import('./tools/pdf/markdown.js'),
     ]);
     await import('./command-manager.js');
 
@@ -97,23 +91,6 @@ async function runServer() {
 
     // Export transport for use throughout the application
     global.mcpTransport = transport;
-
-    try {
-      deferLog('info', 'Loading configuration...');
-      await configManager.loadConfig();
-      deferLog('info', 'Configuration loaded successfully');
-
-      // Initialize feature flags (non-blocking)
-      deferLog('info', 'Initializing feature flags...');
-      await featureFlagManager.initialize();
-    } catch (configError) {
-      deferLog('error', `Failed to load configuration: ${configError instanceof Error ? configError.message : String(configError)}`);
-      if (configError instanceof Error && configError.stack) {
-        deferLog('debug', `Stack trace: ${configError.stack}`);
-      }
-      deferLog('warning', 'Continuing with in-memory configuration only');
-      // Continue anyway - we'll use an in-memory config
-    }
 
     // Handle uncaught exceptions
     process.on('uncaughtException', async (error) => {
@@ -151,8 +128,6 @@ async function runServer() {
       process.exit(1);
     });
 
-    capture('run_server_start');
-
     deferLog('info', 'Connecting server...');
 
     // Set up event-driven initialization completion handler
@@ -170,10 +145,7 @@ async function runServer() {
 
       // Now we can send regular logging messages
       transport.sendLog('info', 'Server connected successfully');
-      transport.sendLog('info', 'MCP fully initialized, all startup messages sent');
-
-      // Preemptively check/download Chrome for PDF generation (runs in background)
-      ensureChromeAvailable();
+      transport.sendLog('info', 'MCP protocol initialized; operational services remain lazy until first tool call');
     };
 
     await server.connect(transport);

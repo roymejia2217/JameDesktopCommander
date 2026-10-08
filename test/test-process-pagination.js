@@ -44,13 +44,14 @@ async function testNewOutputBehavior() {
   assert(!read2.isError, 'Second read should succeed');
   const text2 = read2.content[0].text;
   
-  // Should NOT re-read tick0 if we already read it
-  // (unless process completed, in which case all output is available)
-  if (text2.includes('Process completed')) {
-    console.log('  Process completed - all output available');
-  } else {
-    console.log(`  Second read status: ${text2.split('\n')[0]}`);
+  // offset=0 is incremental across the active -> completed transition.
+  if (lines1 > 0) {
+    assert(
+      !text2.includes('tick0'),
+      'Second incremental read must not replay output consumed before completion',
+    );
   }
+  console.log(`  Second read status: ${text2.split('\n')[0]}`);
   
   console.log('✅ Test 1 passed: New output behavior works correctly');
 }

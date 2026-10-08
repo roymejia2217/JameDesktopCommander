@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(JsonValueSchema),
+  z.record(JsonValueSchema),
+]));
+
 // Config tools schemas
 export const GetConfigArgsSchema = z.object({
   // 'ui' marks calls the config-editor widget fires programmatically; they are
@@ -39,7 +56,16 @@ export const ReadProcessOutputArgsSchema = z.object({
   timeout_ms: z.number().optional(),
   offset: z.number().optional(),   // Line offset: 0=from last read, positive=absolute, negative=tail
   length: z.number().optional(),   // Max lines to return (default from config.fileReadLineLimit)
+  wait_for: z.enum(['output', 'exit']).optional().default('output'),
   verbose_timing: z.boolean().optional(),
+}).superRefine((data, ctx) => {
+  if (data.wait_for === 'exit' && (data.offset ?? 0) !== 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['wait_for'],
+      message: 'wait_for="exit" requires offset=0',
+    });
+  }
 });
 
 export const ForceTerminateArgsSchema = z.object({
@@ -60,7 +86,7 @@ export const ReadFileArgsSchema = z.object({
   length: z.number().optional().default(1000),
   sheet: z.string().optional(),  // String only for MCP client compatibility (Cursor doesn't support union types in JSON Schema)
   range: z.string().optional(),
-  options: z.record(z.any()).optional(),
+  options: z.record(JsonValueSchema).optional(),
   // Whether the call came from the file-preview UI (refresh/navigation) or the
   // LLM. 'ui' calls are excluded from tool-call telemetry; see isUiOriginCall
   // in server.ts.
@@ -157,8 +183,8 @@ export const EditBlockArgsSchema = z.object({
   expected_replacements: z.number().optional().default(1),
   // Structured file range rewrite (Excel, etc.)
   range: z.string().optional(),
-  content: z.any().optional(),
-  options: z.record(z.any()).optional(),
+  content: JsonValueSchema.optional(),
+  options: z.record(JsonValueSchema).optional(),
   // 'ui' when fired by the file-preview UI, else 'llm'. 'ui' calls are
   // excluded from tool-call telemetry; see isUiOriginCall in server.ts.
   origin: z.enum(['ui', 'llm']).optional(),
@@ -239,10 +265,28 @@ export const GetRecentToolCallsArgsSchema = z.object({
   since: z.string().datetime().optional(),
 });
 
-export const TrackUiEventArgsSchema = z.object({
+const UiEventParamsSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
+
+export const UiEventEnvelopeSchema = z.object({
   event: z.string().min(1).max(80),
   component: z.string().optional().default('file_preview'),
-  params: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().default({}),
+  params: UiEventParamsSchema.optional().default({}),
+});
+
+export const TrackUiEventArgsSchema = z.object({
+  event: z.string().min(1).max(80).optional(),
+  component: z.string().optional(),
+  params: UiEventParamsSchema.optional(),
+  events: z.array(UiEventEnvelopeSchema).min(1).max(32).optional(),
+}).superRefine((data, ctx) => {
+  const hasSingle = typeof data.event === 'string';
+  const hasBatch = Array.isArray(data.events);
+  if (hasSingle === hasBatch) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Provide either event or events, but not both',
+    });
+  }
 });
 
 

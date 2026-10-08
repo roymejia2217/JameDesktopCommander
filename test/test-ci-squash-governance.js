@@ -13,6 +13,10 @@ const workflowPath = process.argv[2]
   : path.join(repositoryRoot, '.github', 'workflows', 'ci.yml');
 
 const workflow = YAML.parse(fs.readFileSync(workflowPath, 'utf8'));
+const contributing = fs.readFileSync(
+  path.join(repositoryRoot, 'CONTRIBUTING.md'),
+  'utf8',
+);
 const steps = workflow.jobs?.['required-ci']?.steps ?? [];
 const defaultsIndex = steps.findIndex(
   (step) => step.name === 'Validate repository squash defaults',
@@ -62,5 +66,21 @@ assert.doesNotMatch(
   'CI must not rely on REST merge settings omitted by the Actions token',
 );
 assert.match(script, /core\.setFailed\(/, 'CI must fail closed on repository drift');
+
+assert.match(
+  contributing,
+  /squash commit message must remain blank/i,
+  'CONTRIBUTING.md must require an empty squash commit body',
+);
+assert.match(
+  contributing,
+  /must not override the squash commit message/i,
+  'CONTRIBUTING.md must forbid manual squash commit-message overrides',
+);
+assert.doesNotMatch(
+  contributing,
+  /pull-request body as the squash commit message/i,
+  'CONTRIBUTING.md must not claim that the PR body becomes the squash commit body',
+);
 
 console.log('CI squash governance contract: PASS');

@@ -21,13 +21,25 @@ import {
 } from './markdown/conflict-dialog.js';
 import type { RenderPayload } from './model.js';
 import {
+    recordPresentationMount,
+    recordPresentationRender,
+} from './presentation-metrics.js';
+import { createLatestRenderScheduler } from './presentation-scheduler.js';
+import {
     MARKDOWN_EDITOR_CACHE_LIMIT,
     areRenderPayloadsEquivalent,
     setBoundedMapEntry,
 } from './presentation-state.js';
 import { attachPanelActions } from './panel-actions.js';
-import { extractRenderPayload, extractToolText, getFileExtensionForAnalytics, isLikelyUrl, isPreviewStructuredContent } from './payload-utils.js';
+import { extractRenderPayload, extractToolText, getFileExtensionForAnalytics, isLikelyUrl } from './payload-utils.js';
 import type { HtmlPreviewMode } from './types.js';
+import {
+    createWorkspaceState,
+    isPersistedWorkspaceState,
+    normalizeWorkspaceState,
+    type PersistedWorkspaceState,
+    type WorkspaceState,
+} from './workspace-state.js';
 
 let isExpanded = false;
 let hideSummaryRow = false;
@@ -49,6 +61,7 @@ let localPayloadOverride: RenderPayload | undefined;
 let hostPayload: RenderPayload | undefined;
 let inlinePayloadBeforeFullscreen: RenderPayload | undefined;
 let directoryBackPayload: RenderPayload | undefined;
+let workspaceRootPath: string | undefined;
 let selectionAbortController: AbortController | null = null;
 const markdownEditorAppCache = new Map<string, { appName: string; appPath?: string }>();
 
@@ -300,6 +313,7 @@ export function renderApp(
     htmlMode: HtmlPreviewMode = 'rendered',
     expandedState = false
 ): void {
+    recordPresentationRender();
     clearPreviewWatchdog();
     isExpanded = expandedState;
     currentHtmlMode = htmlMode;
@@ -414,6 +428,7 @@ export function renderApp(
             buildOpenInFolderCommand: (filePath) => buildOpenInFolderCommand(filePath, isLikelyUrl),
             onOpenPayload: (nextPayload) => {
                 directoryBackPayload = payload;
+                persistPayload?.(nextPayload);
                 renderApp(container, nextPayload, 'rendered', true);
             },
         });
@@ -424,6 +439,7 @@ export function renderApp(
         const savedPayload = directoryBackPayload;
         backBtn.addEventListener('click', () => {
             directoryBackPayload = undefined;
+            persistPayload?.(savedPayload);
             renderApp(container, savedPayload, 'rendered', true);
         });
     }
@@ -459,6 +475,7 @@ export function bootstrapApp(): void {
     if (!container) {
         return;
     }
+    recordPresentationMount();
     renderLoadingState(container);
 
     // Mount the conflict dialog once at body level. It's position: fixed and
@@ -489,24 +506,54 @@ export function bootstrapApp(): void {
         hideSummaryRow = chrome.hideSummaryRow;
     };
 
-    const widgetState = createWidgetStateStorage<RenderPayload>(
-        (value): value is RenderPayload => isPreviewStructuredContent(value) && typeof (value as any).content === 'string'
+    const widgetState = createWidgetStateStorage<PersistedWorkspaceState>(
+        isPersistedWorkspaceState
     );
+    const readWorkspaceState = (): WorkspaceState | undefined => (
+        normalizeWorkspaceState(widgetState.read())
+    );
+    const restoreWorkspaceState = (state: WorkspaceState): RenderPayload => {
+        workspaceRootPath = state.rootPath;
+        directoryBackPayload = state.directoryBackPayload;
+        return state.currentPayload;
+    };
+    const writeWorkspaceState = (payload: RenderPayload): void => {
+        const rootPath = workspaceRootPath ?? hostPayload?.filePath ?? payload.filePath;
+        widgetState.write(createWorkspaceState(rootPath, payload, directoryBackPayload));
+    };
+
+    const renderScheduler = createLatestRenderScheduler<RenderPayload>({
+        schedule: (callback) => (
+            typeof window.requestAnimationFrame === 'function'
+                ? window.requestAnimationFrame(callback)
+                : window.setTimeout(callback, 0)
+        ),
+        cancel: (id) => {
+            if (typeof window.cancelAnimationFrame === 'function') {
+                window.cancelAnimationFrame(id);
+            } else {
+                window.clearTimeout(id);
+            }
+        },
+        getCurrent: () => currentPayload,
+        equivalent: areRenderPayloadsEquivalent,
+        render: (payload) => {
+            renderApp(container, payload, 'rendered', isExpanded);
+        },
+    });
 
     const renderAndSync = (payload?: RenderPayload): void => {
         if (payload) {
-            widgetState.write(payload);
-            if (areRenderPayloadsEquivalent(currentPayload, payload)) {
-                return;
-            }
+            writeWorkspaceState(payload);
         }
-        renderApp(container, payload, 'rendered', isExpanded);
+        renderScheduler.enqueue(payload);
     };
     const syncFromPersistedWidgetState = (): void => {
-        const persistedPayload = widgetState.read();
-        if (!persistedPayload) {
+        const persistedState = readWorkspaceState();
+        if (!persistedState) {
             return;
         }
+        const persistedPayload = restoreWorkspaceState(persistedState);
 
         if (
             currentPayload
@@ -516,18 +563,16 @@ export function bootstrapApp(): void {
             return;
         }
 
-        renderAndSync(persistedPayload);
+        renderScheduler.enqueue(persistedPayload);
     };
 
     syncPayload = renderAndSync;
-    persistPayload = (payload: RenderPayload) => {
-        widgetState.write(payload);
-    };
+    persistPayload = writeWorkspaceState;
     rerenderCurrent = () => {
         renderApp(container, currentPayload, currentHtmlMode, isExpanded);
     };
 
-    let pendingCachedPayload: RenderPayload | undefined;
+    let pendingCachedState: WorkspaceState | undefined;
     let lastToolInputArgs: Record<string, unknown> | undefined;
     // The mutation tool that produced the current tool call, if any — stamped
     // onto the pulled payload so telemetry attributes to write_file/edit_block
@@ -600,14 +645,21 @@ export function bootstrapApp(): void {
         }
         if (
             !initialStateResolved
-            && pendingCachedPayload
+            && pendingCachedState
             && requestedPath
-            && pendingCachedPayload.filePath === requestedPath
+            && pendingCachedState.rootPath === requestedPath
         ) {
-            const cached = pendingCachedPayload;
-            pendingCachedPayload = undefined;
-            resolveInitialState(cached);
+            const cached = pendingCachedState;
+            pendingCachedState = undefined;
+            renderedForCurrentInput = true;
+            resolveInitialState(restoreWorkspaceState(cached));
             return;
+        }
+        if (requestedPath) {
+            if (workspaceRootPath !== requestedPath) {
+                directoryBackPayload = undefined;
+            }
+            workspaceRootPath = requestedPath;
         }
 
         renderLoadingState(container);
@@ -622,7 +674,7 @@ export function bootstrapApp(): void {
     };
 
     app.ontoolresult = (result) => {
-        pendingCachedPayload = undefined;
+        pendingCachedState = undefined;
 
         if (renderedForCurrentInput) {
             return;
@@ -693,6 +745,8 @@ export function bootstrapApp(): void {
     };
 
     const teardown = (): void => {
+        renderScheduler.cancel();
+        filePreviewUiEvent.cancel();
         clearPreviewWatchdog();
         shellController?.dispose();
         shellController = undefined;
@@ -735,12 +789,12 @@ export function bootstrapApp(): void {
                 if (restoreWasPartial && restorePayload) {
                     localPayloadOverride = restorePayload;
                     currentPayload = restorePayload;
-                    widgetState.write(restorePayload);
+                    writeWorkspaceState(restorePayload);
                     void markdownController.handleInlineExitFromFullscreen(restorePayload).then((freshPayload) => {
                         if (freshPayload) {
                             currentPayload = freshPayload;
                             localPayloadOverride = freshPayload;
-                            widgetState.write(freshPayload);
+                            writeWorkspaceState(freshPayload);
                             rerenderCurrent?.();
                         }
                     });
@@ -765,7 +819,7 @@ export function bootstrapApp(): void {
         },
         onConnected: () => {
             currentHostContext = app.getHostContext() as Record<string, unknown> | undefined;
-            pendingCachedPayload = widgetState.read() ?? undefined;
+            pendingCachedState = readWorkspaceState();
         },
     }).catch(() => {
         renderStatusState(container, 'Failed to connect to host.');

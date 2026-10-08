@@ -6,6 +6,11 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const serverPath = path.join(rootDir, 'dist', 'index.js');
 
 async function testConditionalTools() {
     console.log('\n=== Test: Conditional Tool Registration ===\n');
@@ -23,8 +28,9 @@ async function testConditionalTools() {
     );
 
     const regularTransport = new StdioClientTransport({
-        command: "node",
-        args: ["../dist/index.js"]
+        command: process.execPath,
+        args: [serverPath],
+        cwd: rootDir,
     });
 
     await regularClient.connect(regularTransport);
@@ -59,8 +65,9 @@ async function testConditionalTools() {
     );
 
     const dcTransport = new StdioClientTransport({
-        command: "node",
-        args: ["../dist/index.js"]
+        command: process.execPath,
+        args: [serverPath],
+        cwd: rootDir,
     });
 
     await dcClient.connect(dcTransport);

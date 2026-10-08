@@ -73,6 +73,8 @@ import { usageTracker } from './utils/usageTracker.js';
 import { processDockerPrompt } from './utils/dockerPrompt.js';
 import { toolHistory } from './utils/toolHistory.js';
 import { handleWelcomePageOnboarding, skipWelcomePageOnboarding } from './utils/welcome-onboarding.js';
+import { configManager } from './config-manager.js';
+import { featureFlagManager } from './utils/feature-flags.js';
 
 import { VERSION } from './version.js';
 import { capture, capture_call_tool, runInUiOriginCallContext } from "./utils/capture.js";
@@ -210,6 +212,54 @@ async function updateCurrentClient(clientInfo: { name?: string, version?: string
     return false;
 }
 
+let operationalInitialization: Promise<void> | null = null;
+
+async function initializeOperationalRuntime(): Promise<void> {
+    try {
+        logToStderr('info', 'Loading configuration...');
+        await configManager.loadConfig();
+        logToStderr('info', 'Configuration loaded successfully');
+
+        logToStderr('info', 'Initializing feature flags...');
+        await featureFlagManager.initialize();
+
+        const isWelcomePageEligibleClient = currentClient.name !== 'desktop-commander-app'
+            && currentClient.name !== 'desktop-commander'
+            && !isRemoteClientContext(currentClient.name)
+            && !(global as any).disableOnboarding;
+
+        if (isWelcomePageEligibleClient) {
+            await handleWelcomePageOnboarding(currentClient.name);
+        } else {
+            await skipWelcomePageOnboarding();
+        }
+
+        capture('run_server_start');
+        capture('run_server_mcp_initialized', {
+            host_entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT?.substring(0, 100),
+            host_agent: process.env.AI_AGENT?.substring(0, 100),
+            host_plugin_id: process.env.CLAUDE_PLUGIN_DATA
+                ? path.basename(process.env.CLAUDE_PLUGIN_DATA).substring(0, 100)
+                : undefined,
+        });
+
+    } catch (error) {
+        logToStderr(
+            'warning',
+            `Operational runtime initialization failed; continuing with lazy defaults: ${
+                error instanceof Error ? error.message : String(error)
+            }`,
+        );
+    }
+}
+
+export async function ensureOperationalRuntimeInitialized(): Promise<void> {
+    if (!operationalInitialization) {
+        operationalInitialization = initializeOperationalRuntime();
+    }
+    await operationalInitialization;
+}
+
 // Add handler for initialization method - capture client info
 server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequest) => {
     try {
@@ -217,42 +267,7 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
         const clientInfo = request.params?.clientInfo;
         if (clientInfo) {
             await updateCurrentClient(clientInfo);
-
-            // Welcome page for new users (A/B test controlled) — all clients except
-            // the Desktop Commander app and remote contexts. Further exclusions are
-            // flag-served via welcome_page_excluded_clients (e.g. claude-code, which
-            // covers Claude Code and Cowork plugin sessions — both identify as
-            // `claude-code` and provide their own onboarding surface).
-            const isWelcomePageEligibleClient = currentClient.name !== 'desktop-commander-app'
-                && currentClient.name !== 'desktop-commander'
-                && !isRemoteClientContext(currentClient.name)
-                && !(global as any).disableOnboarding;
-
-            if (isWelcomePageEligibleClient) {
-                await handleWelcomePageOnboarding(currentClient.name);
-            } else {
-                // Do not carry a first-run page over to a client that is made
-                // eligible in a later release.
-                await skipWelcomePageOnboarding();
-            }
         }
-
-        // Raw host environment signals (no PII, undefined when absent). Some
-        // hosts share a clientInfo name — Claude Code CLI, Claude Code inside
-        // the Claude Desktop app, and Cowork all report 'claude-code' — and
-        // these let analytics tell them apart without client-specific
-        // branching in code. Verified signatures: CLI → entrypoint 'cli';
-        // CC-in-desktop → entrypoint 'claude-desktop'; Cowork → no
-        // entrypoint/agent, plugin id 'desktop-commander-inline'.
-        // Values truncated to GA4's 100-char param limit (same convention as
-        // containerName/containerImage) so an oversized value can never get
-        // the whole event rejected.
-        capture('run_server_mcp_initialized', {
-            host_entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT?.substring(0, 100),
-            host_agent: process.env.AI_AGENT?.substring(0, 100),
-            host_plugin_id: process.env.CLAUDE_PLUGIN_DATA
-                ? path.basename(process.env.CLAUDE_PLUGIN_DATA).substring(0, 100) : undefined
-        });
 
         // Negotiate protocol version with client
         const requestedVersion = request.params?.protocolVersion;
@@ -382,6 +397,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         Read PDF files and extract content as markdown and images.
                         
                         Suitable for reading authorized local files directly without starting a shell command.
+                        For two or more already-known file paths, prefer read_multiple_files instead of issuing separate read_file calls.
+                        This tool is for model analysis and does not mount a Presentation widget.
                         
                         Supports partial file reading with:
                         - 'offset' (start line, default: 0)
@@ -445,6 +462,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         Render the shared interactive workspace for a file, URL, or directory.
                         Use read_file or list_directory for ordinary analysis and automation.
                         Call render_workspace only when a visual/interactive workspace is useful or explicitly requested.
+                        Do not call render_workspace merely because the model needs file contents.
+                        Use offset and length to render only the relevant range when full-file visualization is unnecessary.
                         The mounted workspace can navigate files and directories internally without additional render-tool calls.
 
                         ${PATH_GUIDANCE}
@@ -477,6 +496,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 name: "read_multiple_files",
                 description: `
                         Read the contents of multiple files simultaneously.
+                        Prefer this tool when two or more file paths are already known.
+                        One MCP call batches those reads and reduces remote round-trips.
+                        This tool is for model analysis and does not mount a Presentation widget.
                         
                         Each file's content is returned with its path as a reference.
                         Handles text files normally and renders images as viewable content.
@@ -1001,7 +1023,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         SMART DETECTION:
                         - Detects REPL prompts (>>>, >, $, etc.)
                         - Identifies when a process is waiting for input
-                        - Recognizes process completion vs timeout
+                        - Reacts to native process output/exit events instead of fixed-interval status polling
+                        - Recognizes process completion vs bounded wait deadlines
                         - Early exit prevents unnecessary waiting
                         
                         STATES DETECTED:
@@ -1011,7 +1034,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
                         PERFORMANCE DEBUGGING (verbose_timing parameter):
                         Set verbose_timing: true to get detailed timing information including:
-                        - Exit reason (early_exit_quick_pattern, early_exit_periodic_check, process_exit, timeout)
+                        - Exit reason (early_exit_quick_pattern, early_exit_event_state, process_exit, timeout)
                         - Total duration and time to first output
                         - Complete timeline of all output events with timestamps
                         - Which detection mechanism triggered early exit
@@ -1037,10 +1060,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                           * Positive: Read from absolute line position
                           * Negative: Read last N lines from end (tail behavior)
                         - 'length' (max lines to read, default: configurable via 'fileReadLineLimit' setting)
+                        - 'wait_for' (offset=0 only)
+                          * "output" (default): return when new output or process exit is observed
+                          * "exit": ignore intermediate output as a return condition and wait for process exit
                         
                         Examples:
                         - offset: 0, length: 100     → First 100 NEW lines since last read
                         - offset: 0                  → All new lines (respects config limit)
+                        - offset: 0, wait_for: "exit" → Wait for process completion without model-side output polling
                         - offset: 500, length: 50    → Lines 500-549 (absolute position)
                         - offset: -20                → Last 20 lines (tail)
                         - offset: -50, length: 10    → Start 50 from end, read 10 lines
@@ -1051,7 +1078,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - Prevents context overflow from verbose processes
                         
                         SMART FEATURES:
-                        - For offset=0, waits up to timeout_ms for new output to arrive
+                        - For offset=0, waits on native process events; it does not poll process state on a fixed interval
+                        - wait_for="output" wakes on new output or exit; wait_for="exit" wakes only on exit, cancellation, or deadline
+                        - Blocking waits are bounded by min(timeout_ms, maxProcessWaitMs); the process keeps running when that deadline is reached
+                        - Long external watchers can use wait_for="exit" to avoid repeated model turns for intermediate progress
                         - Detects REPL prompts and process completion
                         - Shows process state (waiting for input, finished, etc.)
                         
@@ -1081,8 +1111,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - Interactive sessions can return newly available output while they remain active.
                         
                         SMART DETECTION:
-                        - Automatically waits for a recognized prompt when requested
+                        - Waits on native process output/exit events rather than fixed-interval status polling
+                        - Automatically returns when a recognized prompt is observed
                         - Detects errors and completion states
+                        - Blocking waits are bounded by min(timeout_ms, maxProcessWaitMs) without terminating the session
                         - Early exit prevents unnecessary waiting
                         - Cleans common REPL prompt text from returned output
                         
@@ -1307,6 +1339,8 @@ import { ServerResult, type ToolExecutionContext } from './types.js';
 import { createToolExecutionContext } from './tools/tool-execution-context.js';
 
 server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
+    await ensureOperationalRuntimeInitialized();
+
     const args = request.params.arguments;
     const executionContext = createToolExecutionContext(extra);
 

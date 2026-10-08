@@ -9,6 +9,17 @@ import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
 
+const LEGACY_TEST_CONFIG_KEYS = ['__nonblockingSaveRegressionTest'] as const;
+
+export const DEFAULT_MAX_PROCESS_WAIT_MS = 180_000;
+
+export function normalizeMaxProcessWaitMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_PROCESS_WAIT_MS;
+  }
+  return Math.min(value, DEFAULT_MAX_PROCESS_WAIT_MS);
+}
+
 export interface ServerConfig {
   blockedCommands?: string[];
   defaultShell?: string;
@@ -16,6 +27,7 @@ export interface ServerConfig {
   telemetryEnabled?: boolean; // New field for telemetry control
   fileWriteLineLimit?: number; // Line limit for file write operations
   fileReadLineLimit?: number; // Default line limit for file read operations (changed from character-based)
+  maxProcessWaitMs?: number; // Maximum blocking wait for terminal tool calls before handing control back
   clientId?: string; // Unique client identifier for analytics
   currentClient?: ClientInfo; // Current connected client information
   [key: string]: any; // Allow for arbitrary configuration keys (including abTest_* keys)
@@ -50,7 +62,7 @@ export function isTelemetryDisabledValue(value: unknown): boolean {
 /**
  * Singleton config manager for the server
  */
-class ConfigManager {
+export class ConfigManager {
   private configPath: string;
   private config: ServerConfig = {};
   private initialized = false;
@@ -63,10 +75,8 @@ class ConfigManager {
   private watcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
-    // Get user's home directory
-    // Define config directory and file paths
-    this.configPath = CONFIG_FILE;
+  constructor(configPath = CONFIG_FILE) {
+    this.configPath = configPath;
   }
 
   /**
@@ -87,8 +97,14 @@ class ConfigManager {
         this.config = await this.readConfigFromDisk();
         this._isFirstRun = false;
 
-        if (this.config['welcomeOnboardingEligible'] === undefined) {
+        const needsWelcomeMigration = this.config['welcomeOnboardingEligible'] === undefined;
+        const hasLegacyTestArtifact = LEGACY_TEST_CONFIG_KEYS.some((key) => Object.prototype.hasOwnProperty.call(this.config, key));
+
+        if (needsWelcomeMigration || hasLegacyTestArtifact) {
           await this.performConfigMutation((latest) => {
+            for (const key of LEGACY_TEST_CONFIG_KEYS) {
+              delete latest[key];
+            }
             if (latest['welcomeOnboardingEligible'] === undefined) {
               latest['welcomeOnboardingEligible'] = false;
               latest['pendingWelcomeOnboarding'] = false;
@@ -191,6 +207,7 @@ class ConfigManager {
       telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
       fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      maxProcessWaitMs: DEFAULT_MAX_PROCESS_WAIT_MS,
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
       welcomeOnboardingEligible: true // Distinguishes new installs from migrated legacy configs
     };
@@ -333,14 +350,23 @@ class ConfigManager {
   }
 
   private async reloadConfigFromDisk(): Promise<void> {
-    try {
-      const latest = await this.readConfigFromDisk();
-      for (const mutate of this.pendingMutations) mutate(latest);
-      latest['version'] = VERSION;
-      this.config = latest;
-    } catch (error: any) {
-      if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);
-    }
+    // Serialize watcher reloads with durable mutations. Without this, a reload
+    // can begin reading an older snapshot, a setValue/resetConfig can commit a
+    // newer value, and then the stale reload can finish last and overwrite the
+    // fresh in-memory config. Keeping both operations on one chain preserves
+    // disk/in-memory ordering without sleeps or polling.
+    const reload = this.writeChain.then(async () => {
+      try {
+        const latest = await this.readConfigFromDisk();
+        for (const mutate of this.pendingMutations) mutate(latest);
+        latest['version'] = VERSION;
+        this.config = latest;
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);
+      }
+    });
+    this.writeChain = reload.then(() => {}, () => {});
+    await reload;
   }
 
   /**
@@ -348,7 +374,10 @@ class ConfigManager {
    */
   async getConfig(): Promise<ServerConfig> {
     await this.init();
-    return { ...this.config };
+    return {
+      ...this.config,
+      maxProcessWaitMs: normalizeMaxProcessWaitMs(this.config.maxProcessWaitMs),
+    };
   }
 
   /**
@@ -458,6 +487,27 @@ class ConfigManager {
       }
 
       await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /**
+   * Release filesystem resources owned by this manager.
+   *
+   * ConfigManager instances are reusable only for their active lifecycle. Close
+   * the watcher first so final persistence cannot schedule reload work against a
+   * directory that a caller is about to remove.
+   */
+  async close(): Promise<void> {
+    if (this.reloadTimer) {
+      clearTimeout(this.reloadTimer);
+      this.reloadTimer = null;
+    }
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    if (this.initialized) {
+      await this.flushPendingWrites();
     }
   }
 

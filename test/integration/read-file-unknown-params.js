@@ -25,6 +25,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const TEST_DIR = path.join(__dirname, 'test_read_file_unknown_params');
+const CONFIG_DIR = path.join(PROJECT_ROOT, '.tmp', 'integration-config', 'read-file-unknown-params');
 const TEST_FILE = path.join(TEST_DIR, 'numbered.txt');
 const LINE_COUNT = 50;
 
@@ -39,7 +40,12 @@ function textOf(result) {
 async function createMcpClient() {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(PROJECT_ROOT, 'dist/index.js'), '--no-onboarding'],
+    args: [
+      path.join(PROJECT_ROOT, 'dist/index.js'),
+      '--config-dir',
+      CONFIG_DIR,
+      '--no-onboarding',
+    ],
     cwd: PROJECT_ROOT,
     stderr: 'pipe',
     env: { ...process.env, DESKTOP_COMMANDER_DISABLE_TELEMETRY: 'true' },

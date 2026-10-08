@@ -1,4 +1,4 @@
-import { configManager, ServerConfig } from '../config-manager.js';
+import { configManager, DEFAULT_MAX_PROCESS_WAIT_MS, ServerConfig } from '../config-manager.js';
 import { SetConfigValueArgsSchema } from './schemas.js';
 import { getSystemInfo } from '../utils/system-info.js';
 import { currentClient } from '../server.js';
@@ -219,6 +219,26 @@ export async function setConfigValue(args: unknown) {
         if (!Array.isArray(valueToStore)) {
           console.error(`Value for ${parsed.data.key} is still not an array, converting to array`);
           valueToStore = [String(valueToStore)];
+        }
+      }
+
+      if (parsed.data.key === 'maxProcessWaitMs') {
+        if (typeof valueToStore === 'string' && valueToStore.trim() !== '') {
+          valueToStore = Number(valueToStore);
+        }
+        if (
+          typeof valueToStore !== 'number' ||
+          !Number.isFinite(valueToStore) ||
+          valueToStore <= 0 ||
+          valueToStore > DEFAULT_MAX_PROCESS_WAIT_MS
+        ) {
+          return {
+            content: [{
+              type: "text",
+              text: `Value for maxProcessWaitMs must be a positive finite number no greater than ${DEFAULT_MAX_PROCESS_WAIT_MS}ms.`
+            }],
+            isError: true
+          };
         }
       }
 

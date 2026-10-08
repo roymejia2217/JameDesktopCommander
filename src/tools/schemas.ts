@@ -59,11 +59,12 @@ export const ReadProcessOutputArgsSchema = z.object({
   wait_for: z.enum(['output', 'exit']).optional().default('output'),
   verbose_timing: z.boolean().optional(),
 }).superRefine((data, ctx) => {
-  if (data.wait_for === 'exit' && (data.offset ?? 0) !== 0) {
+  // Absolute reads do not wait on process exit; incremental and tail reads do.
+  if (data.wait_for === 'exit' && (data.offset ?? 0) > 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['wait_for'],
-      message: 'wait_for="exit" requires offset=0',
+      message: 'wait_for="exit" requires offset<=0',
     });
   }
 });

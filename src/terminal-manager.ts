@@ -297,6 +297,61 @@ export class TerminalManager {
       }
     });
   }
+
+  async waitForSessionExit(
+    pid: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<Exclude<TerminalSessionChange, 'output'>> {
+    const currentState = (): Exclude<TerminalSessionChange, 'output'> | null => {
+      if (signal?.aborted) return 'cancelled';
+      if (this.sessions.has(pid)) return null;
+      return 'exit';
+    };
+
+    const immediate = currentState();
+    if (immediate) return immediate;
+
+    const emitter = this.sessionEvents.get(pid);
+    if (!emitter) return 'exit';
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: NodeJS.Timeout | null = null;
+      let abortHandler: (() => void) | null = null;
+
+      const cleanup = () => {
+        emitter.removeListener('change', onChange);
+        if (timeout) clearTimeout(timeout);
+        if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
+      };
+
+      const settle = (change: Exclude<TerminalSessionChange, 'output'>) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(change);
+      };
+
+      const onChange = (change: 'output' | 'exit') => {
+        if (change === 'exit') settle('exit');
+      };
+      emitter.on('change', onChange);
+
+      const afterSubscribe = currentState();
+      if (afterSubscribe) {
+        settle(afterSubscribe);
+        return;
+      }
+
+      timeout = setTimeout(() => settle('timeout'), Math.max(0, timeoutMs));
+      if (signal) {
+        abortHandler = () => settle('cancelled');
+        signal.addEventListener('abort', abortHandler, { once: true });
+        if (signal.aborted) abortHandler();
+      }
+    });
+  }
   
   async executeCommand(
     command: string,

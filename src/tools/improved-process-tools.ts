@@ -304,6 +304,7 @@ export async function readProcessOutput(
     timeout_ms = 5000, 
     offset = 0,                    // 0 = from last read, positive = absolute, negative = tail
     length = defaultLength,        // Default from config, same as file reading
+    wait_for = 'output',
     verbose_timing = false 
   } = parsed.data;
   const effectiveWaitMs = resolveProcessWaitMs(timeout_ms, config.maxProcessWaitMs);
@@ -331,16 +332,38 @@ export async function readProcessOutput(
       });
   };
 
-  // For active sessions with no unread output yet, wait on native process
-  // output/exit signals. A single deadline bounds the tool call; there is no
-  // fixed-interval state polling.
+  // For active sessions, wait on native process events with one bounded
+  // deadline. wait_for="output" preserves the existing incremental behavior;
+  // wait_for="exit" ignores intermediate output as a return condition so
+  // long-running external watchers do not force model-side polling.
   const session = terminalManager.getSession(pid);
+  let waitOutcome: 'output' | 'exit' | 'timeout' | 'cancelled' | null = null;
   if (session && offset === 0) {
-    if (!terminalManager.hasUnreadOutput(pid)) {
+    if (wait_for === 'exit') {
+      queueProgress(`Waiting for process ${pid} to exit`);
+      waitOutcome = await terminalManager.waitForSessionExit(
+        pid,
+        effectiveWaitMs,
+        context?.signal,
+      );
+      await progressQueue;
+
+      if (waitOutcome === 'cancelled') {
+        return {
+          content: [{ type: "text", text: `Reading process ${pid} output was cancelled by caller.` }],
+          isError: true,
+        };
+      }
+
+      if (waitOutcome === 'exit') {
+        queueProgress(`Process ${pid} completed`);
+        await progressQueue;
+      }
+    } else if (!terminalManager.hasUnreadOutput(pid)) {
       const snapshot = terminalManager.captureOutputSnapshot(pid);
       if (snapshot) {
         queueProgress(`Waiting for output from process ${pid}`);
-        const waitResult = await terminalManager.waitForSessionChange(
+        waitOutcome = await terminalManager.waitForSessionChange(
           pid,
           snapshot,
           effectiveWaitMs,
@@ -348,16 +371,16 @@ export async function readProcessOutput(
         );
         await progressQueue;
 
-        if (waitResult === 'cancelled') {
+        if (waitOutcome === 'cancelled') {
           return {
             content: [{ type: "text", text: `Reading process ${pid} output was cancelled by caller.` }],
             isError: true,
           };
         }
 
-        if (waitResult === 'output' || waitResult === 'exit') {
+        if (waitOutcome === 'output' || waitOutcome === 'exit') {
           queueProgress(
-            waitResult === 'output'
+            waitOutcome === 'output'
               ? `Output is available from process ${pid}`
               : `Process ${pid} completed`,
           );
@@ -413,6 +436,8 @@ export async function readProcessOutput(
       ? ` (runtime: ${(result.runtimeMs / 1000).toFixed(2)}s)` 
       : '';
     processStateMessage = `\n✅ Process completed with exit code ${result.exitCode}${runtimeStr}`;
+  } else if (wait_for === 'exit' && waitOutcome === 'timeout') {
+    processStateMessage = '\n⏱️ Process is still running (exit wait deadline reached)';
   } else if (session) {
     // State detection only needs recent terminal context; avoid joining the
     // entire retained buffer (which can be tens of megabytes).

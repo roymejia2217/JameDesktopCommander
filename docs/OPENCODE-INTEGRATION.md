@@ -16,6 +16,12 @@ Only project aliases are model-visible: neither user prompts nor JDC tools may s
 
 The two-sided check only verifies protocol tool **names**. It does not prove request/response schema compatibility, authentication, cancellation, connection handling, or real-host deployment; those require separate versioned fixtures and end-to-end tests. Changes to the manifest or pinned gateway baseline require review and reconciliation in **both** repositories.
 
+## Client-side selector binding
+
+JDC validates each structured gateway response using the existing Zod result contracts. In addition, scoped responses must echo the exact project alias sent by the client; operations targeting an existing session must also echo that exact session ID. Missing, incorrect or cross-project/session selectors fail closed with a generic mismatch error, without echoing the unexpected values. Both OpenCode model-visible argument schemas reject unknown keys, including caller-supplied working directories.
+
+Synthetic MCP-over-HTTP regression tests exercise genuine client transport and tool calls, including positive responses and mismatched project/session payloads. These checks provide **client-side binding protection**, not an end-to-end proof that every private gateway request/response schema or deployed binary is equivalent to the public contract.
+
 ## Release provenance and recovery
 
 Record JDC and gateway source commits, their independently built artifact hashes, exact Windows runtime paths, service identities, running process IDs and hashes of protected configuration files. Do not publish secrets, bridge tokens, private source archives or secret-bearing command lines.

@@ -15,6 +15,21 @@ assert.equal(
     true,
 );
 
+// Alias-only tools must fail closed on caller-supplied directories or other
+// unrecognized selectors instead of silently stripping them.
+assert.equal(OpenCodeReadArgsSchema.safeParse({
+    action: 'status', project: 'test-project', sessionId: 'ses_valid',
+    workingDirectory: 'unapproved-directory',
+}).success, false);
+assert.equal(OpenCodeTaskArgsSchema.safeParse({
+    action: 'run', project: 'test-project', prompt: 'synthetic',
+    cwd: 'unapproved-directory',
+}).success, false);
+assert.equal(OpenCodeTaskArgsSchema.safeParse({
+    action: 'run', project: 'test-project', prompt: 'synthetic',
+    directory: 'unapproved-directory',
+}).success, false);
+
 const previousUrl = process.env.OPENCODE_GATEWAY_RDC_URL;
 const previousToken = process.env.OPENCODE_GATEWAY_RDC_BRIDGE_TOKEN;
 try {

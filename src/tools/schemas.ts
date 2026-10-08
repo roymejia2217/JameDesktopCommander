@@ -299,7 +299,7 @@ export const OpenCodeReadArgsSchema = z.object({
   project: OpenCodeProjectSchema.optional(),
   sessionId: OpenCodeSessionSchema.optional(),
   offset: z.number().int().min(0).optional(),
-}).superRefine((data, ctx) => {
+}).strict().superRefine((data, ctx) => {
   if (['sessions', 'status', 'messages', 'diff'].includes(data.action) && !data.project) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['project'], message: 'project is required for this action' });
   }
@@ -323,7 +323,7 @@ export const OpenCodeTaskArgsSchema = z.object({
   prompt: z.string().min(1).optional(),
   agent: z.string().min(1).max(128).optional(),
   timeout_ms: z.number().int().min(1000).max(1800000).optional(),
-}).superRefine((data, ctx) => {
+}).strict().superRefine((data, ctx) => {
   if (['start', 'run', 'continue'].includes(data.action) && !data.prompt) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['prompt'], message: 'prompt is required for this action' });
   }

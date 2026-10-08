@@ -176,13 +176,22 @@ async function callGateway(
     args: Record<string, unknown>,
     options?: GatewayCallOptions,
 ): Promise<Record<string, unknown>> {
-    return structured(
+    const response = structured(
         await client.callTool(
             { name, arguments: args },
             undefined,
             options,
         ),
     );
+    // Bind every scoped response to the selector that JDC actually sent.
+    // A structurally valid response for another project/session is not safe.
+    if (typeof args.project === 'string' && response.project !== args.project) {
+        throw new Error('OpenCode gateway response project mismatch');
+    }
+    if (typeof args.sessionId === 'string' && response.sessionId !== args.sessionId) {
+        throw new Error('OpenCode gateway response session mismatch');
+    }
+    return response;
 }
 
 async function finalTaskResult(

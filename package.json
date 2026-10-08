@@ -42,7 +42,7 @@
     "prepare": "husky",
     "clean": "shx rm -rf dist",
     "test:prepare": "shx rm -rf .tmp/test-config && shx mkdir -p .tmp/test-config",
-    "test:unit": "node --env-file=test/test.env --import=./test/setup-test-environment.js --test --test-concurrency=1 \"test/test*.js\"",
+    "test:unit": "node --env-file=test/test.env --import=./test/setup-test-environment.js --test --test-reporter=spec --test-concurrency=1 \"test/test*.js\"",
     "test": "npm run build && npm run test:prepare && npm run test:unit",
     "test:integration:prepare": "shx rm -rf .tmp/integration-config && shx mkdir -p .tmp/integration-config",
     "test:integration": "npm run build && npm run test:integration:prepare && node --env-file=test/integration/integration.env --test --test-concurrency=1 \"test/integration/*.js\"",

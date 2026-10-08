@@ -10,8 +10,25 @@ class CommandManager {
 
     extractCommands(commandString: string): string[] {
         try {
-            // Trim any leading/trailing whitespace
-            commandString = commandString.trim();
+            // Tokenize PowerShell here-string bodies separately. Their embedded quotes
+            // and regex pipes are data to the outer command parser, not separators.
+            // Conservatively inspect every body line as potential executable source:
+            // Invoke-Expression can execute these strings at runtime.
+            const hereStringBodies: string[] = [];
+            commandString = commandString.replace(
+                /@(['"])\r?\n([\s\S]*?)^\1@(?=\r?$)/gm,
+                (_source, _delimiter: string, body: string) => {
+                    hereStringBodies.push(body);
+                    return "''";
+                },
+            );
+            const includesHereString = hereStringBodies.length > 0;
+            // A PowerShell line break separates statements unless escaped.
+            // Only normalize after identifying here-strings, so the old scanner
+            // remains unchanged for other supported shells.
+            commandString = (includesHereString
+                ? commandString.replace(/\r?\n/g, ';')
+                : commandString).trim();
 
             // Define command separators - these are the operators that can chain commands
             const separators = [';', '&&', '||', '|', '&'];
@@ -159,6 +176,14 @@ class CommandManager {
                 if (baseCommand) commands.push(baseCommand);
             }
 
+            // A here-string can be executed by Invoke-Expression, so its own
+            // commands must be checked even when the outer script treats it as
+            // literal data. Analyze each physical line to preserve statements.
+            for (const body of hereStringBodies) {
+                for (const line of body.split(/\r?\n/)) {
+                    if (line.trim()) commands.push(...this.extractCommands(line));
+                }
+            }
             // Remove duplicates and return
             return [...new Set(commands)];
         } catch (error) {

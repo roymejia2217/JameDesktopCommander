@@ -55,6 +55,19 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Check out pinned OpenCode gateway protocol source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: roymejia2217/chatgpt-opencode-mcp
+          ref: 0176b5780a7037d5637b7e75ff1a650fae386570
+          path: .gateway-contract-source
+          persist-credentials: false
+
+      - name: Validate cross-repository OpenCode MCP tool contract
+        env:
+          JDC_GATEWAY_CHECKOUT: .gateway-contract-source
+        run: node --test test/contracts/gateway-surface.test.js
+
       - name: Validate repository squash defaults
         if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0

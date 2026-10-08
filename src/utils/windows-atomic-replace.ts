@@ -11,6 +11,9 @@ const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_SHARING_VIOLATION = 32;
+const ERROR_UNABLE_TO_REMOVE_REPLACED = 1175;
+const REPLACE_RETRY_ATTEMPTS = 50;
+const REPLACE_RETRY_DELAY_MS = 10;
 
 let apiPromise: Promise<Win32FileApi> | undefined;
 
@@ -20,7 +23,7 @@ function makeWin32Error(code: number, target: string, cause?: unknown): NodeJS.E
             ? 'ENOENT'
             : code === ERROR_ACCESS_DENIED
               ? 'EACCES'
-              : code === ERROR_SHARING_VIOLATION
+              : code === ERROR_SHARING_VIOLATION || code === ERROR_UNABLE_TO_REMOVE_REPLACED
                 ? 'EBUSY'
                 : 'EIO';
 
@@ -67,24 +70,35 @@ async function loadWin32FileApi(): Promise<Win32FileApi> {
 
 export async function replaceFileWin32(target: string, replacement: string): Promise<void> {
     const api = await loadWin32FileApi();
-    const replaced = api.replaceFile(target, replacement, null, 0, null, null);
-    if (replaced !== 0) return;
 
-    const win32Code = api.getLastError();
+    for (let attempt = 0; attempt < REPLACE_RETRY_ATTEMPTS; attempt++) {
+        const replaced = api.replaceFile(target, replacement, null, 0, null, null);
+        if (replaced !== 0) return;
 
-    if (win32Code === ERROR_FILE_NOT_FOUND || win32Code === ERROR_PATH_NOT_FOUND) {
-        await fs.rename(replacement, target);
-        return;
-    }
+        const win32Code = api.getLastError();
 
-    if (win32Code === ERROR_ACCESS_DENIED || win32Code === ERROR_SHARING_VIOLATION) {
-        try {
+        if (
+            win32Code === ERROR_UNABLE_TO_REMOVE_REPLACED
+            && attempt < REPLACE_RETRY_ATTEMPTS - 1
+        ) {
+            await new Promise((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS));
+            continue;
+        }
+
+        if (win32Code === ERROR_FILE_NOT_FOUND || win32Code === ERROR_PATH_NOT_FOUND) {
             await fs.rename(replacement, target);
             return;
-        } catch (renameError) {
-            throw makeWin32Error(win32Code, target, renameError);
         }
-    }
 
-    throw makeWin32Error(win32Code, target);
+        if (win32Code === ERROR_ACCESS_DENIED || win32Code === ERROR_SHARING_VIOLATION) {
+            try {
+                await fs.rename(replacement, target);
+                return;
+            } catch (renameError) {
+                throw makeWin32Error(win32Code, target, renameError);
+            }
+        }
+
+        throw makeWin32Error(win32Code, target);
+    }
 }

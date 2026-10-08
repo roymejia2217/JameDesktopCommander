@@ -56,7 +56,16 @@ export const ReadProcessOutputArgsSchema = z.object({
   timeout_ms: z.number().optional(),
   offset: z.number().optional(),   // Line offset: 0=from last read, positive=absolute, negative=tail
   length: z.number().optional(),   // Max lines to return (default from config.fileReadLineLimit)
+  wait_for: z.enum(['output', 'exit']).optional().default('output'),
   verbose_timing: z.boolean().optional(),
+}).superRefine((data, ctx) => {
+  if (data.wait_for === 'exit' && (data.offset ?? 0) !== 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['wait_for'],
+      message: 'wait_for="exit" requires offset=0',
+    });
+  }
 });
 
 export const ForceTerminateArgsSchema = z.object({

@@ -257,6 +257,101 @@ test('read_process_output waits on terminal events without polling', async () =>
   }
 });
 
+test('read_process_output rejects exit waiting with historical offsets', async () => {
+  const result = await readProcessOutput({
+    pid: 12345,
+    timeout_ms: 1_000,
+    offset: -20,
+    length: 20,
+    wait_for: 'exit',
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(
+    textOf(result),
+    /wait_for.*exit.*offset.*0/i,
+    'exit waiting must fail closed when combined with a historical offset',
+  );
+});
+
+test('read_process_output can wait for exit without returning on intermediate output', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'read-wait-for-exit',
+    "setTimeout(() => console.log('workflow-progress-one'), 120); setTimeout(() => console.log('workflow-progress-two'), 240); setTimeout(() => process.exit(0), 420);",
+  );
+
+  const start = await terminalManager.executeCommand(
+    nodeCommand(fixture),
+    30,
+    shell,
+    false,
+  );
+  assert.ok(start.pid > 0);
+
+  try {
+    const result = await withIntervalForbidden(() =>
+      readProcessOutput({
+        pid: start.pid,
+        timeout_ms: 2_000,
+        offset: 0,
+        length: 20,
+        wait_for: 'exit',
+      }),
+    );
+
+    const text = textOf(result);
+    assert.match(text, /workflow-progress-one/);
+    assert.match(text, /workflow-progress-two/);
+    assert.match(
+      text,
+      /Process completed with exit code 0/,
+      'exit mode must remain blocked across output events until the process completes',
+    );
+  } finally {
+    terminate(start.pid);
+  }
+});
+
+test('read_process_output exit mode returns on its bounded deadline without killing the process', async () => {
+  await configManager.resetConfig();
+  const fixture = await writeFixture(
+    'read-wait-for-exit-deadline',
+    "setTimeout(() => console.log('deadline-progress-one'), 60); setTimeout(() => console.log('deadline-progress-two'), 120); setTimeout(() => {}, 1_500);",
+  );
+
+  const start = await terminalManager.executeCommand(
+    nodeCommand(fixture),
+    25,
+    shell,
+    false,
+  );
+  assert.ok(start.pid > 0);
+
+  try {
+    const result = await withIntervalForbidden(() =>
+      readProcessOutput({
+        pid: start.pid,
+        timeout_ms: 240,
+        offset: 0,
+        length: 20,
+        wait_for: 'exit',
+      }),
+    );
+
+    const text = textOf(result);
+    assert.match(text, /deadline-progress-one/);
+    assert.match(text, /exit wait deadline reached/);
+    assert.doesNotMatch(text, /Process completed with exit code/);
+    assert.ok(
+      terminalManager.getSession(start.pid),
+      'reaching the exit-wait deadline must not terminate the underlying process',
+    );
+  } finally {
+    terminate(start.pid);
+  }
+});
+
 test('read_process_output returns appends to an already-read partial line', async () => {
   await configManager.resetConfig();
   const fixture = await writeFixture(

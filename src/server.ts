@@ -1060,10 +1060,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                           * Positive: Read from absolute line position
                           * Negative: Read last N lines from end (tail behavior)
                         - 'length' (max lines to read, default: configurable via 'fileReadLineLimit' setting)
+                        - 'wait_for' (offset=0 only)
+                          * "output" (default): return when new output or process exit is observed
+                          * "exit": ignore intermediate output as a return condition and wait for process exit
                         
                         Examples:
                         - offset: 0, length: 100     → First 100 NEW lines since last read
                         - offset: 0                  → All new lines (respects config limit)
+                        - offset: 0, wait_for: "exit" → Wait for process completion without model-side output polling
                         - offset: 500, length: 50    → Lines 500-549 (absolute position)
                         - offset: -20                → Last 20 lines (tail)
                         - offset: -50, length: 10    → Start 50 from end, read 10 lines
@@ -1074,8 +1078,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         - Prevents context overflow from verbose processes
                         
                         SMART FEATURES:
-                        - For offset=0, waits on native process output/exit events; it does not poll process state on a fixed interval
+                        - For offset=0, waits on native process events; it does not poll process state on a fixed interval
+                        - wait_for="output" wakes on new output or exit; wait_for="exit" wakes only on exit, cancellation, or deadline
                         - Blocking waits are bounded by min(timeout_ms, maxProcessWaitMs); the process keeps running when that deadline is reached
+                        - Long external watchers can use wait_for="exit" to avoid repeated model turns for intermediate progress
                         - Detects REPL prompts and process completion
                         - Shows process state (waiting for input, finished, etc.)
                         

@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "repository": "roymejia2217/chatgpt-opencode-mcp",
+  "sourceCommit": "0176b5780a7037d5637b7e75ff1a650fae386570",
+  "transportPath": "/rdc-mcp",
+  "requiredTools": [
+    "gateway_health",
+    "project_list",
+    "task_abort",
+    "task_continue",
+    "task_diff",
+    "task_messages",
+    "task_sessions",
+    "task_start",
+    "task_status",
+    "task_wait"
+  ]
+}

@@ -138,6 +138,9 @@ jobs:
       - name: Run repository verification
         run: npm run verify
 
+      - name: Validate public OpenCode MCP payload examples
+        run: node --test test/contracts/gateway-payload-examples.test.js
+
       - name: Verify npm package contents
         run: npm pack --dry-run
 
@@ -163,6 +166,9 @@ jobs:
 
       - name: Verify minimum supported Node.js runtime
         run: npm run verify
+
+      - name: Validate public OpenCode payloads on Node 22.19
+        run: node --test test/contracts/gateway-payload-examples.test.js
 
   windows-ui-bridge:
     name: Windows UI Bridge

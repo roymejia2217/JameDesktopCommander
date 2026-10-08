@@ -14,7 +14,13 @@ Only project aliases are model-visible: neither user prompts nor JDC tools may s
 
 **Gateway CI (separate repository)** must check out the public JDC manifest at a reviewed commit and compare all actual gateway `registerTool` names against it. This check belongs in the private gateway CI, which may safely fetch the public contract. Do not supply gateway repository read credentials to public JDC PR workflows. Pin third-party Actions by SHA, and avoid executing downloaded PR code under credentials that can read the private gateway.
 
-The two-sided check only verifies protocol tool **names**. It does not prove request/response schema compatibility, authentication, cancellation, connection handling, or real-host deployment; those require separate versioned fixtures and end-to-end tests. Changes to the manifest or pinned gateway baseline require review and reconciliation in **both** repositories.
+The two-sided tool-name check does not prove request/response schema compatibility, authentication, cancellation, connection handling, or real-host deployment. Changes to the manifest or pinned gateway baseline require review and reconciliation in **both** repositories.
+
+## Public synthetic payload examples
+
+`contracts/opencode-gateway-examples.json` contains illustrative, non-sensitive requests and successful structured responses for all ten MCP tools, plus two error envelopes. JDC tests use an in-process synthetic MCP-over-HTTP server to verify the actual client accepts these examples on the minimum supported Node version and the primary CI runtime. The examples intentionally contain no live session IDs, filesystem paths or credentials.
+
+**Status:** The public fixture is a reviewed client acceptance baseline, **not** a schema specification or proof of private gateway compatibility. Private gateway CI must independently execute its real MCP handlers against the *same pinned examples* before claiming reciprocal payload acceptance. Until that step passes, this remains a one-sided compatibility gate.
 
 ## Client-side selector binding
 

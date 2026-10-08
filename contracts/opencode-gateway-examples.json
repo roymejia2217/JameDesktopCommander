@@ -1,0 +1,150 @@
+{
+  "formatVersion": 1,
+  "description": "Public synthetic MCP request/response interoperability examples. No real tasks, paths or credentials.",
+  "cases": {
+    "gateway_health": {
+      "request": {},
+      "response": {
+        "gateway": "ok",
+        "opencode": {
+          "healthy": true,
+          "version": "test-version"
+        },
+        "projectCount": 1
+      }
+    },
+    "project_list": {
+      "request": {},
+      "response": {
+        "projects": [
+          "contract-project"
+        ]
+      }
+    },
+    "task_sessions": {
+      "request": {
+        "project": "contract-project"
+      },
+      "response": {
+        "project": "contract-project",
+        "result": {
+          "sessions": [
+            {
+              "id": "ses_contract_example",
+              "updatedAt": 1700000000,
+              "active": false
+            }
+          ]
+        }
+      }
+    },
+    "task_start": {
+      "request": {
+        "project": "contract-project",
+        "prompt": "synthetic test request"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      }
+    },
+    "task_continue": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "prompt": "synthetic next request"
+      },
+      "response": {
+        "accepted": true,
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      }
+    },
+    "task_status": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "result": {
+          "state": "completed",
+          "messageCount": 1
+        }
+      }
+    },
+    "task_wait": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "result": {
+          "state": "completed",
+          "messageCount": 1
+        }
+      }
+    },
+    "task_messages": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "result": {
+          "messages": [
+            {
+              "role": "assistant",
+              "completed": true,
+              "failed": false,
+              "aborted": false,
+              "text": "Synthetic response only"
+            }
+          ]
+        }
+      }
+    },
+    "task_diff": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "result": {
+          "status": [],
+          "stagedDiff": "",
+          "unstagedDiff": "",
+          "untrackedDiff": ""
+        }
+      }
+    },
+    "task_abort": {
+      "request": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example"
+      },
+      "response": {
+        "project": "contract-project",
+        "sessionId": "ses_contract_example",
+        "aborted": true
+      }
+    }
+  },
+  "errorExamples": [
+    {
+      "code": "UNKNOWN_SESSION",
+      "message": "Session is not available for this project"
+    },
+    {
+      "code": "INVALID_INPUT",
+      "message": "Prompt is invalid"
+    }
+  ]
+}

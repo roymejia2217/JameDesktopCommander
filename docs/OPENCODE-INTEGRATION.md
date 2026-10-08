@@ -1,41 +1,33 @@
-# JameDesktopCommander and OpenCode gateway integration
+# JameDesktopCommander–OpenCode integration contract
 
-## Separate sources of truth
+## Ownership and trust boundaries
 
-The two source repositories are deliberately independent:
+JameDesktopCommander (JDC) is the public source of the ChatGPT-facing MCP tools and its OpenCode **client**. [chatgpt-opencode-mcp](https://github.com/roymejia2217/chatgpt-opencode-mcp) is a **private**, independently released gateway, owning authentication, project aliases, Git/worktree admission and OpenCode sessions. OpenCode itself is a separate runtime. A Git worktree is not an independent source repository.
 
-- [JameDesktopCommander](https://github.com/roymejia2217/JameDesktopCommander) owns the ChatGPT-facing MCP tools, terminal, Windows UI bridge, OpenCode **client** and Remote Device integration.
-- [chatgpt-opencode-mcp](https://github.com/roymejia2217/chatgpt-opencode-mcp) owns the authenticated loopback gateway, allowlisted project aliases, clean/registered Git worktree checks, session ownership and gateway MCP **server**.
-- OpenCode is a separate upstream runtime. WinSW service wrappers, installed binaries, local allowlists, credentials and Git trust config are **deployment state**, not additional Git source repositories.
-- Secondary worktrees of either Git repository are not new independent sources of truth.
+Only project aliases are model-visible: neither user prompts nor JDC tools may select arbitrary directories. The gateway validates worktree identity; the OpenCode Windows service identity has its own administrator-controlled Git trust configuration.
 
-Ordinary JDC file/terminal tools do not require the OpenCode gateway. The OpenCode tools use only administrator-enrolled **aliases**, not caller-supplied working directories.
+## Public contract and two-sided CI
 
-## Pinned source compatibility gate
+`contracts/opencode-gateway.json` is the **public protocol manifest**. It declares the accepted MCP tool names, loopback transport path, format version and the gateway commit last reviewed by the maintainers. The commit is review provenance, **not** proof that a runner fetched or executed that private gateway source.
 
-`contracts/opencode-gateway.json` pins an exact Git commit of the gateway. On every JDC pull request and main push, Required CI checks out that immutable commit with credential persistence disabled and runs `test/contracts/gateway-surface.test.js`.
+**JDC CI** parses its local TypeScript client with the TypeScript AST and verifies that all `callGateway` names match this manifest. It never checks out or executes private gateway source and needs no cross-repository credentials. This is essential because JDC is public and executes CI on pull requests.
 
-The test parses real TypeScript source using the installed TypeScript compiler API. It verifies the gateway's `registerTool` names exactly match the reviewed protocol list and the JDC adapter's `callGateway` names. Any source-ref change or unexpected tool name fails the gate and requires a deliberate compatibility review.
+**Gateway CI (separate repository)** must check out the public JDC manifest at a reviewed commit and compare all actual gateway `registerTool` names against it. This check belongs in the private gateway CI, which may safely fetch the public contract. Do not supply gateway repository read credentials to public JDC PR workflows. Pin third-party Actions by SHA, and avoid executing downloaded PR code under credentials that can read the private gateway.
 
-**Scope:** This is a source-level MCP tool-name compatibility check. It is **not** proof that every payload schema, authentication setting, event stream, process, installed build, or session behavior is production compatible. Keep repository unit tests and real-host E2E admission/rollback independent. Do not mark this gate as full deployed compatibility.
+The two-sided check only verifies protocol tool **names**. It does not prove request/response schema compatibility, authentication, cancellation, connection handling, or real-host deployment; those require separate versioned fixtures and end-to-end tests. Changes to the manifest or pinned gateway baseline require review and reconciliation in **both** repositories.
 
-## Deployment provenance requirements
+## Release provenance and recovery
 
-For every production rollout, independently record:
+Record JDC and gateway source commits, their independently built artifact hashes, exact Windows runtime paths, service identities, running process IDs and hashes of protected configuration files. Do not publish secrets, bridge tokens, private source archives or secret-bearing command lines.
 
-1. JDC remote `main` SHA, isolated compiled source SHA, build/packaging evidence, executable SHA-256, process PID and exact running command. Do not assume the source of `main` is the running binary.
-2. Gateway remote `main` SHA, isolated compiled source SHA, `dist/http-cli.js` digest, WinSW service working directory, service executable path and PID.
-3. OpenCode version, service identity and loopback binding; **do not disclose** tokens, full secret-bearing command lines or protected configuration contents.
-4. Gateway project allowlist and the separate protected OpenCode `GIT_CONFIG_GLOBAL` trust-file hashes. Record accepted alias names and identities without printing secrets.
-5. Verified backups and rollback targets for each affected component; restart only services owned by the changed component.
-6. Authenticated health, loopback-only endpoints, unauthenticated HTTP 401, registered/clean worktree, rejected dirty/unregistered alias, real read-only task, empty diff, and session continuation across gateway-only restart.
+For an approved rollout:
+1. Preserve the dirty canonical checkouts and build in clean isolated worktrees.
+2. Back up the actual protected service configuration and alias allowlist, verifying digests.
+3. Verify JDC and gateway versions separately; restart only the owning changed service.
+4. Check authenticated health, loopback-only listeners and HTTP 401 for unauthenticated clients.
+5. Verify accepted clean worktree and rejected dirty/foreign aliases, real read-only OpenCode execution, empty task diff and continuation after gateway-only restart.
+6. Verify rollback and preserve the original runtime until acceptance is confirmed.
 
-Do not auto-enroll new directories because a prompt mentions them. A Git `safe.directory` trust entry does not replace gateway worktree admission. Do not use wildcard Git trust or clean/stash/reset a user's checkout.
+A passing repository CI does **not** prove that the production runtime has been deployed. At the October 8 acceptance, the active JDC runtime was still based on `cf47811` and the gateway runtime on `e5e3aeb19910a6da9274aed226d826889ce2c61a`. These are historical observations; do not assume they remain current.
 
-## Release distinction
-
-A successful GitHub build means **source accepted by CI**. Only a provenance-checked, reversible installation and real-host smoke means **runtime accepted**. JDC and gateway must be released and rolled back independently.
-
-Historical read-only acceptance (2026-10-08) used JDC runtime `cf47811` and gateway runtime `e5e3aeb19910a6da9274aed226d826889ce2c61a`. Later integrated source commits differ: JDC `053b84671e0e631d7228ec52f3f533c8fba0f2e0` and gateway `0176b5780a7037d5637b7e75ff1a650fae386570`. These are **snapshot references, not assertions of present deployment state**.
-
-Remaining gates for full integration closure: versioned input/output schemas, cross-repository runtime protocol E2E on pinned binaries, immutable artifact hashes, and a confirmed JDC rollout with rollback. Keep the integration governance issue open until those are proven.
+Issue #32 remains open until cross-repository schema/E2E evidence and reversible JDC runtime rollout are complete.

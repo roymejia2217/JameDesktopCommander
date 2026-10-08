@@ -338,7 +338,9 @@ export async function readProcessOutput(
   // long-running external watchers do not force model-side polling.
   const session = terminalManager.getSession(pid);
   let waitOutcome: 'output' | 'exit' | 'timeout' | 'cancelled' | null = null;
-  if (session && offset === 0) {
+  // A negative tail offset can wait for exit and return the bounded final
+  // output in one tool call. Positive absolute reads remain non-blocking.
+  if (session && (offset === 0 || (wait_for === 'exit' && offset < 0))) {
     if (wait_for === 'exit') {
       queueProgress(`Waiting for process ${pid} to exit`);
       waitOutcome = await terminalManager.waitForSessionExit(

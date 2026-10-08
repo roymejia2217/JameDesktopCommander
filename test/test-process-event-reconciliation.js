@@ -257,11 +257,11 @@ test('read_process_output waits on terminal events without polling', async () =>
   }
 });
 
-test('read_process_output rejects exit waiting with historical offsets', async () => {
+test('read_process_output rejects exit waiting with positive absolute offsets', async () => {
   const result = await readProcessOutput({
     pid: 12345,
     timeout_ms: 1_000,
-    offset: -20,
+    offset: 20,
     length: 20,
     wait_for: 'exit',
   });
@@ -270,7 +270,7 @@ test('read_process_output rejects exit waiting with historical offsets', async (
   assert.match(
     textOf(result),
     /wait_for.*exit.*offset.*0/i,
-    'exit waiting must fail closed when combined with a historical offset',
+    'exit waiting must fail closed with positive absolute offsets',
   );
 });
 

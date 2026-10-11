@@ -82,8 +82,8 @@ test('platform or source provenance mismatch denies candidate validation', async
 test('symlinks cannot be smuggled into a distribution payload', async () => {
   await withFixture(async options => {
     await buildCandidate(options);
-    await symlink(join(options.destination, 'dist/index.js'),
-      join(options.destination, 'redirect.js'), 'file');
+    await symlink(join(options.destination, 'dist'),
+      join(options.destination, 'redirect-dir'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(verifyCandidate(options), /link or non-regular entry/);
   });
 });

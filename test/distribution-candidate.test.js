@@ -105,7 +105,7 @@ test('TAR transport retains hidden dependency files and native Linux executable 
   await withFixture(async options => {
     await writeFile(join(options.source, 'node_modules', 'fixture', '.rels'), 'relationship\n');
     await writeFile(join(options.source, 'node_modules', '.package-lock.json'), '{}\n');
-    await chmod(options.binary, 0o755);
+    await chmod(options.nodeExecutable, 0o755);
     const manifest = await buildCandidate(options);
     const root = dirname(options.destination);
     const original = join(root, 'original.tar');

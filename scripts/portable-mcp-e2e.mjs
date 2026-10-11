@@ -4,7 +4,7 @@
  * Never invokes tools, installs services, or uses host configuration.
  */
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -145,11 +145,99 @@ try {
   assert.ok(toolText(finalRead).includes(rewritten.trim()), 'Rewritten content missing from read result');
   assert.ok(toolText(finalRead).includes(appended.trim()), 'Appended content missing from read result');
 
+  // T009: allowedDirectories is an application-level authorization policy.
+  // All writes are restricted to disposable fixture paths, never host files.
+  const allowedRoot = join(working, 'allowed');
+  const deniedRoot = join(working, 'allowed-sibling');
+  const allowedFile = join(allowedRoot, 'inside.txt');
+  const deniedFile = join(deniedRoot, 'outside.txt');
+  await mkdir(allowedRoot);
+  await mkdir(deniedRoot);
+  await writeFile(allowedFile, 'inside-initial\n');
+  await writeFile(deniedFile, 'outside-initial\n');
+
+  const configured = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [allowedRoot],
+  });
+  assert.notEqual(configured.isError, true, 'Could not enable the restricted file policy');
+
+  const allowedRead = await callFixtureTool('read_file', { path: allowedFile });
+  assert.notEqual(allowedRead.isError, true, 'Policy denied an explicitly allowed file');
+  const allowedWrite = await callFixtureTool('write_file', {
+    path: allowedFile, content: 'inside-updated\n', mode: 'rewrite',
+  });
+  assert.notEqual(allowedWrite.isError, true, 'Policy denied an explicitly allowed write');
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-updated\n');
+
+  // A configured directory may itself be a symlink/junction alias.
+  // Compare its canonical target against the already canonical file path.
+  const allowedAlias = join(working, 'allowed-alias');
+  await symlink(allowedRoot, allowedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  const aliasConfigured = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [allowedAlias],
+  });
+  assert.notEqual(aliasConfigured.isError, true, 'Cannot configure allowed directory alias');
+  const aliasRead = await callFixtureTool('read_file', { path: allowedFile });
+  assert.notEqual(aliasRead.isError, true, 'Canonical allowed directory alias denied valid access');
+  assert.ok(toolText(aliasRead).includes('inside-updated'), 'Alias returned wrong contents');
+
+  const missingConfigured = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [join(working, 'nonexistent-allowed-root')],
+  });
+  assert.notEqual(missingConfigured.isError, true, 'Cannot configure nonexistent allowed root');
+  const missingDenied = await callFixtureTool('read_file', { path: allowedFile });
+  assert.equal(missingDenied.isError, true, 'A nonexistent allowed root granted file access');
+
+  const restored = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [allowedRoot],
+  });
+  assert.notEqual(restored.isError, true, 'Cannot restore fixture allowed root');
+
+  async function assertDenied(name, args) {
+    const result = await callFixtureTool(name, args);
+    assert.equal(result.isError, true, 'Unauthorized MCP access succeeded: ' + name);
+  }
+  await assertDenied('read_file', { path: deniedFile });
+  await assertDenied('write_file', {
+    path: deniedFile, content: 'unauthorized\n', mode: 'rewrite',
+  });
+  const traversal = allowedRoot + sep + '..' + sep + 'allowed-sibling' + sep + 'outside.txt';
+  await assertDenied('read_file', { path: traversal });
+
+  const escapeLink = join(allowedRoot, 'escape');
+  await symlink(deniedRoot, escapeLink, process.platform === 'win32' ? 'junction' : 'dir');
+  await assertDenied('read_file', { path: join(escapeLink, 'outside.txt') });
+  await assertDenied('write_file', {
+    path: join(escapeLink, 'created-via-link.txt'), content: 'unauthorized\n', mode: 'rewrite',
+  });
+  await assert.rejects(lstat(join(deniedRoot, 'created-via-link.txt')), { code: 'ENOENT' });
+
+  if (process.platform === 'linux') {
+    const caseDifferentRoot = join(working, 'ALLOWED');
+    await mkdir(caseDifferentRoot);
+    assert.notEqual(await realpath(allowedRoot), await realpath(caseDifferentRoot),
+      'Linux test filesystem must distinguish path case');
+    const caseDifferentFile = join(caseDifferentRoot, 'case-outside.txt');
+    await writeFile(caseDifferentFile, 'case-initial\n');
+    await assertDenied('read_file', { path: caseDifferentFile });
+    await assertDenied('write_file', {
+      path: caseDifferentFile, content: 'unauthorized\n', mode: 'rewrite',
+    });
+    assert.equal(await readFile(caseDifferentFile, 'utf8'), 'case-initial\n',
+      'Case-different unauthorized file was modified');
+  }
+  assert.equal(await readFile(deniedFile, 'utf8'), 'outside-initial\n',
+    'Unauthorized file was modified');
+
+
   console.log(JSON.stringify({
     result: 'PASS', target: manifest.target, toolCount: tools.length,
     resourcesRead: read.contents.length, promptCount: prompts.length,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
-    modeOmissionRejected: true, releaseEligible: false,
+    modeOmissionRejected: true, accessPositiveChecks: 3,
+    unresolvedAllowlistDenied: true,
+    accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
+    outsideBytesPreserved: true, releaseEligible: false,
   }));
 } finally {
   await client.close().catch(() => {});

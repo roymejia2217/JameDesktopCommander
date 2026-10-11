@@ -154,6 +154,18 @@ or a production configuration. Temporary state is cleaned up after the client
 closes. Passing does not demonstrate OS confinement or safety of untested
 tool handlers, nor does it authorize a release.
 
+## Race-resistant filesystem access — open release blocker (T011)
+
+The path-based `validatePath()` authorization and subsequent filesystem
+operations are not atomic. A controlled adversarial test on the audited
+Linux runtime demonstrated an out-of-bound file effect under a concurrent
+filesystem namespace mutation. **T009 and T010 do not close this race**.
+The proposed native capability approach and the mandatory Windows/Linux
+acceptance gates are recorded in
+[`security/T011-FILESYSTEM-CAPABILITY-BOUNDARY.md`](security/T011-FILESYSTEM-CAPABILITY-BOUNDARY.md).
+T011 is an **open security blocker**, not an accepted fix or release
+authorization.
+
 ## Case-sensitive access boundary acceptance (T009)
 
 **Security regression:** lowercasing every filesystem path in

@@ -110,24 +110,20 @@ function buildPermissionError(filePath: string, errCode: string | undefined): Er
 // Initialize allowed directories from configuration
 async function getAllowedDirs(): Promise<string[]> {
     try {
-        let allowedDirectories;
-        const config = await configManager.getConfig();
-        if (config.allowedDirectories && Array.isArray(config.allowedDirectories)) {
-            allowedDirectories = config.allowedDirectories;
-        } else {
-            // Fall back to default directories if not configured
-            allowedDirectories = [
-                os.homedir()   // User's home directory
-            ];
-            // Update config with default
-            await configManager.setValue('allowedDirectories', allowedDirectories);
+        const configured = await configManager.getAllowedDirectoriesForFilesystem();
+        if (configured !== undefined) {
+            // Explicit [] intentionally retains the existing unrestricted policy.
+            return configured;
         }
-        return allowedDirectories;
+        // Preserve the legacy home-directory default only when the policy key
+        // is genuinely absent from a successfully retrieved configuration.
+        const homeDefault = [os.homedir()];
+        await configManager.setValue('allowedDirectories', homeDefault);
+        return homeDefault;
     } catch (error) {
-        console.error('Failed to initialize allowed directories:', error);
-        // Keep the default permissive path
+        console.error('Failed to load filesystem authorization policy:', error);
+        throw new Error('Filesystem access denied: authorization policy unavailable');
     }
-    return [];
 }
 
 // Preserve path case when enforcing allowedDirectories. On case-sensitive

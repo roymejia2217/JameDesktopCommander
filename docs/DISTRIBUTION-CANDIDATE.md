@@ -153,3 +153,31 @@ API. It does not use mocked handlers, a developer Node runtime, host services
 or a production configuration. Temporary state is cleaned up after the client
 closes. Passing does not demonstrate OS confinement or safety of untested
 tool handlers, nor does it authorize a release.
+
+## Case-sensitive access boundary acceptance (T009)
+
+**Security regression:** lowercasing every filesystem path in
+`src/tools/filesystem.ts` made distinct directories such as `allowed/` and
+`ALLOWED/` compare equal on Linux. With `allowedDirectories: [allowed]`,
+a real packaged MCP client could read and overwrite `ALLOWED/` despite the
+restriction. The failure was reproduced against an independently audited
+Linux candidate with entirely disposable files, and reproduced as denied
+after preserving case in the path comparison.
+
+The native acceptance test runs through the actual packaged MCP server
+using the bundled Node and official SDK. After the existing fixture tests,
+it configures exactly one allowed directory and verifies two authorized
+read/write operations. It then requires denials for direct sibling reads and
+writes, a traversal path, a directory link escaping the allowlist, and a
+new-file write through that link. The Linux runner additionally proves a
+case-different directory is distinct and rejects reads and writes there.
+Independent filesystem reads assert that none of the denied writes changed
+outside bytes. A failed denial is a hard CI failure.
+
+This intentionally preserves path case for all platforms; explicit
+case-sensitive matching may conservatively reject some differently cased
+Windows path spellings rather than inadvertently authorize a distinct path.
+Case preservation, symlink resolution and `allowedDirectories` do **not**
+constitute an OS sandbox, prevent races after validation, or constrain
+independent process-execution tools. Those require separate review and
+OS/provider-level enforcement. This test does not authorize publication.

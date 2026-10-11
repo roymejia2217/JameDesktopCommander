@@ -130,9 +130,10 @@ async function getAllowedDirs(): Promise<string[]> {
     return [];
 }
 
-// Normalize all paths consistently
+// Preserve path case when enforcing allowedDirectories. On case-sensitive
+// filesystems, case-folding would authorize a different sibling directory.
 function normalizePath(p: string): string {
-    return path.normalize(expandHome(p)).toLowerCase();
+    return path.normalize(expandHome(p));
 }
 
 function expandHome(filepath: string): string {

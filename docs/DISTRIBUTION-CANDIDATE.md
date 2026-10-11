@@ -113,3 +113,23 @@ that native ripgrep to establish architecture-level executability.
 The public integration issue #32 was closed administratively; its
 historical deployment and compatibility acceptance criteria must not
 be inferred to have passed solely from the issue's state.
+
+## Native packaged MCP end-to-end gate
+
+After uploading and downloading each native candidate, CI restores its TAR to
+an isolated path outside the checkout. `scripts/portable-mcp-e2e.mjs` uses the
+**official MCP SDK client shipped in the candidate itself** to spawn the
+**candidate's own Node executable** and compiled JDC server over stdio.
+
+The gate negotiates MCP initialization, checks advertised capabilities,
+discovers the tool catalog with uniqueness and selected-name requirements,
+lists UI resources, reads one actual UI resource, and lists prompts.
+The server receives a fresh temporary working directory and configuration,
+with telemetry disabled and a minimal child environment. It is closed and
+the temporary state is deleted even after failures.
+
+This verifies packaged protocol initialization and read-only catalog/resource
+operations on native CI runners. It does **not** exercise arbitrary tool calls,
+OS sandbox boundaries, clean-host installation, UI Bridge inclusion, service
+startup, real-host identity, upgrade/recovery, or rollback. Artifacts remain
+`releaseEligible: false` and unpublished.

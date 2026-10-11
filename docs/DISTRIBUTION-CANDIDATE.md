@@ -1,0 +1,115 @@
+# Internal portable distribution candidates (Windows and Linux)
+
+## Classification
+
+This pipeline produces **unpublished test candidates**, not official JDC
+releases or single-file native JDC binaries. Each candidate contains a copy
+of the official Node.js executable for its runner, JDC's transpiled JavaScript,
+locked production \`node_modules\`, and the licensing files required for the
+Node runtime and inherited upstream JDC source. The payload remains
+platform-specific: Windows x64 and Linux x64 are built and checked on their
+respective native GitHub runners.
+
+This first slice does **not** claim that JDC's native Windows UI Bridge or
+Remote Device/tunnel is bundled, nor that all optional browser/UI/native tool
+features have passed isolated installation or real-host acceptance. The
+present service and gateway deployment is not modified.
+
+GitHub's raw directory artifact upload omits dotfiles and does not guarantee
+preservation of executable permissions after extraction. Each native candidate
+is therefore stored as a **single TAR file inside the temporary GitHub
+Actions artifact ZIP**. The TAR includes hidden dependency metadata and
+retains Linux executable permission bits. Its contents are independently
+rechecked against the full manifest after a GitHub artifact upload/download
+round-trip, and the extracted Node/ripgrep runtime is smoke-tested again.
+The native TAR transport depends on the runner's standard tar utility.
+A green pre-upload staging verification alone is not sufficient.
+
+GitHub Actions retains each candidate for only seven days under
+\`UNPUBLISHED-jdc-portable-win32-x64\` and
+\`UNPUBLISHED-jdc-portable-linux-x64\`. No installer, npm publication,
+GitHub Release asset, tag, signing step or automatic update is created.
+The existing Release Please workflow remains unchanged.
+
+## CI gates and payload contract
+
+The file \`scripts/distribution-candidate.mjs\` uses only supported Node.js
+built-ins; it has five explicit operations: \`build\`, \`verify\`, \`smoke\`, \`archive\`, and \`roundtrip\`.
+Its final outputs are written exclusively under a fixed
+\`RUNNER_TEMP/jdc-candidate-<platform>-x64\` staging directory.
+
+The native CI matrix installs from \`package-lock.json\` with lifecycle
+scripts disabled, compiles the project, validates the MCP tool contract,
+runs negative tests of the candidate format, removes development
+dependencies, and then stages the resulting payload.
+
+Each candidate includes:
+
+- \`runtime/node.exe\` (Windows) or \`runtime/node\` (Linux): the exact
+  executable used by the corresponding Node 24 CI job
+- \`NODE-LICENSE\` copied from the installed Node distribution; build
+  fails if that license cannot be found
+- \`dist/\`, \`node_modules/\`, \`package.json\`, \`package-lock.json\`,
+  and the inherited \`LICENSE\`
+- \`candidate-manifest.json\`: \`schemaVersion: 1\`, immutable
+  \`releaseEligible: false\`, source SHA, run ID, attempt, target, exact Node
+  version, runtime executable, entrypoint and a sorted SHA-256/byte-length
+  inventory of **every other file**
+
+Verification independently traverses the staged tree, rejects symbolic
+links, junctions and other nonregular filesystem entries, rejects
+case-insensitive path collisions, validates all manifest entries and
+recomputes the entire inventory. Nothing is checked merely by pathname.
+It rejects source/runner mismatch, missing or extra files, and any changed
+byte. \`node_modules/.bin\` command symlinks are not part of the runtime
+payload. A candidate must remain \`private: true\` and keep existing
+upstream ownership metadata until rebranding is separately reviewed.
+
+The smoke gate runs the **packaged** Node executable, checks the packaged
+entrypoint's JavaScript syntax, locates the bundled ripgrep from within
+the payload, rejects any system fallback outside that payload, and runs
+that native ripgrep to establish architecture-level executability.
+
+## Explicit limitations
+
+- A Node executable plus JavaScript modules is a **portable runtime
+  bundle**, not a standalone single-file JDC native binary. Windows
+  native UI Bridge remains an independent build path.
+- The current Node setup selects the actively available Node 24 patch
+  level. Its exact version and executable bytes are recorded in the
+  manifest, but **byte-identical builds across dates are not guaranteed**.
+  Locking a reviewed runtime patch and independently validating the
+  entire binary supply chain is a separate release gate.
+- Source SHA, binary SHA-256 and native CI smoke do not prove the process
+  that is running on an operator's Windows machine came from this bundle.
+- The source build/CLI/test suite, real full MCP handshake, clean-machine
+  installation, user state migration, recovery after network loss,
+  uninstallation, signed binaries, least-privilege tool execution and
+  rollback still require **dedicated acceptance**.
+- The existing \`@wonderwhy-er/desktop-commander\` and
+  \`io.github.wonderwhy-er/desktop-commander\` identifiers belong to
+  upstream; this candidate must not be advertised as an official
+  independently branded JDC distribution. Resolve package identity,
+  licenses, third-party notices and release namespace ownership first.
+- Do not infer isolation from \`--no-onboarding\`, an OpenCode prompt,
+  filesystem path admission or a Dockerfile. Runtime permissions
+  require provider-side/OS-level evidence.
+
+## Remaining gates toward a public first release
+
+1. Accept this native Windows+Linux packaging matrix and download its
+   ORIGINAL CI artifacts for independent manifest and binary-byte audits.
+2. Exercise the packaged server's full MCP initialization and tool
+   discovery without developer dependencies or an existing installation.
+3. Package and validate Windows UI Bridge and document Linux UI
+   parity/supported exclusions; audit native dependencies and licenses.
+4. Prove clean-host install/uninstall, persistent configuration,
+   recovery/reconnect and safe rollback on both operating systems.
+5. Establish JDC-owned repository/package/bundle identifiers, immutable
+   versioned release provenance and approved signing/verification.
+6. Only after those controls pass, authorize a governed Release Please
+   tag and publish Windows/Linux assets with downloadable hashes.
+
+The public integration issue #32 was closed administratively; its
+historical deployment and compatibility acceptance criteria must not
+be inferred to have passed solely from the issue's state.

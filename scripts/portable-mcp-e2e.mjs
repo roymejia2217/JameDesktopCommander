@@ -36,9 +36,9 @@ const isolated = await mkdtemp(join(tmpdir(), 'jdc-portable-mcp-'));
 const working = join(isolated, 'working');
 await mkdir(working);
 const fixture = join(working, 'portable-mcp-fixture.txt');
-const original = 'jdc-portable-original\\n';
-const rewritten = 'jdc-portable-rewritten\\n';
-const appended = 'jdc-portable-appended\\n';
+const original = 'jdc-portable-original\n';
+const rewritten = 'jdc-portable-rewritten\n';
+const appended = 'jdc-portable-appended\n';
 await writeFile(fixture, original);
 const env = {
   HOME: isolated, USERPROFILE: isolated, APPDATA: join(isolated, 'appdata'),
@@ -87,7 +87,7 @@ async function callFixtureTool(name, args) {
 }
 function toolText(result) {
   assert.ok(Array.isArray(result.content), 'MCP tool result must include content');
-  return result.content.filter(item => item.type === 'text').map(item => item.text).join('\\n');
+  return result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
 }
 
 try {
@@ -122,7 +122,7 @@ try {
   assert.ok(toolText(initialRead).includes(original.trim()), 'Initial file contents differ');
 
   const rejected = await callFixtureTool('write_file', {
-    path: fixture, content: 'unapproved-overwrite\\n',
+    path: fixture, content: 'unapproved-overwrite\n',
   });
   assert.equal(rejected.isError, true, 'Omitted mode must reject overwriting a nonempty file');
   assert.equal(await readFile(fixture, 'utf8'), original, 'Rejected write damaged original bytes');

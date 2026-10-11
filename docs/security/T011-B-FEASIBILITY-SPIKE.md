@@ -1,0 +1,44 @@
+# T011-B — Native filesystem capability feasibility
+
+**Status:** Experimental DRAFT, not a production authorization fix.
+
+This isolated native probe uses cap-std 4.0.3, napi 3.14.2 and pinned
+Node-API/Rust build dependencies. The crate explicitly declares the root
+repository's MIT license. Its Rust supply-chain audit uses native
+cargo-deny 0.20.2, installed with checksum verification by
+taiki-e/install-action pinned to a full commit SHA, on Windows and Linux.
+The cap-std Windows device-name issue GHSA-hxf5-99xg-86hw was fixed in 3.4.1,
+but JDC must still test the affected path family and all Windows
+junction/case-sensitive scenarios.
+
+The proof-of-concept has an intentionally ambient constructor solely for
+disposable tests. It MUST NOT be exposed to MCP clients or imported by the JDC
+server. File operations after construction are relative to an open directory
+capability; explicit close invalidates it. The tests exercise reads, rewrite,
+append, traversal, absolute paths, symlink/junction escape, root-name change,
+and reserved Windows device names. A PASS cannot establish complete
+concurrency safety or a hardened policy manager.
+
+**Reproducible dependency gate:** The first native feasibility run produced
+identical Cargo.lock files on Windows 2025 and Ubuntu 24.04: 16,043 bytes,
+SHA-256 a0d59a076a1184dab97b375c183b3b7af85cf5da7a6b3c13ed8ce34f26d1b4a8
+(69 package records). This exact artifact is committed and MUST remain
+unchanged during CI. The first locked build discovered that default Git checkout
+converted Cargo.lock LF to CRLF on Windows (16,620 bytes), although both
+versions normalize to the same dependency graph. The scoped
+\`native/capability-probe/.gitattributes\` now forces LF during checkout,
+and an explicit Node test asserts byte count, CR absence and exact SHA-256 on
+both Node 22 and Node 24 in both OS runners. **Do not merge if raw ZIP
+Cargo.lock bytes differ between Windows and Linux.** Cargo metadata and builds
+run with --locked, without generating the dependency graph. The native cargo-deny CLI is version-pinned and checks advisories,
+approved SPDX licenses and registry provenance with no advisory exceptions. Any rejected or unidentified
+dependency, license or security advisory blocks acceptance; a green status
+must be verified in the native Windows/Linux matrix and independently
+reconciled against the resulting original artifacts. Node 22.19 and Node 24
+must both load and test the native binary on each operating system.
+No runtime dependency is added to JDC's package-lock.json.
+
+This spike is not part of the portable JDC bundle. Neither Rust nor an
+on-host compiler is a deployment prerequisite. T011-C/D/E remain blocked
+pending native security evidence, lifecycle design and full handler coverage.
+No production services, installer, release or update are authorized.

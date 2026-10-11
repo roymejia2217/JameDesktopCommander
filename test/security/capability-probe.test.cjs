@@ -89,3 +89,65 @@ test('patched Windows special device-name variants are denied',
       assert.throws(() => cap.readText('LPT¹'));
     });
   });
+
+const MAX_CAPABILITY_BYTES = 32 * 1024 * 1024;
+
+test('binary capability preserves non-UTF8 bytes, NUL, rewrite and append', () => {
+  withFixture(({ cap, allowed }) => {
+    const first = Buffer.from([0x00, 0xff, 0x80, 0x41, 0x0a]);
+    const second = Buffer.from([0xc0, 0x00, 0x7f]);
+    cap.writeBytes('payload.bin', first, 'rewrite');
+    assert.deepEqual(cap.readBytes('payload.bin'), first);
+    cap.writeBytes('payload.bin', second, 'append');
+    assert.deepEqual(cap.readBytes('payload.bin'), Buffer.concat([first, second]));
+    assert.deepEqual(fs.readFileSync(path.join(allowed, 'payload.bin')),
+      Buffer.concat([first, second]));
+    cap.close();
+    assert.throws(() => cap.readBytes('payload.bin'), /closed/i);
+    assert.throws(() => cap.writeBytes('payload.bin', first, 'rewrite'), /closed/i);
+  });
+});
+
+test('binary operations reject traversal, absolute paths and escaping junctions', () => {
+  withFixture(({ cap, allowed, outside, outsideFile }) => {
+    const payload = Buffer.from('forbidden');
+    const escape = path.join(allowed, 'escape');
+    fs.symlinkSync(outside, escape, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => cap.readBytes(path.join('..', 'outside', 'sentinel.txt')));
+    assert.throws(() => cap.writeBytes(path.join('..', 'outside', 'sentinel.txt'),
+      payload, 'rewrite'));
+    assert.throws(() => cap.writeBytes(outsideFile, payload, 'append'));
+    assert.throws(() => cap.readBytes(path.join('escape', 'sentinel.txt')));
+    assert.throws(() => cap.writeBytes(path.join('escape', 'sentinel.txt'),
+      payload, 'rewrite'));
+    assert.throws(() => cap.writeBytes(path.join('escape', 'new.bin'),
+      payload, 'rewrite'));
+    assert.equal(fs.existsSync(path.join(outside, 'new.bin')), false);
+  });
+});
+
+test('invalid binary mode and oversized write leave existing content unchanged', () => {
+  withFixture(({ cap, allowed }) => {
+    const original = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    cap.writeBytes('existing.bin', original, 'rewrite');
+    assert.throws(() => cap.writeBytes('existing.bin', Buffer.from('evil'), 'invalid'),
+      /Invalid capability write mode/);
+    const oversized = Buffer.alloc(MAX_CAPABILITY_BYTES + 1);
+    assert.throws(() => cap.writeBytes('existing.bin', oversized, 'rewrite'),
+      /Capability byte limit exceeded/);
+    assert.throws(() => cap.writeBytes('missing.bin', oversized, 'append'),
+      /Capability byte limit exceeded/);
+    assert.deepEqual(fs.readFileSync(path.join(allowed, 'existing.bin')), original);
+    assert.equal(fs.existsSync(path.join(allowed, 'missing.bin')), false);
+  });
+});
+
+test('oversized binary reads are explicitly denied instead of truncated', () => {
+  withFixture(({ cap, allowed }) => {
+    const large = path.join(allowed, 'large.bin');
+    fs.writeFileSync(large, Buffer.from([0x23]));
+    fs.truncateSync(large, MAX_CAPABILITY_BYTES + 1);
+    assert.throws(() => cap.readBytes('large.bin'), /Capability byte limit exceeded/);
+    assert.equal(fs.statSync(large).size, MAX_CAPABILITY_BYTES + 1);
+  });
+});

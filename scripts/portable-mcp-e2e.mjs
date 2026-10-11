@@ -169,6 +169,30 @@ try {
   assert.notEqual(allowedWrite.isError, true, 'Policy denied an explicitly allowed write');
   assert.equal(await readFile(allowedFile, 'utf8'), 'inside-updated\n');
 
+  // A configured directory may itself be a symlink/junction alias.
+  // Compare its canonical target against the already canonical file path.
+  const allowedAlias = join(working, 'allowed-alias');
+  await symlink(allowedRoot, allowedAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  const aliasConfigured = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [allowedAlias],
+  });
+  assert.notEqual(aliasConfigured.isError, true, 'Cannot configure allowed directory alias');
+  const aliasRead = await callFixtureTool('read_file', { path: allowedFile });
+  assert.notEqual(aliasRead.isError, true, 'Canonical allowed directory alias denied valid access');
+  assert.ok(toolText(aliasRead).includes('inside-updated'), 'Alias returned wrong contents');
+
+  const missingConfigured = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [join(working, 'nonexistent-allowed-root')],
+  });
+  assert.notEqual(missingConfigured.isError, true, 'Cannot configure nonexistent allowed root');
+  const missingDenied = await callFixtureTool('read_file', { path: allowedFile });
+  assert.equal(missingDenied.isError, true, 'A nonexistent allowed root granted file access');
+
+  const restored = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [allowedRoot],
+  });
+  assert.notEqual(restored.isError, true, 'Cannot restore fixture allowed root');
+
   async function assertDenied(name, args) {
     const result = await callFixtureTool(name, args);
     assert.equal(result.isError, true, 'Unauthorized MCP access succeeded: ' + name);
@@ -210,7 +234,8 @@ try {
     result: 'PASS', target: manifest.target, toolCount: tools.length,
     resourcesRead: read.contents.length, promptCount: prompts.length,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
-    modeOmissionRejected: true, accessPositiveChecks: 2,
+    modeOmissionRejected: true, accessPositiveChecks: 3,
+    unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
     outsideBytesPreserved: true, releaseEligible: false,
   }));

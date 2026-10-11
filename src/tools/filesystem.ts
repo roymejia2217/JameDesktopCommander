@@ -187,35 +187,30 @@ async function isPathAllowed(pathToCheck: string): Promise<boolean> {
         normalizedPathToCheck = normalizedPathToCheck.slice(0, -1);
     }
 
-    // Check if the path is within any allowed directory
-    const isAllowed = allowedDirectories.some(allowedDir => {
-        let normalizedAllowedDir = normalizePath(allowedDir);
+    // The requested path is already canonicalized by validatePath. Canonicalize
+    // configured allowed roots the same way, preserving case on Linux and on
+    // Windows directories configured for case-sensitive names.
+    for (const allowedDir of allowedDirectories) {
+        let normalizedAllowedDir: string;
+        try {
+            normalizedAllowedDir = normalizePath(await fs.realpath(expandHome(allowedDir)));
+        } catch {
+            // An inaccessible or nonexistent configured root grants no access.
+            continue;
+        }
         if (normalizedAllowedDir.slice(-1) === path.sep) {
             normalizedAllowedDir = normalizedAllowedDir.slice(0, -1);
         }
 
-        // Check if path is exactly the allowed directory
-        if (normalizedPathToCheck === normalizedAllowedDir) {
+        // The separator enforces the directory boundary. Drive roots remain
+        // supported because 'C:' + path.sep is the 'C:\' prefix.
+        if (normalizedPathToCheck === normalizedAllowedDir ||
+            normalizedPathToCheck.startsWith(normalizedAllowedDir + path.sep)) {
             return true;
         }
+    }
 
-        // Check if path is a subdirectory of the allowed directory
-        // Make sure to add a separator to prevent partial directory name matches
-        // e.g. /home/user vs /home/username
-        const subdirCheck = normalizedPathToCheck.startsWith(normalizedAllowedDir + path.sep);
-        if (subdirCheck) {
-            return true;
-        }
-
-        // If allowed directory is the root (C:\ on Windows), allow access to the entire drive
-        if (normalizedAllowedDir === 'c:' && process.platform === 'win32') {
-            return normalizedPathToCheck.startsWith('c:');
-        }
-
-        return false;
-    });
-
-    return isAllowed;
+    return false;
 }
 
 /**

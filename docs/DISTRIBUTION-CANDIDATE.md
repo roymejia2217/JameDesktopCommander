@@ -174,6 +174,14 @@ case-different directory is distinct and rejects reads and writes there.
 Independent filesystem reads assert that none of the denied writes changed
 outside bytes. A failed denial is a hard CI failure.
 
+Config entries are now canonicalized through filesystem resolution before
+comparison with canonicalized target paths. This fixes false denials when
+Windows reports a different on-disk path spelling and ensures that a
+configured symlink/junction alias resolves to its real permitted root.
+Nonexistent or inaccessible allowed roots never grant access. The E2E suite
+tests a permitted directory alias and a nonexistent allowlist root on both
+native platforms.
+
 This intentionally preserves path case for all platforms; explicit
 case-sensitive matching may conservatively reject some differently cased
 Windows path spellings rather than inadvertently authorize a distinct path.

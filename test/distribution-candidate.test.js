@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { buildCandidate, verifyCandidate } from '../scripts/distribution-candidate.mjs';
+import { dirname, join } from 'node:path';
+import {
+  buildCandidate, verifyCandidate, createCandidateArchive, restoreCandidateArchive,
+} from '../scripts/distribution-candidate.mjs';
 
 const sourceCommit = 'a'.repeat(40);
 const target = 'linux-x64';
@@ -95,5 +97,45 @@ test('upstream private publication flag cannot silently become publishable', asy
     pkg.private = false;
     await writeFile(sourcePkg, JSON.stringify(pkg));
     await assert.rejects(buildCandidate(options), /private/);
+  });
+});
+
+
+test('TAR transport retains hidden dependency files and native Linux executable mode', async () => {
+  await withFixture(async options => {
+    await writeFile(join(options.source, 'node_modules', 'fixture', '.rels'), 'relationship\n');
+    await writeFile(join(options.source, 'node_modules', '.package-lock.json'), '{}\n');
+    await chmod(options.binary, 0o755);
+    const manifest = await buildCandidate(options);
+    const root = dirname(options.destination);
+    const original = join(root, 'original.tar');
+    const downloaded = join(root, 'downloaded.tar');
+    const extracted = join(root, 'roundtrip');
+    await createCandidateArchive(options.destination, original);
+    await copyFile(original, downloaded);
+    await restoreCandidateArchive(original, downloaded, extracted);
+    assert.deepEqual(await verifyCandidate({ ...options, destination: extracted }), manifest);
+    assert.ok(manifest.files.some(file => file.path === 'node_modules/fixture/.rels'));
+    assert.ok(manifest.files.some(file => file.path === 'node_modules/.package-lock.json'));
+    if (process.platform === 'linux') {
+      assert.ok((await stat(join(extracted, 'runtime/node'))).mode & 0o111,
+        'Extracted Linux runtime must remain executable');
+    }
+  });
+});
+
+test('altered downloaded TAR is rejected before extraction', async () => {
+  await withFixture(async options => {
+    await buildCandidate(options);
+    const root = dirname(options.destination);
+    const original = join(root, 'original.tar');
+    const downloaded = join(root, 'tampered.tar');
+    const extracted = join(root, 'untrusted-extraction');
+    await createCandidateArchive(options.destination, original);
+    await copyFile(original, downloaded);
+    await appendFile(downloaded, 'tampering\n');
+    await assert.rejects(restoreCandidateArchive(original, downloaded, extracted),
+      /Downloaded candidate archive differs/);
+    await assert.rejects(lstat(extracted), { code: 'ENOENT' });
   });
 });

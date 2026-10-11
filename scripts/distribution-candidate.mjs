@@ -6,6 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { cp, chmod, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -200,9 +201,49 @@ async function nodeLicenseFor(executable) {
   throw new Error('Cannot locate Node runtime LICENSE; fail closed');
 }
 
+
+function runNativeTar(args) {
+  const result = spawnSync('tar', args, {
+    encoding: 'utf8', windowsHide: true, timeout: 120000, maxBuffer: 512 * 1024,
+  });
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, 'Native tar failed: ' +
+    String(result.stderr || result.stdout).slice(0, 1000));
+}
+
+async function sha256File(filepath) {
+  const hash = createHash('sha256');
+  for await (const bytes of createReadStream(filepath)) hash.update(bytes);
+  return hash.digest('hex');
+}
+
+// TAR includes dotfiles and preserves executable mode across artifact transport.
+export async function createCandidateArchive(destination, archivePath) {
+  assert.ok(isAbsolute(destination) && isAbsolute(archivePath));
+  assert.ok(!inside(destination, archivePath), 'Archive must be outside candidate');
+  const fileInfo = await lstat(destination);
+  assert.ok(fileInfo.isDirectory(), 'Candidate stage is missing');
+  runNativeTar(['-cf', archivePath, '-C', destination, '.']);
+  const archiveInfo = await lstat(archivePath);
+  assert.ok(archiveInfo.isFile() && archiveInfo.size > 0, 'Candidate TAR is empty');
+}
+
+export async function restoreCandidateArchive(originalArchive, downloadedArchive, destination) {
+  assert.ok(isAbsolute(originalArchive) && isAbsolute(downloadedArchive) &&
+    isAbsolute(destination));
+  assert.notEqual(resolve(originalArchive), resolve(downloadedArchive),
+    'Round-trip must validate a separately downloaded artifact');
+  assert.equal(await sha256File(downloadedArchive), await sha256File(originalArchive),
+    'Downloaded candidate archive differs from uploaded bytes');
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(destination, { recursive: true });
+  runNativeTar(['-xf', downloadedArchive, '-C', destination]);
+}
+
 async function main() {
   const action = process.argv[2];
-  assert.ok(['build', 'verify', 'smoke'].includes(action), 'Expected build, verify or smoke');
+  assert.ok(['build', 'verify', 'smoke', 'archive', 'roundtrip'].includes(action),
+    'Expected build, verify, smoke, archive or roundtrip');
   const target = process.platform + '-' + process.arch;
   validTarget(target);
   assert.equal(process.env.JDC_CANDIDATE_TARGET, target, 'GitHub runner does not match candidate target');
@@ -219,10 +260,20 @@ async function main() {
     runId: process.env.GITHUB_RUN_ID,
     attempt: process.env.GITHUB_RUN_ATTEMPT,
   };
+  const archiveName = 'UNPUBLISHED-jdc-portable-' + target + '.tar';
+  const archivePath = join(await realpath(temp), archiveName);
   let manifest;
   if (action === 'build') manifest = await buildCandidate(args);
   else manifest = await verifyCandidate(args);
   if (action === 'smoke') await smokeCandidate(destination, manifest);
+  if (action === 'archive') await createCandidateArchive(destination, archivePath);
+  if (action === 'roundtrip') {
+    const downloadedArchive = join(await realpath(temp), 'jdc-roundtrip-download', archiveName);
+    const extracted = join(await realpath(temp), 'jdc-candidate-roundtrip-' + target);
+    await restoreCandidateArchive(archivePath, downloadedArchive, extracted);
+    manifest = await verifyCandidate({ ...args, destination: extracted });
+    await smokeCandidate(extracted, manifest);
+  }
   // Never echo file paths, environment values, credentials or file inventories.
   console.log(JSON.stringify({
     result: 'PASS',

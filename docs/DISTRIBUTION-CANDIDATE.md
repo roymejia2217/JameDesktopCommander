@@ -15,6 +15,16 @@ Remote Device/tunnel is bundled, nor that all optional browser/UI/native tool
 features have passed isolated installation or real-host acceptance. The
 present service and gateway deployment is not modified.
 
+GitHub's raw directory artifact upload omits dotfiles and does not guarantee
+preservation of executable permissions after extraction. Each native candidate
+is therefore stored as a **single TAR file inside the temporary GitHub
+Actions artifact ZIP**. The TAR includes hidden dependency metadata and
+retains Linux executable permission bits. Its contents are independently
+rechecked against the full manifest after a GitHub artifact upload/download
+round-trip, and the extracted Node/ripgrep runtime is smoke-tested again.
+The native TAR transport depends on the runner's standard tar utility.
+A green pre-upload staging verification alone is not sufficient.
+
 GitHub Actions retains each candidate for only seven days under
 \`UNPUBLISHED-jdc-portable-win32-x64\` and
 \`UNPUBLISHED-jdc-portable-linux-x64\`. No installer, npm publication,
@@ -24,7 +34,7 @@ The existing Release Please workflow remains unchanged.
 ## CI gates and payload contract
 
 The file \`scripts/distribution-candidate.mjs\` uses only supported Node.js
-built-ins; it has three explicit operations: \`build\`, \`verify\`, \`smoke\`.
+built-ins; it has five explicit operations: \`build\`, \`verify\`, \`smoke\`, \`archive\`, and \`roundtrip\`.
 Its final outputs are written exclusively under a fixed
 \`RUNNER_TEMP/jdc-candidate-<platform>-x64\` staging directory.
 

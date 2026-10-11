@@ -72,11 +72,23 @@ jobs:
       - name: Smoke test packaged Node and bundled ripgrep
         run: node scripts/distribution-candidate.mjs smoke
 
+      - name: Create lossless TAR containing hidden files and native permissions
+        run: node scripts/distribution-candidate.mjs archive
+
       - name: Retain unpublished candidate as a short-lived CI artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: UNPUBLISHED-jdc-portable-${{ matrix.target }}
-          path: ${{ runner.temp }}/jdc-candidate-${{ matrix.target }}/
+          path: ${{ runner.temp }}/UNPUBLISHED-jdc-portable-${{ matrix.target }}.tar
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Download original uploaded candidate for round-trip acceptance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: UNPUBLISHED-jdc-portable-${{ matrix.target }}
+          path: ${{ runner.temp }}/jdc-roundtrip-download/
+
+      - name: Verify downloaded TAR and smoke extracted native runtime
+        run: node scripts/distribution-candidate.mjs roundtrip

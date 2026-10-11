@@ -133,3 +133,23 @@ operations on native CI runners. It does **not** exercise arbitrary tool calls,
 OS sandbox boundaries, clean-host installation, UI Bridge inclusion, service
 startup, real-host identity, upgrade/recovery, or rollback. Artifacts remain
 `releaseEligible: false` and unpublished.
+
+## Native fixture tool-call acceptance (T008)
+
+The same portable MCP client additionally exercises six real protocol
+`tools/call` requests against a single file created inside its disposable
+working directory. The native Windows and Linux jobs must prove:
+
+- `list_directory` exposes the test fixture and `read_file` returns its
+  original content.
+- `write_file` without an explicit `mode` is rejected on a nonempty file
+  and preserves its exact bytes (data-loss regression).
+- Explicit `mode: rewrite` and `mode: append` both succeed and their
+  resulting on-disk UTF-8 bytes match independent filesystem reads.
+- A final `read_file` observes both rewritten and appended content.
+
+The test uses the MCP SDK's real `callTool(params, resultSchema, options)`
+API. It does not use mocked handlers, a developer Node runtime, host services
+or a production configuration. Temporary state is cleaned up after the client
+closes. Passing does not demonstrate OS confinement or safety of untested
+tool handlers, nor does it authorize a release.

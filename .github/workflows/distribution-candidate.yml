@@ -92,3 +92,6 @@ jobs:
 
       - name: Verify downloaded TAR and smoke extracted native runtime
         run: node scripts/distribution-candidate.mjs roundtrip
+
+      - name: Real MCP client acceptance outside checkout
+        run: node scripts/portable-mcp-e2e.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}"

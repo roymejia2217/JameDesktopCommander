@@ -215,7 +215,7 @@ async function main() {
     nodeExecutable: process.execPath,
     nodeLicense: await nodeLicenseFor(process.execPath),
     target,
-    sourceCommit: process.env.GITHUB_SHA,
+    sourceCommit: process.env.JDC_CANDIDATE_SOURCE_SHA,
     runId: process.env.GITHUB_RUN_ID,
     attempt: process.env.GITHUB_RUN_ATTEMPT,
   };

@@ -1,0 +1,71 @@
+name: T011 Capability Feasibility (non-release)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t011-probe-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native-probe:
+    name: Native probe (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: win32-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned Rust compiler in CI only
+        run: rustup toolchain install 1.91.1 --profile minimal
+
+      - name: Generate provisional lock for feasibility only
+        run: cargo +1.91.1 generate-lockfile --manifest-path native/capability-probe/Cargo.toml
+
+      - name: Build native Rust Node-API addon
+        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
+
+      - name: Use official Node 22.19
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.19.0
+
+      - name: Native addon and capability security tests on Node 22
+        run: node --test test/security/capability-probe.test.cjs
+
+      - name: Use official Node 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Native addon and capability security tests on Node 24
+        run: node --test test/security/capability-probe.test.cjs
+
+      - name: Preserve unpublished proof and provisional dependency lock
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: UNPUBLISHED-t011-capability-probe-${{ matrix.target }}
+          path: |
+            native/capability-probe/Cargo.lock
+            native/capability-probe/target/release/jdc-capability-probe.node
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0

@@ -8,6 +8,10 @@ import lockfile from 'proper-lockfile';
 import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
+import {
+  parseFilesystemPolicyCandidate,
+  type FilesystemPolicyCandidateSnapshot,
+} from './security/filesystem-policy-snapshot.js';
 
 const LEGACY_TEST_CONFIG_KEYS = ['__nonblockingSaveRegressionTest'] as const;
 
@@ -417,6 +421,37 @@ export class ConfigManager {
       throw new Error('Invalid filesystem authorization policy');
     }
     return directories as string[] | undefined;
+  }
+
+  /**
+   * Observe a candidate filesystem policy directly from the persisted file.
+   * This additive API deliberately does NOT change the legacy file handlers.
+   * A content digest detects observed changes but CANNOT guarantee monotonic
+   * revisions, atomic revocation, or safe native root opening.
+   */
+  async getFilesystemPolicyCandidateSnapshot(): Promise<FilesystemPolicyCandidateSnapshot> {
+    await this.init();
+    const pendingWrite = this.writeChain;
+    await pendingWrite;
+    // This rejects known in-process pending writes, watcher errors and stale
+    // reads. An external process can still change config immediately after
+    // the read; T011-C3+ must solve that before authorizing real file I/O.
+    const unavailable = () => this.filesystemPolicyLoadFailed ||
+      this.writeChain !== pendingWrite || this.saveScheduled || this.pendingMutations.length > 0;
+    if (unavailable()) {
+      throw new Error('Filesystem policy candidate unavailable');
+    }
+
+    let persisted: unknown;
+    try {
+      persisted = await this.readConfigFromDisk();
+    } catch {
+      throw new Error('Filesystem policy candidate unavailable');
+    }
+    if (unavailable()) {
+      throw new Error('Filesystem policy candidate unavailable');
+    }
+    return parseFilesystemPolicyCandidate(persisted);
   }
 
   /**

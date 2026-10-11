@@ -85,9 +85,11 @@ semantics. Reject the dependency or revise the design if the proof fails.
 **T011-A infrastructure checkpoint (not a security fix):** The new
 `test/security/support/controlled-interleaving.js` establishes a deterministic,
 bounded checkpoint/interleaving API and disposable inside/outside byte fixtures.
-Its four harness self-tests run before packaging in the native Windows/Linux CI
-matrix. They validate choreography, error propagation, release on failure and
-preservation of unrelated outside bytes. They do **not** exercise JDC's
+Its nine harness tests run before packaging in the native Windows/Linux CI
+matrix. The supervisor terminates a stalled Worker before evaluating or
+cleaning fixtures; the tests confirm each hang reached its intended phase,
+and check outside-file bytes even when a scenario throws. The original
+scenario and integrity errors are both preserved if both fail. They do **not** exercise JDC's
 vulnerable filesystem API, do not prove that the race is mitigated and must
 never be counted as an authorization gate. The previously reproduced
 vulnerability remains a release blocker. The private adversarial reproduction

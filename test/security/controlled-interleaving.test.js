@@ -1,50 +1,59 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile, writeFile } from 'node:fs/promises';
-import { controlledInterleaving, withBoundary } from './support/controlled-interleaving.js';
+import { runIsolatedScenario, withBoundary } from './support/controlled-interleaving.js';
 
-test('barrier makes an allowed in-root mutation deterministic and preserves outside bytes', async () => {
-  await withBoundary(async ({ insideFile, outsideFile, insideOriginal, outsideOriginal }) => {
-    const observed = [];
-    await controlledInterleaving({
-      subject: async checkpoint => {
-        observed.push('subject-enter');
-        assert.deepEqual(await readFile(insideFile), insideOriginal);
-        await checkpoint();
-        observed.push('subject-resumed');
-        assert.equal(await readFile(insideFile, 'utf8'), 'in-root-update\n');
-      },
-      interleave: async () => {
-        observed.push('interleave');
-        await writeFile(insideFile, 'in-root-update\n');
-      },
-    });
-    assert.deepEqual(observed, ['subject-enter', 'interleave', 'subject-resumed']);
-    assert.deepEqual(await readFile(outsideFile), outsideOriginal);
+test('isolated barrier preserves deterministic choreography and outside bytes', async () => {
+  assert.deepEqual(await runIsolatedScenario('ordered'),
+    ['subject-enter', 'interleave', 'subject-resumed']);
+});
+
+test('subject exit before checkpoint is rejected', async () => {
+  await assert.rejects(runIsolatedScenario('noCheckpoint'), /Subject exited before checkpoint/);
+});
+
+test('interleaving failure propagates after the checkpoint is released', async () => {
+  await assert.rejects(runIsolatedScenario('failedInterleave'), /fixture-injection-failed/);
+});
+
+test('subject failure propagates without running the interleaver', async () => {
+  await assert.rejects(runIsolatedScenario('failedSubject'), /subject-failed/);
+});
+
+test('supervisor terminates a stalled subject within deadline', { timeout: 10000 }, async () => {
+  const started = Date.now();
+  await assert.rejects(runIsolatedScenario('hungSubject', { timeoutMs: 2000, expectedPhase: 'subject-stalled' }),
+    /Isolated scenario deadline exceeded/);
+  assert.ok(Date.now() - started < 8000, 'Worker shutdown exceeded the test deadline');
+});
+
+test('supervisor terminates a stalled interleaver within deadline', { timeout: 10000 }, async () => {
+  const started = Date.now();
+  await assert.rejects(runIsolatedScenario('hungInterleave', { timeoutMs: 2000, expectedPhase: 'interleave-stalled' }),
+    /Isolated scenario deadline exceeded/);
+  assert.ok(Date.now() - started < 8000, 'Worker shutdown exceeded the test deadline');
+});
+
+test('failed scenarios must still assert external file integrity before cleanup', async () => {
+  await assert.rejects(runIsolatedScenario('mutatedOutsideAndFailed'), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.errors[0].message, /scenario-invalid/);
+    assert.match(error.errors[1].message, /outside file changed/);
+    return true;
   });
 });
 
-test('a subject that never reaches the checkpoint fails explicitly', async () => {
-  await assert.rejects(
-    controlledInterleaving({ subject: async () => {}, interleave: async () => {} }),
-    /Subject exited before checkpoint/
-  );
+test('successful callback that modifies outside file also fails integrity', async () => {
+  await assert.rejects(withBoundary(async ({ outsideFile }) => {
+    await writeFile(outsideFile, 'corrupted\n');
+  }), /outside file changed/);
 });
 
-test('interleaving errors release the checkpoint and are not hidden', async () => {
-  let released = false;
-  await assert.rejects(controlledInterleaving({
-    subject: async checkpoint => { await checkpoint(); released = true; },
-    interleave: async () => { throw new Error('fixture-injection-failed'); },
-  }), /fixture-injection-failed/);
-  assert.equal(released, true, 'Barrier left the worker blocked after fixture failure');
-});
-
-test('a subject failure before the barrier propagates without running interleaver', async () => {
-  let mutated = false;
-  await assert.rejects(controlledInterleaving({
-    subject: async () => { throw new Error('subject-failed'); },
-    interleave: async () => { mutated = true; },
-  }), /subject-failed/);
-  assert.equal(mutated, false);
+test('failed callback without outside effect propagates original error', async () => {
+  await withBoundary(async ({ outsideFile, outsideOriginal }) => {
+    assert.deepEqual(await readFile(outsideFile), outsideOriginal);
+  });
+  await assert.rejects(withBoundary(async () => {
+    throw new Error('expected-callback-failure');
+  }), /expected-callback-failure/);
 });

@@ -15,13 +15,18 @@ append, traversal, absolute paths, symlink/junction escape, root-name change,
 and reserved Windows device names. A PASS cannot establish complete
 concurrency safety or a hardened policy manager.
 
-**Dependency acceptance is deliberately two-stage:** First CI compiles on
-Windows 2025 and Ubuntu 24.04 using Rust 1.91.1, generating a temporary
-Cargo.lock with exact direct dependency versions. CI tests Node 22.19 and
-Node 24 and retains the unpublished lock and binary for one day. Do **not**
-merge this PR with a generated-only lock. Audit dependencies/licenses,
-commit the approved Cargo.lock, switch CI to build only with --locked,
-repeat both platforms and perform independent artifact verification.
+**Reproducible dependency gate:** The first native feasibility run produced
+identical Cargo.lock files on Windows 2025 and Ubuntu 24.04: 16,043 bytes,
+SHA-256 a0d59a076a1184dab97b375c183b3b7af85cf5da7a6b3c13ed8ce34f26d1b4a8
+(69 package records). This exact artifact is committed and MUST remain
+unchanged during CI. Cargo metadata and builds run with --locked, without
+generating the dependency graph. The maintained cargo-deny action is
+commit-pinned and checks advisories, approved SPDX licenses and registry
+provenance with no advisory exceptions. Any rejected or unidentified
+dependency, license or security advisory blocks acceptance; a green status
+must be verified in the native Windows/Linux matrix and independently
+reconciled against the resulting original artifacts. Node 22.19 and Node 24
+must both load and test the native binary on each operating system.
 No runtime dependency is added to JDC's package-lock.json.
 
 This spike is not part of the portable JDC bundle. Neither Rust nor an

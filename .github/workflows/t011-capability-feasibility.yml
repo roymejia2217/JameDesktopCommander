@@ -37,8 +37,15 @@ jobs:
       - name: Install pinned Rust compiler in CI only
         run: rustup toolchain install 1.91.1 --profile minimal
 
-      - name: Generate provisional lock for feasibility only
-        run: cargo +1.91.1 generate-lockfile --manifest-path native/capability-probe/Cargo.toml
+      - name: Require exact committed Rust dependency lock
+        run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
+
+      - name: Audit locked Rust advisories, licenses and registry provenance
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: '1.91.1'
+          manifest-path: native/capability-probe/Cargo.toml
+          command: check advisories licenses sources
 
       - name: Build native Rust Node-API addon
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
@@ -59,7 +66,7 @@ jobs:
       - name: Native addon and capability security tests on Node 24
         run: node --test test/security/capability-probe.test.cjs
 
-      - name: Preserve unpublished proof and provisional dependency lock
+      - name: Preserve unpublished proof and immutable dependency lock
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: UNPUBLISHED-t011-capability-probe-${{ matrix.target }}

@@ -189,3 +189,34 @@ Case preservation, symlink resolution and `allowedDirectories` do **not**
 constitute an OS sandbox, prevent races after validation, or constrain
 independent process-execution tools. Those require separate review and
 OS/provider-level enforcement. This test does not authorize publication.
+
+## Filesystem authorization fail-closed regression (T010)
+
+The existing `allowedDirectories: []` setting deliberately grants unrestricted
+filesystem access. That meaning is preserved **only** when the configuration
+was loaded successfully and the operator explicitly persisted the empty list.
+Previously, `getAllowedDirs()` returned `[]` after a retrieval error, while
+`ConfigManager.init()` could also replace an unreadable/corrupt persisted
+config with the permissive default `[]`. Both routes could authorize access
+when configuration had actually failed.
+
+`ConfigManager.getAllowedDirectoriesForFilesystem()` now distinguishes valid
+configuration from failed initial or watcher loads. If loading fails, the
+filesystem path cannot use the in-memory fallback: it attempts to read the
+durable config, and rejects access when that remains unreadable or invalid.
+A subsequent valid persisted policy permits recovery without a process restart.
+An absent key in a successfully loaded config retains the historical
+home-directory fallback; an explicitly empty list retains its documented
+meaning. Malformed policy values and empty path entries are rejected.
+
+The CI security test uses disposable temp files and controlled failed reads to
+assert denied reads/writes without side effects, corrupt JSON at startup,
+explicit empty-policy compatibility, invalid values, watcher reload failures,
+and recovery from a repaired file. It runs after building JDC on **both**
+native Windows and Linux runners, before pruning dependencies and staging
+unpublished artifacts. The test never touches the user's live configuration.
+
+This is application-level authorization hardening, not OS sandboxing: the
+window between path validation and filesystem access, shell/process tools,
+permissions outside filesystem handlers, and compromised local OS accounts
+remain separate release blockers.

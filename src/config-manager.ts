@@ -66,6 +66,8 @@ export class ConfigManager {
   private configPath: string;
   private config: ServerConfig = {};
   private initialized = false;
+  // Fail closed for filesystem authorization after a config load/reload error.
+  private filesystemPolicyLoadFailed = false;
   private _isFirstRun = false; // Track if this is the first run (config was just created)
   // Serializes all disk writes so concurrent saves can't corrupt config.json.
   private writeChain: Promise<void> = Promise.resolve();
@@ -124,10 +126,12 @@ export class ConfigManager {
       }
 
       this.config['version'] = VERSION;
+      this.filesystemPolicyLoadFailed = false;
       this.initialized = true;
       this.startConfigWatcher();
     } catch (error) {
       console.error('Failed to initialize config:', error);
+      this.filesystemPolicyLoadFailed = true;
       this.config = this.getDefaultConfig();
       this.initialized = true;
       this.startConfigWatcher();
@@ -343,8 +347,12 @@ export class ConfigManager {
         if (this.reloadTimer) clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => void this.reloadConfigFromDisk(), 20);
       });
-      this.watcher.on('error', (error) => console.error('Config watcher error:', error));
+      this.watcher.on('error', (error) => {
+        this.filesystemPolicyLoadFailed = true;
+        console.error('Config watcher error:', error);
+      });
     } catch (error) {
+      this.filesystemPolicyLoadFailed = true;
       console.error('Failed to watch config:', error);
     }
   }
@@ -361,7 +369,9 @@ export class ConfigManager {
         for (const mutate of this.pendingMutations) mutate(latest);
         latest['version'] = VERSION;
         this.config = latest;
+        this.filesystemPolicyLoadFailed = false;
       } catch (error: any) {
+        this.filesystemPolicyLoadFailed = true;
         if (error?.code !== 'ENOENT') console.error('Failed to reload config:', error);
       }
     });
@@ -378,6 +388,35 @@ export class ConfigManager {
       ...this.config,
       maxProcessWaitMs: normalizeMaxProcessWaitMs(this.config.maxProcessWaitMs),
     };
+  }
+
+  /**
+   * Return only a verified filesystem access policy. An initial or watcher
+   * read failure must never turn the fallback allowedDirectories: [] into
+   * unrestricted file access. While unhealthy, re-read persisted config for
+   * each access rather than trust the in-memory fallback or stale snapshot.
+   * The watcher clears the failure flag after a successful reload.
+   */
+  async getAllowedDirectoriesForFilesystem(): Promise<string[] | undefined> {
+    await this.init();
+    let persisted: unknown = this.config;
+    if (this.filesystemPolicyLoadFailed) {
+      try {
+        persisted = await this.readConfigFromDisk();
+      } catch {
+        throw new Error('Filesystem authorization policy unavailable');
+      }
+    }
+    if (!persisted || typeof persisted !== 'object' || Array.isArray(persisted)) {
+      throw new Error('Invalid filesystem authorization policy');
+    }
+    const directories: unknown = (persisted as ServerConfig).allowedDirectories;
+    if (directories !== undefined &&
+        (!Array.isArray(directories) ||
+         directories.some((entry: unknown) => typeof entry !== 'string' || entry.trim().length === 0))) {
+      throw new Error('Invalid filesystem authorization policy');
+    }
+    return directories as string[] | undefined;
   }
 
   /**

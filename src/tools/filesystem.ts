@@ -122,7 +122,7 @@ async function getAllowedDirs(): Promise<string[]> {
         return homeDefault;
     } catch (error) {
         console.error('Failed to load filesystem authorization policy:', error);
-        throw new Error('Filesystem access denied: authorization policy unavailable', { cause: error });
+        throw new Error('Filesystem access denied: authorization policy unavailable');
     }
 }
 

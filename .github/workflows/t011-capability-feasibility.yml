@@ -58,6 +58,9 @@ jobs:
         with:
           node-version: 22.19.0
 
+      - name: Assert byte-for-byte reproducible Cargo.lock on Node 22
+        run: node --test test/security/capability-lock-consistency.test.cjs
+
       - name: Native addon and capability security tests on Node 22
         run: node --test test/security/capability-probe.test.cjs
 
@@ -65,6 +68,9 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
+
+      - name: Assert byte-for-byte reproducible Cargo.lock on Node 24
+        run: node --test test/security/capability-lock-consistency.test.cjs
 
       - name: Native addon and capability security tests on Node 24
         run: node --test test/security/capability-probe.test.cjs

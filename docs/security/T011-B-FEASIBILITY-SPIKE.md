@@ -23,8 +23,14 @@ concurrency safety or a hardened policy manager.
 identical Cargo.lock files on Windows 2025 and Ubuntu 24.04: 16,043 bytes,
 SHA-256 a0d59a076a1184dab97b375c183b3b7af85cf5da7a6b3c13ed8ce34f26d1b4a8
 (69 package records). This exact artifact is committed and MUST remain
-unchanged during CI. Cargo metadata and builds run with --locked, without
-generating the dependency graph. The native cargo-deny CLI is version-pinned and checks advisories,
+unchanged during CI. The first locked build discovered that default Git checkout
+converted Cargo.lock LF to CRLF on Windows (16,620 bytes), although both
+versions normalize to the same dependency graph. The scoped
+\`native/capability-probe/.gitattributes\` now forces LF during checkout,
+and an explicit Node test asserts byte count, CR absence and exact SHA-256 on
+both Node 22 and Node 24 in both OS runners. **Do not merge if raw ZIP
+Cargo.lock bytes differ between Windows and Linux.** Cargo metadata and builds
+run with --locked, without generating the dependency graph. The native cargo-deny CLI is version-pinned and checks advisories,
 approved SPDX licenses and registry provenance with no advisory exceptions. Any rejected or unidentified
 dependency, license or security advisory blocks acceptance; a green status
 must be verified in the native Windows/Linux matrix and independently

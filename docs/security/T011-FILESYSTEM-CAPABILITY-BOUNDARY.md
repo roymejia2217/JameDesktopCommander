@@ -82,6 +82,28 @@ semantics. Reject the dependency or revise the design if the proof fails.
 
 ## Implementation sequence and mandatory native gates
 
+**T011-A infrastructure checkpoint (not a security fix):** The new
+`test/security/support/controlled-interleaving.js` establishes a deterministic,
+bounded checkpoint/interleaving API and disposable inside/outside byte fixtures.
+Its nine harness tests run before packaging in the native Windows/Linux CI
+matrix. The supervisor terminates a stalled Worker before evaluating or
+cleaning fixtures; the tests confirm each hang reached its intended phase,
+and check outside-file bytes even when a scenario throws. The original
+scenario and integrity errors are both preserved if both fail. They do **not** exercise JDC's
+vulnerable filesystem API, do not prove that the race is mitigated and must
+never be counted as an authorization gate. The previously reproduced
+vulnerability remains a release blocker. The private adversarial reproduction
+will only be published with a verified remediation and an appropriate disclosure
+decision. The next requirement is to exercise this harness against the
+capability implementation on **both** native systems.
+
+**Windows-specific dependency review:** Before adopting `cap-std`, test
+reserved device names including superscript-digit variants, junctions,
+reparse points and case-sensitive directories. The upstream advisory
+[GHSA-hxf5-99xg-86hw](https://github.com/bytecodealliance/cap-std/security/advisories/GHSA-hxf5-99xg-86hw)
+documents a previously patched device-name sandbox bypass; do not select
+affected versions or assume that Windows resolution rules match Linux.
+
 - **T011-A — Adversarial harness:** deterministic concurrency tests with
   handshakes/barriers (no timing-dependent probabilistic loops), disposable
   fixtures and exact before/after byte checks. Cover parent-component swap,

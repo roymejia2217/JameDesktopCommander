@@ -51,6 +51,9 @@ jobs:
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Exercise deterministic filesystem test barriers and temp fixtures
+        run: node --test test/security/controlled-interleaving.test.js
+
       - name: Build JDC production files
         run: npm run build
 

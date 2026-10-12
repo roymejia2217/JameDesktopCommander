@@ -23,9 +23,11 @@ editor would NOT satisfy this trust boundary.
 ## Precisely tested in-memory ordering semantics
 
 - A new gate starts unavailable; an operation callback cannot execute.
-- `accept_externally_committed_epoch` only accepts positive, strictly
-  increasing unsigned 64-bit epochs inside the current process. This
-  method **does not authenticate or persist** the supplied value.
+- As hardened by T011-C4f, the epoch-promotion method is now crate-private:
+  external consumers cannot supply epochs directly. Internally it only
+  accepts strictly increasing positive unsigned 64-bit epochs while the
+  gate is unavailable; an active epoch must be explicitly revoked first.
+  This method **does not authenticate or persist** the supplied value.
 - A synchronous operation with a matching active epoch executes while
   the mutex remains held. Therefore any revocation or epoch replacement
   linearizes after that operation returns. Stale requests never execute.

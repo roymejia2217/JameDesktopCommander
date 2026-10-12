@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { readCooperativePolicyGeneration } from './filesystem-policy-generation.js';
 
 /** Disk-observed candidate, NOT an atomic filesystem authorization capability. */
 export interface FilesystemPolicyCandidateSnapshot {
   readonly mode: 'restricted' | 'unrestricted' | 'legacy-unset';
   readonly revision: string;
   readonly allowedRoots: readonly string[];
+  /** Cooperative writer counter; null means legacy/unmanaged, NOT authorized. */
+  readonly cooperativeGeneration: number | null;
 }
 
 function invalid(): Error {
@@ -52,5 +55,6 @@ export function parseFilesystemPolicyCandidate(config: unknown): FilesystemPolic
     }
   }
   const revision = createHash('sha256').update(JSON.stringify([mode, roots])).digest('hex');
-  return Object.freeze({ mode, revision, allowedRoots: Object.freeze(roots) });
+  const cooperativeGeneration = readCooperativePolicyGeneration(persisted);
+  return Object.freeze({ mode, revision, allowedRoots: Object.freeze(roots), cooperativeGeneration });
 }

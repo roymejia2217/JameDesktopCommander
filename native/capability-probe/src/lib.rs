@@ -96,6 +96,43 @@ impl RootCapability {
         Ok(())
     }
 
+    // Native directory operations must remain relative to the opened root:
+    // never return validated absolute names for JavaScript to reopen.
+    #[napi]
+    pub fn create_directory(&self, relative: String) -> Result<()> {
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        dir.create_dir_all(relative).map_err(denied)
+    }
+
+    #[napi]
+    pub fn move_relative(&self, from: String, to: String) -> Result<()> {
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        // cap-std resolves both names relative to the same opened directory.
+        dir.rename(from, dir, to).map_err(denied)
+    }
+
+    #[napi]
+    pub fn list_directory(&self, relative: String) -> Result<Vec<String>> {
+        const MAX_DIRECTORY_ENTRIES: usize = 4096;
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let entries = dir.read_dir(relative).map_err(denied)?;
+        let mut names = Vec::new();
+        for entry in entries {
+            // Never silently return a truncated listing.
+            if names.len() >= MAX_DIRECTORY_ENTRIES {
+                return Err(Error::from_reason("Capability directory entry limit exceeded"));
+            }
+            let entry = entry.map_err(denied)?;
+            let name = entry.file_name().into_string()
+                .map_err(|_| Error::from_reason("Capability directory contains a non-UTF8 name"))?;
+            names.push(name);
+        }
+        Ok(names)
+    }
+
     #[napi]
     pub fn close(&self) -> Result<()> {
         let mut guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;

@@ -38,15 +38,16 @@ test('persisted restricted roots are immutable with a stable policy digest', asy
   });
 });
 
-test('direct persisted read observes external root changes without relying on cache', async () => {
+test('direct persisted reads deny externally modified roots without a matching generation', async () => {
   await withManager(async ({ home, configFile, manager }) => {
     await manager.setValue('allowedDirectories', [home]);
     const first = await manager.getFilesystemPolicyCandidateSnapshot();
     const next = path.join(home, 'restricted');
-    await writeFile(configFile, JSON.stringify({ allowedDirectories: [next], welcomeOnboardingEligible: false }));
-    const second = await manager.getFilesystemPolicyCandidateSnapshot();
-    assert.deepEqual(second.allowedRoots, [next]);
-    assert.notEqual(first.revision, second.revision);
+    const disk = JSON.parse(await readFile(configFile, 'utf8'));
+    disk.allowedDirectories = [next];
+    await writeFile(configFile, JSON.stringify(disk));
+    await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+      /Filesystem policy generation unavailable/);
     assert.deepEqual(first.allowedRoots, [home]);
   });
 });

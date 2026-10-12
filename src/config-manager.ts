@@ -8,6 +8,7 @@ import lockfile from 'proper-lockfile';
 import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
+import { stampCooperativePolicyMutation } from './security/filesystem-policy-generation.js';
 import {
   parseFilesystemPolicyCandidate,
   type FilesystemPolicyCandidateSnapshot,
@@ -298,7 +299,14 @@ export class ConfigManager {
         latest = {};
         existed = false;
       }
+      // Copy policy roots before callbacks can mutate an allowlist in place.
+      // Preserve the missing-key / explicit-empty distinction.
+      const beforePolicy = { ...latest };
+      if (Array.isArray(beforePolicy.allowedDirectories)) {
+        beforePolicy.allowedDirectories = [...beforePolicy.allowedDirectories];
+      }
       mutate(latest, existed);
+      stampCooperativePolicyMutation(beforePolicy, latest);
       await this.writeConfigAtomically(latest);
       this.config = { ...latest, version: VERSION };
       return latest;

@@ -62,9 +62,10 @@ references `RootCapability`, `RestrictedCapabilityPolicy`, the candidate
 snapshot/cooperative setter invocation, or the unpublished native addon.
 The three *existing definition modules* are exempt solely because they
 define these non-authorizing helpers; their call sites are not exempt.
-Self-checks prove the gate detects direct and computed access plus native
-import attempts. It is run by the existing `npm run test:unit` path on the
-minimum supported Node version.
+Eleven self-checks detect direct and computed access, extracted method
+references, destructuring, import aliases and native import attempts.
+The existing `npm run test:unit` path runs the gate on the minimum
+supported Node version.
 
 This guard prevents *obvious accidental wiring*, not arbitrary reflection,
 obfuscated dynamic imports, compromised dependencies or hostile processes.

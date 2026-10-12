@@ -17,6 +17,7 @@ const shaPattern = /^[a-f0-9]{40}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 const targets = new Set(['win32-x64', 'linux-x64']);
 const manifestName = 'candidate-manifest.json';
+const nativeAddonName = 'native/jdc-capability-probe.node';
 
 function safeRelative(value) {
   return typeof value === 'string' && value.length > 0 &&
@@ -65,6 +66,20 @@ async function scanRegularFiles(root) {
   return files.sort((a, b) => a.path.localeCompare(b.path, 'en'));
 }
 
+async function validateNativeAddon(addon, target) {
+  assert.ok(isAbsolute(addon), 'Native addon must be an absolute path');
+  const metadata = await lstat(addon);
+  assert.ok(metadata.isFile(), 'Native addon must be a regular file, never a link');
+  const bytes = await readFile(addon);
+  assert.ok(bytes.length >= 1024, 'Native addon is incomplete');
+  if (target.startsWith('win32')) {
+    assert.ok(bytes.subarray(0, 2).equals(Buffer.from('MZ')), 'Expected Windows PE native addon');
+  } else {
+    assert.ok(bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])),
+      'Expected Linux ELF native addon');
+  }
+}
+
 async function validatedSource(source) {
   const absolute = await realpath(source);
   for (const name of ['dist/index.js', 'dist/npm-scripts/verify-ripgrep.js', 'package.json', 'package-lock.json', 'LICENSE', 'node_modules']) {
@@ -76,7 +91,7 @@ async function validatedSource(source) {
   return { source: absolute, pkg };
 }
 
-export async function buildCandidate({ source, destination, nodeExecutable, nodeLicense, target, sourceCommit, runId, attempt }) {
+export async function buildCandidate({ source, destination, nodeExecutable, nodeLicense, target, sourceCommit, runId, attempt, nativeAddon }) {
   validTarget(target);
   assert.match(sourceCommit, shaPattern);
   assert.match(String(runId), /^[0-9]+$/);
@@ -103,6 +118,13 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
   if (target.startsWith('linux')) await chmod(join(destination, binary), 0o755);
   await cp(nodeLicense, join(destination, 'NODE-LICENSE'), { force: false, errorOnExist: true });
 
+  if (nativeAddon !== undefined) {
+    await validateNativeAddon(nativeAddon, target);
+    await mkdir(join(destination, 'native'), { recursive: true });
+    await cp(nativeAddon, join(destination, nativeAddonName),
+      { force: false, errorOnExist: true });
+  }
+
   const files = await scanRegularFiles(destination);
   assert.ok(files.length > 100, 'Candidate has an unexpectedly small runtime payload');
   for (const mandatory of [binary, 'NODE-LICENSE', 'LICENSE', 'package.json',
@@ -119,6 +141,7 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
     nodeVersion: process.version,
     entrypoint: 'dist/index.js',
     runtimeExecutable: binary,
+    ...(nativeAddon === undefined ? {} : { nativeCapabilityAddon: nativeAddonName }),
     fileCount: files.length,
     files,
   };
@@ -126,7 +149,7 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
   return manifest;
 }
 
-export async function verifyCandidate({ destination, target, sourceCommit, runId, attempt }) {
+export async function verifyCandidate({ destination, target, sourceCommit, runId, attempt, nativeAddon }) {
   validTarget(target);
   const manifest = JSON.parse(await readFile(join(destination, manifestName), 'utf8'));
   assert.equal(manifest.schemaVersion, 1);
@@ -139,6 +162,14 @@ export async function verifyCandidate({ destination, target, sourceCommit, runId
   assert.equal(manifest.build?.attempt, Number(attempt));
   assert.equal(manifest.runtimeExecutable, target.startsWith('win32') ? 'runtime/node.exe' : 'runtime/node');
   assert.equal(manifest.entrypoint, 'dist/index.js');
+  if (nativeAddon !== undefined) {
+    assert.equal(manifest.nativeCapabilityAddon, nativeAddonName,
+      'Required capability addon omitted from candidate manifest');
+    await validateNativeAddon(join(destination, nativeAddonName), target);
+  } else {
+    assert.equal(manifest.nativeCapabilityAddon, undefined,
+      'Native addon must never be silently added to an unapproved candidate');
+  }
   assert.ok(Array.isArray(manifest.files) && manifest.fileCount === manifest.files.length);
   for (const record of manifest.files) {
     assert.ok(safeRelative(record.path) && Number.isSafeInteger(record.byteLength) &&
@@ -169,6 +200,30 @@ function runTool(executable, arguments_, cwd) {
 
 export async function smokeCandidate(destination, manifest) {
   const executable = join(destination, manifest.runtimeExecutable);
+  if (manifest.nativeCapabilityAddon !== undefined) {
+    assert.equal(manifest.nativeCapabilityAddon, nativeAddonName);
+    const nativeSmoke = [
+      "const fs = require('node:fs');",
+      "const os = require('node:os');",
+      "const path = require('node:path');",
+      "const { RootCapability } = require(process.argv[1]);",
+      "const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-packaged-cap-'));",
+      "let cap;",
+      "try {",
+      "  cap = new RootCapability(root);",
+      "  cap.createDirectory('confined');",
+      "  cap.writeBytes('confined/probe.bin', Buffer.from([0, 255]), 'rewrite');",
+      "  if (!cap.readBytes('confined/probe.bin').equals(Buffer.from([0, 255]))) throw Error('Native byte mismatch');",
+      "  if (!cap.listDirectory('confined').includes('probe.bin')) throw Error('Native listing mismatch');",
+      "  if (!cap || !fs.existsSync(path.join(root, 'confined', 'probe.bin'))) throw Error('Native confinement failed');",
+      "  cap.moveRelative('confined/probe.bin', 'confined/renamed.bin');",
+      "  if (!fs.existsSync(path.join(root, 'confined', 'renamed.bin'))) throw Error('Native move failed');",
+      "  if (!cap) throw Error('Capability absent');",
+      "  try { cap.createDirectory('../escaped'); throw Error('Traversal was allowed'); } catch (e) { if (e.message === 'Traversal was allowed') throw e; }",
+      "} finally { try { cap?.close(); } finally { fs.rmSync(root, {recursive:true,force:true}); } }",
+    ].join('\n');
+    runTool(executable, ['-e', nativeSmoke, join(destination, nativeAddonName)], destination);
+  }
   assert.equal(runTool(executable, ['--version'], destination), manifest.nodeVersion);
   runTool(executable, ['--check', join(destination, 'dist/index.js')], destination);
   const script = [
@@ -259,6 +314,9 @@ async function main() {
     sourceCommit: process.env.JDC_CANDIDATE_SOURCE_SHA,
     runId: process.env.GITHUB_RUN_ID,
     attempt: process.env.GITHUB_RUN_ATTEMPT,
+    ...(process.env.JDC_CANDIDATE_INCLUDE_NATIVE === '1'
+      ? { nativeAddon: join(projectRoot, 'native/capability-probe/target/release/jdc-capability-probe.node') }
+      : {}),
   };
   const archiveName = 'UNPUBLISHED-jdc-portable-' + target + '.tar';
   const archivePath = join(await realpath(temp), archiveName);

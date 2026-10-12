@@ -42,8 +42,14 @@ function unsafeReferences(source, filename = 'fixture.ts') {
   const errors = [];
 
   function visit(node) {
-    if (ts.isIdentifier(node) && forbiddenSymbols.has(node.text)) {
-      errors.push(`Experimental native capability identifier: ${node.text}`);
+    if (ts.isIdentifier(node) &&
+        (forbiddenSymbols.has(node.text) || forbiddenMethodCalls.has(node.text))) {
+      errors.push(`Experimental authority reference: ${node.text}`);
+    }
+    if (ts.isElementAccessExpression(node) && node.argumentExpression &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        forbiddenMethodCalls.has(node.argumentExpression.text)) {
+      errors.push(`Computed experimental authority reference: ${node.argumentExpression.text}`);
     }
 
     if (ts.isCallExpression(node)) {
@@ -76,6 +82,10 @@ test('authority isolation gate detects direct, computed and native binding usage
     'new RestrictedCapabilityPolicy({})',
     'manager.getFilesystemPolicyCandidateSnapshot()',
     'manager["setFilesystemPolicyCooperatively"]([])',
+    'const invoke = manager.getFilesystemPolicyCandidateSnapshot; invoke()',
+    'const invoke = manager["getFilesystemPolicyCandidateSnapshot"]; invoke()',
+    'const { setFilesystemPolicyCooperatively: invoke } = manager; invoke([])',
+    'import { getFilesystemPolicyCandidateSnapshot as invoke } from "./config-manager.js"',
     'import("../native/capability-probe/src/lib.rs")',
     'require("../test/security/support/restricted-capability-policy.cjs")',
     'import("./target/release/jdc-capability-probe.node")',

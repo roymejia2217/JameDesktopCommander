@@ -67,6 +67,10 @@ jobs:
       - name: Verify restricted capability policy lifecycle on Node 22
         run: node --test --test-concurrency=1 test/security/restricted-capability-policy.test.cjs test/security/restricted-capability-policy-native.test.cjs
 
+      - name: Prove post-authorization directory swap confinement on Node 22
+        # Both suites stage/load the same native .node path; Windows locks loaded DLLs.
+        run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
+
       - name: Use official Node 24
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -80,6 +84,10 @@ jobs:
 
       - name: Verify restricted capability policy lifecycle on Node 24
         run: node --test --test-concurrency=1 test/security/restricted-capability-policy.test.cjs test/security/restricted-capability-policy-native.test.cjs
+
+      - name: Prove post-authorization directory swap confinement on Node 24
+        # Both suites stage/load the same native .node path; Windows locks loaded DLLs.
+        run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
 
       - name: Preserve unpublished proof and immutable dependency lock
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

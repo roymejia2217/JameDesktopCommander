@@ -32,6 +32,23 @@ test('every Windows/Linux candidate requires a locked native addon', () => {
   'Native validation and full staged/roundtrip acceptance must run in that order');
   assert.match(steps[build].run, /cargo \+1\.91\.1 build --locked --release/);
   assert.match(steps[check].run, /test\/security\/capability-namespace-swap\.test\.cjs/);
+  assert.match(steps[check].run, /test\/security\/capability-root-acquisition\.test\.cjs/);
   assert.match(steps[stage].run, /distribution-candidate\.mjs build/);
   assert.match(steps[roundtrip].run, /distribution-candidate\.mjs roundtrip/);
+});
+
+test('root acquisition adversarial coverage is enforced across native Node and OS matrix', () => {
+  const native = YAML.parse(fs.readFileSync(
+    path.join(root, '.github/workflows/t011-capability-feasibility.yml'), 'utf8'));
+  const jobs = native.jobs?.['native-probe'];
+  assert.deepEqual((jobs?.strategy?.matrix?.include ?? []).map(x => x.target).sort(),
+    ['linux-x64', 'win32-x64']);
+  const steps = jobs?.steps ?? [];
+  for (const version of ['22', '24']) {
+    const gate = steps.find(x => x.name ===
+      `Prove post-authorization directory swap confinement on Node ${version}`);
+    assert.ok(gate, `Missing Node ${version} native confinement gate`);
+    assert.match(gate.run, /test\/security\/capability-namespace-swap\.test\.cjs/);
+    assert.match(gate.run, /test\/security\/capability-root-acquisition\.test\.cjs/);
+  }
 });

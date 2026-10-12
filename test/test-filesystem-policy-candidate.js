@@ -40,7 +40,7 @@ test('persisted restricted roots are immutable with a stable policy digest', asy
 
 test('direct persisted reads deny externally modified roots without a matching generation', async () => {
   await withManager(async ({ home, configFile, manager }) => {
-    await manager.setValue('allowedDirectories', [home]);
+    await manager.setFilesystemPolicyCooperatively([home]);
     const first = await manager.getFilesystemPolicyCandidateSnapshot();
     const next = path.join(home, 'restricted');
     const disk = JSON.parse(await readFile(configFile, 'utf8'));

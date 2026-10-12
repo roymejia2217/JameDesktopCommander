@@ -8,7 +8,11 @@ import lockfile from 'proper-lockfile';
 import { VERSION } from './version.js';
 import { CONFIG_FILE } from './config.js';
 import { replaceFileWin32 } from './utils/windows-atomic-replace.js';
-import { stampCooperativePolicyMutation } from './security/filesystem-policy-generation.js';
+import {
+  stampCooperativePolicyMutation,
+  POLICY_GENERATION_KEY,
+  POLICY_FINGERPRINT_KEY,
+} from './security/filesystem-policy-generation.js';
 import {
   parseFilesystemPolicyCandidate,
   type FilesystemPolicyCandidateSnapshot,
@@ -286,7 +290,8 @@ export class ConfigManager {
   }
 
   private async performConfigMutation(
-    mutate: (config: ServerConfig, existed: boolean) => void
+    mutate: (config: ServerConfig, existed: boolean) => void,
+    cooperativePolicyWrite = false,
   ): Promise<ServerConfig> {
     const release = await this.acquireConfigLock();
     try {
@@ -299,14 +304,18 @@ export class ConfigManager {
         latest = {};
         existed = false;
       }
-      // Copy policy roots before callbacks can mutate an allowlist in place.
-      // Preserve the missing-key / explicit-empty distinction.
-      const beforePolicy = { ...latest };
-      if (Array.isArray(beforePolicy.allowedDirectories)) {
-        beforePolicy.allowedDirectories = [...beforePolicy.allowedDirectories];
+      // Only the explicitly opted-in experimental policy protocol may stamp
+      // generation metadata. Generic production mutations must not be blocked
+      // by out-of-band edits or stale experimental markers.
+      let beforePolicy: ServerConfig | undefined;
+      if (cooperativePolicyWrite) {
+        beforePolicy = { ...latest };
+        if (Array.isArray(beforePolicy.allowedDirectories)) {
+          beforePolicy.allowedDirectories = [...beforePolicy.allowedDirectories];
+        }
       }
       mutate(latest, existed);
-      stampCooperativePolicyMutation(beforePolicy, latest);
+      if (beforePolicy) stampCooperativePolicyMutation(beforePolicy, latest);
       await this.writeConfigAtomically(latest);
       this.config = { ...latest, version: VERSION };
       return latest;
@@ -470,9 +479,42 @@ export class ConfigManager {
     return this.config[key];
   }
 
+  /**
+   * Experimental, opt-in cooperative persistence protocol (T011-C4a).
+   * Does NOT authorize file operations or change normal allowedDirectories
+   * setters. Direct/unmanaged edits can still roll back this metadata.
+   */
+  async setFilesystemPolicyCooperatively(allowedDirectories: string[]): Promise<void> {
+    await this.init();
+    if (!Array.isArray(allowedDirectories)) {
+      throw new Error('Invalid cooperative filesystem policy');
+    }
+    const roots = [...allowedDirectories];
+    // Validate a new candidate before acquiring the configuration lock.
+    // The actual persisted baseline is validated *inside* that lock.
+    try {
+      parseFilesystemPolicyCandidate({ allowedDirectories: roots });
+    } catch {
+      throw new Error('Invalid cooperative filesystem policy');
+    }
+    const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
+      latest.allowedDirectories = [...roots];
+    }, true));
+    this.writeChain = write.then(() => {}, () => {});
+    await write;
+  }
+
+  /** Reserved opt-in protocol fields are not writable by generic APIs. */
+  private assertNotFilesystemPolicyMetadata(key: string): void {
+    if (key === POLICY_GENERATION_KEY || key === POLICY_FINGERPRINT_KEY) {
+      throw new Error('Filesystem policy generation unavailable');
+    }
+  }
+
   /** Set a specific configuration value and wait for durable persistence. */
   async setValue(key: string, value: any): Promise<void> {
     await this.init();
+    this.assertNotFilesystemPolicyMetadata(key);
     if (key === 'telemetryEnabled') value = normalizeTelemetryEnabledValue(value);
 
     if (key === 'telemetryEnabled' && isTelemetryDisabledValue(value)) {
@@ -494,6 +536,7 @@ export class ConfigManager {
   /** Update one value under the cross-process lock and return the durable value. */
   async updateValue(key: string, updater: (current: any) => any): Promise<any> {
     await this.init();
+    this.assertNotFilesystemPolicyMetadata(key);
     let updatedValue: any;
     const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
       updatedValue = updater(latest[key]);
@@ -510,6 +553,7 @@ export class ConfigManager {
    */
   async setValueNonBlocking(key: string, value: any): Promise<void> {
     await this.init();
+    this.assertNotFilesystemPolicyMetadata(key);
     this.config[key] = value;
     this.queueMutation((latest) => { latest[key] = value; });
   }
@@ -521,6 +565,7 @@ export class ConfigManager {
    */
   async updateValueNonBlocking(key: string, updater: (current: any) => any): Promise<any> {
     await this.init();
+    this.assertNotFilesystemPolicyMetadata(key);
     const next = updater(this.config[key]);
     this.config[key] = next;
     this.queueMutation((latest) => { latest[key] = updater(latest[key]); });
@@ -596,6 +641,7 @@ export class ConfigManager {
   /** Update multiple configuration values at once. */
   async updateConfig(updates: Partial<ServerConfig>): Promise<ServerConfig> {
     await this.init();
+    for (const key of Object.keys(updates)) this.assertNotFilesystemPolicyMetadata(key);
     const write = this.writeChain.then(() => this.performConfigMutation((latest) => {
       Object.assign(latest, updates);
     }));

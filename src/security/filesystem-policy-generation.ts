@@ -39,8 +39,10 @@ export function readCooperativePolicyGeneration(config: PersistedObject): number
 
 /**
  * Executed inside ConfigManager's existing cross-process config mutation lock,
- * before its atomic rename. Preserves a cooperative generation across *all*
- * regular JDC writers; does not establish trust against an arbitrary editor
+ * before its atomic rename. This opt-in operation does NOT run for
+ * normal config mutations, preserving legacy behavior and preventing stale
+ * experimental metadata from denying unrelated runtime configuration writes.
+ * It does not establish trust against an arbitrary editor
  * capable of replacing the whole config, rollback/ABA, or process crashes.
  */
 export function stampCooperativePolicyMutation(

@@ -35,11 +35,11 @@ test('cooperative writes advance a durable generation through policy ABA', async
     const manager = await create(), a = path.join(dir, 'a'), b = path.join(dir, 'b');
     const before = await manager.getFilesystemPolicyCandidateSnapshot();
     assert.equal(before.cooperativeGeneration, null);
-    await manager.setValue('allowedDirectories', [a]);
+    await manager.setFilesystemPolicyCooperatively([a]);
     const one = await manager.getFilesystemPolicyCandidateSnapshot();
-    await manager.setValue('allowedDirectories', [b]);
+    await manager.setFilesystemPolicyCooperatively([b]);
     const two = await manager.getFilesystemPolicyCandidateSnapshot();
-    await manager.setValue('allowedDirectories', [a]);
+    await manager.setFilesystemPolicyCooperatively([a]);
     const three = await manager.getFilesystemPolicyCandidateSnapshot();
     assert.deepEqual([one.cooperativeGeneration, two.cooperativeGeneration,
       three.cooperativeGeneration], [1, 2, 3]);
@@ -52,7 +52,7 @@ test('cooperative writes advance a durable generation through policy ABA', async
 test('unrelated config writes keep generation and fingerprint stable', async () => {
   await fixture(async ({ dir, configPath, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setFilesystemPolicyCooperatively([dir]);
     const first = await manager.getFilesystemPolicyCandidateSnapshot();
     await manager.setValue('telemetryEnabled', false);
     const second = await manager.getFilesystemPolicyCandidateSnapshot();
@@ -68,8 +68,8 @@ test('cross-instance writers serialize policy generation under the existing conf
   await fixture(async ({ dir, configPath, create }) => {
     const first = await create(), second = await create();
     await Promise.all([
-      first.setValue('allowedDirectories', [path.join(dir, 'a')]),
-      second.setValue('allowedDirectories', [path.join(dir, 'b')]),
+      first.setFilesystemPolicyCooperatively([path.join(dir, 'a')]),
+      second.setFilesystemPolicyCooperatively([path.join(dir, 'b')]),
     ]);
     const disk = JSON.parse(await readFile(configPath, 'utf8'));
     assert.equal(readCooperativePolicyGeneration(disk), 2);
@@ -77,52 +77,67 @@ test('cross-instance writers serialize policy generation under the existing conf
   });
 });
 
-test('in-place allowlist mutation advances generation rather than mutating the baseline', async () => {
+test('opt-in API defensively copies input and legacy in-place edits taint candidate', async () => {
   await fixture(async ({ dir, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    const supplied = [dir];
+    await manager.setFilesystemPolicyCooperatively(supplied);
+    supplied.push(path.join(dir, 'uncommitted'));
+    assert.deepEqual((await manager.getFilesystemPolicyCandidateSnapshot()).allowedRoots, [dir]);
     await manager.updateValue('allowedDirectories', (value) => {
       value.push(path.join(dir, 'child'));
       return value;
     });
-    const snapshot = await manager.getFilesystemPolicyCandidateSnapshot();
-    assert.equal(snapshot.cooperativeGeneration, 2);
-    assert.equal(snapshot.allowedRoots.length, 2);
+    await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+      /Filesystem policy generation unavailable/);
+    // Production's pre-existing generic update still succeeds; it does not
+    // silently become a cooperative, trusted policy transaction.
+    assert.deepEqual(await manager.getValue('allowedDirectories'),
+      [dir, path.join(dir, 'child')]);
   });
 });
 
-test('config reset preserves generation continuity across restricted to unrestricted', async () => {
+test('opt-in reset advances generation; ordinary reset preserves legacy semantics', async () => {
   await fixture(async ({ dir, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
-    await manager.resetConfig();
+    await manager.setFilesystemPolicyCooperatively([dir]);
+    await manager.setFilesystemPolicyCooperatively([]);
     const after = await manager.getFilesystemPolicyCandidateSnapshot();
     assert.equal(after.mode, 'unrestricted');
     assert.equal(after.cooperativeGeneration, 2);
-    assert.deepEqual(after.allowedRoots, []);
+    await manager.resetConfig();
+    const legacy = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(legacy.mode, 'unrestricted');
+    assert.equal(legacy.cooperativeGeneration, null);
   });
 });
 
-test('tampering with stamped policy roots fails closed in candidate and further mutations', async () => {
+test('tampered stamped roots deny opt-in mutation but never break unrelated legacy writes', async () => {
   await fixture(async ({ dir, configPath, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setFilesystemPolicyCooperatively([dir]);
     const forged = JSON.parse(await readFile(configPath, 'utf8'));
     forged.allowedDirectories = [path.join(dir, 'outsider')];
     await writeFile(configPath, JSON.stringify(forged));
     await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
       /Filesystem policy generation unavailable/);
-    await assert.rejects(manager.setValue('allowedDirectories', [dir]),
+    await assert.rejects(manager.setFilesystemPolicyCooperatively([dir]),
       /Filesystem policy generation unavailable/);
+    await manager.setValue('telemetryEnabled', false);
+    await manager.updateValue('telemetryEnabled', () => true);
+    await manager.updateConfig({ telemetryEnabled: false });
     const unchanged = JSON.parse(await readFile(configPath, 'utf8'));
     assert.deepEqual(unchanged.allowedDirectories, forged.allowedDirectories);
+    assert.equal(unchanged.telemetryEnabled, false);
+    await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+      /Filesystem policy generation unavailable/);
   });
 });
 
 test('metadata API cannot manually spoof a generation or its fingerprint', async () => {
   await fixture(async ({ dir, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setFilesystemPolicyCooperatively([dir]);
     await assert.rejects(manager.setValue(POLICY_GENERATION_KEY, 999),
       /Filesystem policy generation unavailable/);
     await assert.rejects(manager.setValue(POLICY_FINGERPRINT_KEY, '0'.repeat(64)),
@@ -134,11 +149,11 @@ test('metadata API cannot manually spoof a generation or its fingerprint', async
 test('generation overflow refuses mutation instead of wrapping or resetting to one', async () => {
   await fixture(async ({ dir, configPath, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setFilesystemPolicyCooperatively([dir]);
     const disk = JSON.parse(await readFile(configPath, 'utf8'));
     disk[POLICY_GENERATION_KEY] = Number.MAX_SAFE_INTEGER;
     await writeFile(configPath, JSON.stringify(disk));
-    await assert.rejects(manager.setValue('allowedDirectories', [path.join(dir, 'other')]),
+    await assert.rejects(manager.setFilesystemPolicyCooperatively([path.join(dir, 'other')]),
       /Filesystem policy generation unavailable/);
     const stored = JSON.parse(await readFile(configPath, 'utf8'));
     assert.equal(stored[POLICY_GENERATION_KEY], Number.MAX_SAFE_INTEGER);
@@ -149,7 +164,7 @@ test('generation overflow refuses mutation instead of wrapping or resetting to o
 test('a reader refuses truncated cooperative metadata', async () => {
   await fixture(async ({ dir, configPath, create }) => {
     const manager = await create();
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setFilesystemPolicyCooperatively([dir]);
     const disk = JSON.parse(await readFile(configPath, 'utf8'));
     delete disk[POLICY_FINGERPRINT_KEY];
     await writeFile(configPath, JSON.stringify(disk));
@@ -157,3 +172,40 @@ test('a reader refuses truncated cooperative metadata', async () => {
       /Filesystem policy generation unavailable/);
   });
 });
+test('ordinary legacy policy writes never stamp or block restored configuration', async () => {
+  await fixture(async ({ dir, configPath, create }) => {
+    const manager = await create();
+    await manager.setValue('allowedDirectories', [dir]);
+    await manager.updateValue('allowedDirectories', () => [path.join(dir, 'next')]);
+    const old = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(old.cooperativeGeneration, null);
+    await manager.setFilesystemPolicyCooperatively([dir]);
+    const disk = JSON.parse(await readFile(configPath, 'utf8'));
+    disk.allowedDirectories = [path.join(dir, 'legacy-restore')];
+    await writeFile(configPath, JSON.stringify(disk));
+    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setValue('telemetryEnabled', true);
+    const restored = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.deepEqual(restored.allowedDirectories, [dir]);
+    // The stale stamp is not repaired implicitly, so the candidate stays denied.
+    await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+      /Filesystem policy generation unavailable/);
+  });
+});
+
+test('reserved policy markers cannot be forged by any ordinary config setter', async () => {
+  await fixture(async ({ dir, create }) => {
+    const manager = await create();
+    await manager.setFilesystemPolicyCooperatively([dir]);
+    await assert.rejects(manager.updateValue(POLICY_GENERATION_KEY, () => 1000),
+      /Filesystem policy generation unavailable/);
+    await assert.rejects(manager.setValueNonBlocking(POLICY_FINGERPRINT_KEY, 'x'),
+      /Filesystem policy generation unavailable/);
+    await assert.rejects(manager.updateValueNonBlocking(POLICY_GENERATION_KEY, () => 1000),
+      /Filesystem policy generation unavailable/);
+    await assert.rejects(manager.updateConfig({ [POLICY_GENERATION_KEY]: 1000 }),
+      /Filesystem policy generation unavailable/);
+    assert.equal((await manager.getFilesystemPolicyCandidateSnapshot()).cooperativeGeneration, 1);
+  });
+});
+

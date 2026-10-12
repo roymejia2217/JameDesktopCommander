@@ -29,7 +29,13 @@ array and uses the existing serial write queue. It is NOT used by any live MCP
 filesystem handler or exposed as an MCP tool. It is not suitable as an
 authorization endpoint: unmanaged writers can still bypass the protocol.
 
-Two optional internal config JSON fields are committed with an opt-in change:
+Two optional internal config JSON fields are committed on initial
+**explicit enrollment**, even if the supplied allowlist is identical to the
+legacy on-disk value. The initial generation is 1; repeated unchanged opted-in
+writes do not increment it. This removes an unversioned enrollment edge
+case, but does not provide rollback resistance.
+
+The fields are:
 
 - `__jdcFilesystemPolicyGeneration`: positive safe integer incremented
   once per opt-in change, including A → B → A, refusing overflow;
@@ -62,6 +68,8 @@ The native and portable Windows/Linux tests, all existing CI tests and
 the specific `test-filesystem-policy-generation.js` suite must pass on
 Node 22.19 and supported platforms. Test evidence must include:
 
+- first opt-in enrollment of an unchanged legacy unrestricted allowlist
+  stamps generation 1, repeated no-op opt-in preserves 1;
 - Opt-in A → B → A with distinct 1, 2, 3 generations despite repeat digest;
 - two cooperating ConfigManager instances serializing opt-in changes;
 - ordinary/unrelated writes do not advance or overwrite the metadata;

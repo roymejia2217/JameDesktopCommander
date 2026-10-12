@@ -49,6 +49,29 @@ test('cooperative writes advance a durable generation through policy ABA', async
   });
 });
 
+test('first explicit opt-in enrolls unchanged legacy policy exactly once', async () => {
+  await fixture(async ({ create, configPath }) => {
+    const manager = await create();
+    const initial = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(initial.mode, 'unrestricted');
+    assert.equal(initial.cooperativeGeneration, null);
+
+    await manager.setFilesystemPolicyCooperatively([]);
+    const enrolled = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(enrolled.mode, 'unrestricted');
+    assert.equal(enrolled.cooperativeGeneration, 1);
+    assert.equal(enrolled.revision, initial.revision);
+
+    await manager.setFilesystemPolicyCooperatively([]);
+    const repeated = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(repeated.cooperativeGeneration, 1);
+    assert.equal(repeated.revision, enrolled.revision);
+
+    const onDisk = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.equal(readCooperativePolicyGeneration(onDisk), 1);
+  });
+});
+
 test('unrelated config writes keep generation and fingerprint stable', async () => {
   await fixture(async ({ dir, configPath, create }) => {
     const manager = await create();

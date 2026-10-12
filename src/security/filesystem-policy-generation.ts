@@ -60,7 +60,10 @@ export function stampCooperativePolicyMutation(
   if (forgedMetadata || forgedFingerprint) {
     throw unavailable(); // Configuration API callers may not forge the markers.
   }
-  if (changed) {
+  // Explicit enrollment of an unchanged legacy allowlist must still create
+  // the first versioned marker. A repeated no-op on an already enrolled
+  // allowlist must not increment its generation.
+  if (changed || previousGeneration === null) {
     if (previousGeneration === Number.MAX_SAFE_INTEGER) throw unavailable();
     after[POLICY_GENERATION_KEY] = (previousGeneration ?? 0) + 1;
     after[POLICY_FINGERPRINT_KEY] = next;

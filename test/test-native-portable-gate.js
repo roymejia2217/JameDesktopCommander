@@ -31,6 +31,8 @@ test('every Windows/Linux candidate requires a locked native addon', () => {
     stage < verify && verify < smoke && smoke < roundtrip,
   'Native validation and full staged/roundtrip acceptance must run in that order');
   assert.match(steps[build].run, /cargo \+1\.91\.1 build --locked --release/);
+  assert.match(steps[check].run, /(?:^|\s)--test-concurrency=1(?:\s|$)/,
+    'Portable candidate must serialize tests that load the same Windows native addon');
   assert.match(steps[check].run, /test\/security\/capability-namespace-swap\.test\.cjs/);
   assert.match(steps[check].run, /test\/security\/capability-root-acquisition\.test\.cjs/);
   assert.match(steps[stage].run, /distribution-candidate\.mjs build/);
@@ -48,6 +50,8 @@ test('root acquisition adversarial coverage is enforced across native Node and O
     const gate = steps.find(x => x.name ===
       `Prove post-authorization directory swap confinement on Node ${version}`);
     assert.ok(gate, `Missing Node ${version} native confinement gate`);
+    assert.match(gate.run, /(?:^|\s)--test-concurrency=1(?:\s|$)/,
+      'Tests that copy/load a shared Windows .node addon must not overlap');
     assert.match(gate.run, /test\/security\/capability-namespace-swap\.test\.cjs/);
     assert.match(gate.run, /test\/security\/capability-root-acquisition\.test\.cjs/);
   }

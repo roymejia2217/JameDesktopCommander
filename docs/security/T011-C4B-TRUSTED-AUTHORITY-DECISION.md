@@ -62,9 +62,9 @@ references `RootCapability`, `RestrictedCapabilityPolicy`, the candidate
 snapshot/cooperative setter invocation, or the unpublished native addon.
 The three *existing definition modules* are exempt solely because they
 define these non-authorizing helpers; their call sites are not exempt.
-Twelve self-checks detect direct and computed access, extracted method
+Thirteen self-checks detect direct and computed access, extracted method
 references, destructuring, import aliases, native imports, and attempts
-to import the C4c experimental authority operation data contract.
+to import the C4c data contract or C4d experimental frame codec.
 The existing `npm run test:unit` path runs the gate on the minimum
 supported Node version.
 

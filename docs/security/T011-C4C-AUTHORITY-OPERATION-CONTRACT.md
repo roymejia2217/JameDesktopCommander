@@ -50,10 +50,11 @@ accidental-wiring guard, not protection from malicious local code.
 1. Independently provision and protect a Windows service identity/state
    and Linux equivalent, with authenticated peer credentials, precise ACLs,
    administrator-only policy control and real cross-principal denial tests.
-2. Define and verify IPC framing/encoding and message authentication by OS
-   identity. Reject duplicate JSON fields, noncanonical encodings, unknown
-   versions and oversized frames **before** object validation. This module
-   does **not** implement byte framing, JSON parsing or IPC.
+2. Canonical complete-frame encoding and strict parsing are provided only by
+   the experimental T011-C4d data codec. The protected authority must still
+   implement bounded IPC receive buffering, authenticated peer OS identity,
+   disconnection handling and replay resistance. C4c itself remains a
+   pure object validator and does not implement byte framing or IPC.
 3. Persist a monotonic policy epoch outside the config editor's trust domain.
    Prove A->B->A replay and rollback resistance, crash/restart and invalid/
    missing store handling; failure to reach the broker must deny requests.

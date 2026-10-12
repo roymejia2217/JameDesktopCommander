@@ -14,6 +14,8 @@ const definitionOnly = new Set([
   'src/config-manager.ts',
   'src/security/filesystem-policy-snapshot.ts',
   'src/security/filesystem-policy-generation.ts',
+  // Definition-only frame codec imports the C4c data shape; never a production handler.
+  'src/security/authority-frame-contract.ts',
 ]);
 const forbiddenSymbols = new Set([
   'RootCapability',
@@ -67,7 +69,7 @@ function unsafeReferences(source, filename = 'fixture.ts') {
     }
 
     if (ts.isStringLiteralLike(node) &&
-        /(?:native[\\/]capability-probe|restricted-capability-policy\.cjs|jdc-capability-probe\.node|jdc_capability_probe|authority-operation-contract)/i.test(node.text)) {
+        /(?:native[\\/]capability-probe|restricted-capability-policy\.cjs|jdc-capability-probe\.node|jdc_capability_probe|authority-operation-contract|authority-frame-contract)/i.test(node.text)) {
       errors.push('Runtime reference to experimental authority or native capability module');
     }
     ts.forEachChild(node, visit);
@@ -90,6 +92,7 @@ test('authority isolation gate detects direct, computed and native binding usage
     'require("../test/security/support/restricted-capability-policy.cjs")',
     'import("./target/release/jdc-capability-probe.node")',
     'import("../security/authority-operation-contract.js")',
+    'import("../security/authority-frame-contract.js")',
   ];
   for (const example of maliciousExamples) {
     assert.ok(unsafeReferences(example).length > 0,

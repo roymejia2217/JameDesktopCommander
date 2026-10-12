@@ -71,11 +71,30 @@ test('a missing policy key remains distinguishable from explicit unrestricted', 
 
 test('malformed or noncanonical roots cannot become restricted capabilities', async () => {
   await withManager(async ({ home, configFile, manager }) => {
-    const bad = ['[]', [null], [''], ['relative'], [home, home], [path.parse(home).root],
+    const bad = ['[]', [null], [''], ['relative'], [home, home],
       [home + path.sep + '..' + path.sep + 'other']];
     for (const allowedDirectories of bad) {
       await writeFile(configFile, JSON.stringify({ allowedDirectories, welcomeOnboardingEligible: false }));
       assert.deepEqual(JSON.parse(await readFile(configFile, 'utf8')).allowedDirectories, allowedDirectories);
+      await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+        /Invalid persisted filesystem policy candidate/);
+    }
+  });
+});
+
+test('POSIX root wildcard remains unrestricted; Windows volume root is not a restricted root', async () => {
+  await withManager(async ({ home, configFile, manager }) => {
+    const volumeRoot = path.parse(home).root;
+    await writeFile(configFile, JSON.stringify({
+      allowedDirectories: [volumeRoot], welcomeOnboardingEligible: false,
+    }));
+    if (volumeRoot === '/') {
+      // Existing POSIX '/' sentinel explicitly disables directory restriction.
+      const snapshot = await manager.getFilesystemPolicyCandidateSnapshot();
+      assert.equal(snapshot.mode, 'unrestricted');
+      assert.deepEqual(snapshot.allowedRoots, []);
+    } else {
+      // A drive/volume root is not the legacy '/' sentinel on Windows.
       await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
         /Invalid persisted filesystem policy candidate/);
     }

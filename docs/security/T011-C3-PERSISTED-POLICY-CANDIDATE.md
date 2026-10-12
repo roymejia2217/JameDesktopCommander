@@ -32,13 +32,17 @@ SHA-256 digest of its mode and root list. Modes are distinguished exactly:
   explicit unrestricted mode.
 
 Roots expressed as `~`, relative, nonnormalized, duplicate, empty or
-volume-root paths are denied as **unsupported candidate inputs**. Existing
-user configuration remains unchanged; no silent home expansion or access
-widening is introduced.
+volume-root paths are denied as **unsupported restricted candidate inputs**.
+The literal `'/'` is an intentional legacy unrestricted sentinel, including
+on POSIX where it also equals the filesystem root; Windows drive roots
+such as `C:\\` are not that sentinel and are denied when proposed as
+restricted roots. This distinction is explicitly regression-tested on both
+operating systems. Existing user configuration remains unchanged; no silent
+home expansion or access widening is introduced.
 
 ## Proof obligations and limits
 
-Seven focused node:test tests validate immutable data, stable revisions for
+Eight focused node:test tests validate immutable data, stable revisions for
 unrelated settings, externally replaced persisted config, explicit
 unrestricted vs legacy-unset, malformed/noncanonical roots and disk errors.
 The tests exercise `ConfigManager` through compiled `dist` code on the

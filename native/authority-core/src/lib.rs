@@ -22,6 +22,14 @@ struct State {
 /// In-memory ordering only. NOT trusted persistent policy, OS identity, or
 /// native filesystem confinement. Only a future protected broker may use it
 /// after independently authenticating and durably committing an epoch.
+///
+/// A separate consumer MUST NOT be able to promote client-supplied data into
+/// an active epoch. The trusted bootstrap path does not exist yet.
+/// ```compile_fail
+/// use jdc_authority_core::EpochArbiter;
+/// let gate = EpochArbiter::new();
+/// gate.accept_externally_committed_epoch(7).unwrap();
+/// ```
 pub struct EpochArbiter {
     state: Mutex<State>,
 }
@@ -46,9 +54,12 @@ impl EpochArbiter {
     // This function DOES NOT verify durable state or caller identity.
     // Until those are provided by a separate protected broker, it is unsafe
     // to wire this primitive into any production authorization path.
-    pub fn accept_externally_committed_epoch(&self, epoch: u64) -> Result<(), Denied> {
+    // No production bootstrap backend exists yet. Prevent downstream crates
+    // from passing arbitrary epochs as if they were independently attested.
+    #[allow(dead_code)]
+    pub(crate) fn accept_externally_committed_epoch(&self, epoch: u64) -> Result<(), Denied> {
         let mut state = self.state.lock().map_err(|_| Denied)?;
-        if state.phase == Phase::Closed || epoch == 0 || epoch <= state.last_epoch {
+        if state.phase != Phase::Unavailable || epoch == 0 || epoch <= state.last_epoch {
             return Err(Denied);
         }
         state.last_epoch = epoch;
@@ -117,10 +128,24 @@ mod tests {
         assert_eq!(gate.accept_externally_committed_epoch(6), Err(Denied));
         assert_eq!(gate.execute(6, || Ok::<_, ()>(123)), Err(Denied));
         assert_eq!(gate.execute(7, || Ok::<_, ()>(123)), Ok(Ok(123)));
+        assert_eq!(gate.revoke(), Ok(()));
         assert_eq!(gate.accept_externally_committed_epoch(8), Ok(()));
         assert_eq!(gate.execute(7, || Ok::<_, ()>(123)), Err(Denied));
         assert_eq!(gate.execute(8, || Ok::<_, ()>(123)), Ok(Ok(123)));
     }
+    #[test]
+    fn active_epoch_cannot_be_replaced_without_explicit_revoke() {
+        let gate = EpochArbiter::new();
+        assert_eq!(gate.accept_externally_committed_epoch(5), Ok(()));
+        assert_eq!(gate.accept_externally_committed_epoch(6), Err(Denied));
+        assert_eq!(gate.execute(5, || Ok::<_, ()>(5)), Ok(Ok(5)));
+        assert_eq!(gate.execute(6, || Ok::<_, ()>(6)), Err(Denied));
+        assert_eq!(gate.revoke(), Ok(()));
+        assert_eq!(gate.accept_externally_committed_epoch(6), Ok(()));
+        assert_eq!(gate.execute(5, || Ok::<_, ()>(5)), Err(Denied));
+        assert_eq!(gate.execute(6, || Ok::<_, ()>(6)), Ok(Ok(6)));
+    }
+
     #[test]
     fn revoke_keeps_high_water_and_close_is_irreversible() {
         let gate = EpochArbiter::new();

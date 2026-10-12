@@ -40,6 +40,9 @@ jobs:
       - name: Require exact committed Rust dependency lock
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
 
+      - name: Prove isolated epoch serialization and revocation on native OS
+        run: cargo +1.91.1 test --locked --manifest-path native/authority-core/Cargo.toml --lib
+
       - name: Install checksum-verified native cargo-deny for Windows and Linux
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:

@@ -69,7 +69,7 @@ function unsafeReferences(source, filename = 'fixture.ts') {
     }
 
     if (ts.isStringLiteralLike(node) &&
-        /(?:native[\\/]capability-probe|restricted-capability-policy\.cjs|jdc-capability-probe\.node|jdc_capability_probe|authority-operation-contract|authority-frame-contract)/i.test(node.text)) {
+        /(?:native[\\/]capability-probe|restricted-capability-policy\.cjs|jdc-capability-probe\.node|jdc_capability_probe|authority-operation-contract|authority-frame-contract|authority-core)/i.test(node.text)) {
       errors.push('Runtime reference to experimental authority or native capability module');
     }
     ts.forEachChild(node, visit);
@@ -93,6 +93,7 @@ test('authority isolation gate detects direct, computed and native binding usage
     'import("./target/release/jdc-capability-probe.node")',
     'import("../security/authority-operation-contract.js")',
     'import("../security/authority-frame-contract.js")',
+    'import("../../native/authority-core/src/lib.rs")',
   ];
   for (const example of maliciousExamples) {
     assert.ok(unsafeReferences(example).length > 0,

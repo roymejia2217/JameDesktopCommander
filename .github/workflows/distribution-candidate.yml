@@ -80,7 +80,7 @@ jobs:
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 
       - name: Exercise real native confinement and create verified Node addon
-        run: node --test test/security/capability-namespace-swap.test.cjs
+        run: node --test test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
 
       - name: Stage Node runtime and native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build

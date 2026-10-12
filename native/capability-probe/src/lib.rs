@@ -1,5 +1,6 @@
 //! Isolated T011-B feasibility spike. Never expose ambient constructor to MCP callers.
-use cap_std::{ambient_authority, fs::{Dir, OpenOptions}};
+use cap_std::fs::{Dir, OpenOptions};
+mod secure_root;
 use napi::{bindgen_prelude::Buffer, Error, Result};
 use napi_derive::napi;
 use std::{io::{Read, Write}, sync::Mutex};
@@ -18,7 +19,7 @@ pub struct RootCapability { root: Mutex<Option<Dir>> }
 impl RootCapability {
     #[napi(constructor)]
     pub fn new(root: String) -> Result<Self> {
-        let dir = Dir::open_ambient_dir(root, ambient_authority()).map_err(denied)?;
+        let dir = secure_root::open_root_dir(&root).map_err(denied)?;
         Ok(Self { root: Mutex::new(Some(dir)) })
     }
 

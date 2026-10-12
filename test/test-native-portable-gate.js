@@ -48,6 +48,8 @@ test('root acquisition adversarial coverage is enforced across native Node and O
     const gate = steps.find(x => x.name ===
       `Prove post-authorization directory swap confinement on Node ${version}`);
     assert.ok(gate, `Missing Node ${version} native confinement gate`);
+    assert.match(gate.run, /(?:^|\s)--test-concurrency=1(?:\s|$)/,
+      'Tests that copy/load a shared Windows .node addon must not overlap');
     assert.match(gate.run, /test\/security\/capability-namespace-swap\.test\.cjs/);
     assert.match(gate.run, /test\/security\/capability-root-acquisition\.test\.cjs/);
   }

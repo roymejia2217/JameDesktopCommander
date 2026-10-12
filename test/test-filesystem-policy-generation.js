@@ -183,13 +183,37 @@ test('ordinary legacy policy writes never stamp or block restored configuration'
     const disk = JSON.parse(await readFile(configPath, 'utf8'));
     disk.allowedDirectories = [path.join(dir, 'legacy-restore')];
     await writeFile(configPath, JSON.stringify(disk));
-    await manager.setValue('allowedDirectories', [dir]);
+    await manager.setValue('allowedDirectories', [path.join(dir, 'legacy-final')]);
     await manager.setValue('telemetryEnabled', true);
     const restored = JSON.parse(await readFile(configPath, 'utf8'));
-    assert.deepEqual(restored.allowedDirectories, [dir]);
-    // The stale stamp is not repaired implicitly, so the candidate stays denied.
+    assert.deepEqual(restored.allowedDirectories, [path.join(dir, 'legacy-final')]);
+    // Normal writes do not fix a mismatching cooperative fingerprint.
     await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
       /Filesystem policy generation unavailable/);
+  });
+});
+
+test('unmanaged A-B-A restores matching stamps without increasing generation (known security gap)', async () => {
+  await fixture(async ({ dir, create }) => {
+    const manager = await create();
+    await manager.setFilesystemPolicyCooperatively([dir]);
+    const first = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(first.cooperativeGeneration, 1);
+
+    // Generic writes are deliberately not participants in the opt-in
+    // protocol. They do not increment the cooperative counter.
+    await manager.setValue('allowedDirectories', [path.join(dir, 'untracked')]);
+    await assert.rejects(manager.getFilesystemPolicyCandidateSnapshot(),
+      /Filesystem policy generation unavailable/);
+
+    // ABA restores both policy bytes and their matching old fingerprint.
+    // The candidate is observably indistinguishable from the first snapshot.
+    // This MUST NOT be construed as a safe authorization/version token.
+    await manager.setValue('allowedDirectories', [dir]);
+    const replayed = await manager.getFilesystemPolicyCandidateSnapshot();
+    assert.equal(replayed.cooperativeGeneration, first.cooperativeGeneration);
+    assert.equal(replayed.revision, first.revision);
+    assert.deepEqual(replayed.allowedRoots, first.allowedRoots);
   });
 });
 

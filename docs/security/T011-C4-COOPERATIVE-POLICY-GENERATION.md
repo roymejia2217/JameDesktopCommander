@@ -42,8 +42,13 @@ rejects malformed/incomplete fields and a fingerprint that does not match
 the observed allowlist. Only opt-in writers advance the counter. Changes
 to unrelated settings via legacy APIs leave the markers untouched.
 If a normal legacy writer changes the allowlist after a stamped policy,
-the candidate deliberately becomes **untrusted and denied**, while the
-existing production configuration write succeeds as before.
+the candidate is denied **while the bytes no longer match** the old
+fingerprint, while existing production configuration writes succeed.
+**Critical known gap:** an unmanaged A → B → A sequence can restore the
+original allowlist and make the stale fingerprint/generation appear valid
+again, without any generation increment. A new regression test explicitly
+demonstrates this counterexample. The candidate MUST NOT grant filesystem
+permissions even if it currently appears internally consistent.
 
 The general-purpose configuration setters explicitly reject attempts to
 write the reserved metadata field names. The native restricted capability
@@ -70,7 +75,10 @@ Node 22.19 and supported platforms. Test evidence must include:
 - max-safe-integer overflow, incomplete metadata, and malformed policy
   remain denied through the experimental candidate boundary;
 - restoration of legacy config during unrelated test teardown produces
-  no unhandled generation exceptions.
+  no unhandled generation exceptions;
+- a mismatched legacy write remains denied, while an unmanaged A → B → A
+  restores the old digest and generation (documented proof of insecurity,
+  never considered a passing production authorization gate).
 
 **Red means stop:** The original full CI run on the first revision failed
 12 older tests. Do not replace those tests with mocks or weaken their

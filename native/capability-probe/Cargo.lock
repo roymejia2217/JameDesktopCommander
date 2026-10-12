@@ -210,6 +210,8 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

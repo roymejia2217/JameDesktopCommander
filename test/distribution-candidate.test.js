@@ -139,3 +139,37 @@ test('altered downloaded TAR is rejected before extraction', async () => {
     await assert.rejects(lstat(extracted), { code: 'ENOENT' });
   });
 });
+
+test('native candidate requires a platform-valid addon and records its exact bytes', async () => {
+  await withFixture(async options => {
+    const nativeAddon = join(dirname(options.destination), 'native-fixture.node');
+    const elf = Buffer.alloc(4096);
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46]).copy(elf);
+    await writeFile(nativeAddon, elf);
+    const approved = { ...options, nativeAddon };
+    const manifest = await buildCandidate(approved);
+    assert.equal(manifest.nativeCapabilityAddon, 'native/jdc-capability-probe.node');
+    assert.ok(manifest.files.some(file => file.path === manifest.nativeCapabilityAddon));
+    assert.deepEqual(await verifyCandidate(approved), manifest);
+    await assert.rejects(verifyCandidate(options), /Native addon must never be silently added/);
+
+    await writeFile(join(options.destination, manifest.nativeCapabilityAddon),
+      Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.alloc(4092, 1)]));
+    await assert.rejects(verifyCandidate(approved), /payload differs/);
+  });
+});
+
+test('native packaging refuses absent, invalid, symlinked and wrong-platform addons', async () => {
+  await withFixture(async options => {
+    const nativeAddon = join(dirname(options.destination), 'addon-fixture.node');
+    await assert.rejects(buildCandidate({ ...options, nativeAddon }));
+    await writeFile(nativeAddon, Buffer.from('not a compiled library'));
+    await assert.rejects(buildCandidate({ ...options, nativeAddon }), /incomplete/);
+    await writeFile(nativeAddon, Buffer.alloc(4096));
+    await assert.rejects(buildCandidate({ ...options, nativeAddon }), /Expected Linux ELF/);
+    await rm(nativeAddon);
+    await symlink(options.nodeExecutable, nativeAddon);
+    await assert.rejects(buildCandidate({ ...options, nativeAddon }),
+      /regular file, never a link/);
+  });
+});

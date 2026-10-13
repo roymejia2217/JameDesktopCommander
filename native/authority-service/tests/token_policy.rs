@@ -50,7 +50,7 @@ fn privilege_inventory_is_not_preapproved_without_real_scm_baseline() {
     ] {
         assert_eq!(
             classify_token(&minimal(&[name])),
-            TokenFinding::Unverifiable
+            TokenFinding::PrivilegeBaselineUnreviewed
         );
     }
     assert_eq!(
@@ -108,4 +108,31 @@ fn windows_sid_size_is_revision_and_count_bounded() {
         None
     );
     assert_eq!(bounded_sid_bytes(&[]), None);
+}
+
+#[test]
+fn scm_terminal_reasons_are_distinct_and_permanently_deny_only() {
+    use jdc_authority_service::token_policy::scm_terminal_denial_code;
+    assert_eq!(scm_terminal_denial_code(false, None), 2);
+    assert_eq!(scm_terminal_denial_code(true, None), 5);
+    assert_eq!(
+        scm_terminal_denial_code(true, Some(TokenFinding::BoundaryViolation)),
+        4
+    );
+    assert_eq!(
+        scm_terminal_denial_code(true, Some(TokenFinding::Unverifiable)),
+        5
+    );
+    assert_eq!(
+        scm_terminal_denial_code(true, Some(TokenFinding::PrivilegeBaselineUnreviewed)),
+        3
+    );
+    assert_eq!(
+        scm_terminal_denial_code(true, Some(TokenFinding::ObservedDenyOnly)),
+        1
+    );
+    assert_eq!(
+        scm_terminal_denial_code(false, Some(TokenFinding::ObservedDenyOnly)),
+        2
+    );
 }

@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Rust compiler in CI only
-        run: rustup toolchain install 1.91.1 --profile minimal
+        run: rustup toolchain install 1.91.1 --profile minimal --component clippy
 
       - name: Require exact committed Rust dependency lock
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml

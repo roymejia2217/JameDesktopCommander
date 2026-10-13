@@ -14,8 +14,14 @@ path = "src/lib.rs"
 name = "jdc-authority-service"
 path = "src/main.rs"
 
+# SCM-compatible deny-only experiment; never packaged or registered on user hosts.
+[[bin]]
+name = "jdc-authority-scm"
+path = "src/windows_scm.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.190"
 
 [target.'cfg(windows)'.dependencies]
+windows-service = { version = "=0.8.1" }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

@@ -24,9 +24,16 @@ pub fn verify_service_identity() -> Result<(), IdentityDenied> {
     }
 }
 
+// Shared pure policy for platform-independent tests. The Linux verifier
+// supplies its actual kernel getgroups(2) values; no caller-supplied names.
+#[cfg(any(target_os = "linux", test))]
+fn only_dedicated_supplementary_groups(groups: &[u32], expected_gid: u32) -> bool {
+    expected_gid != 0 && groups.len() <= 32 && groups.iter().all(|&gid| gid == expected_gid)
+}
+
 #[cfg(target_os = "linux")]
 mod linux_identity {
-    use super::IdentityDenied;
+    use super::{only_dedicated_supplementary_groups, IdentityDenied};
     use std::{mem::MaybeUninit, ptr};
     // Provisioning MUST be performed by a distinct system administrator.
     const SERVICE_NAME: &[u8] = b"jdc-authority\0";
@@ -71,6 +78,29 @@ mod linux_identity {
             return Err(IdentityDenied);
         }
         if !matches_dedicated_ids([ru, eu, su], [rg, eg, sg], (pwd.pw_uid, pwd.pw_gid)) {
+            return Err(IdentityDenied);
+        }
+
+        // getresgid(2) does not report supplementary groups. Retaining a
+        // foreign group can silently expand access despite matching UIDs.
+        // Refuse oversized lists or a list that changes between reads.
+        const MAX_GROUPS: i32 = 32;
+        let count = unsafe { libc::getgroups(0, ptr::null_mut()) };
+        if !(0..=MAX_GROUPS).contains(&count) {
+            return Err(IdentityDenied);
+        }
+        let mut supplementary = vec![0 as libc::gid_t; count as usize];
+        let seen = unsafe {
+            libc::getgroups(
+                count,
+                if count == 0 {
+                    ptr::null_mut()
+                } else {
+                    supplementary.as_mut_ptr()
+                },
+            )
+        };
+        if seen != count || !only_dedicated_supplementary_groups(&supplementary, pwd.pw_gid) {
             return Err(IdentityDenied);
         }
         Ok(())
@@ -215,5 +245,20 @@ mod windows_identity {
             return Err(IdentityDenied);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod supplemental_group_tests {
+    use super::only_dedicated_supplementary_groups;
+
+    #[test]
+    fn only_the_dedicated_service_group_may_be_supplementary() {
+        assert!(only_dedicated_supplementary_groups(&[], 2002));
+        assert!(only_dedicated_supplementary_groups(&[2002], 2002));
+        assert!(!only_dedicated_supplementary_groups(&[2002, 65534], 2002));
+        assert!(!only_dedicated_supplementary_groups(&[0], 2002));
+        assert!(!only_dedicated_supplementary_groups(&[2002], 0));
+        assert!(!only_dedicated_supplementary_groups(&[2002; 33], 2002));
     }
 }

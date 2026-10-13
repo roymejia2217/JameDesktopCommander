@@ -46,6 +46,14 @@ jobs:
       - name: Prove OS service identity preflight and fail-closed startup
         run: cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml
 
+      - name: Compile isolated deny-only Windows SCM entry point
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml
+
+      - name: Check isolated Windows SCM entry point without compiler warnings
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 clippy --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml -- -D warnings
+
       - name: Check OS identity preflight without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-service/Cargo.toml -- -D warnings
 
@@ -118,6 +126,19 @@ jobs:
       - name: Prove Linux systemd service fails closed under its actual OS identity
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-systemd-lifecycle-acceptance.sh
+
+      - name: Parse Windows SCM deny-only acceptance script
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-scm-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove Windows SCM virtual account denies startup under its real token
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
 
       - name: Build test-only Windows custody fixtures
         if: matrix.target == 'win32-x64'

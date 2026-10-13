@@ -31,24 +31,14 @@ mod linux_identity {
     // Provisioning MUST be performed by a distinct system administrator.
     const SERVICE_NAME: &[u8] = b"jdc-authority\0";
 
-    fn matches_dedicated_ids(
-        real_uid: u32,
-        effective_uid: u32,
-        saved_uid: u32,
-        real_gid: u32,
-        effective_gid: u32,
-        saved_gid: u32,
-        expected_uid: u32,
-        expected_gid: u32,
-    ) -> bool {
+    // Group the kernel's real/effective/saved credential triples; all slots
+    // must match the independently looked-up non-root service account.
+    fn matches_dedicated_ids(uids: [u32; 3], gids: [u32; 3], expected: (u32, u32)) -> bool {
+        let (expected_uid, expected_gid) = expected;
         expected_uid != 0
             && expected_gid != 0
-            && real_uid == expected_uid
-            && effective_uid == expected_uid
-            && saved_uid == expected_uid
-            && real_gid == expected_gid
-            && effective_gid == expected_gid
-            && saved_gid == expected_gid
+            && uids == [expected_uid; 3]
+            && gids == [expected_gid; 3]
     }
 
     pub fn verify() -> Result<(), IdentityDenied> {
@@ -80,7 +70,7 @@ mod linux_identity {
         {
             return Err(IdentityDenied);
         }
-        if !matches_dedicated_ids(ru, eu, su, rg, eg, sg, pwd.pw_uid, pwd.pw_gid) {
+        if !matches_dedicated_ids([ru, eu, su], [rg, eg, sg], (pwd.pw_uid, pwd.pw_gid)) {
             return Err(IdentityDenied);
         }
         Ok(())
@@ -92,20 +82,24 @@ mod linux_identity {
         #[test]
         fn dedicated_uid_gid_required_in_all_real_effective_saved_slots() {
             assert!(matches_dedicated_ids(
-                2001, 2001, 2001, 2002, 2002, 2002, 2001, 2002
+                [2001, 2001, 2001],
+                [2002, 2002, 2002],
+                (2001, 2002)
             ));
-            for (ru, eu, su, rg, eg, sg, expected_u, expected_g) in [
-                (0, 0, 0, 0, 0, 0, 0, 0),
-                (2001, 2001, 0, 2002, 2002, 2002, 2001, 2002),
-                (2001, 0, 2001, 2002, 2002, 2002, 2001, 2002),
-                (2001, 2001, 2001, 2002, 0, 2002, 2001, 2002),
-                (2001, 2001, 2001, 2002, 2002, 0, 2001, 2002),
-                (2001, 2001, 2001, 2002, 2002, 2002, 2001, 0),
-                (2001, 2001, 2001, 2002, 2002, 2002, 0, 2002),
+            for (uids, gids, expected) in [
+                ([0, 0, 0], [0, 0, 0], (0, 0)),
+                ([0, 2001, 2001], [2002, 2002, 2002], (2001, 2002)),
+                ([2001, 0, 2001], [2002, 2002, 2002], (2001, 2002)),
+                ([2001, 2001, 0], [2002, 2002, 2002], (2001, 2002)),
+                ([2001, 2001, 2001], [0, 2002, 2002], (2001, 2002)),
+                ([2001, 2001, 2001], [2002, 0, 2002], (2001, 2002)),
+                ([2001, 2001, 2001], [2002, 2002, 0], (2001, 2002)),
+                ([2001, 2001, 2001], [2002, 2002, 2002], (2001, 0)),
+                ([2001, 2001, 2001], [2002, 2002, 2002], (0, 2002)),
+                ([2003, 2003, 2003], [2002, 2002, 2002], (2001, 2002)),
+                ([2001, 2001, 2001], [2003, 2003, 2003], (2001, 2002)),
             ] {
-                assert!(!matches_dedicated_ids(
-                    ru, eu, su, rg, eg, sg, expected_u, expected_g
-                ));
+                assert!(!matches_dedicated_ids(uids, gids, expected));
             }
         }
     }

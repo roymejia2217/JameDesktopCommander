@@ -26,7 +26,10 @@ explicit non-inherited NTFS DACLs:
 PowerShell Start-Process -Credential launches separate processes with
 each account's real Windows token. The owner must initialize epoch 1,
 advance to epoch 2 and read it. The attacker must successfully write
-its canary and read an old snapshot. Actual attacker attempts to read,
+its canary, read an old snapshot, and exercise append, overwrite,
+rename, unlink, create, parent rename and DACL changes on its own
+writable fixture before those same operations are tested for denial.
+Actual attacker attempts to read,
 append, create, overwrite the DB with epoch 1, rename, unlink, rename
 the parent directory and change its DACL via icacls must all fail.
 The owner must then read epoch 2; the database SHA-256 must be unchanged.

@@ -107,7 +107,7 @@ try {
         @{ Sid = $service.User.SID; Rights = $modify }
     ))
     Grant-ExplicitAcl $public ($privileged + @(
-        @{ Sid = $attacker.User.SID; Rights = $modify }
+        @{ Sid = $attacker.User.SID; Rights = $full }
     ))
 
     $source = Join-Path (Get-Location).Path 'native/authority-store/target/debug/examples'
@@ -127,6 +127,19 @@ try {
     if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
         throw 'E_CUSTODY_MISSING_ATTACKER_CANARY'
     }
+    # Prove each adverse file operation works where the attacker owns the ACL.
+    Require-Success 'ATTACKER_APPEND_OWN' $attacker.Credential $probe @('append', $canary, $snapshot)
+    Require-Success 'ATTACKER_OVERWRITE_OWN' $attacker.Credential $probe @('overwrite', $canary, $snapshot)
+    Require-Success 'ATTACKER_RENAME_OWN' $attacker.Credential $probe @('rename', $canary, $snapshot)
+    Require-Success 'ATTACKER_CREATE_OWN' $attacker.Credential $probe @('create', $canary, $snapshot)
+    Require-Success 'ATTACKER_RECREATE_CANARY' $attacker.Credential $probe @('canary', $canary, $canary)
+    Require-Success 'ATTACKER_DELETE_OWN' $attacker.Credential $probe @('unlink', $canary, $snapshot)
+    $nested = Join-Path $public 'nested'
+    New-Item -Path $nested -ItemType Directory -ErrorAction Stop | Out-Null
+    Require-Success 'ATTACKER_RENAME_OWN_PARENT' $attacker.Credential $probe @('parent-rename', (Join-Path $nested 'unused.sqlite3'), $snapshot)
+    $icacls = (Get-Command icacls.exe -ErrorAction Stop).Source
+    $grantTarget = "$env:COMPUTERNAME\" + $attackerName + ':(OI)(CI)F'
+    Require-Success 'ATTACKER_CAN_CHANGE_OWN_DACL' $attacker.Credential $icacls @($public, '/grant', $grantTarget)
     Require-Success 'OWNER_ADVANCE' $service.Credential $fixture @('advance', $db)
     Require-Success 'OWNER_READ' $service.Credential $fixture @('verify-2', $db)
     $before = (Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash
@@ -135,9 +148,7 @@ try {
         Require-Denied $operation $attacker.Credential $probe @($operation, $db, $snapshot)
     }
     Require-Denied 'replay' $attacker.Credential $probe @('overwrite', $db, $snapshot)
-    # The unprivileged attacker must not be able to rewrite the directory DACL.
-    $icacls = (Get-Command icacls.exe -ErrorAction Stop).Source
-    $grantTarget = "$env:COMPUTERNAME\" + $attackerName + ':(OI)(CI)F'
+    # The same validated icacls invocation must now fail on protected state.
     Require-Denied 'CHANGE_DACL' $attacker.Credential $icacls @($state, '/grant', $grantTarget)
 
     Require-Success 'OWNER_EPOCH_AFTER_ATTACK' $service.Credential $fixture @('verify-2', $db)

@@ -39,8 +39,13 @@ The existing governed **Native probe (linux-x64)** job in
 `t011-capability-feasibility.yml` builds the exact pinned Rust
 `jdc-authority-service` crate. On an ephemeral GitHub-hosted Ubuntu
 runner, it validates the account fragment with the official
-`systemd-sysusers --dry-run` (no account modification), copies the
-test-built binary to the declared path **on that runner only**, then
+`systemd-sysusers --dry-run` (no account modification), using an
+existing absolute path resolved by GNU `realpath -e`. Ubuntu 24.04
+searches its system configuration directories when the positional
+argument is a relative path; passing the repository-relative path
+previously caused an incorrect file-not-found failure. The service
+unit is also supplied to `systemd-analyze verify` by resolved absolute
+path. The runner then copies the test-built binary to the declared path **on that runner only**, then
 runs the official `systemd-analyze verify` on the unit. A missing
 runner indicator, preexisting binary at that path, build failure,
 unknown directive or systemd validator error must FAIL the native job.

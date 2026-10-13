@@ -37,7 +37,9 @@ test('official systemd validators run within the existing Linux native CI gate',
     'CI must be explicitly scoped to an ephemeral runner');
   for (const marker of [
     'cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-service',
-    'systemd-sysusers --dry-run packaging/experimental/linux/sysusers.d/jdc-authority.conf',
-    'systemd-analyze verify packaging/experimental/linux/systemd/jdc-authority.service',
+    'sysusers_file="$(realpath -e -- packaging/experimental/linux/sysusers.d/jdc-authority.conf)"',
+    'unit_file="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"',
+    'systemd-sysusers --dry-run "$sysusers_file"',
+    'systemd-analyze verify "$unit_file"',
   ]) assert.ok(workflow.includes(marker), `Missing official CI validation: ${marker}`);
 });

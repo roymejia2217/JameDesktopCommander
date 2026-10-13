@@ -84,9 +84,11 @@ jobs:
           set -euo pipefail
           test "${RUNNER_ENVIRONMENT:-}" = "github-hosted"
           test ! -e /usr/libexec/jdc/jdc-authority-service
-          systemd-sysusers --dry-run packaging/experimental/linux/sysusers.d/jdc-authority.conf
+          sysusers_file="$(realpath -e -- packaging/experimental/linux/sysusers.d/jdc-authority.conf)"
+          unit_file="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"
+          systemd-sysusers --dry-run "$sysusers_file"
           sudo install -D -m 0755 native/authority-service/target/debug/jdc-authority-service /usr/libexec/jdc/jdc-authority-service
-          systemd-analyze verify packaging/experimental/linux/systemd/jdc-authority.service
+          systemd-analyze verify "$unit_file"
 
       - name: Build test-only dedicated identity probe on Linux
         if: matrix.target == 'linux-x64'

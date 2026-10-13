@@ -49,6 +49,37 @@ sudo -n chown nobody:"$attacker_group" "$canary"
 # PROVE both identities can actually execute commands; do not misinterpret
 # a broken sudo invocation as protection.
 sudo -n -u jdc-authority -- "$identity_probe"
+
+# Adversarial REAL token: same service UID and primary GID, but a foreign
+# supplementary group injected by the disposable runner administrator.
+# The proof must show the intended UID/groups were actually installed
+# before it can credit the identity probe with rejecting them.
+service_gid="$(id -g jdc-authority)"
+attacker_gid="$(id -g nobody)"
+if [[ "$service_gid" -eq "$attacker_gid" || "$attacker_gid" -eq 0 ]]; then
+  printf '%s\n' 'E_CUSTODY_GROUPS_NOT_DISTINCT' >&2
+  exit 1
+fi
+if ! command -v setpriv >/dev/null; then
+  printf '%s\n' 'E_CUSTODY_SETPRIV_UNAVAILABLE' >&2
+  exit 1
+fi
+identity_uid="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -u)"
+identity_groups="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -G)"
+# Verify real/effective/saved credentials independently via Linux procfs.
+# Otherwise an unrelated UID mismatch could masquerade as group rejection.
+uid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Uid:/ {print $2, $3, $4}' /proc/self/status)"
+gid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Gid:/ {print $2, $3, $4}' /proc/self/status)"
+if [[ "$identity_uid" != "$service_uid" || " $identity_groups " != *" $attacker_gid "* ||
+      "$uid_triplet" != "$service_uid $service_uid $service_uid" ||
+      "$gid_triplet" != "$service_gid $service_gid $service_gid" ]]; then
+  printf '%s\n' 'E_CUSTODY_GROUP_INJECTION_NOT_PROVEN' >&2
+  exit 1
+fi
+if sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- "$identity_probe"; then
+  printf '%s\n' 'E_CUSTODY_SUPPLEMENTARY_GROUP_ACCEPTED' >&2
+  exit 1
+fi
 if sudo -n -u nobody -- "$identity_probe"; then
   printf '%s\n' 'E_CUSTODY_IDENTITY_SPOOF' >&2
   exit 1

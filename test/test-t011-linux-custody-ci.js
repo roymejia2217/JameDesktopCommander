@@ -34,6 +34,8 @@ test('cross-principal proof is inside the existing governed Linux native job', (
     /set -euo pipefail/, /RUNNER_ENVIRONMENT/, /useradd --system/,
     /sudo -n -u nobody/, /sudo -n -u jdc-authority/,
     /expect_denied replay/, /sha256sum/, /verify-2/,
+    /setpriv --reuid/, /E_CUSTODY_GROUP_INJECTION_NOT_PROVEN/,
+    /E_CUSTODY_SUPPLEMENTARY_GROUP_ACCEPTED/,
   ]) {
     assert.match(script, expression);
   }

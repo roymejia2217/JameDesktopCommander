@@ -87,6 +87,12 @@ merge. This preserves the repository setting `squashMergeCommitMessage: BLANK` a
 protected-branch Commitlint gate validates the same governed Conventional Commit title that passed
 PR Governance.
 
+When invoking the GitHub squash merge API, omit **both** `commit_title` and `commit_message`.
+Pass the expected PR head SHA and let GitHub apply its governed title and blank body defaults.
+Manual metadata overrides can evade prospective PR checks and fail postmerge Commitlint;
+see `docs/governance/CP-71-POSTMERGE-COMMITLINT-INCIDENT.md`. The historical failure
+must remain recorded; a later green CI run does not retroactively validate that commit.
+
 The initial fork migration may contain older topic-branch commits. They are reviewed and tested in
 the pull request but enter `main` only through the single governed squash commit.
 

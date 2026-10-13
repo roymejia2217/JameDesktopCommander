@@ -2,6 +2,8 @@
 //! This DOES NOT authenticate an IPC peer, validate a policy store,
 //! grant filesystem operations, or start a service.
 
+pub mod token_policy;
+
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityDenied;

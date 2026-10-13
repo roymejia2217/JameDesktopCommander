@@ -89,6 +89,23 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-linux-custody-acceptance.sh
 
+      - name: Build test-only Windows custody fixtures
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml
+
+      - name: Parse Windows NTFS custody acceptance script
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-custody-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove Windows distinct-principal NTFS custody and reject rollback
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-custody-acceptance.ps1
+
       - name: Build native Rust Node-API addon
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 

@@ -1,0 +1,38 @@
+# T011-C4k EXPERIMENTAL. No [Install] section, NOT release-eligible.
+# The referenced binary always denies startup while the trusted policy
+# store, authenticated IPC and native pinned filesystem roots are missing.
+[Unit]
+Description=JDC experimental deny-only filesystem authority
+Documentation=https://github.com/roymejia2217/JameDesktopCommander
+After=local-fs.target
+ConditionPathIsExecutable=/usr/libexec/jdc/jdc-authority-service
+
+[Service]
+Type=exec
+User=jdc-authority
+Group=jdc-authority
+ExecStart=/usr/libexec/jdc/jdc-authority-service
+Restart=no
+TimeoutStartSec=15s
+KillMode=control-group
+UMask=0077
+StateDirectory=jdc-authority
+StateDirectoryMode=0700
+RuntimeDirectory=jdc-authority
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native

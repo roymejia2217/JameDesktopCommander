@@ -73,6 +73,23 @@ jobs:
 
       # This Linux-only proof lives inside the already governed native job.
       # It modifies only the ephemeral GitHub-hosted runner.
+      - name: Build deny-only Linux authority binary for declarative service validation
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-service
+
+      - name: Validate experimental systemd unit and sysusers definition
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted"
+          test ! -e /usr/libexec/jdc/jdc-authority-service
+          sysusers_file="$(realpath -e -- packaging/experimental/linux/sysusers.d/jdc-authority.conf)"
+          unit_file="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"
+          systemd-sysusers --dry-run "$sysusers_file"
+          sudo install -D -m 0755 native/authority-service/target/debug/jdc-authority-service /usr/libexec/jdc/jdc-authority-service
+          systemd-analyze verify "$unit_file"
+
       - name: Build test-only dedicated identity probe on Linux
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml

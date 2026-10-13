@@ -12,7 +12,6 @@ test('experimental SCM DACL grants mutation only to SYSTEM and Administrators',(
   const sddl = fs.readFileSync(file,'utf8').trim();
   assert.equal(sddl,'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;AU)');
   assert.equal(sddl.split('(A;;').length - 1,3);
-  assert.doesNotMatch(sddl,/;;;WD|;;;BU|;;;IU|;;;SU/);
 });
 test('SCM tests prove real non-admin child process and service-object rights rather than console success',()=>{
   for(const token of [

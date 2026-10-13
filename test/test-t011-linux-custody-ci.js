@@ -31,7 +31,7 @@ test('cross-principal proof is inside the existing governed Linux native job', (
     path.join(repo, 'test/security/t011-linux-custody-acceptance.sh'), 'utf8',
   );
   for (const expression of [
-    /set -euo pipefail/, /RUNNER_ENVIRONMENT/, /useradd --system/,
+    /set -euo pipefail/, /RUNNER_ENVIRONMENT/, /getent passwd jdc-authority/,
     /sudo -n -u nobody/, /sudo -n -u jdc-authority/,
     /expect_denied replay/, /sha256sum/, /verify-2/,
     /setpriv --reuid/, /E_CUSTODY_GROUP_INJECTION_NOT_PROVEN/,

@@ -49,6 +49,12 @@ jobs:
       - name: Check OS identity preflight without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-service/Cargo.toml -- -D warnings
 
+      - name: Prove isolated SQLite epoch transactions and replay limitation
+        run: cargo +1.91.1 test --locked --manifest-path native/authority-store/Cargo.toml
+
+      - name: Check SQLite epoch backend without compiler warnings
+        run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-store/Cargo.toml -- -D warnings
+
       - name: Install checksum-verified native cargo-deny for Windows and Linux
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
@@ -61,6 +67,9 @@ jobs:
 
       - name: Audit isolated service identity dependencies under native policy
         run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/authority-service/Cargo.toml check advisories licenses sources
+
+      - name: Audit isolated SQLite epoch dependencies under native policy
+        run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/authority-store/Cargo.toml check advisories licenses sources
 
       - name: Build native Rust Node-API addon
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml

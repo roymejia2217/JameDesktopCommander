@@ -12,6 +12,13 @@ ignore = []
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "ISC", "Unicode-3.0"]
 confidence-threshold = 0.8
 
+# Reviewed SPDX Zlib license for the exact SQLite transitive dependency.
+# This does NOT permit any other Zlib-licensed crate or version.
+[[licenses.exceptions]]
+name = "foldhash"
+version = "=0.1.5"
+allow = ["Zlib"]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

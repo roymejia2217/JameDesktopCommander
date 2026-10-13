@@ -62,10 +62,11 @@ references `RootCapability`, `RestrictedCapabilityPolicy`, the candidate
 snapshot/cooperative setter invocation, or the unpublished native addon.
 The three *existing definition modules* are exempt solely because they
 define these non-authorizing helpers; their call sites are not exempt.
-Fifteen self-checks detect direct and computed access, extracted method
+Sixteen self-checks detect direct and computed access, extracted method
 references, destructuring, import aliases, native imports, and attempts
 to import the C4c data contract, C4d experimental frame codec, C4e epoch
-serialization library, or C4g deny-only service-identity preflight.
+serialization library, C4g deny-only service-identity preflight, or C4h
+isolated transactional SQLite state prototype.
 The existing `npm run test:unit` path runs the gate on the minimum
 supported Node version.
 

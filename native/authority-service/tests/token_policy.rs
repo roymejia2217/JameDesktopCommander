@@ -79,3 +79,33 @@ fn variable_arrays_reject_truncation_and_oversized_counts() {
     assert!(!bounded_token_array(16, 8, 0, 1));
     assert!(!bounded_token_array(16, usize::MAX, 8, 1));
 }
+
+#[test]
+fn raw_windows_token_pointer_ranges_fail_closed() {
+    use jdc_authority_service::token_policy::bounded_buffer_span;
+    assert!(bounded_buffer_span(0x1000, 96, 0x1010, 16, 8));
+    assert!(!bounded_buffer_span(0x1000, 96, 0x0fff, 8, 8));
+    assert!(!bounded_buffer_span(0x1000, 96, 0x105f, 2, 1));
+    assert!(!bounded_buffer_span(0x1000, 96, 0x1001, 8, 8));
+    assert!(!bounded_buffer_span(0x1000, 96, 0x1010, 0, 8));
+    assert!(!bounded_buffer_span(usize::MAX - 2, 8, usize::MAX, 4, 1));
+    assert!(!bounded_buffer_span(0x1000, 96, 0x1010, 16, 3));
+}
+
+#[test]
+fn windows_sid_size_is_revision_and_count_bounded() {
+    use jdc_authority_service::token_policy::bounded_sid_bytes;
+    // Revision 1, authority NT=5, one subauthority of RID 80.
+    let sid = [1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
+    assert_eq!(bounded_sid_bytes(&sid), Some(12));
+    assert_eq!(bounded_sid_bytes(&sid[..11]), None);
+    assert_eq!(
+        bounded_sid_bytes(&[2, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0]),
+        None
+    );
+    assert_eq!(
+        bounded_sid_bytes(&[1, 16, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0]),
+        None
+    );
+    assert_eq!(bounded_sid_bytes(&[]), None);
+}

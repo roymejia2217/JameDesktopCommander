@@ -4,6 +4,9 @@
 
 pub mod token_policy;
 
+#[cfg(windows)]
+pub mod windows_token;
+
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityDenied;

@@ -90,3 +90,45 @@ pub fn bounded_token_array(
         .and_then(|entries| header_bytes.checked_add(entries))
         .is_some_and(|required| required <= total_bytes)
 }
+
+/// Verify a native field spans only an aligned region within its query buffer.
+/// No untrusted field pointer may be dereferenced before this returns true.
+#[must_use]
+pub fn bounded_buffer_span(
+    buffer_addr: usize,
+    total_len: usize,
+    field_addr: usize,
+    field_len: usize,
+    alignment: usize,
+) -> bool {
+    if buffer_addr == 0
+        || total_len == 0
+        || field_len == 0
+        || !alignment.is_power_of_two()
+        || !field_addr.is_multiple_of(alignment)
+    {
+        return false;
+    }
+    let Some(buffer_end) = buffer_addr.checked_add(total_len) else {
+        return false;
+    };
+    let Some(field_end) = field_addr.checked_add(field_len) else {
+        return false;
+    };
+    field_addr >= buffer_addr && field_end <= buffer_end
+}
+
+/// Validate the fixed SID header and its subauthority byte count.
+/// This is a structural validation only; identity equality is an OS check.
+#[must_use]
+pub fn bounded_sid_bytes(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 8 || bytes[0] != 1 {
+        return None;
+    }
+    let count = usize::from(bytes[1]);
+    if !(1..=15).contains(&count) {
+        return None;
+    }
+    let len = count.checked_mul(4)?.checked_add(8)?;
+    (len <= bytes.len()).then_some(len)
+}

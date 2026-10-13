@@ -10,8 +10,8 @@ if [[ "$(id -u)" -eq 0 ]]; then
   printf '%s\n' 'E_CUSTODY_RUNNER_MUST_NOT_BE_ROOT' >&2
   exit 1
 fi
-if getent passwd jdc-authority >/dev/null; then
-  printf '%s\n' 'E_CUSTODY_UNEXPECTED_EXISTING_SERVICE_PRINCIPAL' >&2
+if ! getent passwd jdc-authority >/dev/null || ! getent group jdc-authority >/dev/null; then
+  printf '%s\n' 'E_CUSTODY_SERVICE_PRINCIPAL_NOT_PROVISIONED' >&2
   exit 1
 fi
 if ! getent passwd nobody >/dev/null; then
@@ -19,7 +19,16 @@ if ! getent passwd nobody >/dev/null; then
   exit 1
 fi
 sudo -n true
-sudo -n useradd --system --user-group --no-create-home --shell /usr/sbin/nologin jdc-authority
+# Account is provisioned by official systemd-sysusers in the governed CI job.
+# Verify effective account contract rather than recreating a lookalike user.
+if [[ "$(getent passwd jdc-authority | cut -d: -f7)" != "/usr/sbin/nologin" ]]; then
+  printf '%s\n' 'E_CUSTODY_SERVICE_LOGIN_SHELL_MISMATCH' >&2
+  exit 1
+fi
+if [[ "$(id -gn jdc-authority)" != "jdc-authority" ]]; then
+  printf '%s\n' 'E_CUSTODY_SERVICE_PRIMARY_GROUP_MISMATCH' >&2
+  exit 1
+fi
 
 service_uid="$(id -u jdc-authority)"
 attacker_uid="$(id -u nobody)"

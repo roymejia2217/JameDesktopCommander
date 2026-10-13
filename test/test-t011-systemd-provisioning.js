@@ -22,6 +22,7 @@ test('Linux authority uses standard systemd account and deny-only service config
     'ProtectSystem=strict', 'ProtectHome=yes', 'NoNewPrivileges=yes',
     'PrivateTmp=yes', 'PrivateDevices=yes', 'RestrictSUIDSGID=yes',
     'CapabilityBoundingSet=', 'AmbientCapabilities=', 'UMask=0077',
+    'StandardOutput=journal', 'StandardError=journal',
     'Restart=no',
   ]) assert.ok(service.split(/\r?\n/).includes(entry), `Missing explicit hardening directive: ${entry}`);
   assert.doesNotMatch(service, /^\[Install\]$/m, 'experimental service must not be enabled on boot');

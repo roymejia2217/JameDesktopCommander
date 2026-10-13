@@ -87,6 +87,11 @@ jobs:
           sysusers_file="$(realpath -e -- packaging/experimental/linux/sysusers.d/jdc-authority.conf)"
           unit_file="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"
           systemd-sysusers --dry-run "$sysusers_file"
+          test -z "$(getent passwd jdc-authority || :)"
+          test -z "$(getent group jdc-authority || :)"
+          sudo systemd-sysusers "$sysusers_file"
+          test "$(id -u jdc-authority)" -gt 0
+          test "$(id -g jdc-authority)" -gt 0
           sudo install -D -m 0755 native/authority-service/target/debug/jdc-authority-service /usr/libexec/jdc/jdc-authority-service
           systemd-analyze verify "$unit_file"
 
@@ -105,6 +110,14 @@ jobs:
       - name: Prove Linux distinct-principal custody and reject database rollback
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-linux-custody-acceptance.sh
+
+      - name: Lint systemd real-lifecycle acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-systemd-lifecycle-acceptance.sh && bash -n test/security/t011-systemd-lifecycle-acceptance.sh
+
+      - name: Prove Linux systemd service fails closed under its actual OS identity
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-systemd-lifecycle-acceptance.sh
 
       - name: Build test-only Windows custody fixtures
         if: matrix.target == 'win32-x64'

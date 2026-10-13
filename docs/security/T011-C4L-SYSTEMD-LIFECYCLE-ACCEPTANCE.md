@@ -23,8 +23,13 @@ The script
 hosts, root invocation, missing systemd PID 1 or preexisting unit/state
 paths. It temporarily places the **existing reviewed unit** into
 `/run/systemd/system` (ephemeral), reloads the manager with
-`systemctl daemon-reload` and calls `systemctl start`. The binary is
-deliberately deny-only and **must exit unsuccessfully** with status 1,
+`systemctl daemon-reload` and calls `systemctl --wait start` with a
+bounded 30-second GNU `timeout` (5-second termination grace). The
+initial command may return success for `Type=exec` simply because PID 1
+successfully executed the binary; this does **not** mean the service
+is operational. The test waits for actual termination, then requires
+systemd's final result, exit code and journal to prove denial. The
+binary is deliberately deny-only and **must exit unsuccessfully** with status 1,
 reporting `E_POLICY_UNAVAILABLE` to the real systemd journal. An
 `E_IDENTITY_REQUIRED` message, successful start or unexpected exit
 state is a failure. The CI test never enables or installs the unit for

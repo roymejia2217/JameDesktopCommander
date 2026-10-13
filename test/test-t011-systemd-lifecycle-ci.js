@@ -16,7 +16,7 @@ test('systemd sysusers provisions CI service account before Linux identity and c
   assert.match(custody,/E_CUSTODY_SERVICE_PRINCIPAL_NOT_PROVISIONED/);
 });
 test('service real-lifecycle check uses official systemctl and journalctl in existing Linux native gate',()=>{
-  for (const v of ['systemctl daemon-reload','systemctl start "$unit_name"','systemctl show','journalctl','E_POLICY_UNAVAILABLE']) {
+  for (const v of ['systemctl daemon-reload','systemctl --wait start "$unit_name"','systemctl show','journalctl','E_POLICY_UNAVAILABLE']) {
     const script=fs.readFileSync(path.join(repo,'test/security/t011-systemd-lifecycle-acceptance.sh'),'utf8');
     assert.ok(script.includes(v),v);
   }
@@ -27,4 +27,7 @@ test('service real-lifecycle check uses official systemctl and journalctl in exi
   assert.match(script,/set -euo pipefail/);
   assert.match(script,/trap .*EXIT/);
   assert.match(script,/E_CUSTODY_UNAUTHORIZED/);
+  assert.match(script,/timeout --kill-after=5s 30s/);
+  assert.match(script,/E_SYSTEMD_TERMINATION_TIMEOUT/);
+  assert.doesNotMatch(script,/if sudo -n systemctl start/);
 });

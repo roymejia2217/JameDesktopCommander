@@ -48,9 +48,19 @@ trap cleanup EXIT
 
 sudo -n install -m 0644 "$unit_source" "$unit_destination"
 sudo -n systemctl daemon-reload
-if sudo -n systemctl start "$unit_name"; then
-  printf '%s\n' 'E_SYSTEMD_AUTHORITY_UNEXPECTEDLY_STARTED' >&2
-  exit 1
+# For Type=exec, a successful start request only confirms successful execve,
+# not that the unit remains active. Official --wait synchronizes with actual
+# termination; a standard bounded timeout prevents a broken binary from
+# hanging the security job. Do not confuse the start CLI status with the
+# process's final systemd Result/ExecMainStatus and journal diagnostics.
+if timeout --kill-after=5s 30s sudo -n systemctl --wait start "$unit_name"; then
+  :
+else
+  start_status=$?
+  if [[ "$start_status" -eq 124 || "$start_status" -eq 137 ]]; then
+    printf '%s\n' 'E_SYSTEMD_TERMINATION_TIMEOUT' >&2
+    exit 1
+  fi
 fi
 
 # Identity must be valid: the binary prints E_POLICY_UNAVAILABLE only after

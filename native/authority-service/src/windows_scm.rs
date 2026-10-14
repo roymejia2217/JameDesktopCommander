@@ -45,17 +45,11 @@ mod scm {
 
         // Inspect the *kernel process token*, never an environment variable,
         // CLI argument, process name, caller-controlled SID or JSON grant.
-        let identity_valid = jdc_authority_service::verify_service_identity().is_ok();
-        let token_observation = if identity_valid {
-            // Inspect the *actual* SCM process token; never a test-runner token.
-            jdc_authority_service::windows_token::observe_current_process_token().ok()
-        } else {
-            None
-        };
-        let reason = jdc_authority_service::token_policy::scm_terminal_denial_code(
-            identity_valid,
-            token_observation,
-        );
+        // One TokenUser/TokenGroups/TokenPrivileges proof under one handle.
+        // A failed native query maps to fail-closed SCM code 5, not code 2.
+        let observation =
+            jdc_authority_service::windows_token::observe_current_process_token().ok();
+        let reason = jdc_authority_service::token_policy::scm_terminal_denial_code(observation);
         // Deliberately never signal StartPending -> Running: there is no
         // authenticated IPC, protected policy authority or native I/O broker.
         handler.set_service_status(ServiceStatus {

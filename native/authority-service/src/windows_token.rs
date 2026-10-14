@@ -10,9 +10,9 @@ use windows_sys::Win32::{
     Security::{
         EqualSid, GetTokenInformation, IsWellKnownSid, LookupAccountNameW, LookupPrivilegeNameW,
         TokenGroups, TokenIntegrityLevel, TokenPrimary, TokenPrivileges, TokenRestrictedSids,
-        TokenType, WinBuiltinAdministratorsSid, WinLocalSystemSid, LUID_AND_ATTRIBUTES,
+        TokenType, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, LUID_AND_ATTRIBUTES,
         SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, SID_NAME_USE, TOKEN_GROUPS,
-        TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_TYPE,
+        TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_TYPE, TOKEN_USER,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -218,17 +218,24 @@ fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
     Ok(u32::from_le_bytes(tail))
 }
 /// Read actual kernel-issued process token; caller cannot supply SID or claims.
-/// This does NOT grant authority, and is not wired into the SCM lifecycle yet.
+/// This does NOT grant authority. SCM uses this single-token proof to deny.
 pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
-    // C4g's independent virtual-account identity proof still applies.
-    if crate::verify_service_identity().is_err() {
-        return Ok(TokenFinding::BoundaryViolation);
-    }
+    // A single kernel-issued process token is used for both TokenUser
+    // identity and all privilege/SID attributes. Do not re-open a token.
     let mut raw: HANDLE = ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
         return Err(TokenUnverifiable);
     }
     let token = Handle(raw);
+    let expected = service_sid()?;
+    let expected_sid = expected.words.as_ptr().cast_mut().cast();
+    let identity_info = query(token.0, TokenUser)?;
+    let user: TOKEN_USER = identity_info.fixed()?;
+    // The SID pointer and its full structure MUST be in this query buffer.
+    identity_info.sid(user.User.Sid)?;
+    if unsafe { EqualSid(user.User.Sid, expected_sid) } == 0 {
+        return Ok(TokenFinding::IdentityMismatch);
+    }
     let token_type: TOKEN_TYPE = query(token.0, TokenType)?.fixed()?;
     let groups = query(token.0, TokenGroups)?;
     let normal_groups = groups.sid_groups()?;
@@ -244,8 +251,6 @@ pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable
         }
     }
     let restricted = query(token.0, TokenRestrictedSids)?;
-    let expected = service_sid()?;
-    let expected_sid = expected.words.as_ptr().cast_mut().cast();
     let mut matching_attributes = None;
     for group in restricted.sid_groups()? {
         if unsafe { EqualSid(group.Sid, expected_sid) } != 0
@@ -329,6 +334,46 @@ mod tests {
         assert!(info.sid_groups().is_err());
     }
 
+    #[test]
+    fn token_user_sid_pointer_and_complete_length_are_bounded() {
+        // A synthetic TOKEN_USER layout must not make a forged kernel
+        // pointer readable just because its fixed-size header is present.
+        let mut info = RawInfo {
+            words: vec![0usize; 16],
+            used: 16 * mem::size_of::<usize>(),
+        };
+        let base = info.words.as_mut_ptr().cast::<u8>();
+        let forged = TOKEN_USER {
+            User: SID_AND_ATTRIBUTES {
+                Sid: (info.addr() + info.used + 8) as *mut c_void,
+                Attributes: 0,
+            },
+        };
+        unsafe {
+            ptr::write_unaligned(base.cast::<TOKEN_USER>(), forged);
+        }
+        let user: TOKEN_USER = info.fixed().unwrap();
+        assert!(info.sid(user.User.Sid).is_err());
+
+        let sid_offset = mem::size_of::<TOKEN_USER>() + 8;
+        let incomplete = [1u8, 2, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
+        unsafe {
+            ptr::write_unaligned(
+                base.cast::<TOKEN_USER>(),
+                TOKEN_USER {
+                    User: SID_AND_ATTRIBUTES {
+                        Sid: base.add(sid_offset).cast(),
+                        Attributes: 0,
+                    },
+                },
+            );
+            ptr::copy_nonoverlapping(incomplete.as_ptr(), base.add(sid_offset), incomplete.len());
+        }
+        // One subauthority is missing; never call EqualSid.
+        info.used = sid_offset + incomplete.len();
+        let user: TOKEN_USER = info.fixed().unwrap();
+        assert!(info.sid(user.User.Sid).is_err());
+    }
     #[test]
     fn invalid_kernel_token_handle_never_produces_a_snapshot() {
         assert!(query(ptr::null_mut(), TokenType).is_err());

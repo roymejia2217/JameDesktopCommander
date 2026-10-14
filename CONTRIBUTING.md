@@ -84,8 +84,12 @@ not copied into the protected-branch commit body.
 
 Automation, agents, and maintainers must not override the squash commit message when completing a
 merge. This preserves the repository setting `squashMergeCommitMessage: BLANK` and ensures the
-protected-branch Commitlint gate validates the same governed Conventional Commit title that passed
-PR Governance.
+protected-branch Commitlint gate validates the governed Conventional Commit header after
+GitHub applies its squash title rules. GitHub appends ` (#<PR number>)` to a
+`PR_TITLE` squash subject. **The 72-character Commitlint limit includes this suffix.**
+Required CI checks the prospective full header using the actual PR number and
+the same Commitlint configuration used after merge. Choose PR titles short
+enough to accommodate the suffix; a title-only Commitlint pass is insufficient.
 
 When invoking the GitHub squash merge API, omit **both** `commit_title` and `commit_message`.
 Pass the expected PR head SHA and let GitHub apply its governed title and blank body defaults.

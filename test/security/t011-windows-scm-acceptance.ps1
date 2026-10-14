@@ -163,11 +163,20 @@ try {
         [timespan]::FromSeconds(15))
     $state = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $state -or $state.State -ne 'Stopped' -or
-        $state.ExitCode -ne 1066 -or $state.ServiceSpecificExitCode -ne 1) {
+        $state.ExitCode -ne 1066) {
         throw 'E_SCM_WRONG_DENIAL_REASON'
     }
+    # Codes 2, 4 and 5 are NOT accepted: identity, SID/group boundary and
+    # native token-query failures cannot be recorded as an SCM security pass.
+    # 3 is fail-closed but means the privilege baseline is STILL unreviewed.
+    if ($state.ServiceSpecificExitCode -notin @(1, 3)) {
+        throw 'E_SCM_TOKEN_OBSERVATION_INVALID'
+    }
     if ($state.ProcessId -ne 0) { throw 'E_SCM_PROCESS_STILL_RUNNING' }
-    Write-Output 'T011-C4m Windows SCM virtual-account denial: PASS (non-release)'
+    if ($state.ServiceSpecificExitCode -eq 3) {
+        Write-Output 'E_SCM_PRIVILEGE_BASELINE_UNREVIEWED: deny-only, non-release'
+    }
+    Write-Output 'T011-C4o SCM token audit reached terminal denial: PASS (non-release)'
 }
 finally {
     $cleanupFailure = $false

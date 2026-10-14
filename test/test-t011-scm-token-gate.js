@@ -44,6 +44,22 @@ test('SCM privilege LUIDs and flags are checked before every name lookup', () =>
   assert.match(observer, /seen_names\.insert\(name\.to_ascii_lowercase\(\)\)/);
 });
 
+test('SCM evidence snapshot is private, in-process and cannot export token material', () => {
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  const scm = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_scm.rs'), 'utf8');
+  assert.match(observer, /struct VerifiedScmTokenSnapshot \{/);
+  assert.doesNotMatch(observer, /pub\s+(?:struct|fn)\s+(?:VerifiedScmTokenSnapshot|verified_snapshot)/);
+  assert.match(observer, /let snapshot = verified_snapshot\(token\.0, &expected\)\?/);
+  assert.match(observer, /Ok\(snapshot\.classify\(\)\)/);
+  assert.doesNotMatch(observer, /serde|serde_json|println!|eprintln!|File::create|OpenOptions::new|TcpStream|NamedPipe/);
+  assert.match(scm, /scm_terminal_denial_code\(observation\)/);
+  // Comments may describe TokenPrivileges; executable SCM code must not
+  // read, serialize or export names directly.
+  const scmCode = scm.replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(scmCode, /enabled_privileges|TokenPrivileges|write_all\(/);
+  assert.doesNotMatch(acceptance, /Write-Output.*(?:SeDebugPrivilege|SeChangeNotifyPrivilege|TokenGroups)/i);
+});
+
 test('ephemeral runner requires precise audit outcomes, not arbitrary nonzero failure', () => {
   assert.match(acceptance, /ServiceSpecificExitCode/);
   assert.match(acceptance, /ServiceSpecificExitCode -notin @\(1, 3\)/);

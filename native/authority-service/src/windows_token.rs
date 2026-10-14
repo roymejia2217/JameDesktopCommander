@@ -280,17 +280,42 @@ pub(crate) fn verify_current_process_identity() -> Result<(), TokenUnverifiable>
     }
 }
 
-/// Read actual kernel-issued process token; caller cannot supply SID or claims.
-/// SCM attests all attributes on one handle and remains deny-only.
-pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
-    let token = open_current_process_token()?;
-    let expected = service_sid()?;
-    if !token_user_matches_service(token.0, &expected)? {
-        return Ok(TokenFinding::IdentityMismatch);
+// Sensitive token attributes remain exclusively in this Windows module.
+// No Debug, serialization, persistence or public getter: a future evidence
+// writer must first pass a separate, independently reviewed confidentiality
+// and provenance contract. This structure itself cannot grant I/O.
+struct VerifiedScmTokenSnapshot {
+    is_primary: bool,
+    restricted_service_sid_attributes: Option<u32>,
+    elevated_group_enabled: bool,
+    integrity_rid: u32,
+    enabled_privileges: Vec<String>,
+}
+
+impl VerifiedScmTokenSnapshot {
+    fn classify(&self) -> TokenFinding {
+        let names: Vec<&str> = self.enabled_privileges.iter().map(String::as_str).collect();
+        classify_token(&TokenEvidence {
+            identity_matches: true,
+            is_primary: self.is_primary,
+            restricted_service_sid_attributes: self.restricted_service_sid_attributes,
+            elevated_group_enabled: self.elevated_group_enabled,
+            integrity_rid: Some(self.integrity_rid),
+            enabled_privileges: &names,
+        })
     }
+}
+
+// All attributes originate from the one kernel-issued token handle.
+// No raw SID pointers survive the query buffers; only copied, validated
+// names/flags remain in this in-process snapshot.
+fn verified_snapshot(
+    token: HANDLE,
+    expected: &RawInfo,
+) -> Result<VerifiedScmTokenSnapshot, TokenUnverifiable> {
     let expected_sid = expected.words.as_ptr().cast_mut().cast();
-    let token_type: TOKEN_TYPE = query(token.0, TokenType)?.fixed()?;
-    let groups = query(token.0, TokenGroups)?;
+    let token_type: TOKEN_TYPE = query(token, TokenType)?.fixed()?;
+    let groups = query(token, TokenGroups)?;
     let normal_groups = groups.sid_groups()?;
     let mut elevated = false;
     for group in normal_groups {
@@ -303,7 +328,7 @@ pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable
             elevated = true;
         }
     }
-    let restricted = query(token.0, TokenRestrictedSids)?;
+    let restricted = query(token, TokenRestrictedSids)?;
     let mut matching_attributes = None;
     for group in restricted.sid_groups()? {
         if unsafe { EqualSid(group.Sid, expected_sid) } != 0
@@ -312,22 +337,33 @@ pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable
             return Err(TokenUnverifiable);
         }
     }
-    let integrity = integrity_rid(&query(token.0, TokenIntegrityLevel)?)?;
-    let enabled = enabled_privileges(&query(token.0, TokenPrivileges)?)?;
-    let names: Vec<&str> = enabled.iter().map(String::as_str).collect();
-    Ok(classify_token(&TokenEvidence {
-        identity_matches: true,
+    let integrity = integrity_rid(&query(token, TokenIntegrityLevel)?)?;
+    let enabled = enabled_privileges(&query(token, TokenPrivileges)?)?;
+    Ok(VerifiedScmTokenSnapshot {
         is_primary: token_type == TokenPrimary,
         restricted_service_sid_attributes: matching_attributes,
         elevated_group_enabled: elevated,
-        integrity_rid: Some(integrity),
-        enabled_privileges: &names,
-    }))
+        integrity_rid: integrity,
+        enabled_privileges: enabled,
+    })
+}
+
+/// Read actual kernel-issued process token; caller cannot supply SID or claims.
+/// SCM attests all attributes on one handle and remains deny-only.
+pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
+    let token = open_current_process_token()?;
+    let expected = service_sid()?;
+    if !token_user_matches_service(token.0, &expected)? {
+        return Ok(TokenFinding::IdentityMismatch);
+    }
+    let snapshot = verified_snapshot(token.0, &expected)?;
+    Ok(snapshot.classify())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token_policy::scm_terminal_denial_code;
 
     fn synthetic_groups() -> RawInfo {
         let mut info = RawInfo {
@@ -514,6 +550,29 @@ mod tests {
             resolve_enabled_privilege_names(&records, |_| Ok(String::new())),
             Err(TokenUnverifiable)
         );
+    }
+
+    #[test]
+    fn in_process_verified_snapshot_keeps_privilege_names_private_and_deny_only() {
+        let mut snapshot = VerifiedScmTokenSnapshot {
+            is_primary: true,
+            restricted_service_sid_attributes: Some(0x4),
+            elevated_group_enabled: false,
+            integrity_rid: 0x2000,
+            enabled_privileges: vec!["SeChangeNotifyPrivilege".to_owned()],
+        };
+        assert_eq!(
+            snapshot.classify(),
+            TokenFinding::PrivilegeBaselineUnreviewed
+        );
+        assert_eq!(scm_terminal_denial_code(Some(snapshot.classify())), 3);
+        snapshot.enabled_privileges = vec!["SeDebugPrivilege".to_owned()];
+        assert_eq!(snapshot.classify(), TokenFinding::BoundaryViolation);
+        snapshot.enabled_privileges.clear();
+        assert_eq!(snapshot.classify(), TokenFinding::ObservedDenyOnly);
+        assert_eq!(scm_terminal_denial_code(Some(snapshot.classify())), 1);
+        snapshot.integrity_rid = 0;
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
     }
 
     #[test]

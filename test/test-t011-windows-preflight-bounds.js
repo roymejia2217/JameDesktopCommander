@@ -22,7 +22,7 @@ test('SCM still checks every token attribute from its own opened token', () => {
   assert.match(observer, /windows_token::observe_current_process_token\(\)/);
   assert.doesNotMatch(observer, /jdc_authority_service::verify_service_identity\(/);
   assert.match(windows, /token_user_matches_service\(token\.0, &expected\)/);
-  assert.match(windows, /verified_snapshot\(token\.0, &expected\)/);
+  assert.match(windows, /verified_snapshot\(token\.0, &expected, user_sid\)/);
   assert.match(windows, /fn verified_snapshot\(/);
   assert.match(windows, /query\(token, TokenGroups\)/);
   assert.match(windows, /query\(token, TokenPrivileges\)/);

@@ -32,6 +32,18 @@ test('SCM mandatory integrity label uses the exact bounded S-1-16 single-RID par
   assert.doesNotMatch(observer, /sid\[sid\.len\(\) - 4\.\.\]/);
 });
 
+test('SCM privilege LUIDs and flags are checked before every name lookup', () => {
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  const policy = fs.readFileSync(path.join(root, 'native/authority-service/src/token_policy.rs'), 'utf8');
+  assert.match(observer, /resolve_enabled_privilege_names\(&records,/);
+  assert.match(observer, /LookupPrivilegeNameW\(/);
+  assert.match(observer, /validated_enabled_privilege_indices\(records\)/);
+  assert.match(policy, /pub fn validated_enabled_privilege_indices\(/);
+  assert.match(policy, /luids\.insert\(\(record\.luid_low, record\.luid_high\)\)/);
+  assert.match(policy, /record\.attributes & !ALLOWED_FLAGS/);
+  assert.match(observer, /seen_names\.insert\(name\.to_ascii_lowercase\(\)\)/);
+});
+
 test('ephemeral runner requires precise audit outcomes, not arbitrary nonzero failure', () => {
   assert.match(acceptance, /ServiceSpecificExitCode/);
   assert.match(acceptance, /ServiceSpecificExitCode -notin @\(1, 3\)/);

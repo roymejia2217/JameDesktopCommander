@@ -2,17 +2,17 @@
 //! No public SCM authorization or service lifecycle is changed here.
 use crate::token_policy::{
     bounded_buffer_span, bounded_sid_bytes, bounded_token_array, classify_token, integrity_sid_rid,
-    TokenEvidence, TokenFinding,
+    validated_enabled_privilege_indices, PrivilegeRecord, TokenEvidence, TokenFinding,
 };
-use std::{ffi::c_void, iter, mem, ptr};
+use std::{collections::HashSet, ffi::c_void, iter, mem, ptr};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE},
     Security::{
         EqualSid, GetTokenInformation, IsWellKnownSid, LookupAccountNameW, LookupPrivilegeNameW,
         TokenGroups, TokenIntegrityLevel, TokenPrimary, TokenPrivileges, TokenRestrictedSids,
         TokenType, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, LUID_AND_ATTRIBUTES,
-        SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, SID_NAME_USE, TOKEN_GROUPS,
-        TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_TYPE, TOKEN_USER,
+        SID_AND_ATTRIBUTES, SID_NAME_USE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
+        TOKEN_QUERY, TOKEN_TYPE, TOKEN_USER,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -167,6 +167,30 @@ fn service_sid() -> Result<RawInfo, TokenUnverifiable> {
     sid.sid(sid.words.as_ptr().cast_mut().cast())?;
     Ok(sid)
 }
+// Resolve the complete inventory (including disabled entries) before
+// classifying enabled names. Missing or duplicate native names deny.
+fn resolve_enabled_privilege_names<F>(
+    records: &[PrivilegeRecord],
+    mut lookup: F,
+) -> Result<Vec<String>, TokenUnverifiable>
+where
+    F: FnMut(usize) -> Result<String, TokenUnverifiable>,
+{
+    let enabled = validated_enabled_privilege_indices(records).ok_or(TokenUnverifiable)?;
+    let mut seen_names = HashSet::with_capacity(records.len());
+    let mut names = Vec::with_capacity(enabled.len());
+    for index in 0..records.len() {
+        let name = lookup(index)?;
+        if name.is_empty() || !seen_names.insert(name.to_ascii_lowercase()) {
+            return Err(TokenUnverifiable);
+        }
+        if enabled.binary_search(&index).is_ok() {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
 fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> {
     let prefix = mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
     let count: u32 = info.fixed()?;
@@ -180,30 +204,40 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
         return Err(TokenUnverifiable);
     }
     let base = unsafe { info.words.as_ptr().cast::<u8>().add(prefix) };
-    let mut names = Vec::new();
-    for i in 0..count {
+    let mut slots = Vec::with_capacity(count);
+    let mut records = Vec::with_capacity(count);
+    for index in 0..count {
         let slot = unsafe {
             ptr::read_unaligned(
-                base.add(i * mem::size_of::<LUID_AND_ATTRIBUTES>())
+                base.add(index * mem::size_of::<LUID_AND_ATTRIBUTES>())
                     .cast::<LUID_AND_ATTRIBUTES>(),
             )
         };
-        if slot.Attributes & SE_PRIVILEGE_ENABLED == 0 {
-            continue;
-        }
+        records.push(PrivilegeRecord {
+            luid_low: slot.Luid.LowPart,
+            luid_high: slot.Luid.HighPart,
+            attributes: slot.Attributes,
+        });
+        slots.push(slot);
+    }
+    resolve_enabled_privilege_names(&records, |index| {
         let mut buf = [0u16; 256];
         let mut chars = buf.len() as u32;
-        if unsafe { LookupPrivilegeNameW(ptr::null(), &slot.Luid, buf.as_mut_ptr(), &mut chars) }
-            == 0
+        if unsafe {
+            LookupPrivilegeNameW(
+                ptr::null(),
+                &slots[index].Luid,
+                buf.as_mut_ptr(),
+                &mut chars,
+            )
+        } == 0
             || chars == 0
             || chars as usize > buf.len()
         {
             return Err(TokenUnverifiable);
         }
-        let name = String::from_utf16(&buf[..chars as usize]).map_err(|_| TokenUnverifiable)?;
-        names.push(name);
-    }
-    Ok(names)
+        String::from_utf16(&buf[..chars as usize]).map_err(|_| TokenUnverifiable)
+    })
 }
 fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
     let label: TOKEN_MANDATORY_LABEL = info.fixed()?;
@@ -440,6 +474,46 @@ mod tests {
             );
         }
         assert!(integrity_rid(&info).is_err());
+    }
+
+    #[test]
+    fn native_name_resolution_fails_closed_even_for_disabled_luids() {
+        let records = [
+            PrivilegeRecord {
+                luid_low: 3,
+                luid_high: 0,
+                attributes: 0,
+            },
+            PrivilegeRecord {
+                luid_low: 4,
+                luid_high: 0,
+                attributes: 0x2,
+            },
+        ];
+        assert_eq!(
+            resolve_enabled_privilege_names(&records, |i| {
+                Ok(["SeChangeNotifyPrivilege", "SeImpersonatePrivilege"][i].into())
+            }),
+            Ok(vec!["SeImpersonatePrivilege".to_string()])
+        );
+        assert_eq!(
+            resolve_enabled_privilege_names(&records, |i| {
+                if i == 0 {
+                    Err(TokenUnverifiable)
+                } else {
+                    Ok("SeImpersonatePrivilege".into())
+                }
+            }),
+            Err(TokenUnverifiable)
+        );
+        assert_eq!(
+            resolve_enabled_privilege_names(&records, |_| Ok("SeChangeNotifyPrivilege".into())),
+            Err(TokenUnverifiable)
+        );
+        assert_eq!(
+            resolve_enabled_privilege_names(&records, |_| Ok(String::new())),
+            Err(TokenUnverifiable)
+        );
     }
 
     #[test]

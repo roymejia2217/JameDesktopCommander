@@ -88,6 +88,76 @@ fn native_integrity_sid_requires_exact_single_rid_structure() {
 }
 
 #[test]
+fn privilege_luid_inventory_rejects_ambiguous_or_unsupported_records() {
+    use jdc_authority_service::token_policy::{
+        validated_enabled_privilege_indices, PrivilegeRecord,
+    };
+    let disabled = PrivilegeRecord {
+        luid_low: 7,
+        luid_high: -1,
+        attributes: 0,
+    };
+    let enabled = PrivilegeRecord {
+        luid_low: 8,
+        luid_high: 0,
+        attributes: 0x2,
+    };
+    let used = PrivilegeRecord {
+        luid_low: 9,
+        luid_high: 0,
+        attributes: 0x8000_0002,
+    };
+    assert_eq!(validated_enabled_privilege_indices(&[]), Some(vec![]));
+    assert_eq!(
+        validated_enabled_privilege_indices(&[disabled, enabled, used]),
+        Some(vec![1, 2])
+    );
+    // Duplicate LUID even with different enabled bits is ambiguous.
+    let duplicate = PrivilegeRecord {
+        attributes: 0x2,
+        ..disabled
+    };
+    assert_eq!(
+        validated_enabled_privilege_indices(&[disabled, duplicate]),
+        None
+    );
+    // Different HighPart is a distinct LUID: never compare only LowPart.
+    let different_high = PrivilegeRecord {
+        luid_high: 0,
+        ..disabled
+    };
+    assert_eq!(
+        validated_enabled_privilege_indices(&[disabled, different_high]),
+        Some(vec![])
+    );
+    for forbidden in [0x4, 0x8, 0x10, 0x4000_0000, u32::MAX] {
+        assert_eq!(
+            validated_enabled_privilege_indices(&[PrivilegeRecord {
+                attributes: forbidden,
+                ..enabled
+            }]),
+            None,
+            "unsupported TokenPrivileges attribute: {forbidden:#x}"
+        );
+    }
+    // ENABLED_BY_DEFAULT and USED_FOR_ACCESS are documented bits,
+    // but neither alone implies an enabled privilege.
+    assert_eq!(
+        validated_enabled_privilege_indices(&[
+            PrivilegeRecord {
+                attributes: 0x1,
+                ..disabled
+            },
+            PrivilegeRecord {
+                attributes: 0x8000_0000,
+                ..enabled
+            }
+        ]),
+        Some(vec![])
+    );
+}
+
+#[test]
 fn absent_or_invalid_integrity_is_not_observed_as_success() {
     let mut snapshot = minimal(&[]);
     snapshot.integrity_rid = None;

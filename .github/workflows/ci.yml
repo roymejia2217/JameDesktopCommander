@@ -100,7 +100,9 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$PR_TITLE" | npm run --silent lint:commit
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Validate the actual GitHub PR_TITLE squash subject, including (#number).
+        run: printf '%s (#%s)\n' "$PR_TITLE" "$PR_NUMBER" | npm run --silent lint:commit
 
       - name: Validate protected-branch commit
         if: github.event_name == 'push'

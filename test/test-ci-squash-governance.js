@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,66 @@ assert.ok(
   defaultsIndex < prospectiveIndex,
   'repository squash defaults must be validated before prospective commit metadata',
 );
+const prospectiveStep = steps[prospectiveIndex];
+assert.equal(
+  prospectiveStep.if,
+  "github.event_name == 'pull_request'",
+  'the final squash subject must be checked on every PR',
+);
+assert.equal(
+  prospectiveStep.env?.PR_TITLE,
+  '${{ github.event.pull_request.title }}',
+);
+assert.equal(
+  prospectiveStep.env?.PR_NUMBER,
+  '${{ github.event.pull_request.number }}',
+);
+assert.equal(
+  prospectiveStep.run?.trim(),
+  `printf '%s (#%s)\\n' "$PR_TITLE" "$PR_NUMBER" | npm run --silent lint:commit`,
+  'prospective lint must include the GitHub-generated PR-number suffix',
+);
+
+// Regression: #81 passed the former PR-title-only check, but its squash
+// subject was 73 characters and failed on protected main.
+const historicalPrTitle =
+  'test(process): synchronize child readiness before output assertions';
+const historicalSquashSubject = `${historicalPrTitle} (#81)`;
+assert.ok(historicalPrTitle.length <= 72);
+assert.equal(historicalSquashSubject.length, 73);
+
+// Execute the repository's pinned Commitlint CLI against both subjects.
+// A PR-title-only check previously passed; the actual squash subject must
+// fail before merge with exactly the same rule that protects main.
+const lintSubject = (subject) => {
+  const result = spawnSync(
+    process.execPath,
+    [path.join(repositoryRoot, 'node_modules', '@commitlint', 'cli', 'cli.js'),
+      '--config', path.join(repositoryRoot, 'commitlint.config.cjs')],
+    {
+      cwd: repositoryRoot,
+      input: `${subject}\n`,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000,
+    },
+  );
+  assert.ifError(result.error);
+  return result;
+};
+assert.equal(lintSubject(historicalPrTitle).status, 0);
+const rejected = lintSubject(historicalSquashSubject);
+assert.equal(rejected.status, 1, 'the #81 postmerge subject must be rejected premerge');
+assert.match(
+  rejected.stdout + rejected.stderr,
+  /header must not be longer than 72 characters/i,
+);
+assert.equal(
+  lintSubject('ci(governance): validate squash title suffix (#82)').status,
+  0,
+  'an appropriately short squash title must pass',
+);
+
 const defaultsStep = steps[defaultsIndex];
 assert.equal(
   defaultsStep.if,

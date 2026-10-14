@@ -83,6 +83,43 @@ pub fn classify_token(snapshot: &TokenEvidence<'_>) -> TokenFinding {
     TokenFinding::ObservedDenyOnly
 }
 
+/// One structurally decoded Windows TOKEN_PRIVILEGES entry.
+/// Its raw LUID and attribute bits are never authorization by themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivilegeRecord {
+    pub luid_low: u32,
+    pub luid_high: i32,
+    pub attributes: u32,
+}
+
+/// Reject malformed or ambiguous token privilege records *before* names are
+/// resolved. Every LUID (including disabled ones) must occur exactly once.
+/// Only documented persistent/observation flags are accepted; a removed
+/// privilege is not a valid listed token entry. No privilege is whitelisted.
+#[must_use]
+pub fn validated_enabled_privilege_indices(entries: &[PrivilegeRecord]) -> Option<Vec<usize>> {
+    use std::collections::HashSet;
+    const MAX_PRIVILEGES: usize = 128;
+    const ALLOWED_FLAGS: u32 = 0x0000_0001 | 0x0000_0002 | 0x8000_0000;
+    const ENABLED_FLAG: u32 = 0x0000_0002;
+    if entries.len() > MAX_PRIVILEGES {
+        return None;
+    }
+    let mut luids = HashSet::with_capacity(entries.len());
+    let mut enabled = Vec::new();
+    for (index, record) in entries.iter().enumerate() {
+        if record.attributes & !ALLOWED_FLAGS != 0
+            || !luids.insert((record.luid_low, record.luid_high))
+        {
+            return None;
+        }
+        if record.attributes & ENABLED_FLAG != 0 {
+            enabled.push(index);
+        }
+    }
+    Some(enabled)
+}
+
 /// Enforce a cap and checked byte arithmetic before interpreting an array
 /// supplied by any variable-size token-information query.
 ///

@@ -6,8 +6,9 @@ fn ordinary_windows_process_is_not_the_scm_virtual_account() {
 
     // This process is the unprivileged CI/test runner, never the SCM target.
     // Any missing/forged virtual-service identity must fail closed.
-    assert_eq!(
+    assert!(matches!(
         observe_current_process_token(),
-        Ok(TokenFinding::BoundaryViolation)
-    );
+        Ok(TokenFinding::IdentityMismatch)
+            | Err(jdc_authority_service::windows_token::TokenUnverifiable)
+    ));
 }

@@ -113,26 +113,25 @@ fn windows_sid_size_is_revision_and_count_bounded() {
 #[test]
 fn scm_terminal_reasons_are_distinct_and_permanently_deny_only() {
     use jdc_authority_service::token_policy::scm_terminal_denial_code;
-    assert_eq!(scm_terminal_denial_code(false, None), 2);
-    assert_eq!(scm_terminal_denial_code(true, None), 5);
+    assert_eq!(scm_terminal_denial_code(None), 5);
     assert_eq!(
-        scm_terminal_denial_code(true, Some(TokenFinding::BoundaryViolation)),
+        scm_terminal_denial_code(Some(TokenFinding::IdentityMismatch)),
+        2
+    );
+    assert_eq!(
+        scm_terminal_denial_code(Some(TokenFinding::BoundaryViolation)),
         4
     );
     assert_eq!(
-        scm_terminal_denial_code(true, Some(TokenFinding::Unverifiable)),
+        scm_terminal_denial_code(Some(TokenFinding::Unverifiable)),
         5
     );
     assert_eq!(
-        scm_terminal_denial_code(true, Some(TokenFinding::PrivilegeBaselineUnreviewed)),
+        scm_terminal_denial_code(Some(TokenFinding::PrivilegeBaselineUnreviewed)),
         3
     );
     assert_eq!(
-        scm_terminal_denial_code(true, Some(TokenFinding::ObservedDenyOnly)),
+        scm_terminal_denial_code(Some(TokenFinding::ObservedDenyOnly)),
         1
-    );
-    assert_eq!(
-        scm_terminal_denial_code(false, Some(TokenFinding::ObservedDenyOnly)),
-        2
     );
 }

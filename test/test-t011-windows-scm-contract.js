@@ -18,11 +18,19 @@ test('Windows SCM dispatcher is a separate unreleased, fully locked Rust service
     'service_control_handler::register',
     'ServiceState::Stopped',
     'ServiceExitCode::ServiceSpecific',
-    'jdc_authority_service::verify_service_identity',
+    'jdc_authority_service::windows_token::observe_current_process_token',
     'ServiceControl::Interrogate',
     'ServiceControlAccept::empty()',
     'E_SCM_DISPATCHER_REQUIRED',
   ]) assert.ok(content.includes(marker), `Missing deny-only SCM contract: ${marker}`);
+  // Identity and privilege claims MUST derive from the same kernel token.
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  assert.doesNotMatch(content, /jdc_authority_service::verify_service_identity\(/);
+  assert.doesNotMatch(observer, /crate::verify_service_identity\(/);
+  assert.equal((observer.match(/OpenProcessToken\(/g) ?? []).length, 1);
+  assert.match(observer, /query\(token\.0, TokenUser\)/);
+  assert.match(observer, /identity_info\.sid\(user\.User\.Sid\)/);
+  assert.match(observer, /TokenFinding::IdentityMismatch/);
   assert.doesNotMatch(content, /ServiceState::Running|ServiceControlAccept::STOP|OpenProcess\(|CreateFile\(|TcpListener|UnixListener/);
   assert.doesNotMatch(content, /(?<![A-Za-z])ServiceExitCode::Win32\(0\)/);
 });

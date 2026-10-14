@@ -10,6 +10,8 @@ pub enum TokenFinding {
     ObservedDenyOnly,
     /// A mandatory identity, group or token-mode boundary was violated.
     BoundaryViolation,
+    /// The kernel process token has a different service account SID.
+    IdentityMismatch,
     /// Required token evidence is missing or invalid, never a CI acceptance.
     Unverifiable,
     /// Token evidence passed structural checks, but enabled privileges
@@ -20,11 +22,11 @@ pub enum TokenFinding {
 /// Terminal SCM denial reasons; no branch authorizes a running service.
 /// Code 3 is reserved for verified-but-unreviewed privilege inventories.
 #[must_use]
-pub fn scm_terminal_denial_code(identity_valid: bool, observation: Option<TokenFinding>) -> u32 {
-    if !identity_valid {
-        return 2; // kernel-issued service identity required
-    }
+pub fn scm_terminal_denial_code(observation: Option<TokenFinding>) -> u32 {
+    // Identity is attested inside the same process-token observation.
+    // Never accept a caller-supplied bool to bypass TokenUser checks.
     match observation {
+        Some(TokenFinding::IdentityMismatch) => 2, // real TokenUser does not match
         Some(TokenFinding::ObservedDenyOnly) => 1, // policy unavailable
         Some(TokenFinding::PrivilegeBaselineUnreviewed) => 3, // privilege review missing
         Some(TokenFinding::BoundaryViolation) => 4, // token boundary violation

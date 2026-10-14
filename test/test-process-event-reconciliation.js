@@ -317,22 +317,24 @@ test('read_process_output exit mode returns on its bounded deadline without kill
   await configManager.resetConfig();
   const fixture = await writeFixture(
     'read-wait-for-exit-deadline',
-    "setTimeout(() => console.log('deadline-progress-one'), 60); setTimeout(() => console.log('deadline-progress-two'), 120); setTimeout(() => {}, 1_500);",
+    "console.log('fixture-ready'); process.stdin.once('data', () => { console.log('deadline-progress-one'); setTimeout(() => console.log('deadline-progress-two'), 80); setTimeout(() => {}, 1_500); });",
   );
 
   const start = await terminalManager.executeCommand(
     nodeCommand(fixture),
-    25,
+    2_000,
     shell,
     false,
   );
   assert.ok(start.pid > 0);
+  assert.match(start.output, /fixture-ready/, 'the Node child must be ready before deadline timing');
 
   try {
+    assert.equal(terminalManager.sendInputToProcess(start.pid, 'begin'), true);
     const result = await withIntervalForbidden(() =>
       readProcessOutput({
         pid: start.pid,
-        timeout_ms: 240,
+        timeout_ms: 400,
         offset: 0,
         length: 20,
         wait_for: 'exit',
@@ -356,21 +358,32 @@ test('read_process_output returns appends to an already-read partial line', asyn
   await configManager.resetConfig();
   const fixture = await writeFixture(
     'partial-line-output',
-    "process.stdout.write('phase-one'); setTimeout(() => process.stdout.write('-phase-two'), 220); setTimeout(() => {}, 1_000);",
+    "console.log('fixture-ready'); process.stdin.once('data', () => { process.stdout.write('phase-one'); setTimeout(() => process.stdout.write('-phase-two'), 220); setTimeout(() => {}, 1_000); });",
   );
 
   const start = await terminalManager.executeCommand(
     nodeCommand(fixture),
-    80,
+    2_000,
     shell,
     false,
   );
   assert.ok(start.pid > 0);
+  assert.match(start.output, /fixture-ready/, 'the Node child must be ready before partial-line timing');
 
   try {
+    // Consume the readiness line before testing incremental partial-line reads.
+    // A previously unread ready marker is not an append to the data line.
+    const readyRead = await readProcessOutput({
+      pid: start.pid,
+      timeout_ms: 500,
+      offset: 0,
+      length: 20,
+    });
+    assert.match(textOf(readyRead), /fixture-ready/);
+    assert.equal(terminalManager.sendInputToProcess(start.pid, 'begin'), true);
     const firstRead = await readProcessOutput({
       pid: start.pid,
-      timeout_ms: 120,
+      timeout_ms: 500,
       offset: 0,
       length: 20,
     });

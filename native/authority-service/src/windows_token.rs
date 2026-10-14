@@ -1,8 +1,8 @@
 //! Windows-only read-only token observation for T011-C4o (non-release).
 //! No public SCM authorization or service lifecycle is changed here.
 use crate::token_policy::{
-    bounded_buffer_span, bounded_sid_bytes, bounded_token_array, classify_token, TokenEvidence,
-    TokenFinding,
+    bounded_buffer_span, bounded_sid_bytes, bounded_token_array, classify_token, integrity_sid_rid,
+    TokenEvidence, TokenFinding,
 };
 use std::{ffi::c_void, iter, mem, ptr};
 use windows_sys::Win32::{
@@ -207,15 +207,10 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
 }
 fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
     let label: TOKEN_MANDATORY_LABEL = info.fixed()?;
+    // RawInfo::sid performs pointer and complete-length checks first.
+    // Pure parser insists on exactly one mandatory-integrity subauthority.
     let sid = info.sid(label.Label.Sid)?;
-    // Mandatory label SID: S-1-16-<integrity RID>.
-    if sid[2..8] != [0, 0, 0, 0, 0, 16] {
-        return Err(TokenUnverifiable);
-    }
-    let tail: [u8; 4] = sid[sid.len() - 4..]
-        .try_into()
-        .map_err(|_| TokenUnverifiable)?;
-    Ok(u32::from_le_bytes(tail))
+    integrity_sid_rid(sid).ok_or(TokenUnverifiable)
 }
 // Both C4g preflight and C4o SCM observation use these exact bounded
 // Windows primitives, but each independent API owns and closes its handle.
@@ -402,6 +397,49 @@ mod tests {
     fn standalone_preflight_rejects_ordinary_process_identity() {
         // The CI process is not the temporary SCM virtual service account.
         assert!(verify_current_process_identity().is_err());
+    }
+
+    #[test]
+    fn native_integrity_label_rejects_invalid_sid_pointer_and_extra_authority() {
+        let mut info = RawInfo {
+            words: vec![0usize; 16],
+            used: 16 * mem::size_of::<usize>(),
+        };
+        let sid_offset = mem::size_of::<TOKEN_MANDATORY_LABEL>() + 8;
+        let base = info.words.as_mut_ptr().cast::<u8>();
+        let medium = [1u8, 1, 0, 0, 0, 0, 0, 16, 0, 32, 0, 0];
+        unsafe {
+            ptr::write_unaligned(
+                base.cast::<TOKEN_MANDATORY_LABEL>(),
+                TOKEN_MANDATORY_LABEL {
+                    Label: SID_AND_ATTRIBUTES {
+                        Sid: base.add(sid_offset).cast(),
+                        Attributes: 0,
+                    },
+                },
+            );
+            ptr::copy_nonoverlapping(medium.as_ptr(), base.add(sid_offset), medium.len());
+        }
+        assert_eq!(integrity_rid(&info), Ok(0x2000));
+        unsafe {
+            *base.add(sid_offset + 1) = 2;
+        }
+        // The declared second subauthority has not been provided.
+        info.used = sid_offset + 12;
+        assert!(integrity_rid(&info).is_err());
+
+        unsafe {
+            ptr::write_unaligned(
+                base.cast::<TOKEN_MANDATORY_LABEL>(),
+                TOKEN_MANDATORY_LABEL {
+                    Label: SID_AND_ATTRIBUTES {
+                        Sid: (info.addr() + info.used + 8) as *mut c_void,
+                        Attributes: 0,
+                    },
+                },
+            );
+        }
+        assert!(integrity_rid(&info).is_err());
     }
 
     #[test]

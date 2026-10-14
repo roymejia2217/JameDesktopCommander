@@ -12,7 +12,7 @@ test('real SCM deny-only exit must depend on kernel token audit', () => {
   assert.doesNotMatch(service, /jdc_authority_service::verify_service_identity\(\)/);
   const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
   assert.doesNotMatch(observer, /crate::verify_service_identity\(\)/);
-  assert.match(observer, /query\(token\.0, TokenUser\)/);
+  assert.match(observer, /query\(token, TokenUser\)/);
   assert.match(observer, /\.sid\(user\.User\.Sid\)/);
   assert.match(observer, /TokenFinding::IdentityMismatch/);
   assert.equal((observer.match(/OpenProcessToken\(/g) ?? []).length, 1,

@@ -217,25 +217,49 @@ fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
         .map_err(|_| TokenUnverifiable)?;
     Ok(u32::from_le_bytes(tail))
 }
-/// Read actual kernel-issued process token; caller cannot supply SID or claims.
-/// This does NOT grant authority. SCM uses this single-token proof to deny.
-pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
-    // A single kernel-issued process token is used for both TokenUser
-    // identity and all privilege/SID attributes. Do not re-open a token.
+// Both C4g preflight and C4o SCM observation use these exact bounded
+// Windows primitives, but each independent API owns and closes its handle.
+fn open_current_process_token() -> Result<Handle, TokenUnverifiable> {
     let mut raw: HANDLE = ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
         return Err(TokenUnverifiable);
     }
-    let token = Handle(raw);
-    let expected = service_sid()?;
-    let expected_sid = expected.words.as_ptr().cast_mut().cast();
-    let identity_info = query(token.0, TokenUser)?;
+    Ok(Handle(raw))
+}
+
+fn token_user_matches_service(
+    token: HANDLE,
+    expected: &RawInfo,
+) -> Result<bool, TokenUnverifiable> {
+    let identity_info = query(token, TokenUser)?;
     let user: TOKEN_USER = identity_info.fixed()?;
-    // The SID pointer and its full structure MUST be in this query buffer.
+    // Validate the entire kernel-supplied SID before calling EqualSid.
     identity_info.sid(user.User.Sid)?;
-    if unsafe { EqualSid(user.User.Sid, expected_sid) } == 0 {
+    let expected_sid = expected.words.as_ptr().cast_mut().cast();
+    Ok(unsafe { EqualSid(user.User.Sid, expected_sid) } != 0)
+}
+
+/// Standalone C4g process identity preflight. It never grants access.
+/// Any missing, forged or corrupt identity is rejected without disclosure.
+pub(crate) fn verify_current_process_identity() -> Result<(), TokenUnverifiable> {
+    let token = open_current_process_token()?;
+    let expected = service_sid()?;
+    if token_user_matches_service(token.0, &expected)? {
+        Ok(())
+    } else {
+        Err(TokenUnverifiable)
+    }
+}
+
+/// Read actual kernel-issued process token; caller cannot supply SID or claims.
+/// SCM attests all attributes on one handle and remains deny-only.
+pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
+    let token = open_current_process_token()?;
+    let expected = service_sid()?;
+    if !token_user_matches_service(token.0, &expected)? {
         return Ok(TokenFinding::IdentityMismatch);
     }
+    let expected_sid = expected.words.as_ptr().cast_mut().cast();
     let token_type: TOKEN_TYPE = query(token.0, TokenType)?.fixed()?;
     let groups = query(token.0, TokenGroups)?;
     let normal_groups = groups.sid_groups()?;
@@ -374,6 +398,12 @@ mod tests {
         let user: TOKEN_USER = info.fixed().unwrap();
         assert!(info.sid(user.User.Sid).is_err());
     }
+    #[test]
+    fn standalone_preflight_rejects_ordinary_process_identity() {
+        // The CI process is not the temporary SCM virtual service account.
+        assert!(verify_current_process_identity().is_err());
+    }
+
     #[test]
     fn invalid_kernel_token_handle_never_produces_a_snapshot() {
         assert!(query(ptr::null_mut(), TokenType).is_err());

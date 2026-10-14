@@ -142,114 +142,12 @@ mod linux_identity {
 #[cfg(windows)]
 mod windows_identity {
     use super::IdentityDenied;
-    use std::{ffi::c_void, iter, mem, ptr};
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        Security::{
-            EqualSid, GetTokenInformation, LookupAccountNameW, TokenUser, SID_NAME_USE,
-            TOKEN_QUERY, TOKEN_USER,
-        },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-    // Account identity must be provisioned by the Windows SCM, independently
-    // of any user-configurable JDC settings or caller-provided parameters.
-    const SERVICE_NAME: &str = "NT SERVICE\\JameDesktopCommanderAuthority";
 
-    struct OwnedHandle(HANDLE);
-    impl Drop for OwnedHandle {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-    fn aligned_words(len: u32) -> Result<Vec<usize>, IdentityDenied> {
-        let len = len as usize;
-        if len == 0 || len > 4096 {
-            return Err(IdentityDenied);
-        }
-        Ok(vec![0; len.div_ceil(mem::size_of::<usize>())])
-    }
-
+    // Use the same bounded TokenUser query, SID validation, service SID
+    // lookup and RAII token handle as the SCM observer. The independent
+    // preflight still acquires its own handle and never grants operations.
     pub fn verify() -> Result<(), IdentityDenied> {
-        let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(iter::once(0)).collect();
-        // An unresolved/not-yet-registered service account MUST deny.
-        let mut sid_bytes = 0u32;
-        let mut domain_chars = 0u32;
-        let mut sid_use: SID_NAME_USE = 0;
-        let probe = unsafe {
-            LookupAccountNameW(
-                ptr::null(),
-                name.as_ptr(),
-                ptr::null_mut(),
-                &mut sid_bytes,
-                ptr::null_mut(),
-                &mut domain_chars,
-                &mut sid_use,
-            )
-        };
-        if probe != 0 || sid_bytes == 0 || sid_bytes > 256 || domain_chars > 256 {
-            return Err(IdentityDenied);
-        }
-        let mut expected_sid = aligned_words(sid_bytes)?;
-        let mut domain = vec![0u16; (domain_chars as usize).max(1)];
-        let ok = unsafe {
-            LookupAccountNameW(
-                ptr::null(),
-                name.as_ptr(),
-                expected_sid.as_mut_ptr().cast::<c_void>(),
-                &mut sid_bytes,
-                domain.as_mut_ptr(),
-                &mut domain_chars,
-                &mut sid_use,
-            )
-        };
-        if ok == 0 {
-            return Err(IdentityDenied);
-        }
-
-        let mut raw_token: HANDLE = ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) } == 0 {
-            return Err(IdentityDenied);
-        }
-        let token = OwnedHandle(raw_token);
-        let mut token_bytes = 0u32;
-        let probe = unsafe {
-            GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut token_bytes)
-        };
-        if probe != 0 {
-            return Err(IdentityDenied);
-        }
-        let mut buffer = aligned_words(token_bytes)?;
-        if (token_bytes as usize) < mem::size_of::<TOKEN_USER>() {
-            return Err(IdentityDenied);
-        }
-        let ok = unsafe {
-            GetTokenInformation(
-                token.0,
-                TokenUser,
-                buffer.as_mut_ptr().cast::<c_void>(),
-                token_bytes,
-                &mut token_bytes,
-            )
-        };
-        if ok == 0 {
-            return Err(IdentityDenied);
-        }
-        let token_user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
-        if token_user.User.Sid.is_null() {
-            return Err(IdentityDenied);
-        }
-        if unsafe {
-            EqualSid(
-                token_user.User.Sid,
-                expected_sid.as_mut_ptr().cast::<c_void>(),
-            )
-        } == 0
-        {
-            return Err(IdentityDenied);
-        }
-        Ok(())
+        crate::windows_token::verify_current_process_identity().map_err(|_| IdentityDenied)
     }
 }
 

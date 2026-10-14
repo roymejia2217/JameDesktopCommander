@@ -28,7 +28,7 @@ test('Windows SCM dispatcher is a separate unreleased, fully locked Rust service
   assert.doesNotMatch(content, /jdc_authority_service::verify_service_identity\(/);
   assert.doesNotMatch(observer, /crate::verify_service_identity\(/);
   assert.equal((observer.match(/OpenProcessToken\(/g) ?? []).length, 1);
-  assert.match(observer, /query\(token\.0, TokenUser\)/);
+  assert.match(observer, /query\(token, TokenUser\)/);
   assert.match(observer, /identity_info\.sid\(user\.User\.Sid\)/);
   assert.match(observer, /TokenFinding::IdentityMismatch/);
   assert.doesNotMatch(content, /ServiceState::Running|ServiceControlAccept::STOP|OpenProcess\(|CreateFile\(|TcpListener|UnixListener/);

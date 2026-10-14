@@ -103,6 +103,7 @@ impl RawInfo {
         }
         let base = unsafe { self.words.as_ptr().cast::<u8>().add(prefix) };
         let mut groups = Vec::with_capacity(count);
+        let mut seen_sids = HashSet::with_capacity(count);
         for i in 0..count {
             let item = unsafe {
                 ptr::read_unaligned(
@@ -110,7 +111,11 @@ impl RawInfo {
                         .cast::<SID_AND_ATTRIBUTES>(),
                 )
             };
-            self.sid(item.Sid)?;
+            // Canonical SID bytes, not pointer identity, define uniqueness.
+            // Reject duplicates before the buffer is passed to any OS SID API.
+            if !seen_sids.insert(self.sid(item.Sid)?) {
+                return Err(TokenUnverifiable);
+            }
             groups.push(item);
         }
         Ok(groups)
@@ -328,6 +333,11 @@ struct VerifiedScmTokenSnapshot {
     service_account_sid: Vec<u8>,
 }
 
+fn unique_group_sids(groups: &[OwnedSidGroup]) -> bool {
+    let mut seen = HashSet::with_capacity(groups.len());
+    groups.iter().all(|group| seen.insert(group.sid.as_slice()))
+}
+
 impl VerifiedScmTokenSnapshot {
     fn classify(&self) -> TokenFinding {
         if bounded_sid_bytes(&self.token_user_sid) != Some(self.token_user_sid.len())
@@ -336,11 +346,13 @@ impl VerifiedScmTokenSnapshot {
         {
             return TokenFinding::Unverifiable;
         }
-        if self
-            .normal_groups
-            .iter()
-            .chain(self.restricted_groups.iter())
-            .any(|group| !group.is_consistent())
+        if !unique_group_sids(&self.normal_groups)
+            || !unique_group_sids(&self.restricted_groups)
+            || self
+                .normal_groups
+                .iter()
+                .chain(self.restricted_groups.iter())
+                .any(|group| !group.is_consistent())
         {
             return TokenFinding::Unverifiable;
         }
@@ -446,6 +458,35 @@ mod tests {
             ptr::copy_nonoverlapping(sid.as_ptr(), base.add(sid_offset), sid.len());
         }
         info
+    }
+
+    #[test]
+    fn duplicate_native_group_sid_is_unverifiable_even_with_identical_attributes() {
+        let mut info = RawInfo {
+            words: vec![0usize; 64],
+            used: 64 * mem::size_of::<usize>(),
+        };
+        let offset = mem::offset_of!(TOKEN_GROUPS, Groups);
+        let sid = [1u8, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
+        // Distinct, non-overlapping native SID allocations with identical
+        // canonical content: both are structurally valid before duplicate check.
+        unsafe {
+            let base = info.words.as_mut_ptr().cast::<u8>();
+            ptr::write_unaligned(base.cast::<u32>(), 2);
+            for (index, sid_offset) in [128usize, 160usize].into_iter().enumerate() {
+                ptr::copy_nonoverlapping(sid.as_ptr(), base.add(sid_offset), sid.len());
+                ptr::write_unaligned(
+                    base.add(offset + index * mem::size_of::<SID_AND_ATTRIBUTES>())
+                        .cast::<SID_AND_ATTRIBUTES>(),
+                    SID_AND_ATTRIBUTES {
+                        Sid: base.add(sid_offset).cast(),
+                        Attributes: 0x4,
+                    },
+                );
+                assert_eq!(info.sid(base.add(sid_offset).cast()).unwrap(), sid);
+            }
+        }
+        assert!(info.sid_groups().is_err());
     }
 
     #[test]
@@ -669,6 +710,44 @@ mod tests {
             attributes: 0x14, // structurally inconsistent: enabled + deny-only
         });
         assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.restricted_groups.clear();
+        let sid = vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
+        snapshot.normal_groups = vec![
+            OwnedSidGroup {
+                sid: sid.clone(),
+                attributes: 0x4,
+            },
+            OwnedSidGroup {
+                sid: sid.clone(),
+                attributes: 0x4,
+            },
+        ];
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.normal_groups.clear();
+        snapshot.restricted_groups = vec![
+            OwnedSidGroup {
+                sid: sid.clone(),
+                attributes: 0x4,
+            },
+            OwnedSidGroup {
+                sid,
+                attributes: 0x10,
+            },
+        ];
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.restricted_groups.clear();
+        // The two TOKEN_GROUPS classes are distinct inventories: overlap
+        // between their SIDs is permitted, duplication within either is not.
+        snapshot.normal_groups = vec![OwnedSidGroup {
+            sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0],
+            attributes: 0x4,
+        }];
+        snapshot.restricted_groups = vec![OwnedSidGroup {
+            sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0],
+            attributes: 0x4,
+        }];
+        assert_eq!(snapshot.classify(), TokenFinding::ObservedDenyOnly);
+        snapshot.normal_groups.clear();
         snapshot.restricted_groups.clear();
         snapshot.token_user_sid[8] = 99;
         assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);

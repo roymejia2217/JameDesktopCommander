@@ -88,6 +88,17 @@ test('SCM owns the verified token-user SID, compares it to expected service SID,
   assert.doesNotMatch(service, /token_user_sid|service_account_sid|write_all\(/);
 });
 
+test('SCM rejects ambiguous duplicate SID bytes within each group inventory', () => {
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  assert.match(observer, /let mut seen_sids = HashSet::with_capacity\(count\)/);
+  assert.match(observer, /seen_sids\.insert\(self\.sid\(item\.Sid\)\?\)/);
+  assert.match(observer, /fn unique_group_sids\(groups: &\[OwnedSidGroup\]\)/);
+  assert.match(observer, /seen\.insert\(group\.sid\.as_slice\(\)\)/);
+  assert.match(observer, /!unique_group_sids\(&self\.normal_groups\)/);
+  assert.match(observer, /!unique_group_sids\(&self\.restricted_groups\)/);
+  assert.doesNotMatch(observer, /println!|eprintln!|File::create|OpenOptions::new|serde_json/);
+});
+
 test('ephemeral runner requires precise audit outcomes, not arbitrary nonzero failure', () => {
   assert.match(acceptance, /ServiceSpecificExitCode/);
   assert.match(acceptance, /ServiceSpecificExitCode -notin @\(1, 3\)/);

@@ -34,6 +34,21 @@ struct RawInfo {
     words: Vec<usize>,
     used: usize,
 }
+
+// Owned SID bytes and attributes, never a pointer to GetTokenInformation memory.
+// Private, deliberately not Debug or Serializable and never an authorization grant.
+struct OwnedSidGroup {
+    sid: Vec<u8>,
+    attributes: u32,
+}
+impl OwnedSidGroup {
+    fn is_consistent(&self) -> bool {
+        const ENABLED: u32 = 0x4;
+        const DENY_ONLY: u32 = 0x10;
+        bounded_sid_bytes(&self.sid) == Some(self.sid.len())
+            && self.attributes & (ENABLED | DENY_ONLY) != (ENABLED | DENY_ONLY)
+    }
+}
 impl RawInfo {
     fn addr(&self) -> usize {
         self.words.as_ptr() as usize
@@ -57,6 +72,19 @@ impl RawInfo {
         let remaining = &self.bytes()[offset..];
         let len = bounded_sid_bytes(remaining).ok_or(TokenUnverifiable)?;
         Ok(&remaining[..len])
+    }
+    fn copied_sid_group(
+        &self,
+        group: SID_AND_ATTRIBUTES,
+    ) -> Result<OwnedSidGroup, TokenUnverifiable> {
+        let observed = OwnedSidGroup {
+            sid: self.sid(group.Sid)?.to_vec(),
+            attributes: group.Attributes,
+        };
+        if !observed.is_consistent() {
+            return Err(TokenUnverifiable);
+        }
+        Ok(observed)
     }
     fn sid_groups(&self) -> Result<Vec<SID_AND_ATTRIBUTES>, TokenUnverifiable> {
         let prefix = mem::offset_of!(TOKEN_GROUPS, Groups);
@@ -290,10 +318,20 @@ struct VerifiedScmTokenSnapshot {
     elevated_group_enabled: bool,
     integrity_rid: u32,
     enabled_privileges: Vec<String>,
+    normal_groups: Vec<OwnedSidGroup>,
+    restricted_groups: Vec<OwnedSidGroup>,
 }
 
 impl VerifiedScmTokenSnapshot {
     fn classify(&self) -> TokenFinding {
+        if self
+            .normal_groups
+            .iter()
+            .chain(self.restricted_groups.iter())
+            .any(|group| !group.is_consistent())
+        {
+            return TokenFinding::Unverifiable;
+        }
         let names: Vec<&str> = self.enabled_privileges.iter().map(String::as_str).collect();
         classify_token(&TokenEvidence {
             identity_matches: true,
@@ -317,25 +355,29 @@ fn verified_snapshot(
     let token_type: TOKEN_TYPE = query(token, TokenType)?.fixed()?;
     let groups = query(token, TokenGroups)?;
     let normal_groups = groups.sid_groups()?;
+    let mut copied_normal_groups = Vec::with_capacity(normal_groups.len());
     let mut elevated = false;
     for group in normal_groups {
-        if group.Attributes & 0x4 == 0 {
-            continue;
-        }
-        if unsafe { IsWellKnownSid(group.Sid, WinBuiltinAdministratorsSid) } != 0
-            || unsafe { IsWellKnownSid(group.Sid, WinLocalSystemSid) } != 0
+        // The native API checks the original bounded kernel SID pointer.
+        if group.Attributes & 0x4 != 0
+            && (unsafe { IsWellKnownSid(group.Sid, WinBuiltinAdministratorsSid) } != 0
+                || unsafe { IsWellKnownSid(group.Sid, WinLocalSystemSid) } != 0)
         {
             elevated = true;
         }
+        copied_normal_groups.push(groups.copied_sid_group(group)?);
     }
     let restricted = query(token, TokenRestrictedSids)?;
+    let restricted_groups = restricted.sid_groups()?;
+    let mut copied_restricted_groups = Vec::with_capacity(restricted_groups.len());
     let mut matching_attributes = None;
-    for group in restricted.sid_groups()? {
+    for group in restricted_groups {
         if unsafe { EqualSid(group.Sid, expected_sid) } != 0
             && matching_attributes.replace(group.Attributes).is_some()
         {
             return Err(TokenUnverifiable);
         }
+        copied_restricted_groups.push(restricted.copied_sid_group(group)?);
     }
     let integrity = integrity_rid(&query(token, TokenIntegrityLevel)?)?;
     let enabled = enabled_privileges(&query(token, TokenPrivileges)?)?;
@@ -345,6 +387,8 @@ fn verified_snapshot(
         elevated_group_enabled: elevated,
         integrity_rid: integrity,
         enabled_privileges: enabled,
+        normal_groups: copied_normal_groups,
+        restricted_groups: copied_restricted_groups,
     })
 }
 
@@ -386,6 +430,35 @@ mod tests {
             ptr::copy_nonoverlapping(sid.as_ptr(), base.add(sid_offset), sid.len());
         }
         info
+    }
+
+    #[test]
+    fn copied_group_sid_survives_original_kernel_buffer_mutation() {
+        let mut raw = synthetic_groups();
+        let item = raw.sid_groups().unwrap().remove(0);
+        let copied = raw.copied_sid_group(item).unwrap();
+        let expected = [1u8, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
+        assert_eq!(copied.sid, expected);
+        assert_eq!(copied.attributes, 0x4);
+        assert!(copied.is_consistent());
+        // Alter the originating token allocation after copying.
+        let sid_offset = item.Sid as usize - raw.addr();
+        unsafe {
+            *raw.words.as_mut_ptr().cast::<u8>().add(sid_offset + 8) = 42;
+        }
+        assert_eq!(
+            copied.sid, expected,
+            "a copied SID must not alias the raw buffer"
+        );
+        assert_ne!(raw.sid(item.Sid).unwrap(), copied.sid.as_slice());
+        let mut impossible = copied;
+        impossible.attributes = 0x14; // enabled and deny-only simultaneously
+        assert!(!impossible.is_consistent());
+        let invalid_pointer = SID_AND_ATTRIBUTES {
+            Sid: (raw.addr() + raw.used + 8) as *mut c_void,
+            Attributes: 0x4,
+        };
+        assert!(raw.copied_sid_group(invalid_pointer).is_err());
     }
 
     #[test]
@@ -560,6 +633,8 @@ mod tests {
             elevated_group_enabled: false,
             integrity_rid: 0x2000,
             enabled_privileges: vec!["SeChangeNotifyPrivilege".to_owned()],
+            normal_groups: vec![],
+            restricted_groups: vec![],
         };
         assert_eq!(
             snapshot.classify(),
@@ -571,6 +646,12 @@ mod tests {
         snapshot.enabled_privileges.clear();
         assert_eq!(snapshot.classify(), TokenFinding::ObservedDenyOnly);
         assert_eq!(scm_terminal_denial_code(Some(snapshot.classify())), 1);
+        snapshot.restricted_groups.push(OwnedSidGroup {
+            sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0],
+            attributes: 0x14, // structurally inconsistent: enabled + deny-only
+        });
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.restricted_groups.clear();
         snapshot.integrity_rid = 0;
         assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
     }

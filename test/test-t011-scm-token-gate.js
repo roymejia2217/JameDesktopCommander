@@ -60,6 +60,20 @@ test('SCM evidence snapshot is private, in-process and cannot export token mater
   assert.doesNotMatch(acceptance, /Write-Output.*(?:SeDebugPrivilege|SeChangeNotifyPrivilege|TokenGroups)/i);
 });
 
+test('SCM group inventory copies bounded SID bytes without exporting raw token pointers', () => {
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  const scm = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_scm.rs'), 'utf8');
+  assert.match(observer, /struct OwnedSidGroup \{[\s\S]*?sid: Vec<u8>,[\s\S]*?attributes: u32,/);
+  assert.match(observer, /self\.sid\(group\.Sid\)\?\.to_vec\(\)/);
+  assert.match(observer, /copied_normal_groups\.push\(groups\.copied_sid_group\(group\)\?\)/);
+  assert.match(observer, /copied_restricted_groups\.push\(restricted\.copied_sid_group\(group\)\?\)/);
+  assert.match(observer, /normal_groups: copied_normal_groups/);
+  assert.match(observer, /restricted_groups: copied_restricted_groups/);
+  assert.match(observer, /\.chain\(self\.restricted_groups\.iter\(\)\)/);
+  assert.doesNotMatch(observer, /pub\s+struct OwnedSidGroup|pub\s+fn verified_snapshot/);
+  assert.doesNotMatch(scm, /(?:println!|write_all|OpenOptions|File::create).*sid/i);
+});
+
 test('ephemeral runner requires precise audit outcomes, not arbitrary nonzero failure', () => {
   assert.match(acceptance, /ServiceSpecificExitCode/);
   assert.match(acceptance, /ServiceSpecificExitCode -notin @\(1, 3\)/);

@@ -60,6 +60,34 @@ fn privilege_inventory_is_not_preapproved_without_real_scm_baseline() {
 }
 
 #[test]
+fn native_integrity_sid_requires_exact_single_rid_structure() {
+    use jdc_authority_service::token_policy::integrity_sid_rid;
+    // Windows mandatory-integrity authority S-1-16, one subauthority.
+    let medium = [1u8, 1, 0, 0, 0, 0, 0, 16, 0, 32, 0, 0];
+    assert_eq!(integrity_sid_rid(&medium), Some(0x2000));
+    assert_eq!(integrity_sid_rid(&medium[..11]), None);
+
+    let mut forged = medium;
+    forged[1] = 0;
+    assert_eq!(integrity_sid_rid(&forged), None);
+    forged = medium;
+    forged[0] = 2;
+    assert_eq!(integrity_sid_rid(&forged), None);
+    forged = medium;
+    forged[7] = 5;
+    assert_eq!(integrity_sid_rid(&forged), None);
+    forged = medium;
+    forged[8..12].fill(0);
+    assert_eq!(integrity_sid_rid(&forged), None);
+
+    // Two subauthorities under S-1-16 must not be interpreted as an RID
+    // taken from the final four bytes.
+    let extra = [1u8, 2, 0, 0, 0, 0, 0, 16, 0, 32, 0, 0, 0, 48, 0, 0];
+    assert_eq!(integrity_sid_rid(&extra), None);
+    assert_eq!(integrity_sid_rid(&extra[..12]), None);
+}
+
+#[test]
 fn absent_or_invalid_integrity_is_not_observed_as_success() {
     let mut snapshot = minimal(&[]);
     snapshot.integrity_rid = None;

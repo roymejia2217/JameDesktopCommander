@@ -23,6 +23,15 @@ test('real SCM deny-only exit must depend on kernel token audit', () => {
   assert.doesNotMatch(service, /ServiceControlAccept::STOP/);
 });
 
+test('SCM mandatory integrity label uses the exact bounded S-1-16 single-RID parser', () => {
+  const observer = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_token.rs'), 'utf8');
+  const policy = fs.readFileSync(path.join(root, 'native/authority-service/src/token_policy.rs'), 'utf8');
+  assert.match(observer, /info\.sid\(label\.Label\.Sid\)/);
+  assert.match(observer, /integrity_sid_rid\(sid\)\.ok_or\(TokenUnverifiable\)/);
+  assert.match(policy, /pub fn integrity_sid_rid\(sid: &\[u8\]\)/);
+  assert.doesNotMatch(observer, /sid\[sid\.len\(\) - 4\.\.\]/);
+});
+
 test('ephemeral runner requires precise audit outcomes, not arbitrary nonzero failure', () => {
   assert.match(acceptance, /ServiceSpecificExitCode/);
   assert.match(acceptance, /ServiceSpecificExitCode -notin @\(1, 3\)/);

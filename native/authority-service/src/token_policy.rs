@@ -138,6 +138,25 @@ pub fn bounded_buffer_span(
     field_addr >= buffer_addr && field_end <= buffer_end
 }
 
+/// Decode only a canonical Windows mandatory integrity label SID.
+///
+/// A well-formed integrity SID has authority SECURITY_MANDATORY_LABEL_AUTHORITY
+/// (S-1-16) and EXACTLY ONE nonzero RID. Never use the final four bytes
+/// of a multi-subauthority SID as an integrity level. The native caller
+/// must first verify the SID pointer and total bytes within its kernel buffer.
+#[must_use]
+pub fn integrity_sid_rid(sid: &[u8]) -> Option<u32> {
+    if sid.len() != 12
+        || bounded_sid_bytes(sid)? != 12
+        || sid[1] != 1
+        || sid[2..8] != [0, 0, 0, 0, 0, 16]
+    {
+        return None;
+    }
+    let rid = u32::from_le_bytes(sid[8..12].try_into().ok()?);
+    (rid != 0).then_some(rid)
+}
+
 /// Validate the fixed SID header and its subauthority byte count.
 /// This is a structural validation only; identity equality is an OS check.
 #[must_use]

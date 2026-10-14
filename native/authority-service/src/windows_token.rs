@@ -287,13 +287,17 @@ fn open_current_process_token() -> Result<Handle, TokenUnverifiable> {
 fn token_user_matches_service(
     token: HANDLE,
     expected: &RawInfo,
-) -> Result<bool, TokenUnverifiable> {
+) -> Result<Option<Vec<u8>>, TokenUnverifiable> {
     let identity_info = query(token, TokenUser)?;
     let user: TOKEN_USER = identity_info.fixed()?;
     // Validate the entire kernel-supplied SID before calling EqualSid.
-    identity_info.sid(user.User.Sid)?;
+    let validated_sid = identity_info.sid(user.User.Sid)?;
     let expected_sid = expected.words.as_ptr().cast_mut().cast();
-    Ok(unsafe { EqualSid(user.User.Sid, expected_sid) } != 0)
+    if unsafe { EqualSid(user.User.Sid, expected_sid) } == 0 {
+        return Ok(None);
+    }
+    // Copy only the verified matching identity; never retain a native pointer.
+    Ok(Some(validated_sid.to_vec()))
 }
 
 /// Standalone C4g process identity preflight. It never grants access.
@@ -301,7 +305,7 @@ fn token_user_matches_service(
 pub(crate) fn verify_current_process_identity() -> Result<(), TokenUnverifiable> {
     let token = open_current_process_token()?;
     let expected = service_sid()?;
-    if token_user_matches_service(token.0, &expected)? {
+    if token_user_matches_service(token.0, &expected)?.is_some() {
         Ok(())
     } else {
         Err(TokenUnverifiable)
@@ -320,10 +324,18 @@ struct VerifiedScmTokenSnapshot {
     enabled_privileges: Vec<String>,
     normal_groups: Vec<OwnedSidGroup>,
     restricted_groups: Vec<OwnedSidGroup>,
+    token_user_sid: Vec<u8>,
+    service_account_sid: Vec<u8>,
 }
 
 impl VerifiedScmTokenSnapshot {
     fn classify(&self) -> TokenFinding {
+        if bounded_sid_bytes(&self.token_user_sid) != Some(self.token_user_sid.len())
+            || bounded_sid_bytes(&self.service_account_sid) != Some(self.service_account_sid.len())
+            || self.token_user_sid != self.service_account_sid
+        {
+            return TokenFinding::Unverifiable;
+        }
         if self
             .normal_groups
             .iter()
@@ -350,8 +362,10 @@ impl VerifiedScmTokenSnapshot {
 fn verified_snapshot(
     token: HANDLE,
     expected: &RawInfo,
+    matched_user_sid: Vec<u8>,
 ) -> Result<VerifiedScmTokenSnapshot, TokenUnverifiable> {
     let expected_sid = expected.words.as_ptr().cast_mut().cast();
+    let service_account_sid = expected.sid(expected_sid)?.to_vec();
     let token_type: TOKEN_TYPE = query(token, TokenType)?.fixed()?;
     let groups = query(token, TokenGroups)?;
     let normal_groups = groups.sid_groups()?;
@@ -389,6 +403,8 @@ fn verified_snapshot(
         enabled_privileges: enabled,
         normal_groups: copied_normal_groups,
         restricted_groups: copied_restricted_groups,
+        token_user_sid: matched_user_sid,
+        service_account_sid,
     })
 }
 
@@ -397,10 +413,10 @@ fn verified_snapshot(
 pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
     let token = open_current_process_token()?;
     let expected = service_sid()?;
-    if !token_user_matches_service(token.0, &expected)? {
+    let Some(user_sid) = token_user_matches_service(token.0, &expected)? else {
         return Ok(TokenFinding::IdentityMismatch);
-    }
-    let snapshot = verified_snapshot(token.0, &expected)?;
+    };
+    let snapshot = verified_snapshot(token.0, &expected, user_sid)?;
     Ok(snapshot.classify())
 }
 
@@ -635,6 +651,8 @@ mod tests {
             enabled_privileges: vec!["SeChangeNotifyPrivilege".to_owned()],
             normal_groups: vec![],
             restricted_groups: vec![],
+            token_user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0],
+            service_account_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0],
         };
         assert_eq!(
             snapshot.classify(),
@@ -652,6 +670,12 @@ mod tests {
         });
         assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
         snapshot.restricted_groups.clear();
+        snapshot.token_user_sid[8] = 99;
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.token_user_sid[8] = 80;
+        snapshot.service_account_sid.truncate(9);
+        assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
+        snapshot.service_account_sid = vec![1, 1, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0];
         snapshot.integrity_rid = 0;
         assert_eq!(snapshot.classify(), TokenFinding::Unverifiable);
     }

@@ -495,7 +495,10 @@ healthy control-plane poll before reporting success.
 `tunnel status` discovers the registered executable and profile from Task Scheduler, resolves the
 profile through `tunnel-client profiles list --json`, and delegates liveness/readiness checks to
 `tunnel-client health --json --require-control-plane-poll`. JDC does not hardcode the dynamic
-health port and does not read secret file contents.
+health port and does not read secret file contents. The CLI preserves structured status output
+but returns a nonzero exit code unless result is `ok` and liveness, readiness, and the
+control-plane poll all pass. A running Scheduled Task alone is not evidence of availability;
+this read-only status check does not restart the tunnel.
 
 ### Windows UI Bridge Lifecycle
 

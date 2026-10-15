@@ -13,6 +13,7 @@ import {
 import {
     getWindowsTunnelRegistration,
     getWindowsTunnelStatus,
+    isWindowsTunnelHealthReady,
     type WindowsTunnelRegistration,
     type WindowsTunnelStatus,
 } from './tunnel-status.js';
@@ -422,12 +423,7 @@ export async function restartWindowsTunnel(
     for (let attempt = 0; attempt < deps.healthAttempts; attempt += 1) {
         try {
             const status = await deps.getStatus(taskName);
-            if (
-                status.health.result === 'ok' &&
-                status.health.live &&
-                status.health.ready &&
-                status.health.controlPlanePoll
-            ) {
+            if (isWindowsTunnelHealthReady(status.health)) {
                 return {
                     oldRootPid,
                     newRootPid: newRoot.processId,

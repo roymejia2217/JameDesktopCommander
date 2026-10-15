@@ -4,10 +4,12 @@ import {
   DEFAULT_WINDOWS_TUNNEL_TASK_NAME,
   formatWindowsTunnelCommandResult,
   runWindowsTunnelCommand,
+  runTunnel,
 } from '../dist/npm-scripts/tunnel.js';
 import {
   DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
 } from '../dist/platform/windows/tunnel-restart-supervisor-task.js';
+import { isWindowsTunnelHealthReady } from '../dist/platform/windows/tunnel-status.js';
 
 const tunnelBin = 'C:\\OpenAI\\tunnel-client.exe';
 const profileDir = 'C:\\Users\\Roy\\AppData\\Local\\OpenAI\\tunnel-client\\profiles';
@@ -242,5 +244,57 @@ await assert.rejects(
   runWindowsTunnelCommand(['restart', '--extra'], dependencies),
   /does not accept additional arguments/i,
 );
+
+const healthyStatus = statusResult.status;
+assert.equal(isWindowsTunnelHealthReady(healthyStatus.health), true);
+
+for (const healthPatch of [
+  { result: 'degraded' },
+  { live: false },
+  { ready: false },
+  { controlPlanePoll: false },
+]) {
+  assert.equal(
+    isWindowsTunnelHealthReady({ ...healthyStatus.health, ...healthPatch }),
+    false,
+    JSON.stringify(healthPatch),
+  );
+}
+
+const originalConsoleLog = console.log;
+const originalExitCode = process.exitCode;
+try {
+  const output = [];
+  console.log = (...parts) => output.push(parts.join(' '));
+
+  for (const healthPatch of [
+    { result: 'degraded' },
+    { live: false },
+    { ready: false },
+    { controlPlanePoll: false },
+  ]) {
+    process.exitCode = undefined;
+    await runTunnel(['status'], {
+      ...dependencies,
+      statusTunnel: async () => ({
+        ...healthyStatus,
+        health: { ...healthyStatus.health, ...healthPatch },
+      }),
+    });
+    assert.equal(process.exitCode, 1, JSON.stringify(healthPatch));
+  }
+
+  assert.match(output[0], /"result": "degraded"/);
+  assert.match(output[2], /"ready": false/);
+  process.exitCode = undefined;
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => healthyStatus,
+  });
+  assert.equal(process.exitCode, undefined);
+} finally {
+  console.log = originalConsoleLog;
+  process.exitCode = originalExitCode;
+}
 
 console.log('Windows tunnel CLI contract: PASS');

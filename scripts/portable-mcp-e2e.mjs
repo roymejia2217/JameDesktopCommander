@@ -66,6 +66,12 @@ const transport = new StdioClientTransport({
 });
 const client = new Client({ name: 'jdc-portable-acceptance', version: '1.0.0' },
   { capabilities: {} });
+// Protocol.onclose is notified after the stdio child process closes. Its
+// shutdown may outlive client.close() on Windows after forced termination.
+let notifyChildClosed;
+const childClosed = new Promise((resolve) => { notifyChildClosed = resolve; });
+client.onclose = () => notifyChildClosed();
+
 async function bounded(label, action) {
   let timer;
   try {
@@ -240,6 +246,12 @@ try {
     outsideBytesPreserved: true, releaseEligible: false,
   }));
 } finally {
+  // SDK close() may return after requesting SIGKILL but before the OS has
+  // released the child's stdio/file handles. Do not race fixture deletion.
+  const childWasRunning = transport.pid !== null;
   await client.close().catch(() => {});
+  if (childWasRunning) {
+    await bounded('MCP stdio child close', () => childClosed);
+  }
   await rm(isolated, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

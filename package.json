@@ -46,6 +46,7 @@
     "test": "npm run build && npm run test:prepare && npm run test:unit",
     "test:integration:prepare": "shx rm -rf .tmp/integration-config && shx mkdir -p .tmp/integration-config",
     "test:integration": "npm run build && npm run test:integration:prepare && node --env-file=test/integration/integration.env --test --test-concurrency=1 \"test/integration/*.js\"",
+    "test:windows:task-recurrence:realhost": "powershell.exe -NoProfile -NonInteractive -File test/e2e/windows-scheduler-recurrence.ps1",
     "test:debug": "npm run test:prepare && node --env-file=test/test.env --import=./test/setup-test-environment.js --inspect-brk --test --test-concurrency=1 \"test/test*.js\"",
     "validate:tools:inspect": "mcp-inspector --cli --config test/mcp-inspector.config.json --server desktop-commander-test --method tools/list --format json --strict",
     "validate:tools:built": "npm run --silent validate:tools:inspect | node scripts/validate-tools-sync.js",

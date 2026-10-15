@@ -301,7 +301,7 @@ export class DesktopCommanderIntegration {
 
         // Proxy other tools to MCP server
         try {
-            console.debug('[DEBUG] Calling MCP tool:', toolName, 'args:', JSON.stringify(args).substring(0, 100));
+            console.debug('[DEBUG] Calling local MCP tool:', toolName);
             const result = await this.mcpClient!.callTool({
                 name: toolName,
                 arguments: args,
@@ -310,8 +310,7 @@ export class DesktopCommanderIntegration {
             console.debug('[DEBUG] Tool call successful:', toolName);
             return result;
         } catch (error) {
-            console.error(`Error executing tool ${toolName}:`, error);
-            console.debug('[DEBUG] Tool call error details:', error);
+            console.error(`Local MCP tool ${toolName} failed; consult the correlated Remote Device receipt.`);
             await captureRemote('desktop_integration_tool_call_failed', { error, toolName });
             throw error;
         }

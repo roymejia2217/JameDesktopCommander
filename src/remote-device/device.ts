@@ -8,6 +8,7 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import { captureRemote } from '../utils/capture.js';
+import { createRemoteCallReceipt } from './remote-call-receipt.js';
 
 export interface MCPDeviceOptions {
     persistSession?: boolean;
@@ -503,7 +504,7 @@ export class MCPDevice {
         // Expect toolCall to include a device_id field used to route calls to this device instance.
         const { id: call_id, tool_name, tool_args, device_id, metadata = {} } = toolCall;
 
-        console.debug('[DEBUG] Tool call received, device_id:', device_id, 'this.deviceId:', this.deviceId);
+        // Avoid logging device identifiers or tool payloads.
 
         // Only process jobs for this device
         if (device_id && device_id !== this.deviceId) {
@@ -511,7 +512,8 @@ export class MCPDevice {
             return;
         }
 
-        console.log(`🔧 Received tool call ${call_id}: ${tool_name} ${JSON.stringify(tool_args)} metadata: ${JSON.stringify(metadata)}`);
+        const receipt = createRemoteCallReceipt();
+        console.info(receipt('received'));
 
         // LOCAL claim first — this is the authoritative guard against executing
         // a call twice. During the transition both transports deliver every call
@@ -520,7 +522,7 @@ export class MCPDevice {
         // markCallExecuting return true for both deliveries, which could run a
         // side-effecting command twice (found in review, 2026-07-24).
         if (this.seenCallIds.has(call_id)) {
-            console.debug('[DEBUG] Duplicate delivery for call already handled here, skipping:', call_id);
+            console.info(receipt('duplicate_ignored'));
             return;
         }
         this.rememberCallId(call_id);
@@ -533,9 +535,10 @@ export class MCPDevice {
             // path claims before dispatch and marks the payload `claimed`.
             const claimed = payload.claimed === true || await this.remoteChannel.markCallExecuting(call_id);
             if (!claimed) {
-                // markCallExecuting already logged the duplicate-delivery skip.
+                console.info(receipt('claim_rejected'));
                 return;
             }
+            console.info(receipt('claimed'));
 
             let result;
 
@@ -566,21 +569,23 @@ export class MCPDevice {
                 result = await this.desktop.callClientTool(tool_name, tool_args, metadata);
             }
 
-            console.log(`✅ Tool call ${tool_name} completed:\r\n ${JSON.stringify(result)}`);
+            console.info(receipt('local_completed'));
 
             // The result write itself notifies the server (a DB trigger).
             await this.remoteChannel.updateCallResult(call_id, 'completed', result);
+            console.info(receipt('result_published'));
 
         } catch (error: any) {
-            console.error(`❌ Tool call ${tool_name} failed:`, error.message);
+            console.error(receipt('execution_failed'));
             // The failure path must not fail: this method's promise is discarded
             // at every call site, so a throw here becomes an unhandled rejection
             // and takes the device process down.
             try {
                 await captureRemote('remote_device_tool_call_failed', { error, tool_name });
                 await this.remoteChannel.updateCallResult(call_id, 'failed', null, error.message);
-            } catch (reportError: any) {
-                console.error(`❌ Could not report failure for ${call_id}:`, reportError?.message);
+                console.info(receipt('failure_published'));
+            } catch {
+                console.error(receipt('result_publish_failed'));
             }
         }
     }

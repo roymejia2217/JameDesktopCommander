@@ -24,6 +24,13 @@ assert.match(xml, /<LogonType>S4U<\/LogonType>/);
 assert.match(xml, /<RunLevel>LeastPrivilege<\/RunLevel>/);
 assert.match(xml, /<BootTrigger>[\s\S]*<Enabled>true<\/Enabled>[\s\S]*<\/BootTrigger>/);
 assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+assert.doesNotMatch(xml, /<Repetition>/);
+const repeatingXml = buildWindowsTunnelTaskXml({ ...base, recoveryIntervalMinutes: 5 });
+assert.match(repeatingXml, /<BootTrigger>[\s\S]*<Repetition>[\s\S]*<Interval>PT5M<\/Interval>[\s\S]*<StopAtDurationEnd>false<\/StopAtDurationEnd>[\s\S]*<\/BootTrigger>/);
+assert.match(repeatingXml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
+for (const invalid of [0, -1, 61, 2.5, Infinity, NaN]) {
+  assert.throws(() => buildWindowsTunnelTaskXml({ ...base, recoveryIntervalMinutes: invalid }), /interval/);
+}
 assert.match(xml, /<RestartOnFailure>[\s\S]*<Interval>PT1M<\/Interval>[\s\S]*<Count>5<\/Count>[\s\S]*<\/RestartOnFailure>/);
 assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/);
 assert.match(xml, /<Command>C:\\Program Files\\OpenAI\\tunnel-client\.exe<\/Command>/);

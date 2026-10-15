@@ -16,6 +16,8 @@ export interface WindowsTunnelTaskOptions {
     executable: string;
     profileDir: string;
     profileName: string;
+    /** Opt-in native Task Scheduler retry after an unexpected clean exit. */
+    recoveryIntervalMinutes?: number;
 }
 
 const PROFILE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -50,6 +52,12 @@ export function buildWindowsTunnelTaskXml(options: WindowsTunnelTaskOptions): st
         throw new Error('Tunnel profile name may contain only letters, digits, dot, underscore, and hyphen.');
     }
 
+    const recoveryInterval = options.recoveryIntervalMinutes;
+    if (recoveryInterval !== undefined &&
+        (!Number.isSafeInteger(recoveryInterval) || recoveryInterval < 1 || recoveryInterval > 60)) {
+        throw new Error('Tunnel recurrence interval must be 1..60 minutes.');
+    }
+
     const workingDirectory = path.win32.dirname(executable);
     const argumentsText = buildWindowsTunnelRunArguments(profileDir, profileName);
 
@@ -63,6 +71,12 @@ export function buildWindowsTunnelTaskXml(options: WindowsTunnelTaskOptions): st
         '  <Triggers>',
         '    <BootTrigger>',
         '      <Enabled>true</Enabled>',
+        ...(recoveryInterval === undefined ? [] : [
+            '      <Repetition>',
+            `        <Interval>PT${recoveryInterval}M</Interval>`,
+            '        <StopAtDurationEnd>false</StopAtDurationEnd>',
+            '      </Repetition>',
+        ]),
         '    </BootTrigger>',
         '  </Triggers>',
         '  <Principals>',

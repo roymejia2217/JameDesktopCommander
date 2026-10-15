@@ -49,10 +49,30 @@ export async function startWindowsTunnelTask(
     taskName: string,
     dependencies: WindowsTunnelLifecycleDependencies = {},
 ): Promise<RunExecutableResult> {
+    await runWindowsScheduledTaskAction('enable', taskName, dependencies);
+    return runWindowsScheduledTaskAction('start', taskName, dependencies);
+}
+
+/** Supervisor-only: never re-enable a deliberately stopped task. */
+export async function requestWindowsTunnelStartForRestart(
+    taskName: string,
+    dependencies: WindowsTunnelLifecycleDependencies = {},
+): Promise<RunExecutableResult> {
     return runWindowsScheduledTaskAction('start', taskName, dependencies);
 }
 
 export async function stopWindowsTunnelTask(
+    taskName: string,
+    dependencies: WindowsTunnelLifecycleDependencies = {},
+): Promise<RunExecutableResult> {
+    // Persist operator STOP before ending any process; scheduled repetitions
+    // can never revert an intentional stop while this task is disabled.
+    await runWindowsScheduledTaskAction('disable', taskName, dependencies);
+    return runWindowsScheduledTaskAction('stop', taskName, dependencies);
+}
+
+/** Supervisor-only: preserve current operator intent while recycling a process. */
+export async function requestWindowsTunnelStopForRestart(
     taskName: string,
     dependencies: WindowsTunnelLifecycleDependencies = {},
 ): Promise<RunExecutableResult> {

@@ -7,11 +7,12 @@ import {
     type RunExecutableResult,
 } from './scheduled-task.js';
 import {
-    startWindowsTunnelTask,
-    stopWindowsTunnelTask,
+    requestWindowsTunnelStartForRestart,
+    requestWindowsTunnelStopForRestart,
 } from './tunnel-lifecycle.js';
 import {
     getWindowsTunnelRegistration,
+    getWindowsTunnelTaskEnabled,
     getWindowsTunnelStatus,
     isWindowsTunnelHealthReady,
     type WindowsTunnelRegistration,
@@ -45,6 +46,7 @@ export interface WindowsTunnelRestartDependencies {
         taskName: string,
     ) => Promise<WindowsTunnelRegistration>;
     getStatus?: (taskName: string) => Promise<WindowsTunnelStatus>;
+    isTaskEnabled?: (taskName: string) => Promise<boolean>;
     listProcesses?: () => Promise<WindowsProcessRecord[]>;
     stopTask?: (taskName: string) => Promise<RunExecutableResult>;
     startTask?: (taskName: string) => Promise<RunExecutableResult>;
@@ -291,20 +293,25 @@ function resolveDependencies(
                     environment,
                     runExecutable,
                 })),
+        isTaskEnabled:
+            dependencies.isTaskEnabled ??
+            ((taskName) => getWindowsTunnelTaskEnabled(taskName, {
+                environment, runExecutable,
+            })),
         listProcesses:
             dependencies.listProcesses ??
             (() => listWindowsProcesses(environment, runExecutable)),
         stopTask:
             dependencies.stopTask ??
             ((taskName) =>
-                stopWindowsTunnelTask(taskName, {
+                requestWindowsTunnelStopForRestart(taskName, {
                     environment,
                     runExecutable,
                 })),
         startTask:
             dependencies.startTask ??
             ((taskName) =>
-                startWindowsTunnelTask(taskName, {
+                requestWindowsTunnelStartForRestart(taskName, {
                     environment,
                     runExecutable,
                 })),
@@ -333,6 +340,9 @@ export async function restartWindowsTunnel(
     dependencies: WindowsTunnelRestartDependencies = {},
 ): Promise<WindowsTunnelRestartResult> {
     const deps = resolveDependencies(dependencies);
+    if (!(await deps.isTaskEnabled(taskName))) {
+        throw new Error('Operator-disabled tunnel task cannot be restarted.');
+    }
     const registration = await deps.getRegistration(taskName);
     const initialProcesses = await deps.listProcesses();
     const captured = captureOwnedTunnelProcessTree(
@@ -396,6 +406,11 @@ export async function restartWindowsTunnel(
         }
     }
 
+    // Re-check after potentially lengthy shutdown. An intentional stop
+    // during this interval must prevent the pending restart.
+    if (!(await deps.isTaskEnabled(taskName))) {
+        throw new Error('Tunnel task was disabled while restart was pending.');
+    }
     await deps.startTask(taskName);
 
     let newRoot: WindowsProcessRecord | null = null;

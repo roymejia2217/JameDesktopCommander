@@ -3,6 +3,7 @@ import { SetConfigValueArgsSchema } from './schemas.js';
 import { getSystemInfo } from '../utils/system-info.js';
 import { currentClient } from '../server.js';
 import { featureFlagManager } from '../utils/feature-flags.js';
+import { getRuntimeBuildIdentity } from './runtime-build-identity.js';
 import { access, readFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import {
@@ -92,6 +93,8 @@ export async function getConfig() {
   try {
     const config = await configManager.getConfig();
     
+    // Build identity is independently generated and not a configurable value.
+    const runtimeBuild = await getRuntimeBuildIdentity();
     // Add system information and current client to the config response
     const systemInfo = getSystemInfo();
     
@@ -116,14 +119,15 @@ export async function getConfig() {
     };
     const availableShells = await detectAvailableShells(systemInfo);
     
-    console.error(`getConfig result: ${JSON.stringify(configWithSystemInfo, null, 2)}`);
+    // Never log the configuration: it may contain sensitive values.
     return {
       content: [{
         type: "text",
-        text: `Current configuration:\n${JSON.stringify(configWithSystemInfo, null, 2)}`
+        text: `Current configuration:\n${JSON.stringify(configWithSystemInfo, null, 2)}\nRuntime build:\n${JSON.stringify(runtimeBuild, null, 2)}`
       }],
       structuredContent: {
         config: configWithSystemInfo,
+        runtimeBuild,
         uiHints: {
           availableShells,
         },
@@ -156,7 +160,7 @@ export async function getConfig() {
  * Set a specific config value
  */
 export async function setConfigValue(args: unknown) {
-  console.error(`setConfigValue called with args: ${JSON.stringify(args)}`);
+  // Do not log incoming configuration values.
   try {
     const parsed = SetConfigValueArgsSchema.safeParse(args);
     if (!parsed.success) {
@@ -190,7 +194,7 @@ export async function setConfigValue(args: unknown) {
           (valueToStore.startsWith('[') || valueToStore.startsWith('{'))) {
         try {
           valueToStore = JSON.parse(valueToStore);
-          console.error(`Parsed string value to object/array: ${JSON.stringify(valueToStore)}`);
+          // Parsed configuration data must not be logged.
         } catch (parseError) {
           console.error(`Failed to parse string as JSON, using as-is: ${parseError}`);
         }
@@ -267,7 +271,7 @@ export async function setConfigValue(args: unknown) {
       await configManager.setValue(parsed.data.key, valueToStore);
       // Get the updated configuration to show the user
       const updatedConfig = await configManager.getConfig();
-      console.error(`setConfigValue: Successfully set ${parsed.data.key} to ${JSON.stringify(valueToStore)}`);
+      // Do not echo new configuration values to stderr.
       return {
         content: [{
           type: "text",

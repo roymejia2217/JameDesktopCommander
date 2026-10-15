@@ -26,6 +26,10 @@ import {
 import {
     DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
 } from '../platform/windows/tunnel-restart-supervisor-task.js';
+import {
+    readTunnelFunctionalDiagnostics,
+    type TunnelFunctionalDiagnostics,
+} from '../platform/windows/tunnel-functional-diagnostics.js';
 
 export const DEFAULT_WINDOWS_TUNNEL_TASK_NAME = 'Desktop Commander Windows Tunnel';
 
@@ -50,6 +54,7 @@ export interface WindowsTunnelCommandDependencies {
     stopTask?: (taskName: string) => Promise<RunExecutableResult>;
     uninstallTask?: (taskName: string) => Promise<RunExecutableResult>;
     statusTunnel?: (taskName: string) => Promise<WindowsTunnelStatus>;
+    diagnoseLocal?: (baseUrl: string) => Promise<TunnelFunctionalDiagnostics>;
     nodeExecutable?: () => string;
     restartWorkerScript?: () => string;
     installRestartSupervisorTask?: InstallRestartSupervisorTask;
@@ -75,6 +80,11 @@ export type WindowsTunnelCommandResult =
         action: 'status';
         taskName: string;
         status: WindowsTunnelStatus;
+    }
+    | {
+        action: 'diagnose';
+        taskName: string;
+        diagnostics: TunnelFunctionalDiagnostics;
     };
 
 interface InstallArguments {
@@ -255,6 +265,9 @@ function resolveDependencies(
         statusTunnel:
             dependencies.statusTunnel ??
             ((taskName) => getWindowsTunnelStatus(taskName)),
+        diagnoseLocal:
+            dependencies.diagnoseLocal ??
+            ((baseUrl) => readTunnelFunctionalDiagnostics(baseUrl)),
         nodeExecutable:
             dependencies.nodeExecutable ??
             (() => process.execPath),
@@ -285,7 +298,7 @@ export async function runWindowsTunnelCommand(
 
     const [action, ...actionArgs] = args;
     if (!action) {
-        throw new Error('Tunnel action is required: install, start, stop, restart, status, or uninstall.');
+        throw new Error('Tunnel action is required: install, start, stop, restart, status, diagnose, or uninstall.');
     }
 
     const taskName = DEFAULT_WINDOWS_TUNNEL_TASK_NAME;
@@ -365,6 +378,14 @@ export async function runWindowsTunnelCommand(
                 status: await deps.statusTunnel(taskName),
             };
         }
+        case 'diagnose': {
+            if (actionArgs.length > 0) {
+                throw new Error('Tunnel diagnose does not accept additional arguments.');
+            }
+            const state = await deps.statusTunnel(taskName);
+            return { action, taskName,
+                diagnostics: await deps.diagnoseLocal(state.health.baseUrl) };
+        }
         case 'start':
         case 'stop':
         case 'uninstall': {
@@ -406,6 +427,8 @@ export function formatWindowsTunnelCommandResult(
             return `Uninstalled Windows tunnel task "${result.taskName}".`;
         case 'status':
             return JSON.stringify(result.status, null, 2);
+        case 'diagnose':
+            return JSON.stringify(result.diagnostics, null, 2);
     }
 }
 
@@ -418,6 +441,7 @@ Usage:
   desktop-commander tunnel stop
   desktop-commander tunnel restart
   desktop-commander tunnel status
+  desktop-commander tunnel diagnose
   desktop-commander tunnel uninstall
 
 Notes:

@@ -245,6 +245,29 @@ await assert.rejects(
   /does not accept additional arguments/i,
 );
 
+const diagnosed = await runWindowsTunnelCommand(['diagnose'], {
+  ...dependencies,
+  diagnoseLocal: async (baseUrl) => {
+    assert.equal(baseUrl, 'http://127.0.0.1:53637');
+    return {
+      kind: 'observational_only',
+      localHealth: 'ready',
+      mcpInitializeObserved: true,
+      toolDiscovery: 'observed_incomplete',
+      dispatcher: { active: 1, failuresCumulative: 9, timeoutsCumulative: 9 },
+      queueDepth: 0, controlPlaneFailuresConsecutive: 0,
+    };
+  },
+});
+assert.equal(diagnosed.action, 'diagnose');
+assert.equal(diagnosed.diagnostics.dispatcher.timeoutsCumulative, 9);
+assert.doesNotMatch(formatWindowsTunnelCommandResult(diagnosed),
+  /api_key|profileDir|53637|runtime\.key/);
+await assert.rejects(
+  runWindowsTunnelCommand(['diagnose', '--extra'], dependencies),
+  /does not accept additional arguments/i,
+);
+
 const healthyStatus = statusResult.status;
 assert.equal(isWindowsTunnelHealthReady(healthyStatus.health), true);
 

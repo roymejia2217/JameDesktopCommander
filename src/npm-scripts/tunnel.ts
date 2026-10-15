@@ -14,6 +14,7 @@ import {
 } from '../platform/windows/tunnel-lifecycle.js';
 import {
     getWindowsTunnelStatus,
+    isWindowsTunnelHealthReady,
     type WindowsTunnelStatus,
 } from '../platform/windows/tunnel-status.js';
 import {
@@ -426,15 +427,24 @@ Notes:
   Secrets remain owned by tunnel-client profiles via env: or file: references.`);
 }
 
-export async function runTunnel(args: readonly string[] = process.argv.slice(3)): Promise<void> {
+export async function runTunnel(
+    args: readonly string[] = process.argv.slice(3),
+    dependencies: WindowsTunnelCommandDependencies = {},
+): Promise<void> {
     if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
         printTunnelHelp();
         return;
     }
 
     try {
-        const result = await runWindowsTunnelCommand(args);
+        const result = await runWindowsTunnelCommand(args, dependencies);
         console.log(formatWindowsTunnelCommandResult(result));
+        if (
+            result.action === 'status' &&
+            !isWindowsTunnelHealthReady(result.status.health)
+        ) {
+            process.exitCode = 1;
+        }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Tunnel command failed: ${message}`);

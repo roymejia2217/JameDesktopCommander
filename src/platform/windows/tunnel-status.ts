@@ -46,6 +46,19 @@ export interface WindowsTunnelStatus extends WindowsTunnelRegistration {
     };
 }
 
+/**
+ * Strict readiness contract for CLI health checks and restart acceptance.
+ * An active process alone does not establish an authenticated control plane.
+ */
+export function isWindowsTunnelHealthReady(
+    health: WindowsTunnelStatus['health'],
+): boolean {
+    return health.result === 'ok' &&
+        health.live === true &&
+        health.ready === true &&
+        health.controlPlanePoll === true;
+}
+
 export interface WindowsTunnelStatusDependencies {
     environment?: Record<string, string | undefined>;
     runExecutable?: RunExecutable;

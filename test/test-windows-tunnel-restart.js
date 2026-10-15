@@ -114,6 +114,7 @@ let healthAttempt = 0;
 
 const result = await restartWindowsTunnel(taskName, {
   getRegistration: async () => registration,
+  isTaskEnabled: async () => true,
   listProcesses: async () => snapshots[Math.min(snapshotIndex++, snapshots.length - 1)],
   stopTask: async (name) => {
     calls.push({ kind: 'stop', name });

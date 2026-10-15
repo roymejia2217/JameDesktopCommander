@@ -28,6 +28,12 @@ assert.deepEqual(buildSchtasksLifecycleArgs('stop', 'Desktop Commander Windows T
   '/TN',
   'Desktop Commander Windows Tunnel',
 ]);
+assert.deepEqual(buildSchtasksLifecycleArgs('disable', 'Desktop Commander Windows Tunnel'), [
+  '/Change', '/TN', 'Desktop Commander Windows Tunnel', '/DISABLE',
+]);
+assert.deepEqual(buildSchtasksLifecycleArgs('enable', 'Desktop Commander Windows Tunnel'), [
+  '/Change', '/TN', 'Desktop Commander Windows Tunnel', '/ENABLE',
+]);
 assert.deepEqual(buildSchtasksLifecycleArgs('uninstall', 'Desktop Commander Windows Tunnel'), [
   '/Delete',
   '/TN',

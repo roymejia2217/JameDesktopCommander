@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-export type WindowsScheduledTaskLifecycleAction = 'start' | 'stop' | 'uninstall';
+export type WindowsScheduledTaskLifecycleAction = 'start' | 'stop' | 'enable' | 'disable' | 'uninstall';
 
 export interface RunExecutableResult {
     stdout: string;
@@ -116,6 +116,10 @@ export function buildSchtasksLifecycleArgs(
             return ['/Run', '/TN', normalizedTaskName];
         case 'stop':
             return ['/End', '/TN', normalizedTaskName];
+        case 'enable':
+            return ['/Change', '/TN', normalizedTaskName, '/ENABLE'];
+        case 'disable':
+            return ['/Change', '/TN', normalizedTaskName, '/DISABLE'];
         case 'uninstall':
             return ['/Delete', '/TN', normalizedTaskName, '/F'];
         default: {

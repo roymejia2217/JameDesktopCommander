@@ -92,6 +92,7 @@ interface InstallArguments {
     profileDir: string;
     profile: string;
     force: boolean;
+    recoverOnExit: boolean;
 }
 
 const defaultRunExecutable: RunExecutable = async (executable, args) =>
@@ -159,6 +160,7 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
     let profileDir: string | undefined;
     let profile: string | undefined;
     let force = false;
+    let recoverOnExit = false;
 
     for (let index = 0; index < args.length;) {
         const option = args[index];
@@ -168,6 +170,15 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
                 throw new Error('--force may be specified only once.');
             }
             force = true;
+            index += 1;
+            continue;
+        }
+
+        if (option === '--recover-on-exit') {
+            if (recoverOnExit) {
+                throw new Error('--recover-on-exit may be specified only once.');
+            }
+            recoverOnExit = true;
             index += 1;
             continue;
         }
@@ -223,6 +234,7 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
         profileDir: requireAbsoluteWindowsPath('--profile-dir', profileDir),
         profile: requireProfileName(profile),
         force,
+        recoverOnExit,
     };
 }
 
@@ -325,6 +337,7 @@ export async function runWindowsTunnelCommand(
                     executable: options.tunnelClientBin,
                     profileDir: options.profileDir,
                     profileName: options.profile,
+                    ...(options.recoverOnExit ? { recoveryIntervalMinutes: 5 } : {}),
                 },
             });
 
@@ -436,7 +449,7 @@ function printTunnelHelp(): void {
     console.log(`Desktop Commander Secure MCP Tunnel lifecycle
 
 Usage:
-  desktop-commander tunnel install --tunnel-client-bin <absolute-path> --profile-dir <absolute-path> --profile <name> [--force]
+  desktop-commander tunnel install --tunnel-client-bin <absolute-path> --profile-dir <absolute-path> --profile <name> [--force] [--recover-on-exit]
   desktop-commander tunnel start
   desktop-commander tunnel stop
   desktop-commander tunnel restart
@@ -446,6 +459,8 @@ Usage:
 
 Notes:
   install runs the official tunnel-client doctor before registering the task.
+  --recover-on-exit opts in to native Task Scheduler five-minute repetitions on unexpected process exit, including exit code 0.
+  stop first disables the task to preserve intentional operator STOP; start re-enables it.
   restart re-registers and launches an external Windows Task Scheduler supervisor so it survives the tunnel process tree.
   Existing tunnel tasks are not replaced unless --force is supplied.
   Secrets remain owned by tunnel-client profiles via env: or file: references.`);

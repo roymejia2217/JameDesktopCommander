@@ -187,6 +187,33 @@ function parseHealthUrlFile(profileText: string): string {
     );
 }
 
+export function parseWindowsTunnelTaskEnabled(taskXml: string): boolean {
+    const parser = new XMLParser({
+        ignoreAttributes: true, removeNSPrefix: true,
+        processEntities: true, trimValues: true,
+    });
+    const document = requireObject('Task XML document', parser.parse(taskXml));
+    const task = requireObject('Task XML Task', document.Task);
+    const settings = requireObject('Task XML Settings', task.Settings);
+    if (settings.Enabled !== true && settings.Enabled !== 'true' &&
+        settings.Enabled !== false && settings.Enabled !== 'false') {
+        throw new Error('Task Scheduler enabled state must be explicit.');
+    }
+    return settings.Enabled === true || settings.Enabled === 'true';
+}
+
+export async function getWindowsTunnelTaskEnabled(
+    taskName: string,
+    dependencies: WindowsTunnelStatusDependencies = {},
+): Promise<boolean> {
+    const deps = resolveDependencies(dependencies);
+    const task = await deps.runExecutable(
+        resolveSchtasksExecutable(deps.environment),
+        buildSchtasksQueryXmlArgs(taskName),
+    );
+    return parseWindowsTunnelTaskEnabled(task.stdout);
+}
+
 function parseHealthOutput(rawJson: string): WindowsTunnelStatus['health'] {
     let parsed: unknown;
     try {

@@ -140,6 +140,51 @@ try {
   });
   assert.match(textOf(fallbackResult), /fallback-ok/);
 
+  // Measure only the disposable, same-host MCP stdio round trip. This is
+  // not a public tunnel, provider, or ChatGPT UI latency measurement.
+  const timingProcess = await client.callTool({
+    name: 'start_process',
+    arguments: {
+      command: nodeCommand(await writeNodeFixture(
+        'local-timing', "setTimeout(() => console.log('LOCAL_TIMING_MARKER'), 350)",
+      )),
+      timeout_ms: 70,
+      shell,
+    },
+  });
+  const timingPidMatch = textOf(timingProcess).match(/PID\s+(\d+)/);
+  assert.ok(timingPidMatch, 'timing fixture must return a real process PID');
+  const timingStart = process.hrtime.bigint();
+  const timingReply = await client.callTool({
+    name: 'read_process_output',
+    arguments: {
+      pid: Number(timingPidMatch[1]),
+      timeout_ms: 5_000,
+      wait_for: 'exit',
+      offset: -10,
+      length: 10,
+      verbose_timing: true,
+    },
+  });
+  const localStdioRoundTripMs = Number(process.hrtime.bigint() - timingStart) / 1e6;
+  const timingText = textOf(timingReply);
+  assert.equal(timingReply.isError, undefined, timingText);
+  assert.match(timingText, /LOCAL_TIMING_MARKER/);
+  assert.match(timingText, /Process completed with exit code 0/);
+  assert.match(timingText, /Wait outcome: exit/);
+  const handlerMatch = timingText.match(/Timing: ([0-9.]+)ms \(server handler; excludes MCP transport\/UI\)/);
+  assert.ok(handlerMatch, 'server handler elapsed must be explicitly labeled');
+  const serverHandlerMs = Number(handlerMatch[1]);
+  assert.ok(Number.isFinite(serverHandlerMs) && serverHandlerMs >= 0);
+  assert.ok(localStdioRoundTripMs > 0);
+  assert.ok(localStdioRoundTripMs + 5 >= serverHandlerMs,
+    'stdio call duration should encompass server handler duration within clock/rounding tolerance');
+  // Source evidence only: no token, device identity, command line or payload.
+  console.log('LOCAL_STDIO_TIMING ' + JSON.stringify({
+    serverHandlerMs: Number(serverHandlerMs.toFixed(1)),
+    sdkStdioRoundTripMs: Number(localStdioRoundTripMs.toFixed(1)),
+  }));
+
   const childPidPath = path.join(isolatedHome, 'cancel-child.pid');
   const controller = new AbortController();
   const cancelledCall = client.callTool(

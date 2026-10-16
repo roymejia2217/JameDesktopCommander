@@ -63,6 +63,9 @@ test('native reporter retains a failing exit and identifies failure by name', ()
   assert.equal(summary.counts.tests, 1);
   assert.equal(summary.counts.failed, 1);
   assert.deepEqual(summary.failureNames, ['fixture failure remains visible']);
+  assert.deepEqual(summary.failureDiagnostics.map(({ name }) => name),
+    ['fixture failure remains visible']);
+  assert.match(summary.failureDiagnostics[0].detail, /intentional fixture failure/);
   assert.match(completeLog, /NOISY_FAILURE_FIXTURE_DETAIL/);
   assert.match(completeLog, /intentional fixture failure/);
   assert.doesNotMatch(run.stdout, /NOISY_FAILURE_FIXTURE_DETAIL/);
@@ -78,6 +81,31 @@ test('missing native summary is FAIL, never a fabricated success', async () => {
   assert.equal(summary.status, 'FAIL');
   assert.equal(summary.exitCode, 1);
   assert.equal(summary.counts, null);
+});
+
+test('failed assertions retain bounded single-line diagnostics without raw stacks', async () => {
+  const reporter = (await import('../scripts/verification-summary-reporter.mjs')).default;
+  async function* events() {
+    yield { type: 'test:fail', data: {
+      name: 'cross-process CAS',
+      details: { error: {
+        message: 'concurrent failure\n' + 'X'.repeat(2000),
+        stack: 'DO_NOT_INCLUDE_STACK',
+      } },
+    } };
+    yield { type: 'test:summary', data: {
+      success: false, duration_ms: 1,
+      counts: { tests: 1, passed: 0, failed: 1, skipped: 0, cancelled: 0, todo: 0 },
+    } };
+  }
+  const chunks = [];
+  for await (const chunk of reporter(events())) chunks.push(chunk);
+  const report = JSON.parse(chunks.join('').slice('VERIFICATION_SUMMARY '.length));
+  assert.deepEqual(report.failureDiagnostics.map(({ name }) => name), ['cross-process CAS']);
+  assert.match(report.failureDiagnostics[0].detail, /^concurrent failure/);
+  assert.ok(report.failureDiagnostics[0].detail.length <= 320);
+  assert.doesNotMatch(report.failureDiagnostics[0].detail, /[\r\n]/);
+  assert.doesNotMatch(chunks.join(''), /DO_NOT_INCLUDE_STACK/);
 });
 
 test('failed test names are bounded and overflow is declared', async () => {
@@ -97,6 +125,8 @@ test('failed test names are bounded and overflow is declared', async () => {
   assert.equal(summary.status, 'FAIL');
   assert.equal(summary.counts.failed, 25);
   assert.equal(summary.failureNames.length, 20);
+  assert.equal(summary.failureDiagnostics.length, 20);
+  assert.equal(summary.failureDiagnostics[0].detail, null);
   assert.equal(summary.omittedFailureNames, 5);
   assert.equal(summary.failureNames[0], 'failed-0');
 });

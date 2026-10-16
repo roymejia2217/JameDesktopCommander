@@ -30,6 +30,10 @@ reporters through documented Node.js CLI flags:
   Counts come from Node's native aggregate `test:summary` event;
   failed test names come from `test:fail` events. Up to 20 names are
   shown, and `omittedFailureNames` makes additional failures explicit.
+  The same capped set includes `failureDiagnostics`, with at most 320
+  characters of the assertion message per failure, flattened to a single
+  line; raw stacks and test stdout/stderr are never copied into this
+  compact report. Missing messages are represented by `null`.
 - Node's built-in `spec` reporter retains the **entire** test output
   at `.tmp/verification/unit-spec.log` in the isolated checkout.
   The file is already excluded by `.gitignore` and is neither pushed

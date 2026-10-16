@@ -516,12 +516,9 @@ export class MCPDevice {
         let localCompleted = false;
         console.info(receipt('received'));
 
-        // LOCAL claim first — this is the authoritative guard against executing
-        // a call twice. During the transition both transports deliver every call
-        // to THIS SAME PROCESS, so an in-memory check is sufficient and, unlike
-        // the DB claim below, cannot fail open: a transient REST error made
-        // markCallExecuting return true for both deliveries, which could run a
-        // side-effecting command twice (found in review, 2026-07-24).
+        // Process-local dedupe is defense in depth, NOT distributed ownership.
+        // Only the acknowledged DB compare-and-set or a verified doorbell claim
+        // permits a side-effecting tool to execute across device processes.
         if (this.seenCallIds.has(call_id)) {
             console.info(receipt('duplicate_ignored'));
             return;
@@ -529,13 +526,24 @@ export class MCPDevice {
         this.rememberCallId(call_id);
 
         try {
-            // DB claim second — keeps the row state machine honest, gives
-            // cross-restart/cross-process protection, and is observable. It may
-            // fail open (returns true on a transient write error); the local
-            // guard above is what makes execution exactly-once. The doorbell
-            // path claims before dispatch and marks the payload `claimed`.
-            const claimed = payload.claimed === true || await this.remoteChannel.markCallExecuting(call_id);
+            // DB claim second — compare-and-set is the cross-process authority.
+            // A caller-supplied `claimed: true` must never bypass the database;
+            // only an object dispatched by this channel after a confirmed doorbell
+            // claim may reuse that existing claim.
+            let claimed = this.remoteChannel.isVerifiedPreclaim?.(payload) === true;
             if (!claimed) {
+                try {
+                    claimed = await this.remoteChannel.markCallExecuting(call_id);
+                } catch {
+                    // Transport rejection/indeterminate ACK must not execute a tool
+                    // or publish a false terminal failure.
+                    this.seenCallIds.delete(call_id);
+                    console.error(receipt('claim_rejected'));
+                    return;
+                }
+            }
+            if (!claimed) {
+                this.seenCallIds.delete(call_id);
                 console.info(receipt('claim_rejected'));
                 return;
             }

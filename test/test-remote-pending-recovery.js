@@ -153,7 +153,10 @@ const baseRow = (id, overrides = {}) => ({
     ['live-old', 'live-new'],
     'only live pending calls for this device should be recovered in creation order',
   );
-  assert(delivered.every((payload) => payload.claimed === true), 'recovered rows must be atomically claimed before dispatch');
+  assert(delivered.every((payload) => rc.isVerifiedPreclaim(payload)),
+    'recovered rows must carry internal acknowledgement evidence from the channel');
+  assert(delivered.every((payload) => payload.claimed !== true),
+    'recovery must not rely on a caller-provided claimed flag');
   assert.equal(rows.find((row) => row.id === 'expired').status, 'pending', 'expired call must not be claimed');
   assert.equal(rows.find((row) => row.id === 'other-device').status, 'pending', 'another device call must not be claimed');
 }

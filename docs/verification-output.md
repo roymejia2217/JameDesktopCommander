@@ -76,6 +76,36 @@ malformed native summary yields FAIL rather than a fabricated PASS.
 The real Node process—not the reporter—continues to enforce exit codes;
 the reporter never overrides an unsuccessful process to return zero.
 
+## Server handler versus local MCP round-trip timing
+
+`read_process_output(verbose_timing: true)` retains the legacy `Timing:`
+field, now measured with Node's monotonic `performance.now()` clock and
+labeled **server handler; excludes MCP transport/UI**. The same
+opt-in response names its native event-wait outcome: `exit`, `output`,
+`timeout` or `not_waited`. Cancelled reads return errors rather than
+normal timing evidence. A deadline does not imply the process was
+terminated. Process runtime, when available, remains a distinct value.
+
+The official MCP SDK's existing isolated `stdio` integration contract
+now records a single monotonic caller-side `LOCAL_STDIO_TIMING` sample
+containing `serverHandlerMs` and `sdkStdioRoundTripMs`. The sample
+uses an ephemeral child MCP server and a short-lived fixture; it
+checks actual completion, PID-bound response and handler duration.
+Its caller-side duration includes the local SDK and stdio transport,
+serialization and scheduling. **Do not** call the difference network
+latency, nor extrapolate this to ChatGPT, Tailscale, remote device
+routing or browser rendering. No sensitive parameters, outputs, file
+paths, token material or device identities are included in the
+published measurement record.
+
+`verbose_timing` remains opt-in. Invalid requests and cancellations
+keep existing fail-closed behavior and are **not** reclassified as
+successful timed responses. Event-driven waiting, explicit wait
+ceilings, retention and one-call tail access remain unchanged.
+The next phase requires independently measured real remote tool
+receipt/acknowledgment and UI presentation timestamps with a
+reviewed privacy policy before any end-to-end latency attribution.
+
 ## Guardrails, regressions and limitations
 
 Synthetic fixtures verify success and deliberate failure using real

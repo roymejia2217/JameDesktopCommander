@@ -42,6 +42,7 @@ test('one exit wait returns last lines and completion status without a second re
     wait_for: 'exit',
     offset: -5,
     length: 5,
+    verbose_timing: true,
   });
   const text = result.content?.[0]?.text ?? '';
   assert.ok(!result.isError, text);
@@ -49,6 +50,8 @@ test('one exit wait returns last lines and completion status without a second re
   assert.match(text, /slice-64/);
   assert.doesNotMatch(text, /slice-0(?:\D|$)/);
   assert.match(text, /Process completed with exit code 0/);
+  assert.match(text, /Timing: [0-9.]+ms \(server handler; excludes MCP transport\/UI\)/);
+  assert.match(text, /Wait outcome: exit/);
 });
 
 test('tail exit wait respects the deadline and does not cancel its process', async () => {
@@ -59,8 +62,10 @@ test('tail exit wait respects the deadline and does not cancel its process', asy
   const pid = getPid(started);
   const pending = await readProcessOutput({
     pid, wait_for: 'exit', offset: -3, length: 3, timeout_ms: 100,
+    verbose_timing: true,
   });
   assert.match(pending.content?.[0]?.text ?? '', /exit wait deadline reached/);
+  assert.match(pending.content?.[0]?.text ?? '', /Wait outcome: timeout/);
   const completed = await readProcessOutput({
     pid, wait_for: 'exit', offset: -3, length: 3, timeout_ms: 10_000,
   });

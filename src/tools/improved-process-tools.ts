@@ -7,6 +7,7 @@ import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, Pro
 import * as os from 'os';
 import { configManager } from '../config-manager.js';
 import { spawn } from 'child_process';
+import { performance } from 'node:perf_hooks';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -309,8 +310,9 @@ export async function readProcessOutput(
   } = parsed.data;
   const effectiveWaitMs = resolveProcessWaitMs(timeout_ms, config.maxProcessWaitMs);
 
-  // Timing telemetry
-  const startTime = Date.now();
+  // Monotonic handler-only elapsed time. It cannot measure the MCP client's
+  // network/provider round-trip or UI rendering overhead.
+  const startTime = performance.now();
 
   if (context?.signal?.aborted) {
     return {
@@ -450,11 +452,13 @@ export async function readProcessOutput(
     }
   }
 
-  // Add timing information if requested
+  // Preserve the existing Timing field while distinguishing server-side
+  // handler time from event-wait outcome and external transport latency.
   let timingMessage = '';
   if (verbose_timing) {
-    const endTime = Date.now();
-    timingMessage = `\n\n📊 Timing: ${endTime - startTime}ms`;
+    const elapsedMs = (performance.now() - startTime).toFixed(1);
+    timingMessage = `\n\n📊 Timing: ${elapsedMs}ms (server handler; excludes MCP transport/UI)` +
+      `\n  Wait outcome: ${waitOutcome ?? 'not_waited'}`;
   }
 
   const responseText = output || '(No output in requested range)';

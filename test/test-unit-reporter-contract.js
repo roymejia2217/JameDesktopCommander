@@ -6,14 +6,20 @@ import { test } from 'node:test';
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-test('unit verification uses Node built-in spec reporter and retains isolation flags', () => {
+test('unit verification keeps the full native spec log and a bounded stdout summary', () => {
   const command = manifest.scripts['test:unit'];
+  assert.match(command, /--test-reporter=\.\/scripts\/verification-summary-reporter\.mjs(?:\s|$)/);
   assert.match(command, /--test-reporter=spec(?:\s|$)/);
+  assert.match(command, /--test-reporter-destination=stdout(?:\s|$)/);
+  assert.match(command, /--test-reporter-destination=\.tmp\/verification\/unit-spec\.log(?:\s|$)/);
+  assert.equal((command.match(/--test-reporter=/g) ?? []).length, 2,
+    'exactly two native reporters are required');
+  assert.equal((command.match(/--test-reporter-destination=/g) ?? []).length, 2,
+    'each reporter requires its own destination');
   assert.ok(command.includes('--env-file=test/test.env'));
   assert.ok(command.includes('--import=./test/setup-test-environment.js'));
   assert.ok(command.includes('--test-concurrency=1'));
   assert.ok(command.includes('"test/test*.js"'));
-  assert.ok(!command.includes('--test-reporter-destination'));
 });
 
 test('spec reporter preserves exit failure and useful assertion diagnostics', () => {

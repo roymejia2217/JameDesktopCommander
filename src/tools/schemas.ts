@@ -18,6 +18,10 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
 ]));
 
 // Config tools schemas
+export const TunnelProbeArgsSchema = z.object({
+  challenge: z.string().regex(/^[0-9a-f]{32}$/),
+}).strict();
+
 export const GetConfigArgsSchema = z.object({
   // 'ui' marks calls the config-editor widget fires programmatically; they are
   // excluded from tool-call telemetry (see isUiOriginCall in server.ts).
@@ -339,6 +343,7 @@ export const OpenCodeTaskArgsSchema = z.object({
  */
 export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   get_config: GetConfigArgsSchema,
+  tunnel_probe: TunnelProbeArgsSchema,
   render_config_editor: GetConfigArgsSchema,
   set_config_value: SetConfigValueArgsSchema,
   read_file: ReadFileArgsSchema,

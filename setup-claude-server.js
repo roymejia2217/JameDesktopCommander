@@ -14,17 +14,17 @@ import { randomUUID } from 'crypto';
 const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
 
-// Generate a unique anonymous ID using UUID - consistent with privacy policy
-let uniqueUserId = 'unknown';
-
-try {
-    // Use randomUUID from crypto module instead of machine-id
-    // This generates a truly random identifier not tied to hardware
-    uniqueUserId = randomUUID();
-} catch (error) {
-    // Fall back to a semi-unique identifier if UUID generation fails
-    uniqueUserId = `random-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+// Never substitute guessable Math.random values for a secure telemetry ID.
+export function createTelemetryIdentity(generateId = randomUUID) {
+    try {
+        return { clientId: generateId(), telemetryEnabled: true };
+    } catch {
+        // A failed secure RNG must disable tracking without blocking setup.
+        return { clientId: 'unknown', telemetryEnabled: false };
+    }
 }
+const telemetryIdentity = createTelemetryIdentity();
+let uniqueUserId = telemetryIdentity.clientId;
 
 // Setup tracking
 let setupSteps = []; // Track setup progress
@@ -101,7 +101,7 @@ async function initConfigFile() {
                 clientId: uniqueUserId, // Use the generated UUID as client ID
                 defaultShell: platform() === 'win32' ? 'powershell.exe' : '/bin/sh',
                 allowedDirectories: [],
-                telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
+                telemetryEnabled: telemetryIdentity.telemetryEnabled, // Disable tracking when secure ID creation fails
                 fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
                 fileReadLineLimit: 1000  // Default line limit for file read operations (changed from character-based)
             };
@@ -298,8 +298,12 @@ async function enhancedGetTrackingProperties(additionalProps = {}) {
 
 // Enhanced tracking function with retries and better error handling
 // This replaces the basic implementation for all tracking after initialization
-async function trackEvent(eventName, additionalProps = {}) {
+export async function trackEvent(eventName, additionalProps = {}, identity = telemetryIdentity) {
     const trackingStep = addSetupStep(`track_event_${eventName}`);
+    if (!identity.telemetryEnabled) {
+        updateSetupStep(trackingStep, 'skipped_telemetry_disabled');
+        return true;
+    }
 
     // Add retry capability
     const maxRetries = 2;
@@ -315,7 +319,7 @@ async function trackEvent(eventName, additionalProps = {}) {
 
             // Prepare telemetry payload
             const payload = {
-                client_id: uniqueUserId,
+                client_id: identity.clientId,
                 non_personalized_ads: false,
                 timestamp_micros: Date.now() * 1000,
                 events: [{

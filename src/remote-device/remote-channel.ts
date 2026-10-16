@@ -1296,7 +1296,7 @@ export class RemoteChannel {
                 .eq('id', callId)
                 .eq('status', 'executing')
                 .gt('timeout_at', new Date().toISOString())
-                .select('id');
+                .select('id,status');
         };
 
         const primary = await write(status, result, errorMessage);
@@ -1306,10 +1306,10 @@ export class RemoteChannel {
             // committing. Only this known rejection permits a fallback write.
             // Never retry on network errors or a missing ACK: it may have committed.
             const fallback = await write('failed', null, 'MCP result could not be stored.');
-            confirmedSingleResultUpdate(fallback, callId);
+            confirmedSingleResultUpdate(fallback, callId, 'failed');
             return 'fallback_confirmed';
         }
-        confirmedSingleResultUpdate(primary, callId);
+        confirmedSingleResultUpdate(primary, callId, status);
         return 'confirmed';
     }
 

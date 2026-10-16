@@ -15,10 +15,17 @@ across stages; IDs are not interoperable with server-side request IDs.
 | `duplicate_ignored` / `claim_rejected` | Call was not executed |
 | `claimed` | Remote call claim accepted |
 | `local_completed` | Local MCP tool returned, before result publication |
-| `result_published` | Result update operation completed without an error |
+| `result_published` | Exactly one result row acknowledged with the expected call ID and `completed` terminal status |
 | `execution_failed` | Local execution or prior reporting operation failed |
-| `failure_published` | Failure update completed without an error |
+| `failure_published` | Exactly one failure row acknowledged with the expected call ID and `failed` terminal status |
 | `result_publish_failed` | Failure update operation could not be completed |
+
+PostgREST publication acknowledgement requires a single selected `id,status`
+row matching the requested terminal state; zero rows, lost acknowledgements
+and inconsistent status responses never count as publication proof. A missing
+acknowledgement is indeterminate, not permission to overwrite a possible
+committed result. The established deterministic PostgreSQL 22P05 fallback
+is unchanged and must separately acknowledge the `failed` state.
 
 A missing `received` event does not prove that the upstream provider failed;
 logs may be absent, buffered, rotated, or inaccessible. A returned

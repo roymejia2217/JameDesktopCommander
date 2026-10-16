@@ -28,7 +28,7 @@ function makeStorage({ initialStatus = 'executing', responses = [],
             eq(key, value) { filters[key] = value; return builder; },
             gt(key, value) { filters[key + '_min'] = Date.parse(value); return builder; },
             async select(field) {
-              assert.equal(field, 'id');
+              assert.equal(field, 'id,status');
               const scripted = queue.shift();
               if (scripted === 'lost-ack') {
                 if (filters.id === state.id && filters.status === state.status &&
@@ -54,7 +54,12 @@ function makeStorage({ initialStatus = 'executing', responses = [],
                 state.result = data.result ?? null;
               }
               writes.push({ data, filters, outcome: matched ? 'committed' : 'zero-rows' });
-              return { data: matched ? [{ id: state.id }] : [], error: null };
+              // Model a malformed provider ACK even though the write committed:
+              // the caller must not falsely mark the result as published.
+              if (matched && scripted === 'wrong-terminal-ack') {
+                return { data: [{ id: state.id, status: 'executing' }], error: null };
+              }
+              return { data: matched ? [{ id: state.id, status: state.status }] : [], error: null };
             },
           };
           return builder;
@@ -68,13 +73,18 @@ function makeStorage({ initialStatus = 'executing', responses = [],
 }
 
 test('requires exactly one returned matching ID, not a 204, zero rows or an unverified ACK', () => {
-  confirmedSingleResultUpdate({ data: [{ id: ID }], error: null }, ID);
+  confirmedSingleResultUpdate({ data: [{ id: ID, status: 'completed' }], error: null }, ID, 'completed');
+  confirmedSingleResultUpdate({ data: [{ id: ID, status: 'failed' }], error: null }, ID, 'failed');
   for (const response of [
     { data: null, error: null }, { data: [], error: null },
     { data: [{ id: 'other' }], error: null },
     { data: [{ id: ID }, { id: ID }], error: null },
-    { data: [{ id: ID }], error: { code: 'NETWORK' } },
-  ]) assert.throws(() => confirmedSingleResultUpdate(response, ID),
+    { data: [{ id: ID, status: 'completed' }], error: { code: 'NETWORK' } },
+    { data: [{ id: ID }], error: null },
+    { data: [{ id: ID, status: 'executing' }], error: null },
+    { data: [{ id: ID, status: 'failed' }], error: null },
+    { data: [{ id: ID, status: null }], error: null },
+  ]) assert.throws(() => confirmedSingleResultUpdate(response, ID, 'completed'),
     RemoteResultUnconfirmedError);
   assert.equal(definitelyRejectedResultBytes({ data: null, error: { code: '22P05' } }), true);
   assert.equal(definitelyRejectedResultBytes({ data: null, error: { code: 'NETWORK' } }), false);
@@ -89,6 +99,14 @@ test('confirmed terminal publication sanitizes bytes and cannot rewrite a termin
   assert.equal(writes[0].filters.status, 'executing');
   await assert.rejects(channel.updateCallResult(ID, 'failed', null, 'late'), RemoteResultUnconfirmedError);
   assert.equal(state.status, 'completed', 'Late update must preserve terminal state');
+});
+
+test('wrong terminal status in a returned row is not a confirmed publication', async () => {
+  const { channel, state, writes } = makeStorage({ responses: ['wrong-terminal-ack'] });
+  await assert.rejects(channel.updateCallResult(ID, 'completed', { value: 'ok' }),
+    RemoteResultUnconfirmedError);
+  assert.equal(state.status, 'completed', 'Fake storage committed before malformed ACK');
+  assert.equal(writes.length, 1, 'An unconfirmed publication must not be rewritten');
 });
 
 test('lost response after COMMIT is indeterminate and must never trigger a fallback', async () => {

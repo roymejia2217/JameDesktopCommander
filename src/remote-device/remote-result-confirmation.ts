@@ -16,12 +16,17 @@ export class RemoteResultUnconfirmedError extends Error {
   }
 }
 
-export function confirmedSingleResultUpdate(response: ResultUpdateResponse, callId: string): void {
+export function confirmedSingleResultUpdate(
+  response: ResultUpdateResponse,
+  callId: string,
+  expectedStatus: 'completed' | 'failed',
+): void {
   if (response.error !== null ||
       !Array.isArray(response.data) ||
       response.data.length !== 1 ||
       !response.data[0] || typeof response.data[0] !== 'object' ||
-      response.data[0].id !== callId) {
+      response.data[0].id !== callId ||
+      response.data[0].status !== expectedStatus) {
     throw new RemoteResultUnconfirmedError();
   }
 }

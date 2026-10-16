@@ -4,6 +4,7 @@
  * Never invokes tools, installs services, or uses host configuration.
  */
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, sep } from 'node:path';
@@ -106,9 +107,35 @@ try {
   assert.ok(tools.length >= 20, 'Truncated MCP tool catalog');
   const names = tools.map(tool => tool.name);
   assert.equal(new Set(names).size, names.length, 'Duplicate MCP tool names');
-  for (const required of ['read_file', 'list_directory', 'get_config', 'render_workspace']) {
+  for (const required of ['read_file', 'list_directory', 'get_config', 'render_workspace', 'tunnel_probe']) {
     assert.ok(names.includes(required), 'Missing required tool: ' + required);
   }
+  // T012: two new real tools/call operations on the extracted runtime.
+  // A valid echo is a functional stdio round trip, not a public tunnel probe.
+  const firstChallenge = randomBytes(16).toString('hex');
+  const secondChallenge = randomBytes(16).toString('hex');
+  assert.notEqual(firstChallenge, secondChallenge);
+  const firstProbe = await bounded('MCP tunnel_probe first challenge',
+    () => callFixtureTool('tunnel_probe', { challenge: firstChallenge }));
+  const secondProbe = await bounded('MCP tunnel_probe second challenge',
+    () => callFixtureTool('tunnel_probe', { challenge: secondChallenge }));
+  assert.notEqual(firstProbe.isError, true, 'First MCP challenge failed');
+  assert.notEqual(secondProbe.isError, true, 'Second MCP challenge failed');
+  const firstObservation = firstProbe.structuredContent;
+  const secondObservation = secondProbe.structuredContent;
+  for (const [observation, expectedChallenge] of [
+    [firstObservation, firstChallenge], [secondObservation, secondChallenge],
+  ]) {
+    assert.equal(observation?.schemaVersion, 1);
+    assert.equal(observation?.kind, 'mcp_tool_round_trip_only');
+    assert.equal(observation?.challenge, expectedChallenge, 'Incorrect MCP challenge echo');
+    assert.match(observation?.runtimeInstanceId ?? '', /^[0-9a-f-]{36}$/);
+    assert.equal(observation?.runtimeBuild?.kind, 'git');
+    assert.equal(observation?.runtimeBuild?.sourceCommit, manifest.sourceCommit);
+    assert.equal(observation?.runtimeBuild?.workspaceClean, true);
+  }
+  assert.equal(firstObservation.runtimeInstanceId, secondObservation.runtimeInstanceId,
+    'A stable MCP instance should answer both challenge requests');
   const resources = (await bounded('MCP resources/list', () => client.listResources())).resources;
   assert.ok(resources.length > 0, 'No MCP UI resources');
   const read = await bounded('MCP resources/read',
@@ -239,6 +266,7 @@ try {
   console.log(JSON.stringify({
     result: 'PASS', target: manifest.target, toolCount: tools.length,
     resourcesRead: read.contents.length, promptCount: prompts.length,
+    freshMcpChallengeCalls: 2,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
     modeOmissionRejected: true, accessPositiveChecks: 3,
     unresolvedAllowlistDenied: true,

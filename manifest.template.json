@@ -40,6 +40,10 @@
       "description": "Get the complete server configuration including blocked commands, allowed directories, file limits, telemetry settings, client info, and system information."
     },
     {
+      "name": "tunnel_probe",
+      "description": "Execute a read-only nonce-correlated MCP tools/call round trip to the running server. Does not authorize restart."
+    },
+    {
       "name": "render_config_editor",
       "description": "Render the interactive configuration editor when a visual configuration UI is explicitly useful."
     },

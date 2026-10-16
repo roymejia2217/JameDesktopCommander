@@ -40,6 +40,7 @@ import {
     MoveFileArgsSchema,
     GetFileInfoArgsSchema,
     GetConfigArgsSchema,
+    TunnelProbeArgsSchema,
     SetConfigValueArgsSchema,
     ListProcessesArgsSchema,
     EditBlockArgsSchema,
@@ -63,6 +64,7 @@ import {
     buildUnsupportedParamsWarning,
 } from './utils/unsupportedParams.js';
 import { getConfig, setConfigValue } from './tools/config.js';
+import { executeTunnelProbe } from './tools/tunnel-probe.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
@@ -323,6 +325,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
         // Build complete tools array
         const allTools = [
+            // Correlated MCP route probe; never a recovery or authorization token.
+            {
+                name: "tunnel_probe",
+                description: `Read-only fresh MCP tools/call with a caller-supplied 32-character lower-case hexadecimal challenge. Echoes the exact challenge, process-scoped instance ID and compiled source identity. Caller must enforce a deadline and validate the echoed challenge. Does not restart or diagnose the tunnel control plane.`,
+                inputSchema: zodToJsonSchema(TunnelProbeArgsSchema),
+                annotations: { title: "Probe MCP Round Trip", readOnlyHint: true, openWorldHint: false },
+            },
             // Configuration tools
             {
                 name: "get_config",
@@ -1423,6 +1432,11 @@ async function handleCallToolRequest(
         // (result is declared above so the finally block can read execution status)
 
         switch (name) {
+            // Read-only route correlation; no authority to perform lifecycle actions.
+            case "tunnel_probe":
+                result = await executeTunnelProbe(args);
+                break;
+
             // Config tools
             case "get_config":
                 try {

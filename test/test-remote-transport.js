@@ -67,7 +67,7 @@ function makeDevice({ claimResults = [] } = {}) {
     // Default: first delivery claims, later ones lose. Override to model a
     // transient DB error, which makes the claim return true (fail open).
     markCallExecuting: async () => (claims.length ? claims.shift() : true),
-    updateCallResult: async () => {},
+    updateCallResult: async () => 'confirmed',
   };
   return { device, executed };
 }
@@ -395,7 +395,10 @@ await test('a synchronously throwing handler is contained too', async () => {
 await test('a completed call writes exactly one completed result row', async () => {
   const writes = [];
   const { device, executed } = makeDevice();
-  device.remoteChannel.updateCallResult = async (id, status) => { writes.push(`${id}:${status}`); };
+  device.remoteChannel.updateCallResult = async (id, status) => {
+    writes.push(`${id}:${status}`);
+    return 'confirmed';
+  };
   await device.handleNewToolCall(payloadFor('call-result'));
   assert(executed.length === 1, 'tool should have run');
   assert(writes.join(',') === 'call-result:completed', `expected one completed write — got ${writes.join(',')}`);

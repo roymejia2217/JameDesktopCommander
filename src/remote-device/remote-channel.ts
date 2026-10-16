@@ -1,6 +1,10 @@
 import { createClient, SupabaseClient, Session, UserResponse, User, RealtimeChannel } from '@supabase/supabase-js';
 import { captureRemote } from '../utils/capture.js';
 import { VERSION } from '../version.js';
+import {
+    confirmedSingleResultUpdate, definitelyRejectedResultBytes,
+    type RemoteResultPublication,
+} from './remote-result-confirmation.js';
 
 const NUL_CHAR = String.fromCharCode(0);
 const NUL_RE = new RegExp(NUL_CHAR, 'g');
@@ -1237,59 +1241,50 @@ export class RemoteChannel {
         return claimed;
     }
 
-    async updateCallResult(callId: string, status: string, result: any = null, errorMessage: string | null = null) {
+    async updateCallResult(
+        callId: string,
+        status: 'completed' | 'failed',
+        result: unknown = null,
+        errorMessage: string | null = null,
+    ): Promise<RemoteResultPublication> {
         if (!this.client) throw new Error('Client not initialized');
-        const updateData: any = {
-            status: status,
-            completed_at: new Date().toISOString()
+
+        const write = async (
+            terminalStatus: 'completed' | 'failed',
+            payload: unknown,
+            message: string | null,
+        ) => {
+            const updateData: Record<string, unknown> = {
+                status: terminalStatus,
+                completed_at: new Date().toISOString(),
+            };
+            if (payload !== null) updateData.result = stripNullBytes(payload);
+            if (message !== null) updateData.error_message = stripNullBytes(message);
+
+            // Compare-and-set: a late result must never overwrite a completed,
+            // failed, timed-out, or otherwise no-longer executing call.
+            // SELECT is mandatory: 204/no rows is not evidence of a commit.
+            return this.client!
+                .from('mcp_remote_calls')
+                .update(updateData)
+                .eq('id', callId)
+                .eq('status', 'executing')
+                .gt('timeout_at', new Date().toISOString())
+                .select('id');
         };
 
-        // Strip NUL (U+0000) before it reaches the jsonb `result` column.
-        // jsonb cannot store  and rejects the whole write (Postgres 22P05),
-        // which otherwise leaves the call stuck 'executing' → the user waits out
-        // a 5-minute timeout for a tool that actually ran. Common with binary
-        // file reads / process output. error_message is text, so it's exempt.
-        if (result !== null) updateData.result = stripNullBytes(result);
-        // Postgres `text` rejects NUL too (not just jsonb) — a NUL-bearing error
-        // message would fail this terminal write, and because result === null the
-        // fallback below wouldn't fire, stranding the call until the 5-min timeout.
-        if (errorMessage !== null) updateData.error_message = stripNullBytes(errorMessage);
-
-        // Gated: the size is only knowable by serializing, and results reach
-        // 13 MB — doing that eagerly for a log line would cost more than the
-        // rest of this function.
-        if (process.env.DEBUG_MODE === 'true') {
-            console.debug(
-                `[DEBUG] Updating call result: ${callId} status=${status}` +
-                (result !== null ? ` resultBytes=~${JSON.stringify(updateData.result)?.length ?? 0}` : '')
-            );
+        const primary = await write(status, result, errorMessage);
+        if (status === 'completed' && result !== null &&
+            definitelyRejectedResultBytes(primary)) {
+            // PostgreSQL 22P05 deterministically rejects invalid bytes before
+            // committing. Only this known rejection permits a fallback write.
+            // Never retry on network errors or a missing ACK: it may have committed.
+            const fallback = await write('failed', null, 'MCP result could not be stored.');
+            confirmedSingleResultUpdate(fallback, callId);
+            return 'fallback_confirmed';
         }
-        const { error } = await this.client
-            .from('mcp_remote_calls')
-            .update(updateData)
-            .eq('id', callId);
-
-        if (error) {
-            console.error('[DEBUG] Failed to update call result:', error.message);
-            await captureRemote('remote_channel_update_call_result_error', { error });
-
-            // Fail-fast fallback: if the RESULT write failed (sanitize should
-            // prevent the NUL case, but any unstorable payload lands here),
-            // record a terminal 'failed' with a text-only message so the user
-            // gets an immediate, honest error instead of a 5-minute phantom
-            // timeout. Guard against infinite recursion (only for result writes).
-            if (result !== null && status !== 'failed') {
-                await this.updateCallResult(
-                    callId,
-                    'failed',
-                    null,
-                    `Result could not be stored (${error.message})`
-                );
-            }
-        } else {
-            // (an UPDATE without .select() returns no row data — log the id)
-            console.debug('[DEBUG] Call result updated successfully:', callId);
-        }
+        confirmedSingleResultUpdate(primary, callId);
+        return 'confirmed';
     }
 
     /**

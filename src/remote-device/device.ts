@@ -513,6 +513,7 @@ export class MCPDevice {
         }
 
         const receipt = createRemoteCallReceipt();
+        let localCompleted = false;
         console.info(receipt('received'));
 
         // LOCAL claim first — this is the authoritative guard against executing
@@ -569,20 +570,40 @@ export class MCPDevice {
                 result = await this.desktop.callClientTool(tool_name, tool_args, metadata);
             }
 
+            localCompleted = true;
             console.info(receipt('local_completed'));
 
-            // The result write itself notifies the server (a DB trigger).
-            await this.remoteChannel.updateCallResult(call_id, 'completed', result);
-            console.info(receipt('result_published'));
+            // The result write notifies the server via DB trigger, but a write
+            // attempt is NOT a publication proof. Require one acknowledged row.
+            const publication = await this.remoteChannel.updateCallResult(call_id, 'completed', result);
+            if (publication === 'confirmed') {
+                console.info(receipt('result_published'));
+            } else if (publication === 'fallback_confirmed') {
+                // The original result was definitely rejected; a terminal
+                // failure fallback was independently confirmed instead.
+                console.info(receipt('failure_published'));
+            } else {
+                throw new Error('Remote result acknowledgement was not confirmed.');
+            }
 
         } catch (error: any) {
+            if (localCompleted) {
+                // Unknown database ACK does not prove failure. Do not replace
+                // a possibly committed success with an unconditional failure.
+                console.error(receipt('result_publish_failed'));
+                return;
+            }
             console.error(receipt('execution_failed'));
             // The failure path must not fail: this method's promise is discarded
             // at every call site, so a throw here becomes an unhandled rejection
             // and takes the device process down.
             try {
                 await captureRemote('remote_device_tool_call_failed', { error, tool_name });
-                await this.remoteChannel.updateCallResult(call_id, 'failed', null, error.message);
+                const publication = await this.remoteChannel.updateCallResult(call_id, 'failed', null,
+                    error instanceof Error ? error.message : 'MCP tool execution failed.');
+                if (publication !== 'confirmed') {
+                    throw new Error('Remote failure acknowledgement was not confirmed.');
+                }
                 console.info(receipt('failure_published'));
             } catch {
                 console.error(receipt('result_publish_failed'));

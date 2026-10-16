@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { appendFile, chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,10 @@ async function withFixture(callback) {
   await mkdir(join(source, 'node_modules', 'fixture'), { recursive: true });
   await writeFile(join(source, 'dist', 'index.js'), 'export const example = true;\n');
   await writeFile(join(source, 'dist', 'npm-scripts', 'verify-ripgrep.js'), 'export {};\n');
+  await writeFile(join(source, 'dist', 'build-provenance.json'), JSON.stringify({
+    schemaVersion: 1, kind: 'git', packageVersion: '0.2.52',
+    sourceCommit, workspaceClean: true,
+  }) + '\n');
   await writeFile(join(source, 'package.json'), JSON.stringify({
     name: '@wonderwhy-er/desktop-commander', version: '0.2.52', private: true, type: 'module',
   }));
@@ -51,6 +56,7 @@ test('candidate contains runtime, license and complete offline SHA-256 file inve
     assert.ok(manifest.fileCount > 100);
     assert.ok(manifest.files.some(item => item.path === 'runtime/node'));
     assert.ok(manifest.files.some(item => item.path === 'NODE-LICENSE'));
+    assert.ok(manifest.files.some(item => item.path === 'dist/build-provenance.json'));
     assert.deepEqual(await verifyCandidate(options), manifest);
   });
 });
@@ -87,6 +93,45 @@ test('symlinks cannot be smuggled into a distribution payload', async () => {
     await symlink(join(options.destination, 'dist'),
       join(options.destination, 'redirect-dir'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(verifyCandidate(options), /link or non-regular entry/);
+  });
+});
+
+test('candidate rejects missing, dirty, forged, and ambiguous source identity', async () => {
+  await withFixture(async options => {
+    const filepath = join(options.source, 'dist/build-provenance.json');
+    const clean = { schemaVersion: 1, kind: 'git', packageVersion: '0.2.52',
+      sourceCommit, workspaceClean: true };
+    for (const malformed of [
+      null, { schemaVersion: 1, kind: 'unavailable', packageVersion: '0.2.52' },
+      { ...clean, sourceCommit: 'b'.repeat(40) },
+      { ...clean, packageVersion: '9.0.0' },
+      { ...clean, workspaceClean: false },
+      { ...clean, extra: 'unapproved' },
+    ]) {
+      if (malformed === null) await rm(filepath, { force: true });
+      else await writeFile(filepath, JSON.stringify(malformed));
+      await assert.rejects(buildCandidate(options),
+        /build identity|Git-backed|source commit differs|package version differs|modified source workspace/i);
+    }
+    await writeFile(filepath, JSON.stringify(clean));
+    assert.equal((await buildCandidate(options)).sourceCommit, sourceCommit);
+  });
+});
+
+test('an altered manifest and matching SHA-256 inventory cannot conceal wrong build commit', async () => {
+  await withFixture(async options => {
+    await buildCandidate(options);
+    const filepath = join(options.destination, 'dist/build-provenance.json');
+    const malicious = JSON.stringify({ schemaVersion: 1, kind: 'git', packageVersion: '0.2.52',
+      sourceCommit: 'b'.repeat(40), workspaceClean: true }) + '\n';
+    await writeFile(filepath, malicious);
+    const manifestPath = join(options.destination, 'candidate-manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const record = manifest.files.find(file => file.path === 'dist/build-provenance.json');
+    record.byteLength = Buffer.byteLength(malicious);
+    record.sha256 = createHash('sha256').update(malicious).digest('hex');
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+    await assert.rejects(verifyCandidate(options), /source commit differs/);
   });
 });
 

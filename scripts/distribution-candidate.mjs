@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { cp, chmod, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseRuntimeBuildIdentity } from '../dist/tools/runtime-build-identity.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -80,7 +81,22 @@ async function validateNativeAddon(addon, target) {
   }
 }
 
-async function validatedSource(source) {
+/** The Git commit in a portable manifest must match its compiled server. */
+async function requireCandidateBuildIdentity(directory, version, sourceCommit) {
+  let record;
+  try {
+    const raw = await readFile(join(directory, 'dist/build-provenance.json'), 'utf8');
+    record = parseRuntimeBuildIdentity(JSON.parse(raw));
+  } catch {
+    throw new Error('Candidate build identity is missing or invalid');
+  }
+  assert.equal(record.kind, 'git', 'Candidate requires Git-backed build identity');
+  assert.equal(record.sourceCommit, sourceCommit, 'Candidate source commit differs from build identity');
+  assert.equal(record.packageVersion, version, 'Candidate package version differs from build identity');
+  assert.equal(record.workspaceClean, true, 'Candidate cannot package a modified source workspace');
+}
+
+async function validatedSource(source, sourceCommit) {
   const absolute = await realpath(source);
   for (const name of ['dist/index.js', 'dist/npm-scripts/verify-ripgrep.js', 'package.json', 'package-lock.json', 'LICENSE', 'node_modules']) {
     await lstat(join(absolute, name));
@@ -88,6 +104,7 @@ async function validatedSource(source) {
   const pkg = JSON.parse(await readFile(join(absolute, 'package.json'), 'utf8'));
   assert.equal(pkg.private, true, 'Upstream publication namespace must remain private');
   assert.equal(pkg.version.match(/^\d+\.\d+\.\d+$/)?.[0], pkg.version);
+  await requireCandidateBuildIdentity(absolute, pkg.version, sourceCommit);
   return { source: absolute, pkg };
 }
 
@@ -96,7 +113,7 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
   assert.match(sourceCommit, shaPattern);
   assert.match(String(runId), /^[0-9]+$/);
   assert.match(String(attempt), /^[1-9][0-9]*$/);
-  const checked = await validatedSource(source);
+  const checked = await validatedSource(source, sourceCommit);
   assert.ok(isAbsolute(destination) && isAbsolute(nodeExecutable) && isAbsolute(nodeLicense));
   assert.ok(!inside(checked.source, destination) && !inside(destination, checked.source),
     'Candidate destination must not overlap the working source tree');
@@ -180,6 +197,7 @@ export async function verifyCandidate({ destination, target, sourceCommit, runId
   assert.deepEqual(actual, manifest.files, 'Candidate payload differs from the signed-off file inventory');
   const pkg = JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'));
   assert.equal(pkg.private, true);
+  await requireCandidateBuildIdentity(destination, pkg.version, sourceCommit);
   const executable = join(destination, manifest.runtimeExecutable);
   const fileInfo = await lstat(executable);
   assert.ok(fileInfo.isFile(), 'Node executable is unavailable');

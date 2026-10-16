@@ -56,6 +56,8 @@ Each candidate includes:
   version, runtime executable, entrypoint and a sorted SHA-256/byte-length
   inventory of **every other file**
 
+The candidate now additionally requires `dist/build-provenance.json` to identify a clean Git-backed source build. Its embedded revision must exactly equal the manifest's `sourceCommit`, and its package version must exactly match the bundled `package.json`. Missing, unknown, dirty, forged, or inconsistent metadata causes build and post-download verification to fail closed; a matching file inventory alone cannot authorize an incorrect source claim.
+
 Verification independently traverses the staged tree, rejects symbolic
 links, junctions and other nonregular filesystem entries, rejects
 case-insensitive path collisions, validates all manifest entries and

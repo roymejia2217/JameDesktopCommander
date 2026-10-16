@@ -115,10 +115,14 @@ try {
   const firstChallenge = randomBytes(16).toString('hex');
   const secondChallenge = randomBytes(16).toString('hex');
   assert.notEqual(firstChallenge, secondChallenge);
+  const firstStartedAtMs = Date.now();
   const firstProbe = await bounded('MCP tunnel_probe first challenge',
     () => callFixtureTool('tunnel_probe', { challenge: firstChallenge }));
+  const firstReceivedAtMs = Date.now();
+  const secondStartedAtMs = Date.now();
   const secondProbe = await bounded('MCP tunnel_probe second challenge',
     () => callFixtureTool('tunnel_probe', { challenge: secondChallenge }));
+  const secondReceivedAtMs = Date.now();
   assert.notEqual(firstProbe.isError, true, 'First MCP challenge failed');
   assert.notEqual(secondProbe.isError, true, 'Second MCP challenge failed');
   const firstObservation = firstProbe.structuredContent;
@@ -136,6 +140,21 @@ try {
   }
   assert.equal(firstObservation.runtimeInstanceId, secondObservation.runtimeInstanceId,
     'A stable MCP instance should answer both challenge requests');
+  const { verifyMcpRoundTripPair } = await import(pathToFileURL(
+    join(candidate, 'dist', 'tools', 'tunnel-probe-verification.js')).href);
+  const candidatePackage = JSON.parse(await readFile(join(candidate, 'package.json'), 'utf8'));
+  const checkedPair = verifyMcpRoundTripPair(
+    { challenge: firstChallenge, expectedCommit: manifest.sourceCommit,
+      expectedPackageVersion: candidatePackage.version,
+      requestStartedAtMs: firstStartedAtMs, responseReceivedAtMs: firstReceivedAtMs },
+    firstProbe,
+    { challenge: secondChallenge, expectedCommit: manifest.sourceCommit,
+      expectedPackageVersion: candidatePackage.version,
+      requestStartedAtMs: secondStartedAtMs, responseReceivedAtMs: secondReceivedAtMs },
+    secondProbe,
+  );
+  assert.equal(checkedPair.kind, 'verified',
+    'The extracted candidate must pass strict correlated MCP round-trip verification');
   const resources = (await bounded('MCP resources/list', () => client.listResources())).resources;
   assert.ok(resources.length > 0, 'No MCP UI resources');
   const read = await bounded('MCP resources/read',

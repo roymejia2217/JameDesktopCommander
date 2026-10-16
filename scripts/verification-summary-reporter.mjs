@@ -15,7 +15,9 @@ function boundedText(value, maxLength) {
 export default async function* verificationSummary(source) {
   const failedNames = [];
   const failureDiagnostics = [];
+  const skippedNames = [];
   let totalFailures = 0;
+  let totalSkips = 0;
   let summary;
   for await (const event of source) {
     if (event.type === 'test:fail') {
@@ -28,6 +30,13 @@ export default async function* verificationSummary(source) {
           detail: boundedText(event.data?.details?.error?.message,
             MAX_FAILURE_DETAIL_CHARS),
         });
+      }
+    } else if (event.type === 'test:pass' &&
+      event.data?.skip !== undefined && event.data.skip !== false) {
+      totalSkips += 1;
+      if (skippedNames.length < MAX_FAILURE_NAMES) {
+        skippedNames.push(boundedText(event.data?.name, 160) ??
+          'Unnamed skipped test');
       }
     } else if (event.type === 'test:summary') {
       // Node also emits per-file summaries in isolated mode; the final
@@ -52,6 +61,8 @@ export default async function* verificationSummary(source) {
     durationMs: valid ? summary.duration_ms : null,
     failureNames: failedNames,
     failureDiagnostics,
+    skippedNames,
+    omittedSkippedNames: Math.max(0, totalSkips - skippedNames.length),
     omittedFailureNames: Math.max(0, totalFailures - failedNames.length),
     fullLog: process.env.JDC_VERIFICATION_LOG_PATH || DEFAULT_LOG,
   };

@@ -208,6 +208,8 @@ export class RemoteChannel {
     private deviceId: string | null = null;
     private deviceName: string | null = null;
     private onToolCall: ((payload: any) => void) | null = null;
+    /** Only objects dispatched after this channel's acknowledged DB claim are trusted. */
+    private readonly acknowledgedDeliveries = new WeakSet<object>();
     // Guard so setSession being called twice can't stack auth listeners.
     private authListenerRegistered = false;
     /** False when presence publishing failed on an otherwise healthy channel;
@@ -877,7 +879,10 @@ export class RemoteChannel {
 
     /** Hand a call to device.ts, observing the rejection — the handler is async
      * and an unhandled rejection terminates the process. */
-    private dispatchToolCall(payload: any): void {
+    private dispatchToolCall(payload: any, alreadyClaimed = false): void {
+        if (alreadyClaimed && payload && typeof payload === 'object') {
+            this.acknowledgedDeliveries.add(payload);
+        }
         try {
             const maybePromise = this.onToolCall?.(payload) as unknown;
             if (maybePromise instanceof Promise) {
@@ -888,6 +893,14 @@ export class RemoteChannel {
         } catch (e: any) {
             console.error('[DEBUG] Tool call handler threw:', e?.message);
         }
+    }
+
+    /** A caller-controlled `claimed: true` is never proof of a DB claim. */
+    isVerifiedPreclaim(payload: unknown): boolean {
+        if (!payload || typeof payload !== 'object') return false;
+        // A verified delivery is a single-use capability: a callback cannot
+        // replay the same object after the process-local dedupe cache evicts it.
+        return this.acknowledgedDeliveries.delete(payload);
     }
 
     /**
@@ -935,7 +948,13 @@ export class RemoteChannel {
         }
 
         if (row) {
-            this.dispatchToolCall({ new: row, claimed: true });
+            if (row.id !== callId || row.device_id !== this.deviceId ||
+                row.status !== 'executing' || !row.timeout_at ||
+                new Date(row.timeout_at).getTime() <= Date.now()) {
+                console.error('[DEBUG] Doorbell claim returned unverified row; refusing execution');
+                return;
+            }
+            this.dispatchToolCall({ new: row }, true);
             return;
         }
         if (!claimError) {
@@ -1209,34 +1228,41 @@ export class RemoteChannel {
     }
 
     /**
-     * Claim a call. True only when THIS update flipped the row pending ->
-     * executing, which is what makes dual delivery safe across processes.
-     * .eq('status','pending') makes it conditional; .select('id') makes the
-     * result observable. On a transient DB error it returns true (execute
-     * anyway), matching prior behaviour — so device.ts's in-memory guard is what
-     * actually guarantees exactly-once within a process.
+     * A claim is authoritative only when a single row belonging to this
+     * device was conditionally moved from pending -> executing before expiry.
+     * Ambiguous network errors, lost ACKs and malformed responses fail closed:
+     * neither a local dedupe set nor a read-back of 'executing' proves ownership.
      */
     async markCallExecuting(callId: string): Promise<boolean> {
-        if (!this.client) throw new Error('Client not initialized');
-        const { data, error } = await this.client
-            .from('mcp_remote_calls')
-            .update({ status: 'executing' })
-            .eq('id', callId)
-            .eq('status', 'pending')
-            .gt('timeout_at', new Date(Date.now()).toISOString())
-            .select('id');
-
-        if (error) {
-            console.error('[DEBUG] Failed to mark call executing:', error.message);
-            await captureRemote('remote_channel_mark_call_executing_error', { error });
-            return true; // preserve legacy behavior: execution proceeds despite the write error
+        if (!this.client || !this.deviceId || typeof callId !== 'string' || !callId) {
+            return false;
         }
-
-        const claimed = !!data && data.length > 0;
-        if (claimed) {
-            console.debug('[DEBUG] Call marked executing:', callId);
-        } else {
-            console.debug('[DEBUG] Call already claimed (duplicate delivery), skipping:', callId);
+        let response;
+        try {
+            response = await this.client
+                .from('mcp_remote_calls')
+                .update({ status: 'executing' })
+                .eq('id', callId)
+                .eq('device_id', this.deviceId)
+                .eq('status', 'pending')
+                .gt('timeout_at', new Date(Date.now()).toISOString())
+                .select('id,device_id');
+        } catch {
+            console.error('[DEBUG] Remote call claim transport failed');
+            return false;
+        }
+        if (response.error) {
+            console.error('[DEBUG] Remote call claim was not acknowledged');
+            captureRemote('remote_channel_mark_call_executing_error', {
+                code: response.error.code ?? 'unknown',
+            }).catch(() => { });
+            return false;
+        }
+        const { data } = response;
+        const claimed = Array.isArray(data) && data.length === 1 &&
+            data[0]?.id === callId && data[0]?.device_id === this.deviceId;
+        if (!claimed) {
+            console.debug('[DEBUG] Remote call claim not confirmed; skipping execution');
         }
         return claimed;
     }

@@ -64,8 +64,7 @@ function makeDevice({ claimResults = [] } = {}) {
     },
   };
   device.remoteChannel = {
-    // Default: first delivery claims, later ones lose. Override to model a
-    // transient DB error, which makes the claim return true (fail open).
+    // Default: a confirmed claim. Tests override this to model rejection.
     markCallExecuting: async () => (claims.length ? claims.shift() : true),
     updateCallResult: async () => 'confirmed',
   };
@@ -78,6 +77,12 @@ function makeDevice({ claimResults = [] } = {}) {
  * Records every mcp_devices write in `writes`.
  */
 function makeFakeClient({ row = null, failFetches = 0, failClaims = 0, lostClaims = 0, writeLatencies = [], claimDeviceId = DEVICE_ID } = {}) {
+  if (row) {
+    // Fake PostgREST returns the actual row's identity and expiry after a
+    // confirmed update. Tests not concerned with expiry use a future deadline.
+    row.device_id ??= claimDeviceId;
+    row.timeout_at ??= new Date(Date.now() + 60_000).toISOString();
+  }
   const writes = [];
   // Recorded when a write COMPLETES, not when it is issued. `writes` alone
   // cannot test ordering: setOnlineStatus evaluates .update() synchronously
@@ -102,13 +107,13 @@ function makeFakeClient({ row = null, failFetches = 0, failClaims = 0, lostClaim
       const failed = claimAttempts <= failClaims;
       const wantsRow = selected === '*';
       const matches =
-        filters.id === row?.id && filters.status === 'pending' && (!wantsRow || filters.device_id === claimDeviceId);
+        filters.id === row?.id && filters.status === 'pending' && filters.device_id === claimDeviceId;
       const committed = !!row && matches && row.status === 'pending' && (!failed || claimAttempts <= lostClaims);
       if (committed) row.status = 'executing';
       lastClaim = { filters: { ...filters }, select: selected };
       if (failed) return { data: null, error: { message: 'claim failed' } };
       if (selected === null) return { data: null, error: null }; // PostgREST 204, no representation
-      return { data: committed ? [wantsRow ? row : { id: row.id }] : [], error: null };
+      return { data: committed ? [wantsRow ? row : { id: row.id, device_id: claimDeviceId }] : [], error: null };
     };
     const builder = {
       eq: (col, value) => {
@@ -222,8 +227,8 @@ const payloadFor = (id, deviceId = DEVICE_ID) => ({
 });
 
 // --- 1. Exactly-once under dual delivery ------------------------------------
-// Both transports deliver every call during the transition. The DB claim fails
-// OPEN on a transient error, so the in-memory guard is the real guarantee.
+// Both transports can deliver the same call. A DB claim is required across
+// processes; the in-memory duplicate guard is supplementary.
 
 await test('dual delivery of the same call executes the tool exactly once', async () => {
   const { device, executed } = makeDevice();
@@ -232,11 +237,11 @@ await test('dual delivery of the same call executes the tool exactly once', asyn
   assert(executed.length === 1, `expected 1 execution, got ${executed.length}`);
 });
 
-await test('exactly-once holds when the DB claim fails OPEN for both deliveries', async () => {
+await test('process-local dedupe additionally rejects repeated delivery', async () => {
   const { device, executed } = makeDevice({ claimResults: [true, true] });
   await device.handleNewToolCall(payloadFor('call-b'));
   await device.handleNewToolCall(payloadFor('call-b'));
-  assert(executed.length === 1, `fail-open claim double-executed: ${executed.length} runs`);
+  assert(executed.length === 1, `duplicate delivery executed ${executed.length} times`);
 });
 
 await test('a lost DB claim (another process won) skips execution', async () => {
@@ -245,13 +250,28 @@ await test('a lost DB claim (another process won) skips execution', async () => 
   assert(executed.length === 0, `expected no execution, got ${executed.length}`);
 });
 
-await test('a delivery the doorbell already claimed executes once without claiming again', async () => {
+await test('only a verified internal doorbell delivery can reuse its DB claim', async () => {
   const { device, executed } = makeDevice();
+  const rc = new RemoteChannel();
   let dbClaims = 0;
-  device.remoteChannel.markCallExecuting = async () => { dbClaims++; return true; };
-  await device.handleNewToolCall({ ...payloadFor('call-e'), claimed: true });
+  rc.markCallExecuting = async () => { dbClaims++; return false; };
+  rc.updateCallResult = async () => 'confirmed';
+  rc.onToolCall = () => {};
+  device.remoteChannel = rc;
+  const payload = payloadFor('call-e');
+  rc.dispatchToolCall(payload, true);
+  assert(rc.acknowledgedDeliveries.has(payload), 'the dispatched object must hold an internal claim');
+  assert(!rc.isVerifiedPreclaim({ ...payload, claimed: true }), 'a copy must not inherit trust');
+  await device.handleNewToolCall(payload);
   assert(executed.length === 1, `expected 1 execution, got ${executed.length}`);
-  assert(dbClaims === 0, `expected no DB claim, got ${dbClaims}`);
+  assert(dbClaims === 0, 'an acknowledged doorbell must not re-claim');
+  assert(!rc.isVerifiedPreclaim(payload), 'claim capability must be consumed exactly once');
+});
+
+await test('forged claimed flag fails closed when DB refuses the claim', async () => {
+  const { device, executed } = makeDevice({ claimResults: [false] });
+  await device.handleNewToolCall({ ...payloadFor('forged'), claimed: true });
+  assert(executed.length === 0, 'untrusted claimed=true must not execute');
 });
 
 await test('calls for another device are ignored and do not poison the dedupe set', async () => {
@@ -285,7 +305,8 @@ await test('doorbell delivers a pending row through the shared handler', async (
   await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
   assert(delivered.length === 1, 'expected one delivery');
   assert(delivered[0].new === row, 'must pass the claimed row as {new: row}');
-  assert(delivered[0].claimed === true, 'must mark the delivery claimed');
+  assert(rc.isVerifiedPreclaim(delivered[0]), 'must verify claim using channel-local evidence');
+  assert(delivered[0].claimed !== true, 'must not rely on a caller-controlled boolean');
   assert(client.claims() === 1 && client.attempts() === 0, 'one claim, no separate fetch');
 });
 
@@ -325,7 +346,7 @@ await test('doorbell claim retries a transient failure', async () => {
   await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
   assert(client.claims() === 3, `expected 3 attempts, got ${client.claims()}`);
   assert(delivered.length === 1, 'should deliver after the retry succeeds');
-  assert(delivered[0].claimed === true, 'the successful retry claimed it');
+  assert(rc.isVerifiedPreclaim(delivered[0]), 'successful retry must be internally verified');
 });
 
 await test('a claim that reads back executing is never delivered — the claimant is unknowable', async () => {

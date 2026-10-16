@@ -19,6 +19,26 @@ TypeScript already has `listEmittedFiles: false`. Changing that option
 again would provide no benefit. The Node test suite's own extensive
 stdout/stderr makes the normal terminal transcript expensive to render.
 
+### GitHub Actions timing evidence (2026-10-16)
+
+GitHub's native workflow-job step timestamps (1-second resolution) and
+the Node test runner's final duration provide a cross-checkable baseline:
+
+| Run / revision | Required CI verification step | Node unit duration | Result |
+| --- | ---: | ---: | --- |
+| 38907268197 / pre-#108 main | 200 s | 192.60 s | 317 pass, 1 skip |
+| 38921263253 / #108 PR | 192 s | 183.83 s | 322 pass, 1 skip |
+| 38923899432 / postmerge main | 194 s | 185.95 s | 322 pass, 1 skip |
+
+In the last run, the entire `Required CI` job lasted 227 seconds,
+including 194 seconds for `Run repository verification`. The 8.05-second
+difference between this verification step and the Node duration includes
+build and other repository checks; it is **not** a measured MCP delay.
+Runs have different test counts and runner conditions; they do not
+establish a speedup. MCP transport, model-side read and UI rendering
+timings remain separately unmeasured. Each run is publicly inspectable
+at `https://github.com/roymejia2217/JameDesktopCommander/actions/runs/<id>`.
+
 ## Standard Node.js reporter composition
 
 The `test:unit` npm command retains the same `test/test*.js` selection,
@@ -34,6 +54,9 @@ reporters through documented Node.js CLI flags:
   characters of the assertion message per failure, flattened to a single
   line; raw stacks and test stdout/stderr are never copied into this
   compact report. Missing messages are represented by `null`.
+  Skipped tests are similarly visible by name in the bounded
+  `skippedNames` array, with `omittedSkippedNames` for overflow;
+  native skip counters and process exit status remain authoritative.
 - Node's built-in `spec` reporter retains the **entire** test output
   at `.tmp/verification/unit-spec.log` in the isolated checkout.
   The file is already excluded by `.gitignore` and is neither pushed
@@ -63,8 +86,9 @@ context before launching the child; this is test isolation, not a
 production override.
 
 The full production test gate remains mandatory. GitHub CI must prove
-that Node 22.19 and 24 honor the same dual-reporter configuration, no
-tests have been skipped, the log path can be created, and all required
+that Node 22.19 and 24 honor the same dual-reporter configuration,
+intentional platform-specific skips are counted and named (never
+silently dropped), the log path can be created, and all required
 check results remain unchanged.
 
 This is an incremental output-volume improvement, **not** a verified

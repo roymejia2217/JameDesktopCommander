@@ -70,6 +70,18 @@ test('native reporter retains a failing exit and identifies failure by name', ()
   assert.match(completeLog, /intentional fixture failure/);
   assert.doesNotMatch(run.stdout, /NOISY_FAILURE_FIXTURE_DETAIL/);
 });
+test('native runner identifies deliberately skipped tests without changing PASS', () => {
+  const { run, summary, completeLog } = verifyFixture('skipping.cjs');
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(summary.status, 'PASS');
+  assert.equal(summary.counts.tests, 1);
+  assert.equal(summary.counts.skipped, 1);
+  assert.deepEqual(summary.skippedNames, ['fixture intentionally omitted']);
+  assert.equal(summary.omittedSkippedNames, 0);
+  assert.match(completeLog, /fixture intentionally omitted.*# SKIP/);
+  assert.doesNotMatch(run.stdout, /skipped fixture must never execute/);
+});
+
 test('missing native summary is FAIL, never a fabricated success', async () => {
   const reporter = (await import('../scripts/verification-summary-reporter.mjs')).default;
   async function* events() {
@@ -106,6 +118,29 @@ test('failed assertions retain bounded single-line diagnostics without raw stack
   assert.ok(report.failureDiagnostics[0].detail.length <= 320);
   assert.doesNotMatch(report.failureDiagnostics[0].detail, /[\r\n]/);
   assert.doesNotMatch(chunks.join(''), /DO_NOT_INCLUDE_STACK/);
+});
+
+test('skipped test names are bounded and overflow is explicit', async () => {
+  const reporter = (await import('../scripts/verification-summary-reporter.mjs')).default;
+  async function* events() {
+    for (let i = 0; i < 25; i++) {
+      yield { type: 'test:pass', data: {
+        name: 'omitted-' + i, skip: 'platform-specific',
+      } };
+    }
+    yield { type: 'test:summary', data: {
+      success: true, duration_ms: 1,
+      counts: { tests: 25, passed: 0, failed: 0, skipped: 25, cancelled: 0, todo: 0 },
+    } };
+  }
+  const chunks = [];
+  for await (const chunk of reporter(events())) chunks.push(chunk);
+  const result = JSON.parse(chunks.join('').slice('VERIFICATION_SUMMARY '.length));
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.skippedNames.length, 20);
+  assert.equal(result.skippedNames[0], 'omitted-0');
+  assert.equal(result.omittedSkippedNames, 5);
+  assert.equal(result.counts.skipped, 25);
 });
 
 test('failed test names are bounded and overflow is declared', async () => {

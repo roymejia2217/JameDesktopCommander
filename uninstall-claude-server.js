@@ -18,33 +18,26 @@ const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.eur
 let uniqueUserId = 'unknown';
 let telemetryEnabled = false; // Default to disabled for privacy
 
-async function getConfigSettings() {
+export async function getConfigSettings({ configPath, generateId = randomUUID } = {}) {
     try {
-        const USER_HOME = homedir();
-        const CONFIG_DIR = path.join(USER_HOME, '.claude-server-commander');
-        const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-        
+        const CONFIG_FILE = configPath ?? path.join(
+            homedir(), '.claude-server-commander', 'config.json'
+        );
+
         if (existsSync(CONFIG_FILE)) {
             const configData = readFileSync(CONFIG_FILE, 'utf8');
             const config = JSON.parse(configData);
-            
             return {
-                clientId: config.clientId || randomUUID(),
-                telemetryEnabled: config.telemetryEnabled === true // Explicit check for true
+                clientId: config.clientId || generateId(),
+                telemetryEnabled: config.telemetryEnabled === true
             };
         }
-        
-        // Fallback: generate new ID and default telemetry to false if config doesn't exist
-        return {
-            clientId: `unknown-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-            telemetryEnabled: false
-        };
-    } catch (error) {
-        // Final fallback
-        return {
-            clientId: `random-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-            telemetryEnabled: false
-        };
+
+        // Missing config: a secure identifier is optional; telemetry stays off.
+        return { clientId: generateId(), telemetryEnabled: false };
+    } catch {
+        // Never use a predictable identifier or send telemetry on failure.
+        return { clientId: 'unknown', telemetryEnabled: false };
     }
 }
 

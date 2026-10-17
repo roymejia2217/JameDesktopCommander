@@ -2,6 +2,8 @@
 use cap_std::fs::{Dir, OpenOptions};
 mod secure_root;
 use napi::{bindgen_prelude::Buffer, Error, Result};
+#[cfg(feature = "receiver-test-fixture")]
+use napi::{bindgen_prelude::{JsObjectValue, Object}, Env};
 use napi_derive::napi;
 use std::{io::{Read, Write}, sync::Mutex};
 
@@ -15,24 +17,14 @@ fn denied(error: std::io::Error) -> Error {
 #[napi]
 pub struct RootCapability { root: Mutex<Option<Dir>> }
 
-// CI-only foreign native class with no granted filesystem capability.
-#[cfg(feature = "receiver-test-fixture")]
-#[derive(Default)]
-#[napi]
-pub struct ForeignCapabilityReceiver { decoy: Mutex<Option<Dir>> }
-
+// Create a test-only N-API-wrapped object via the supported safe wrapper.
+// No additional #[napi] native class or filesystem capability is introduced.
 #[cfg(feature = "receiver-test-fixture")]
 #[napi]
-impl ForeignCapabilityReceiver {
-    #[napi(constructor)]
-    pub fn new() -> Self {
-        Self { decoy: Mutex::new(None) }
-    }
-
-    #[napi]
-    pub fn is_closed(&self) -> Result<bool> {
-        Ok(self.decoy.lock().map_err(|_| Error::from_reason("Fixture lock unavailable"))?.is_none())
-    }
+pub fn foreign_wrapped_object(env: Env) -> Result<Object<'static>> {
+    let mut object = Object::new(&env)?;
+    object.wrap((), None)?;
+    Ok(object)
 }
 
 // Exercises FromNapiRef conversion independently of class method dispatch.

@@ -2,8 +2,8 @@
 const assert = require('node:assert/strict');
 const addon = require(process.argv[2]);
 const method = process.argv[3];
-const receiver = new addon.ForeignCapabilityReceiver();
-assert.equal(receiver.isClosed(), true);
+const receiver = addon.foreignWrappedObject();
+receiver.marker = 'unchanged';
 
 if (method === 'argument') {
   assert.throws(
@@ -25,4 +25,4 @@ if (method === 'argument') {
     'method must reject foreign N-API receiver',
   );
 }
-assert.equal(receiver.isClosed(), true, 'foreign object must remain intact');
+assert.equal(receiver.marker, 'unchanged', 'foreign wrapped object must remain intact');

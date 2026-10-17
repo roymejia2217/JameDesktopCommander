@@ -13,7 +13,7 @@ const child = path.join(__dirname, 'capability-foreign-receiver-child.cjs');
 assert.ok(fs.statSync(dylib).isFile(), 'build non-release receiver fixture before testing');
 fs.copyFileSync(dylib, addonFile);
 const addon = require(addonFile);
-assert.equal(typeof addon.ForeignCapabilityReceiver, 'function',
+assert.equal(typeof addon.foreignWrappedObject, 'function',
   'receiver-test-fixture feature must be enabled in the non-release build');
 
 for (const method of ['readText', 'readBytes', 'writeText', 'close', 'argument']) {

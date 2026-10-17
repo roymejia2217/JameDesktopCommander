@@ -151,3 +151,28 @@ test('oversized binary reads are explicitly denied instead of truncated', () => 
     assert.equal(fs.statSync(large).size, MAX_CAPABILITY_BYTES + 1);
   });
 });
+
+test('N-API rejects invalid JavaScript receivers without crashing', () => {
+  const { spawnSync } = require('node:child_process');
+  const child = path.join(__dirname, 'capability-receiver-child.cjs');
+  const receivers = ['object', 'prototype', 'buffer', 'date'];
+  for (const receiver of receivers) {
+
+
+
+
+
+
+
+
+    const result = spawnSync(process.execPath, [child, addon, receiver], {
+      timeout: 10_000,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 128 * 1024,
+    });
+    assert.equal(result.error, undefined, receiver + ': child process error');
+    assert.equal(result.signal, null, receiver + ': native process terminated by signal');
+    assert.equal(result.status, 0, receiver + ': unexpected native termination or acceptance: ' + result.stderr);
+  }
+});

@@ -16,7 +16,7 @@ const addon = require(addonFile);
 assert.equal(typeof addon.foreignWrappedObject, 'function',
   'receiver-test-fixture feature must be enabled in the non-release build');
 
-for (const method of ['readText', 'readBytes', 'writeText', 'close', 'argument']) {
+for (const method of ['readText', 'readBytes', 'writeText', 'close', 'argument', 'mutArgument']) {
   test('native type tag rejects foreign receiver for ' + method, () => {
     const result = spawnSync(process.execPath, [child, addonFile, method], {
       timeout: 10_000,
@@ -37,6 +37,7 @@ test('native type tag accepts a legitimate RootCapability argument', () => {
   try {
     cap = new addon.RootCapability(root);
     assert.equal(addon.acceptsRootArgument(cap), true);
+    assert.equal(addon.acceptsMutRootArgument(cap), true);
   } finally {
     cap?.close();
     fs.rmSync(root, { recursive: true, force: true });

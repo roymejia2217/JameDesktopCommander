@@ -35,6 +35,14 @@ pub fn accepts_root_argument(_capability: &RootCapability) -> bool {
     true
 }
 
+// Validate FromNapiMutRef separately; the derived mutable Rust reference
+// must never be constructed from a foreign wrapped native object.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn accepts_mut_root_argument(_capability: &mut RootCapability) -> bool {
+    true
+}
+
 #[napi]
 impl RootCapability {
     #[napi(constructor)]

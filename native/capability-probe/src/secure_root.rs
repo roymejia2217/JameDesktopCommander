@@ -65,9 +65,7 @@ pub fn open_root_dir(raw: &str) -> io::Result<Dir> {
     match root.components().next() {
         Some(Component::Prefix(prefix))
             if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _)) =>
-        {
-            ()
-        }
+        {}
         _ => return Err(reject()),
     }
     let path_chain: Vec<_> = root.ancestors().filter(|p| p.has_root()).collect();

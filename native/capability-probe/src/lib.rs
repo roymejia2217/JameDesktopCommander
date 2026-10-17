@@ -15,6 +15,34 @@ fn denied(error: std::io::Error) -> Error {
 #[napi]
 pub struct RootCapability { root: Mutex<Option<Dir>> }
 
+// CI-only foreign native class with no granted filesystem capability.
+#[cfg(feature = "receiver-test-fixture")]
+#[derive(Default)]
+#[napi]
+pub struct ForeignCapabilityReceiver { decoy: Mutex<Option<Dir>> }
+
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+impl ForeignCapabilityReceiver {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { decoy: Mutex::new(None) }
+    }
+
+    #[napi]
+    pub fn is_closed(&self) -> Result<bool> {
+        Ok(self.decoy.lock().map_err(|_| Error::from_reason("Fixture lock unavailable"))?.is_none())
+    }
+}
+
+// Exercises FromNapiRef conversion independently of class method dispatch.
+// Test-only: a foreign wrapped object must not be treated as RootCapability.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn accepts_root_argument(_capability: &RootCapability) -> bool {
+    true
+}
+
 #[napi]
 impl RootCapability {
     #[napi(constructor)]

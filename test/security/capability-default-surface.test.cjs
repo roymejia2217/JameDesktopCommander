@@ -12,4 +12,5 @@ test('default native artifact does not export CI-only receiver fixtures', () => 
   assert.equal(typeof addon.RootCapability, 'function');
   assert.equal(Object.hasOwn(addon, 'foreignWrappedObject'), false);
   assert.equal(Object.hasOwn(addon, 'acceptsRootArgument'), false);
+  assert.equal(Object.hasOwn(addon, 'acceptsMutRootArgument'), false);
 });

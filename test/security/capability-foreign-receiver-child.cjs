@@ -5,11 +5,14 @@ const method = process.argv[3];
 const receiver = addon.foreignWrappedObject();
 receiver.marker = 'unchanged';
 
-if (method === 'argument') {
+if (method === 'argument' || method === 'mutArgument') {
+  const convert = method === 'argument'
+    ? addon.acceptsRootArgument
+    : addon.acceptsMutRootArgument;
   assert.throws(
-    () => addon.acceptsRootArgument(receiver),
+    () => convert(receiver),
     /not an instance of class.*RootCapability/i,
-    'FromNapiRef must validate native identity before constructing &RootCapability',
+    'Native shared/mutable reference conversion must validate class identity',
   );
 } else {
   const args = {

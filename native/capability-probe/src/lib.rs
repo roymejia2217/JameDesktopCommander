@@ -43,6 +43,25 @@ pub fn accepts_mut_root_argument(_capability: &mut RootCapability) -> bool {
     true
 }
 
+// Test-only multi-argument callbacks exercise native shared/exclusive alias guards.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn probe_shared_pair(_left: &RootCapability, _right: &RootCapability) -> bool {
+    true
+}
+
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn probe_shared_and_mutable(_left: &RootCapability, _right: &mut RootCapability) -> bool {
+    true
+}
+
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn probe_mutable_pair(_left: &mut RootCapability, _right: &mut RootCapability) -> bool {
+    true
+}
+
 #[napi]
 impl RootCapability {
     #[napi(constructor)]

@@ -80,3 +80,21 @@ for (const kind of [
     assert.equal(result.status, 0, kind + ': ' + result.stderr);
   });
 }
+
+for (const kind of [
+  'shared-same', 'shared-distinct', 'shared-mutable-same',
+  'mutable-pair-same', 'mixed-distinct',
+]) {
+  test('native borrow guard preserves aliasing invariant: ' + kind, () => {
+    const childProcess = path.join(__dirname, 'capability-borrow-conflicts-child.cjs');
+    const result = spawnSync(process.execPath, [childProcess, addonFile, kind], {
+      timeout: 10_000,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 128 * 1024,
+    });
+    assert.equal(result.error, undefined, kind + ': bounded child must finish');
+    assert.equal(result.signal, null, kind + ': native runtime must not crash');
+    assert.equal(result.status, 0, kind + ': ' + result.stderr);
+  });
+}

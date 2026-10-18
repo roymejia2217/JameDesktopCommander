@@ -43,3 +43,22 @@ test('native type tag accepts a legitimate RootCapability argument', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('native shared and mutable references reject invalid JavaScript inputs', () => {
+  const inputChild = path.join(__dirname, 'capability-invalid-reference-child.cjs');
+  const kinds = [
+    'null', 'undefined', 'number', 'string', 'boolean',
+    'plain-object', 'null-prototype', 'spoofed-prototype', 'proxy-object', 'buffer',
+  ];
+  for (const kind of kinds) {
+    const result = spawnSync(process.execPath, [inputChild, addonFile, kind], {
+      timeout: 10_000,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 128 * 1024,
+    });
+    assert.equal(result.error, undefined, kind + ': child process must complete');
+    assert.equal(result.signal, null, kind + ': must not crash native runtime');
+    assert.equal(result.status, 0, kind + ': ' + result.stderr);
+  }
+});

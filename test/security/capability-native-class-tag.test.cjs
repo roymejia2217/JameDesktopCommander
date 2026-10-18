@@ -62,3 +62,21 @@ test('native shared and mutable references reject invalid JavaScript inputs', ()
     assert.equal(result.status, 0, kind + ': ' + result.stderr);
   }
 });
+
+for (const kind of [
+  'authentic-prototype-replaced', 'inherited-wrapper',
+  'proxied-wrapper', 'foreign-realm',
+]) {
+  test('native class identity is independent of JavaScript prototype: ' + kind, () => {
+    const childProcess = path.join(__dirname, 'capability-prototype-identity-child.cjs');
+    const result = spawnSync(process.execPath, [childProcess, addonFile, kind], {
+      timeout: 10_000,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 128 * 1024,
+    });
+    assert.equal(result.error, undefined, kind + ': bounded child must finish');
+    assert.equal(result.signal, null, kind + ': native runtime must not crash');
+    assert.equal(result.status, 0, kind + ': ' + result.stderr);
+  });
+}

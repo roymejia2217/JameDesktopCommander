@@ -92,6 +92,63 @@ test('patched Windows special device-name variants are denied',
 
 const MAX_CAPABILITY_BYTES = 32 * 1024 * 1024;
 
+test('text reads enforce the shared byte limit without truncation', () => {
+  withFixture(({ cap, allowed }) => {
+    const file = path.join(allowed, 'oversized.txt');
+    fs.writeFileSync(file, 'A');
+    fs.truncateSync(file, MAX_CAPABILITY_BYTES + 1);
+    assert.throws(() => cap.readText('oversized.txt'),
+      /Capability byte limit exceeded/);
+    assert.equal(fs.statSync(file).size, MAX_CAPABILITY_BYTES + 1);
+    fs.writeFileSync(file, 'safe UTF-8: café');
+    assert.equal(cap.readText('oversized.txt'), 'safe UTF-8: café');
+    fs.writeFileSync(file, Buffer.from([0xff]));
+    assert.throws(() => cap.readText('oversized.txt'), /InvalidData/);
+  });
+});
+
+test('oversized text rewrite and append reject before touching files', () => {
+  withFixture(({ cap, allowed }) => {
+    const original = Buffer.from('untouched\n');
+    const existing = path.join(allowed, 'text.txt');
+    fs.writeFileSync(existing, original);
+    const oversized = 'A'.repeat(MAX_CAPABILITY_BYTES + 1);
+    assert.throws(() => cap.writeText('text.txt', oversized),
+      /Capability byte limit exceeded/);
+    assert.throws(() => cap.appendText('text.txt', oversized),
+      /Capability byte limit exceeded/);
+    assert.deepEqual(fs.readFileSync(existing), original);
+    assert.throws(() => cap.writeText('missing.txt', oversized),
+      /Capability byte limit exceeded/);
+    assert.throws(() => cap.appendText('missing.txt', oversized),
+      /Capability byte limit exceeded/);
+    assert.equal(fs.existsSync(path.join(allowed, 'missing.txt')), false);
+  });
+});
+
+test('text write limit counts encoded UTF-8 bytes, not JS characters', () => {
+  withFixture(({ cap, allowed }) => {
+    const oversizedUnicode = 'é'.repeat(MAX_CAPABILITY_BYTES / 2 + 1);
+    assert.ok(oversizedUnicode.length < MAX_CAPABILITY_BYTES);
+    assert.throws(() => cap.writeText('utf8.txt', oversizedUnicode),
+      /Capability byte limit exceeded/);
+    assert.equal(fs.existsSync(path.join(allowed, 'utf8.txt')), false);
+  });
+});
+
+test('text payload at exactly the byte limit remains usable', () => {
+  withFixture(({ cap, allowed }) => {
+    const exact = 'x'.repeat(MAX_CAPABILITY_BYTES);
+    cap.writeText('boundary.txt', exact);
+    assert.equal(fs.statSync(path.join(allowed, 'boundary.txt')).size,
+      MAX_CAPABILITY_BYTES);
+    assert.equal(cap.readText('boundary.txt'), exact);
+    cap.writeText('boundary.txt', 'short');
+    cap.appendText('boundary.txt', ' content');
+    assert.equal(cap.readText('boundary.txt'), 'short content');
+  });
+});
+
 test('binary capability preserves non-UTF8 bytes, NUL, rewrite and append', () => {
   withFixture(({ cap, allowed }) => {
     const first = Buffer.from([0x00, 0xff, 0x80, 0x41, 0x0a]);

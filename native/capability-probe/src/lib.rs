@@ -14,6 +14,22 @@ const MAX_CAPABILITY_BYTES: usize = 32 * 1024 * 1024;
 fn denied(error: std::io::Error) -> Error {
     Error::from_reason(format!("Capability operation rejected: {}", error.kind()))
 }
+
+fn require_bounded_size(byte_len: usize) -> Result<()> {
+    if byte_len > MAX_CAPABILITY_BYTES {
+        return Err(Error::from_reason("Capability byte limit exceeded"));
+    }
+    Ok(())
+}
+
+fn read_bounded(file: impl Read) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(MAX_CAPABILITY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes).map_err(denied)?;
+    require_bounded_size(bytes.len())?;
+    Ok(bytes)
+}
+
 #[napi]
 pub struct RootCapability { root: Mutex<Option<Dir>> }
 
@@ -74,14 +90,14 @@ impl RootCapability {
     pub fn read_text(&self, relative: String) -> Result<String> {
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
-        let mut file = dir.open(relative).map_err(denied)?;
-        let mut text = String::new();
-        file.read_to_string(&mut text).map_err(denied)?;
-        Ok(text)
+        let file = dir.open(relative).map_err(denied)?;
+        String::from_utf8(read_bounded(file)?)
+            .map_err(|_| Error::from_reason("Capability operation rejected: InvalidData"))
     }
 
     #[napi]
     pub fn write_text(&self, relative: String, content: String) -> Result<()> {
+        require_bounded_size(content.len())?;
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let mut options = OpenOptions::new();
@@ -94,6 +110,7 @@ impl RootCapability {
 
     #[napi]
     pub fn append_text(&self, relative: String, content: String) -> Result<()> {
+        require_bounded_size(content.len())?;
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let mut options = OpenOptions::new();
@@ -109,24 +126,15 @@ impl RootCapability {
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let file = dir.open(relative).map_err(denied)?;
-        // Read at most one byte beyond the limit so oversized files cannot
-        // allocate arbitrarily large buffers or be silently truncated.
-        let mut bounded = file.take(MAX_CAPABILITY_BYTES as u64 + 1);
-        let mut bytes = Vec::new();
-        bounded.read_to_end(&mut bytes).map_err(denied)?;
-        if bytes.len() > MAX_CAPABILITY_BYTES {
-            return Err(Error::from_reason("Capability byte limit exceeded"));
-        }
-        Ok(bytes.into())
+        // Text and binary operations share the same bounded synchronous read.
+        Ok(read_bounded(file)?.into())
     }
 
     #[napi]
     pub fn write_bytes(&self, relative: String, content: Buffer, mode: String) -> Result<()> {
         // Validation must precede opening the file: invalid/oversized requests
         // must never truncate an existing target or create a new one.
-        if content.len() > MAX_CAPABILITY_BYTES {
-            return Err(Error::from_reason("Capability byte limit exceeded"));
-        }
+        require_bounded_size(content.len())?;
         if mode != "rewrite" && mode != "append" {
             return Err(Error::from_reason("Invalid capability write mode"));
         }

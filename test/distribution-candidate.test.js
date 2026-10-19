@@ -61,6 +61,49 @@ test('candidate contains runtime, license and complete offline SHA-256 file inve
   });
 });
 
+test('portable candidate excludes source-only test fixtures from staged distribution', async () => {
+  await withFixture(async options => {
+    const sourceFixture = join(options.source, 'test', 'fixtures', 'oc07-synthetic-only.txt');
+    await mkdir(dirname(sourceFixture), { recursive: true });
+    await writeFile(sourceFixture, 'synthetic-only-receipt-marker\n');
+    const manifest = await buildCandidate(options);
+    assert.ok(!manifest.files.some(item => item.path.startsWith('test/')));
+    assert.deepEqual(await verifyCandidate(options), manifest);
+    await assert.rejects(lstat(join(options.destination, 'test')), { code: 'ENOENT' });
+  });
+});
+
+test('a recomputed SHA-256 manifest cannot authorize extra test or private evidence roots', async () => {
+  await withFixture(async options => {
+    for (const excluded of [
+      'test/fixtures/oc07-synthetic-only.txt',
+      '.tmp/security/private-evidence.txt',
+      'docs/security/confidential-receipt.txt',
+      'runtime/unauthorized-helper.dll',
+      'native/unapproved-addon.node',
+      'native/jdc-capability-probe.node',
+    ]) {
+      await buildCandidate(options);
+      const payloadPath = join(options.destination, ...excluded.split('/'));
+      await mkdir(dirname(payloadPath), { recursive: true });
+      const contents = Buffer.from('SYNTHETIC-ONLY-NOT-REAL-TOKEN');
+      await writeFile(payloadPath, contents);
+      const manifestPath = join(options.destination, 'candidate-manifest.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+      manifest.files.push({
+        path: excluded,
+        byteLength: contents.length,
+        sha256: createHash('sha256').update(contents).digest('hex'),
+      });
+      manifest.files.sort((a, b) => a.path.localeCompare(b.path, 'en'));
+      manifest.fileCount = manifest.files.length;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+      await assert.rejects(verifyCandidate(options), /unapproved candidate root/i,
+        'manifest hash equality must not grant new distribution roots');
+    }
+  });
+});
+
 test('changed payload bytes and added unmanifested files fail closed', async () => {
   await withFixture(async options => {
     await buildCandidate(options);
@@ -68,7 +111,7 @@ test('changed payload bytes and added unmanifested files fail closed', async () 
     await writeFile(targetFile, 'export const compromised = true;\n');
     await assert.rejects(verifyCandidate(options), /payload differs/);
     await buildCandidate(options);
-    await writeFile(join(options.destination, 'untracked-secret.txt'), 'untracked');
+    await writeFile(join(options.destination, 'dist', 'untracked-secret.txt'), 'untracked');
     await assert.rejects(verifyCandidate(options), /payload differs/);
   });
 });

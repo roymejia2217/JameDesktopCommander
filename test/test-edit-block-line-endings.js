@@ -301,12 +301,16 @@ async function testLargeFilePerformance() {
     // With line-based reading, we need to ensure we don't exceed the line limit
     const lines = Array(800).fill('This is a line in a large file.\n'); // Reduced from 2000 to 800
     lines[400] = 'TARGET LINE TO FIND AND REPLACE\n'; // Adjusted position
+    // Two line feeds in one source element exercise complete LF-to-CRLF conversion.
+    lines[20] = 'First embedded line\nSecond embedded line\n';
     
     // LF version
     await fs.writeFile(LARGE_FILE_LF, lines.join(''));
     
     // CRLF version
-    const crlfLines = lines.map(line => line.replace('\n', '\r\n'));
+    const crlfLines = lines.map(line => line.replaceAll('\n', '\r\n'));
+    assert.ok(crlfLines.every(line => !/(^|[^\r])\n/.test(line)),
+      'CRLF fixture must convert every LF, including multiple LFs in one source element');
     await fs.writeFile(LARGE_FILE_CRLF, crlfLines.join(''));
     
     // Test LF file

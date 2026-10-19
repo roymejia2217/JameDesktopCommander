@@ -17,9 +17,17 @@ permissions:
 
 jobs:
   miri-receiver-model:
-    name: Miri receiver model (linux-x64)
+    name: Miri receiver model (${{ matrix.borrow_model.name }}, linux-x64)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        borrow_model:
+          - name: stacked
+            flags: ""
+          - name: tree
+            flags: "-Zmiri-tree-borrows"
     steps:
       - name: Checkout exact PR source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -31,4 +39,6 @@ jobs:
         run: rustup toolchain install nightly-2026-06-29 --profile minimal --component miri
 
       - name: Execute receiver ownership and aliasing model without masking failures
+        env:
+          MIRIFLAGS: ${{ matrix.borrow_model.flags }}
         run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml

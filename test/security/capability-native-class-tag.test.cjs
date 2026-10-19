@@ -42,6 +42,19 @@ test('native borrow guard rejects null before shared or exclusive Rust reference
   }
 });
 
+test('reentrant JS and GC cannot violate an active shared native borrow', () => {
+  const reentry = path.join(__dirname, 'capability-reentrant-borrow-child.cjs');
+  const result = spawnSync(process.execPath, ['--expose-gc', reentry, addonFile], {
+    timeout: 15_000,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined, 'bounded reentry child must finish');
+  assert.equal(result.signal, null, 'reentrant GC must not crash the native runtime');
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('native type tag accepts a legitimate RootCapability argument', () => {
   const os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-napi-tag-'));

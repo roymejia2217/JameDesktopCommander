@@ -1,0 +1,34 @@
+name: T011 N-API Receiver Aliasing (non-release)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/t011-napi-receiver-miri.yml
+      - test/security/napi-receiver-alias-miri/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/t011-napi-receiver-miri.yml
+      - test/security/napi-receiver-alias-miri/**
+
+permissions:
+  contents: read
+
+jobs:
+  miri-receiver-model:
+    name: Miri receiver model (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Miri on ephemeral CI only
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal --component miri
+
+      - name: Execute receiver ownership and aliasing model without masking failures
+        run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml

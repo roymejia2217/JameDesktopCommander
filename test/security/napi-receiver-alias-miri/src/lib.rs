@@ -21,6 +21,53 @@ unsafe fn generated_shared_receiver(ptr: *mut RootCapability) -> &'static RootCa
     this
 }
 
+// Research-only candidate for the upstream generated shared receiver.
+// SAFETY: The owner remains alive and a native alias guard must exclude
+// mutable/exclusive borrows during the entire returned reference lifetime.
+// This model cannot itself prove those external Node-API invariants.
+#[cfg(test)]
+unsafe fn candidate_shared_receiver(ptr: *mut RootCapability) -> &'static RootCapability {
+    unsafe { &*ptr }
+}
+
+// Research-only mutable candidate. In production this would require a
+// live exclusive native guard and no reentrant shared or exclusive borrow.
+#[cfg(test)]
+unsafe fn candidate_exclusive_receiver(ptr: *mut RootCapability) -> &'static mut RootCapability {
+    unsafe { &mut *ptr }
+}
+
+#[test]
+fn candidate_nested_shared_receivers_with_live_outer() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    // SAFETY: This test keeps one Box owner, shares only through &T, and
+    // avoids any exclusive borrow until both shared references are dead.
+    unsafe {
+        let outer = candidate_shared_receiver(ptr);
+        let nested = candidate_shared_receiver(ptr);
+        assert_eq!(*nested.root.lock().unwrap(), Some(7));
+        assert_eq!(*outer.root.lock().unwrap(), Some(7));
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[test]
+fn candidate_exclusive_receiver_without_overlap() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    // SAFETY: This exclusive reference is the only active reference to
+    // the native allocation until it has finished being used.
+    unsafe {
+        let unique = candidate_exclusive_receiver(ptr);
+        *unique.root.get_mut().unwrap() = Some(8);
+        assert_eq!(*unique.root.get_mut().unwrap(), Some(8));
+        drop(Box::from_raw(ptr));
+    }
+}
+
 #[test]
 fn control_plain_raw_shared_reentry() {
     let ptr = Box::into_raw(Box::new(RootCapability {

@@ -11,7 +11,10 @@ without reconstructing ownership while the callback is active. A second
 control exercises the **same** `Box::leak(Box::from_raw(ptr))` conversion
 in two *sequential, nonoverlapping* calls. Under pinned **Stacked
 Borrows Miri**, both controls PASS and the reentrant generated-expression
-case FAILS; Tree Borrows is being evaluated independently.
+case FAILS. In run
+[39252422133](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39252422133),
+**Tree Borrows also reported Undefined Behavior** in the reentrant case;
+both control cases passed under both models.
 
 The current upstream `napi-rs/napi-rs` generator still contains the same
 conversion in `crates/backend/src/codegen/fn.rs` (file blob
@@ -53,6 +56,21 @@ shared-pointer control **passed**, but the generated-expression model
 performed a `Unique` retag and invalidated the earlier shared reference.
 The error surfaced when the outer reference was read after reentry.
 This is a reproducible model failure, **not** a missing Rust toolchain.
+
+**Candidate raw-reference model (research only)**
+
+Additional test cases use `unsafe { &*ptr }` for shared receivers and
+`unsafe { &mut *ptr }` for one exclusive receiver, with no intermediate
+`Box::from_raw`. The shared model retains an outer reference across a nested
+receiver conversion; the exclusive model uses one mutable receiver without
+overlap. These tests ask whether a change of receiver *expression* avoids
+the demonstrated aliasing diagnostic in the simplified model.
+
+They do **not** prove the candidate codegen is sound under N-API. In
+particular the C/JS runtime must guarantee allocation liveness,
+correct alignment/type/provenance, exclusive-vs-shared guard ordering,
+and correct finalization across exceptions. An upstream patch and
+independent review remain prerequisites to any production migration.
 
 **Native reachability fixture**
 

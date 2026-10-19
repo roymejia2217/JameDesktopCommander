@@ -19,6 +19,24 @@ const digestPattern = /^[a-f0-9]{64}$/;
 const targets = new Set(['win32-x64', 'linux-x64']);
 const manifestName = 'candidate-manifest.json';
 const nativeAddonName = 'native/jdc-capability-probe.node';
+// A manifest digest authenticates bytes only relative to its own inventory.
+// It must never expand the candidate's explicitly approved payload roots.
+const permittedDirectories = new Set(['dist', 'node_modules']);
+const permittedRootFiles = new Set([
+  'LICENSE', 'NODE-LICENSE', 'package.json', 'package-lock.json', manifestName,
+]);
+
+function approvedCandidatePath(path, target, nativeAddonIncluded) {
+  const firstSeparator = path.indexOf('/');
+  if (firstSeparator === -1) return permittedRootFiles.has(path);
+  if (path.startsWith('runtime/')) {
+    return path === (target === 'win32-x64' ? 'runtime/node.exe' : 'runtime/node');
+  }
+  if (path.startsWith('native/')) {
+    return nativeAddonIncluded && path === nativeAddonName;
+  }
+  return permittedDirectories.has(path.slice(0, firstSeparator));
+}
 
 function safeRelative(value) {
   return typeof value === 'string' && value.length > 0 &&
@@ -43,7 +61,7 @@ async function fileRecord(root, filepath) {
   return { path, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
-async function scanRegularFiles(root) {
+async function scanRegularFiles(root, target, nativeAddonIncluded) {
   const files = [];
   const seen = new Set();
   async function scan(dir) {
@@ -56,6 +74,7 @@ async function scanRegularFiles(root) {
         // mutable links. In particular no symlink may escape the candidate.
         assert.ok(entry.isFile(), 'Candidate contains link or non-regular entry');
         const record = await fileRecord(root, absolute);
+        assert.ok(approvedCandidatePath(record.path, target, nativeAddonIncluded), 'Unapproved candidate root');
         const folded = record.path.toLowerCase();
         assert.ok(!seen.has(folded), 'Case-insensitive candidate path collision');
         seen.add(folded);
@@ -142,7 +161,7 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
       { force: false, errorOnExist: true });
   }
 
-  const files = await scanRegularFiles(destination);
+  const files = await scanRegularFiles(destination, target, nativeAddon !== undefined);
   assert.ok(files.length > 100, 'Candidate has an unexpectedly small runtime payload');
   for (const mandatory of [binary, 'NODE-LICENSE', 'LICENSE', 'package.json',
     'package-lock.json', 'dist/index.js', 'dist/npm-scripts/verify-ripgrep.js']) {
@@ -192,7 +211,7 @@ export async function verifyCandidate({ destination, target, sourceCommit, runId
     assert.ok(safeRelative(record.path) && Number.isSafeInteger(record.byteLength) &&
       record.byteLength >= 0 && digestPattern.test(record.sha256), 'Invalid manifest file entry');
   }
-  const observed = await scanRegularFiles(destination);
+  const observed = await scanRegularFiles(destination, target, nativeAddon !== undefined);
   const actual = observed.filter(item => item.path !== manifestName);
   assert.deepEqual(actual, manifest.files, 'Candidate payload differs from the signed-off file inventory');
   const pkg = JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'));

@@ -6,6 +6,8 @@
  */
 
 import { writePdf } from '../dist/tools/filesystem.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -70,12 +72,13 @@ console.log('Line 3');
             console.log('✅ PDF created successfully');
             console.log(`   File Size: ${stats.size} bytes`);
 
-            if (stats.size === 0) {
-                throw new Error('Created PDF is empty');
-            }
+            assert.ok(stats.size > 0, 'Created PDF must be nonempty');
+            const header = await fs.readFile(OUTPUT_FILE);
+            assert.equal(header.subarray(0, 5).toString('ascii'), '%PDF-',
+                'Created file must have a PDF signature');
         } catch (e) {
             console.error('❌ Failed to verify created PDF:', e);
-            process.exit(1);
+            throw e;
         }
 
         // --- Modification Test ---
@@ -125,8 +128,7 @@ console.log('Line 3');
             console.log('✅ Modified PDF is valid (non-empty)');
             console.log(`   Modified File Size: ${modStats.size} bytes`);
         } else {
-            console.error('❌ Modified PDF file is empty');
-            process.exit(1);
+            throw new Error('Modified PDF file is empty');
         }
 
         // Cleanup temp file
@@ -134,7 +136,7 @@ console.log('Line 3');
 
     } catch (error) {
         console.error('❌ Failed:', error);
-        process.exit(1);
+        throw error;
     }
 
     // --- Modification Test ---
@@ -158,6 +160,12 @@ console.log('Line 3');
     console.log(`   Saved to: ${SAMPLE_FILE_MODIFIED}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-    main().catch(console.error);
-}
+test('PDF creation and modification generates valid nonempty PDF files', async () => {
+    await main();
+    const modifiedHeader = await fs.readFile(MODIFIED_FILE);
+    assert.equal(modifiedHeader.subarray(0, 5).toString('ascii'), '%PDF-',
+        'Modified PDF must have a PDF signature');
+    const layoutHeader = await fs.readFile(SAMPLE_FILE_MODIFIED);
+    assert.equal(layoutHeader.subarray(0, 5).toString('ascii'), '%PDF-',
+        'Layout-preserving PDF output must have a PDF signature');
+});

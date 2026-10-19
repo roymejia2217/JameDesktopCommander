@@ -25,7 +25,9 @@ const expectations = () => ({
   nowMs: NOW,
   sourceCommit,
   serviceInstance,
+  runAttempt: 1,
   recipientFingerprint,
+  challenge,
   consumedChallenges: new Set(),
 });
 const reject = (frame, options = expectations()) =>
@@ -122,4 +124,40 @@ test('OC-07.2h verifier expectation fails closed when unauthenticated or missing
   reject(encodeSyntheticFixture(valid()), {
     ...expectations(), consumedChallenges: null,
   });
+});
+
+test('OC-07.2h rejects a valid but different run attempt before consuming challenge', () => {
+  const ctx = { ...expectations(), runAttempt: 1, challenge };
+  const changed = encodeSyntheticFixture({ ...valid(), runAttempt: 2 });
+  assert.throws(() => consumeSyntheticReceiptFrame(changed, ctx),
+    /synthetic receipt denied/i);
+  assert.equal(ctx.consumedChallenges.size, 0);
+  assert.deepEqual(consumeSyntheticReceiptFrame(encodeSyntheticFixture(valid()), ctx),
+    { accepted: true, schemaVersion: 0 });
+});
+
+test('OC-07.2h rejects a different canonical 32-byte challenge before consumption', () => {
+  const ctx = { ...expectations(), runAttempt: 1, challenge };
+  const otherChallenge = Buffer.alloc(32, 8).toString('base64url');
+  const changed = encodeSyntheticFixture({ ...valid(), challenge: otherChallenge });
+  assert.throws(() => consumeSyntheticReceiptFrame(changed, ctx),
+    /synthetic receipt denied/i);
+  assert.equal(ctx.consumedChallenges.size, 0);
+  assert.deepEqual(consumeSyntheticReceiptFrame(encodeSyntheticFixture(valid()), ctx),
+    { accepted: true, schemaVersion: 0 });
+});
+
+test('OC-07.2h requires expected attempt and issued challenge to be present and valid', () => {
+  for (const override of [
+    { runAttempt: undefined },
+    { runAttempt: 0 },
+    { runAttempt: 1.5 },
+    { challenge: undefined },
+    { challenge: 'malformed' },
+  ]) {
+    const ctx = { ...expectations(), runAttempt: 1, challenge, ...override };
+    assert.throws(() => consumeSyntheticReceiptFrame(encodeSyntheticFixture(valid()), ctx),
+      /synthetic receipt denied/i);
+    assert.equal(ctx.consumedChallenges.size, 0);
+  }
 });

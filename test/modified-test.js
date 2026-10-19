@@ -18,7 +18,7 @@ async function testLargeFilePerformance() {
     await fs.writeFile(LARGE_FILE_LF, lines.join(''));
     
     // CRLF version - also respect line limit
-    const crlfLines = lines.map(line => line.replace('\n', '\r\n'));
+    const crlfLines = lines.map(line => line.replaceAll('\n', '\r\n'));
     await fs.writeFile(LARGE_FILE_CRLF, crlfLines.join(''));
     
     // Test LF file

@@ -6,8 +6,11 @@ This zero-dependency crate models the **specific** receiver expression emitted b
 locked `napi-derive-backend 6.1.5` in `src/codegen/fn.rs:402–439`:
 `Box::leak(Box::from_raw(this_ptr))`. It preserves a shared reference across
 a second conversion of the same `RootCapability` allocation and reads the
-outer reference afterwards. The control creates shared Rust references without
-reconstructing ownership while the callback is active.
+outer reference afterwards. The first control creates shared Rust references
+without reconstructing ownership while the callback is active. A second
+control exercises the **same** `Box::leak(Box::from_raw(ptr))` conversion
+in two *sequential, nonoverlapping* calls. Its official Miri outcome is
+pending remote execution; ordinary Rust success is insufficient.
 
 The current upstream `napi-rs/napi-rs` generator still contains the same
 conversion in `crates/backend/src/codegen/fn.rs` (file blob

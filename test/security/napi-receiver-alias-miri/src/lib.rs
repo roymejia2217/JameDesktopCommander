@@ -37,6 +37,27 @@ fn control_plain_raw_shared_reentry() {
 }
 
 #[test]
+fn control_sequential_generated_shared_receivers() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    // Each native-call-style shared receiver is used and becomes dead
+    // before the next invocation reconstructs its Box from the raw pointer.
+    // This distinguishes sequential dispatch from overlapping reentry.
+    unsafe {
+        {
+            let first = generated_shared_receiver(ptr);
+            assert_eq!(*first.root.lock().unwrap(), Some(7));
+        }
+        {
+            let second = generated_shared_receiver(ptr);
+            assert_eq!(*second.root.lock().unwrap(), Some(7));
+        }
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[test]
 fn model_pinned_generated_shared_reentry() {
     let ptr = Box::into_raw(Box::new(RootCapability {
         root: Mutex::new(Some(7)),

@@ -30,6 +30,18 @@ for (const method of ['readText', 'readBytes', 'writeText', 'close', 'argument',
   });
 }
 
+test('native borrow guard rejects null before shared or exclusive Rust references exist', () => {
+  assert.equal(typeof addon.probeNullNativeBorrow, 'function',
+    'test-only native borrow rejection fixture must be present');
+  for (const mutable of [false, true]) {
+    assert.throws(
+      () => addon.probeNullNativeBorrow(mutable),
+      /Cannot borrow a null native value/,
+      (mutable ? 'exclusive' : 'shared') + ' null pointer must be denied',
+    );
+  }
+});
+
 test('native type tag accepts a legitimate RootCapability argument', () => {
   const os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-napi-tag-'));

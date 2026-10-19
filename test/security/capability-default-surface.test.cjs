@@ -19,4 +19,6 @@ test('default native artifact does not export CI-only receiver fixtures', () => 
   assert.equal(Object.hasOwn(addon, 'probeSharedAndMutable'), false);
   assert.equal(Object.hasOwn(addon, 'probeMutablePair'), false);
   assert.equal(Object.hasOwn(addon, 'acceptsMutRootArgument'), false);
+  assert.equal(Object.hasOwn(addon, 'probeNullNativeBorrow'), false,
+    'null-borrow probe must not be exported without the test-only feature');
 });

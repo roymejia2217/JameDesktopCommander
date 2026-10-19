@@ -1,7 +1,8 @@
 # T011 / Security #124 — N-API native pointer ownership audit
 
 **Scope:** Rust Code Scanning alert #12 (`rust/access-invalid-pointer`).
-**Baseline:** protected `main` at `d3c3aa3b2407d97ee8adf99878ed850005633c93`.
+**Original baseline:** protected `main` at `d3c3aa3b2407d97ee8adf99878ed850005633c93`.
+**Reverified:** protected `main` at `23016abb05b8613e4508f59928cdceb9124f755b`.
 **Status:** investigative evidence, **not** an alert disposition, privilege
 approval, production acceptance, or release authorization.
 
@@ -16,8 +17,10 @@ twice: a generated `std::ptr::null_mut()` value, assignment to
 does **not** display the `napi_unwrap` output assignment, Node-API
 return-status gate, tag validation, or native borrow registration.
 The location points to the derive invocation, not an explicit
-handwritten Rust dereference. A successful CodeQL job did **not**
-clear the alert; the live latest instance remains HIGH/OPEN.
+handwritten Rust dereference. Protected-main Rust CodeQL analysis
+`1977948204` repeats one result at the same `lib.rs:34` on commit
+`23016abb05b8613e4508f59928cdceb9124f755b`; alert #12
+remains HIGH/OPEN despite successful workflow execution.
 
 Source provenance is from the exact locked registry dependencies:
 `napi=3.14.2`, `napi-derive=3.6.12`,
@@ -77,22 +80,85 @@ with native `napi8` on Windows and Linux.
 - No user-provided `RootCapability` method invokes
   `napi_remove_wrap`, manipulates a wrapped pointer, or has an
   asynchronous return holding `&RootCapability` beyond the callback.
-  Synchronous object reachability throughout the engine callback
-  and abnormal environment teardown require external API guarantees;
-  they are not established merely by successful behavioral tests.
+  The default Node-API handle-scope guarantee establishes normal
+  synchronous object reachability (see below). It does **not** prove
+  arbitrary abnormal environment teardown or hostile native code.
 
 Node-API reference: https://nodejs.org/api/n-api.html
 (`napi_wrap`, `napi_unwrap`, `napi_remove_wrap`,
 `napi_type_tag_object`, `napi_check_object_type_tag`).
+## Synchronous Node-API handle-lifetime argument
+
+Node-API's **Object lifetime management** contract states that
+`napi_value` handles in the default scope keep objects live for the
+entire native method call. A normal `napi_callback` already has a
+default scope; explicit persistent references are needed when data
+must outlive that call. References produced by `napi_wrap` with an
+initial count of zero are weak, **not** permanent GC roots.
+
+Source: https://nodejs.org/download/release/v26.8.2/docs/api/n-api.html
+(Object lifetime management, `napi_get_cb_info`, `napi_wrap`).
+
+1. `napi/src/bindgen_runtime/callback_info.rs:26-69` obtains
+   `this` and argument `napi_value` handles via checked
+   `napi_get_cb_info`; they belong to the native call's scope.
+2. `callback_info.rs:78-118` wraps the constructor-owned
+   `Box<RootCapability>` with `napi_wrap`, adopting finalizer
+   ownership and recording a weak reference before type tagging.
+3. `napi-derive-backend/src/codegen/struct.rs:168-242` checks
+   `napi_unwrap` status and class type tag, then registers the
+   checked, non-null borrow **before** constructing `&T`/`&mut T`.
+4. `napi/src/bindgen_runtime/native_borrow.rs:119-184` creates
+   the synchronous guard scope with `root_values=false`. The
+   Node-API call's default handle scope, **not** the guard, keeps
+   the JavaScript wrapper live. Guards enforce Rust aliasing.
+5. `napi-derive-backend/src/codegen/fn.rs:305-325` keeps acquired
+   guards alive through the synchronous call and return conversion.
+   Its barrier prevents reentrant conversion into an outer scope.
+
+Under the supported synchronous Node-API host contract, the
+wrapped object cannot be finalized *because of ordinary GC* while
+its native callback's handle scope is still live. This closes the
+previously undocumented ordinary-GC reachability assumption,
+**conditional on the Node-API implementation honoring its contract**.
+
+## Scope, exceptions and independent-review requirements
+
+- The contract above is **not** a guarantee for async/worker,
+  Wasm/Emnapi, arbitrary foreign hosts or native teardown.
+  Do not generalize it to the privileged SCM service.
+- JavaScript callers cannot invoke `napi_remove_wrap` through
+  `RootCapability`; a malicious addon in the same process could
+  detach/reassign pointers and crosses the trusted-native boundary.
+- Tag validation is class identity, not a cryptographic credential.
+  The proof assumes a correctly tagged wrapper really owns the
+  allocation provided to `napi_wrap`.
+- A failed `napi_wrap` or type-tag operation, JS exception and
+  `ObjectFinalize` error need independent examination of all
+  cleanup paths. The normal-path finalizer uses
+  `napi/src/bindgen_runtime/mod.rs:63-106`, but its mere presence
+  does not prove teardown safety or single-free on every exit.
+- PR #129's `global.gc()` calls occur while JavaScript retains
+  the capability in its closure. This tests *reentrant aliasing*,
+  **not** finalization of an unreferenced wrapped native object.
+- Reviewer must independently reconcile current Rust SARIF
+  `1977948204` (one result) with the generated borrow guard,
+  reproduce the supported-platform native path and decide
+  A (real defect), B (verified upstream fix) or C (analyzer limit).
+  Do **not** dismiss #12 or mark #124 resolved from these notes.
+
 ## Independent adversarial evidence and remaining limits
 
 Protected PRs #119-#125 tested cross-class receivers, prototype
 spoofing, invalid native arguments, mutable/shared alias conflicts,
 directory confinement, post-close behavior and bounded I/O.
-PR #125 and protected-main postmerge ran native Node 22/24 on
-Windows and Linux with CI/CodeQL in SUCCESS. Those results
-demonstrate observable behavior, not proof of every unsafe pointer
-contract, finalizer ordering or process teardown.
+PR #127 proved null-borrow rejection for shared and exclusive modes.
+PR #129 covered synchronous JavaScript reentry, explicit GC calls,
+nested alias conflicts and guard release after thrown exceptions.
+Both passed protected Windows/Linux T011 and Node compatibility CI.
+These checks establish observable invariants, not complete proof of
+GC finalizer ordering or hostile native teardown. PR #128 resolved
+CodeQL JavaScript HIGH alerts #3 and #4 automatically.
 
 **Current assessment:** the SARIF null-initialization flow omits a
 reachable pre-dereference null-rejection gate. It is a **plausible
@@ -115,8 +181,8 @@ environment teardown.
   against this specific SARIF trace. Only then consider a narrowly
   justified Code Scanning disposition; never bulk-dismiss alerts.
 - Keep #12 **HIGH/OPEN** until one gate has review evidence.
-  Keep separate JS HIGH alerts #3/#4 and privileged SCM issue #80
-  open, with T011 `releaseEligible:false` and deny-only.
+  JS HIGH alerts #3/#4 are fixed as of PR #128; privileged SCM
+  issue #80 stays open, T011 `releaseEligible:false` and deny-only.
 - No protected policy custody, native token export, credentials,
   release artifacts, installed runtime or service configuration
   is changed by this document.

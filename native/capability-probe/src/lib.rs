@@ -78,6 +78,18 @@ pub fn probe_mutable_pair(_left: &mut RootCapability, _right: &mut RootCapabilit
     true
 }
 
+// Test-only: exercise the exact guard that generated reference conversion uses.
+// Never construct or dereference a Rust reference from the null pointer.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn probe_null_native_borrow(mutable: bool) -> Result<()> {
+    let borrow = napi::bindgen_prelude::acquire_native_borrow(
+        std::ptr::null_mut::<RootCapability>(), mutable,
+    )?;
+    drop(borrow);
+    Ok(())
+}
+
 #[napi]
 impl RootCapability {
     #[napi(constructor)]

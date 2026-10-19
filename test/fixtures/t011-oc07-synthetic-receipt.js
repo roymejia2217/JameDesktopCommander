@@ -24,6 +24,13 @@ function validHex(value, bytes) {
     new RegExp(`^[0-9a-f]{${bytes * 2}}$`).test(value);
 }
 
+function validChallenge(value) {
+  return typeof value === 'string' &&
+    /^[A-Za-z0-9_-]{43}$/.test(value) &&
+    Buffer.from(value, 'base64url').length === 32 &&
+    Buffer.from(value, 'base64url').toString('base64url') === value;
+}
+
 /**
  * Validate one untrusted, length-prefixed, canonical synthetic frame.
  * The caller-supplied expectations are TEST fixtures, NOT authentication.
@@ -32,7 +39,9 @@ function validHex(value, bytes) {
  *  nowMs: number,
  *  sourceCommit: string,
  *  serviceInstance: string,
+ *  runAttempt: number,
  *  recipientFingerprint: string,
+ *  challenge: string,
  *  consumedChallenges: Set<string>,
  * }} expected
  */
@@ -73,10 +82,7 @@ export function consumeSyntheticReceiptFrame(frame, expected) {
       !validHex(value.recipientFingerprint, 32)) {
     deny('malformed synthetic metadata');
   }
-  if (typeof value.challenge !== 'string' ||
-      !/^[A-Za-z0-9_-]{43}$/.test(value.challenge) ||
-      Buffer.from(value.challenge, 'base64url').length !== 32 ||
-      Buffer.from(value.challenge, 'base64url').toString('base64url') !== value.challenge) {
+  if (!validChallenge(value.challenge)) {
     deny('invalid challenge encoding');
   }
   if (!Number.isSafeInteger(value.issuedAtMs) ||
@@ -87,16 +93,23 @@ export function consumeSyntheticReceiptFrame(frame, expected) {
     deny('invalid lifetime');
   }
   if (!expected || !Number.isSafeInteger(expected.nowMs) ||
+      expected.nowMs < 0 ||
       !(expected.consumedChallenges instanceof Set) ||
       !validHex(expected.sourceCommit, 20) ||
       !validHex(expected.recipientFingerprint, 32) ||
-      typeof expected.serviceInstance !== 'string') {
+      typeof expected.serviceInstance !== 'string' ||
+      !/^[a-z0-9-]{6,64}$/.test(expected.serviceInstance) ||
+      !Number.isSafeInteger(expected.runAttempt) ||
+      expected.runAttempt < 1 || expected.runAttempt > 999 ||
+      !validChallenge(expected.challenge)) {
     deny('invalid verifier expectations');
   }
   if (value.sourceCommit !== expected.sourceCommit ||
       value.serviceInstance !== expected.serviceInstance ||
-      value.recipientFingerprint !== expected.recipientFingerprint) {
-    deny('provenance or recipient mismatch');
+      value.runAttempt !== expected.runAttempt ||
+      value.recipientFingerprint !== expected.recipientFingerprint ||
+      value.challenge !== expected.challenge) {
+    deny('provenance, run attempt or challenge mismatch');
   }
   if (value.issuedAtMs > expected.nowMs ||
       value.expiresAtMs <= expected.nowMs) deny('stale or future challenge');

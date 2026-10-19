@@ -8,6 +8,10 @@ This zero-dependency Node fixture exercises offline rejection properties
 requested by [OC-07.2h](../../docs/security/T011-C4O-OC072H-SECURITY-DESIGN-REVIEW.md):
 one exact framed JSON message, bounded length and lifetime, unsupported
 fields/versions, bad encoding, provenance-marker mismatch and replay.
+The test verifier must also receive the exact **expected run attempt** and
+**previously issued 32-byte challenge**, rejecting validly encoded but
+different values before consuming the challenge. Missing or malformed
+verifier expectations are denial, not an implicit wildcard.
 No Windows token, SID, privilege name, actual service account, private
 key, signature, network, filesystem or OS authorization information is
 processed. All identifiers and fingerprints used in tests are synthetic.

@@ -11,6 +11,8 @@ try {
   process.send?.({
     kind: 'completed', ok: false,
     error: error instanceof Error ? error.message : 'unknown error',
+    errorCode: error instanceof Error && typeof error.code === 'string'
+      ? error.code : null,
   });
 } finally {
   process.disconnect?.();

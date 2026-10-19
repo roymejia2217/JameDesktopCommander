@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import lockfile from 'proper-lockfile';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -109,10 +110,32 @@ test('two independent OS processes cannot commit a duplicate revision', () =>
       });
     }
     const [a, b] = await Promise.all([run('running'), run('stopped')]);
-    assert.equal([a, b].filter((x) => x.ok).length, 1);
-    assert.equal([a, b].filter((x) => !x.ok).length, 1);
-    assert.match([a, b].find((x) => !x.ok).error, /revision conflict/i);
+    const winners = [a, b].filter((x) => x.ok);
+    const losers = [a, b].filter((x) => !x.ok);
+    assert.equal(winners.length, 1, 'exactly one process must commit');
+    assert.equal(losers.length, 1, 'the competing process must fail closed');
+    assert.equal(winners[0].revision, 2);
+    const loser = losers[0];
+    assert.ok(
+      /revision conflict/i.test(loser.error) || loser.errorCode === 'ELOCKED',
+      `unexpected competing-writer failure: ${loser.errorCode}: ${loser.error}`,
+    );
     assert.equal((await store.read()).revision, 2);
+  }));
+
+test('an unavailable state lock rejects CAS without changing durable state', () =>
+  fixture(async ({ file, store }) => {
+    await writeFile(file, serialized());
+    const release = await lockfile.lock(file, { stale: 30_000, update: 10_000 });
+    try {
+      await assert.rejects(store.compareAndSet(1, next), { code: 'ELOCKED' });
+      assert.deepEqual(await store.read(), initial,
+        'lock refusal must not modify the persisted intent or revision');
+    } finally {
+      await release();
+    }
+    const updated = await store.compareAndSet(1, next);
+    assert.equal(updated.revision, 2, 'CAS succeeds after legitimate lock release');
   }));
 
 test('invalid update never alters the durable state', () =>

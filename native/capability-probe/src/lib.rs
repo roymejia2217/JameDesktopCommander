@@ -3,7 +3,7 @@ use cap_std::fs::{Dir, OpenOptions};
 mod secure_root;
 use napi::{bindgen_prelude::Buffer, Error, Result};
 #[cfg(feature = "receiver-test-fixture")]
-use napi::{bindgen_prelude::{JsObjectValue, Object}, Env};
+use napi::{bindgen_prelude::{Function, JsObjectValue, Object}, Env};
 use napi_derive::napi;
 use std::{io::{Read, Write}, sync::Mutex};
 
@@ -57,6 +57,20 @@ pub fn accepts_root_argument(_capability: &RootCapability) -> bool {
 #[napi]
 pub fn accepts_mut_root_argument(_capability: &mut RootCapability) -> bool {
     true
+}
+
+// Test-only: reenter JavaScript while a generated shared reference is live.
+// GC and nested conversions must not invalidate or mutably alias the borrowed root.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+pub fn probe_borrow_across_js_callback(
+    capability: &RootCapability,
+    callback: Function<'_, (), ()>,
+) -> Result<bool> {
+    callback.call(())?;
+    let guard = capability.root.lock()
+        .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+    Ok(guard.is_some())
 }
 
 // Test-only multi-argument callbacks exercise native shared/exclusive alias guards.

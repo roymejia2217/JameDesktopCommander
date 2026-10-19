@@ -92,6 +92,17 @@ actual unsafe-Rust aliasing under Node-API FFI, and a compatible
 upstream correction all remain security review gates. Leave PR #131
 in draft, issue #124 and CodeQL #12 open, and T011 non-release.
 
+A separate isolated Node child
+(`test/security/capability-receiver-coercion-child.cjs`) probes a
+production-method argument-conversion route without modifying any
+shipping method. It supplies a plain object with `Symbol.toPrimitive`,
+`toString`, and `valueOf` hooks to eight path-taking methods, then
+checks the calls were rejected, no hook executed, and a control file
+was not changed. On the tested Windows native fixture this is PASS.
+It narrows only this specific implicit-coercion route; it does not
+exclude other JavaScript reentry during FFI conversion, object
+finalization or callbacks, or establish native memory-model soundness.
+
 
 ## Table of Contents
 

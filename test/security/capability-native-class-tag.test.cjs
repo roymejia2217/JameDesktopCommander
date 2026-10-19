@@ -55,6 +55,19 @@ test('reentrant JS and GC cannot violate an active shared native borrow', () => 
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('production native methods reject object paths without invoking user coercion', () => {
+  const probe = path.join(__dirname, 'capability-receiver-coercion-child.cjs');
+  const result = spawnSync(process.execPath, [probe, addonFile], {
+    timeout: 15_000,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined, 'bounded coercion child must finish');
+  assert.equal(result.signal, null, 'coercion must not crash the native runtime');
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('native type tag accepts a legitimate RootCapability argument', () => {
   const os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-napi-tag-'));

@@ -104,6 +104,28 @@ fn control_sequential_generated_shared_receivers() {
     }
 }
 
+// Discriminating return-conversion model for the production list_directory path:
+// the generated receiver is read by the Rust method BEFORE JavaScript array
+// creation begins. NativeBorrowScope's alias guard outlives this Rust read,
+// but the guard is not itself a Rust reference to RootCapability.
+// This control must run under Miri, not merely standard cargo test.
+#[test]
+fn control_return_conversion_reentry_after_last_receiver_use() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    unsafe {
+        let outer = generated_shared_receiver(ptr);
+        let owned_result = *outer.root.lock().unwrap();
+        // JavaScript property setter reenters after native return is owned.
+        // Intentionally DO NOT read outer again after the nested conversion.
+        let nested = generated_shared_receiver(ptr);
+        assert_eq!(*nested.root.lock().unwrap(), Some(7));
+        assert_eq!(owned_result, Some(7));
+        drop(Box::from_raw(ptr));
+    }
+}
+
 #[test]
 fn model_pinned_generated_shared_reentry() {
     let ptr = Box::into_raw(Box::new(RootCapability {

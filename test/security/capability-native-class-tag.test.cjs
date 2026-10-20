@@ -81,6 +81,8 @@ test('listDirectory return conversion can reenter a production shared receiver',
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /PRODUCTION_RECEIVER_REENTRY_OBSERVED=1/,
     'the test must actually trigger nested JS during native return conversion');
+  assert.match(result.stdout, /RETURN_CONVERSION_EXCEPTION_GUARD_RELEASED=1/,
+    'the exceptional return-conversion path must release native borrow guards');
 });
 
 test('native type tag accepts a legitimate RootCapability argument', () => {

@@ -125,6 +125,40 @@ lifetime may differ. Independent review must compare actual generated
 references, native borrow scope, raw-pointer provenance and finalization.
 The test fixture is non-release; no Rust pins or shipping APIs changed.
 
+**Pinned-source lifetime trace (2026-10-20; research only):**
+
+1. `napi-derive-backend 6.1.5/src/codegen/fn.rs` converts arguments,
+   unwraps the receiver, registers a native shared borrow and constructs
+   `&RootCapability` through `Box::leak(Box::from_raw(this_ptr))`.
+2. Its generated synchronous callback first invokes the Rust method and
+   then converts the returned value; the `NativeBorrowScope` continues
+   holding native alias guards until the callback returns.
+3. `RootCapability::list_directory(&self)` returns an **owned**
+   `Vec<String>`. Its Rust borrow is last read inside the method, before
+   the `Vec<String>` is converted to a JavaScript value.
+4. `napi 3.14.2/src/bindgen_runtime/js_values/array.rs` implements
+   `ToNapiValue for Vec<T>` using `Array::set`, which calls
+   `napi_set_element`. An inherited JavaScript index setter can execute
+   during this **return-conversion** stage.
+5. `napi 3.14.2/src/bindgen_runtime/native_borrow.rs` separates the
+   native alias guard from the generated Rust reference. Its scope drops
+   guards on both normal and error exits.
+
+The new Miri control `control_return_conversion_reentry_after_last_receiver_use`
+retains the pinned `Box::from_raw` expression but deliberately copies
+the method result **before** reentry and never reads the outer reference
+afterwards. The existing `model_pinned_generated_shared_reentry`
+deliberately **does** read the old reference after a nested conversion;
+its original Stacked/Tree Borrows failures must remain visible.
+Do not equate these two models or infer Rust soundness from either.
+
+The independent Node child now also injects a setter exception during
+array conversion, verifies propagation, tests that the mutable borrow
+guard is released, and reads the capability again after the error.
+This does not prove allocation liveness or FFI pointer provenance.
+The new Miri control requires fresh pinned hosted Miri evidence; stable
+`cargo test` passing is insufficient.
+
 
 ## Table of Contents
 

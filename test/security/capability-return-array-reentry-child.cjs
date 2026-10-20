@@ -12,6 +12,8 @@ let capability;
 let insideCall = false;
 let nestedCalls = 0;
 let setterCalls = 0;
+let injectFailure = false;
+let sawFailureSetter = false;
 const previous = Object.getOwnPropertyDescriptor(Array.prototype, '1');
 assert.equal(previous, undefined, 'test requires an unmodified Array.prototype[1]');
 try {
@@ -24,6 +26,10 @@ try {
     configurable: true,
     set(value) {
       setterCalls++;
+      if (insideCall && injectFailure) {
+        sawFailureSetter = true;
+        throw new Error('JDC_TEST_RETURN_CONVERSION_EXCEPTION');
+      }
       if (insideCall && nestedCalls === 0) {
         nestedCalls++;
         assert.equal(capability.readText('readback.txt'), 'KNOWN-CONTENT',
@@ -51,7 +57,22 @@ try {
   assert.ok(setterCalls >= 1);
   assert.equal(addon.acceptsMutRootArgument(capability), true,
     'exclusive borrow must recover after array conversion completes');
+  injectFailure = true;
+  try {
+    insideCall = true;
+    assert.throws(() => capability.listDirectory('.'), Error,
+      'an inherited setter error during native return conversion must propagate');
+  } finally {
+    insideCall = false;
+    injectFailure = false;
+  }
+  assert.equal(sawFailureSetter, true, 'exception must originate in the inherited setter');
+  assert.equal(addon.acceptsMutRootArgument(capability), true,
+    'the generated native borrow guard must release on return-conversion error');
+  assert.equal(capability.readText('readback.txt'), 'KNOWN-CONTENT',
+    'native capability remains usable after an exceptional return conversion');
   console.log('PRODUCTION_RECEIVER_REENTRY_OBSERVED=' + nestedCalls);
+  console.log('RETURN_CONVERSION_EXCEPTION_GUARD_RELEASED=1');
 } finally {
   insideCall = false;
   if (previous) Object.defineProperty(Array.prototype, '1', previous);

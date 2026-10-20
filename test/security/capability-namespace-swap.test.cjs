@@ -95,6 +95,9 @@ test('real intermediate directory swap after pathname checkpoint cannot escape c
       assert.throws(() => cap.writeBytes('gate/sentinel.bin',
         Buffer.from('outside write'), 'rewrite'));
       assert.throws(() => cap.readBytes('gate/sentinel.bin'));
+      assert.throws(() => cap.statRelative('gate/sentinel.bin'));
+      assert.throws(() => cap.removeFileRelative('gate/sentinel.bin'));
+      assert.throws(() => cap.removeEmptyDirectoryRelative('gate'));
       assert.throws(() => cap.createDirectory('gate/created-outside'));
       assert.throws(() => cap.listDirectory('gate'));
       assert.throws(() => cap.moveRelative('safe-source.bin', 'gate/moved-outside.bin'));
@@ -123,5 +126,8 @@ test('closed handle fails for all added directory operations', () => {
     assert.throws(() => cap.createDirectory('nope'), /closed/i);
     assert.throws(() => cap.moveRelative('from', 'to'), /closed/i);
     assert.throws(() => cap.listDirectory('.'), /closed/i);
+    assert.throws(() => cap.statRelative('.'), /closed/i);
+    assert.throws(() => cap.removeFileRelative('nope'), /closed/i);
+    assert.throws(() => cap.removeEmptyDirectoryRelative('nope'), /closed/i);
   });
 });

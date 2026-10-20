@@ -43,6 +43,23 @@ test('native read, rewrite, append, close', () => {
     assert.throws(() => cap.writeText('inside.txt', 'forbidden'), /closed/i);
   });
 });
+test('native metadata uses anchored entry identity and exact byte size', () => {
+  withFixture(({ cap, allowed, outsideFile }) => {
+    const expected = Buffer.from([0x00, 0xff, 0x01, 0x41, 0x7f]);
+    fs.writeFileSync(path.join(allowed, 'entry.bin'), expected);
+    assert.deepEqual(cap.statRelative('entry.bin'), {
+      kind: 'file', sizeBytes: String(expected.length),
+    });
+    const directory = cap.statRelative('.');
+    assert.equal(directory.kind, 'directory');
+    assert.match(directory.sizeBytes, /^\d+$/);
+    assert.throws(() => cap.statRelative('missing.bin'));
+    assert.throws(() => cap.statRelative('../outside/sentinel.txt'));
+    assert.throws(() => cap.statRelative(outsideFile));
+    assert.deepEqual(fs.readFileSync(path.join(allowed, 'entry.bin')), expected);
+  });
+});
+
 test('parent traversal and absolute paths cannot escape', () => {
   withFixture(({ cap, outsideFile }) => {
     assert.throws(() => cap.readText(path.join('..', 'outside', 'sentinel.txt')));
@@ -50,6 +67,36 @@ test('parent traversal and absolute paths cannot escape', () => {
     assert.throws(() => cap.writeText(outsideFile, 'bad'));
   });
 });
+test('native explicit file removal stays confined and is not recursive', () => {
+  withFixture(({ cap, allowed, outsideFile }) => {
+    fs.writeFileSync(path.join(allowed, 'remove.txt'), 'remove me');
+    cap.removeFileRelative('remove.txt');
+    assert.equal(fs.existsSync(path.join(allowed, 'remove.txt')), false);
+    assert.throws(() => cap.removeFileRelative('remove.txt'));
+    assert.throws(() => cap.removeFileRelative('../outside/sentinel.txt'));
+    assert.throws(() => cap.removeFileRelative(outsideFile));
+    fs.mkdirSync(path.join(allowed, 'directory'));
+    assert.throws(() => cap.removeFileRelative('directory'));
+    assert.equal(fs.existsSync(path.join(allowed, 'directory')), true);
+  });
+});
+
+test('native empty-directory removal never removes nonempty data', () => {
+  withFixture(({ cap, allowed, outsideFile }) => {
+    cap.createDirectory('parent/empty');
+    cap.removeEmptyDirectoryRelative('parent/empty');
+    assert.equal(fs.existsSync(path.join(allowed, 'parent/empty')), false);
+    fs.writeFileSync(path.join(allowed, 'parent/keep.txt'), 'preserve');
+    assert.throws(() => cap.removeEmptyDirectoryRelative('parent'));
+    assert.equal(fs.readFileSync(path.join(allowed, 'parent/keep.txt'), 'utf8'), 'preserve');
+    assert.throws(() => cap.removeEmptyDirectoryRelative('../outside'));
+    assert.throws(() => cap.removeEmptyDirectoryRelative(outsideFile));
+    cap.removeFileRelative('parent/keep.txt');
+    cap.removeEmptyDirectoryRelative('parent');
+    assert.equal(fs.existsSync(path.join(allowed, 'parent')), false);
+  });
+});
+
 test('directory symlink or junction cannot escape', () => {
   withFixture(({ cap, allowed, outside }) => {
     fs.symlinkSync(outside, path.join(allowed, 'escape'),
@@ -60,6 +107,19 @@ test('directory symlink or junction cannot escape', () => {
     assert.equal(fs.existsSync(path.join(outside, 'created.txt')), false);
   });
 });
+test('native entry operations reject escaping symlinks and junctions', () => {
+  withFixture(({ cap, allowed, outside, outsideFile }) => {
+    const alias = path.join(allowed, 'escape-dir');
+    fs.symlinkSync(outside, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => cap.statRelative('escape-dir'));
+    assert.throws(() => cap.statRelative('escape-dir/sentinel.txt'));
+    assert.throws(() => cap.removeFileRelative('escape-dir/sentinel.txt'));
+    assert.throws(() => cap.removeEmptyDirectoryRelative('escape-dir'));
+    assert.deepEqual(fs.readFileSync(outsideFile, 'utf8'), 'untouched\n');
+    assert.equal(fs.existsSync(alias), true);
+  });
+});
+
 test('open root capability resists replacement of original pathname', () => {
   withFixture(({ cap, root, allowed, outside }) => {
     const moved = path.join(root, 'moved');
@@ -87,6 +147,9 @@ test('patched Windows special device-name variants are denied',
     withFixture(({ cap }) => {
       assert.throws(() => cap.writeText('COM¹', 'bad'));
       assert.throws(() => cap.readText('LPT¹'));
+      assert.throws(() => cap.statRelative('COM¹'));
+      assert.throws(() => cap.removeFileRelative('LPT¹'));
+      assert.throws(() => cap.removeEmptyDirectoryRelative('COM¹'));
     });
   });
 

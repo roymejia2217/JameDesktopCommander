@@ -92,6 +92,23 @@ assert.equal(
   'an appropriately short squash title must pass',
 );
 
+// A valid Commitlint body can still violate the protected squash contract.
+// The protected-branch push must reject any nonblank body, even a short one.
+const protectedBodyIndex = steps.findIndex(
+  (step) => step.name === 'Require blank protected squash body',
+);
+const protectedCommitIndex = steps.findIndex(
+  (step) => step.name === 'Validate protected-branch commit',
+);
+assert.ok(protectedBodyIndex >= 0, 'CI must reject nonblank protected squash bodies');
+assert.ok(protectedCommitIndex > protectedBodyIndex, 'blank-body gate must precede Commitlint');
+const protectedBodyStep = steps[protectedBodyIndex];
+assert.equal(protectedBodyStep.if, "github.event_name == 'push'");
+assert.match(protectedBodyStep.run, /git log -1 --format=%b/);
+assert.match(protectedBodyStep.run, /\[ -n "\$body" \]/);
+assert.match(protectedBodyStep.run, /exit 1/);
+assert.match(protectedBodyStep.run, /::error::/);
+
 const defaultsStep = steps[defaultsIndex];
 assert.equal(
   defaultsStep.if,

@@ -91,3 +91,70 @@ test('invalid/rejected policy cannot silently fall back to native unrestricted a
     assert.equal(policy.state, 'revoked');
   });
 });
+
+test('native policy exposes complete confined metadata, directory and deletion operations', async () => {
+  await withBoundary(async ({ inside, sentinel, original, policy }) => {
+    await policy.reload();
+    const at = name => path.join(inside, name);
+    await policy.createDirectory(at('nested'));
+    const payload = Buffer.from([0x00, 0xff, 0x83, 0x21]);
+    await policy.writeBytes(at('nested/original.bin'), payload, 'rewrite');
+    assert.deepEqual(await policy.stat(at('nested/original.bin')),
+      { kind: 'file', sizeBytes: String(payload.length) });
+    assert.equal((await policy.stat(at('nested'))).kind, 'directory');
+    assert.deepEqual(await policy.listDirectory(at('nested')), ['original.bin']);
+    await policy.move(at('nested/original.bin'), at('nested/renamed.bin'));
+    assert.deepEqual(await policy.readBytes(at('nested/renamed.bin')), payload);
+    await assert.rejects(policy.removeEmptyDirectory(at('nested')));
+    await policy.removeFile(at('nested/renamed.bin'));
+    await policy.removeEmptyDirectory(at('nested'));
+    assert.equal(fs.existsSync(at('nested')), false);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native policy entry operations deny junction escape and preserve external bytes', async () => {
+  await withBoundary(async ({ inside, outside, sentinel, original, policy }) => {
+    fs.symlinkSync(outside, path.join(inside, 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+    await policy.reload();
+    const link = path.join(inside, 'escape');
+    for (const operation of [
+      () => policy.stat(link),
+      () => policy.stat(path.join(link, 'sentinel.bin')),
+      () => policy.listDirectory(link),
+      () => policy.removeFile(path.join(link, 'sentinel.bin')),
+      () => policy.removeEmptyDirectory(link),
+      () => policy.createDirectory(path.join(link, 'escaped')),
+      () => policy.move(path.join(inside, 'safe'), path.join(link, 'escaped')),
+    ]) await assert.rejects(operation());
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+    assert.equal(fs.existsSync(path.join(outside, 'escaped')), false);
+  });
+});
+
+test('native policy rechecks revision before destructive entry operations', async () => {
+  await withBoundary(async ({ inside, policy, context, sentinel, original }) => {
+    const target = path.join(inside, 'safe.bin');
+    fs.writeFileSync(target, Buffer.from('original'));
+    await policy.reload();
+    context.revision = 'r2';
+    await assert.rejects(policy.removeFile(target), denied);
+    assert.equal(policy.state, 'revoked');
+    assert.deepEqual(fs.readFileSync(target), Buffer.from('original'));
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native policy denies rename across separately allowed roots', async () => {
+  await withBoundary(async ({ inside, outside, policy, context, sentinel, original }) => {
+    const source = path.join(inside, 'source');
+    fs.writeFileSync(source, Buffer.from('source'));
+    context.allowedRoots = [inside, outside];
+    await policy.reload();
+    await assert.rejects(policy.move(source, path.join(outside, 'target')), denied);
+    assert.equal(fs.readFileSync(source, 'utf8'), 'source');
+    assert.equal(fs.existsSync(path.join(outside, 'target')), false);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});

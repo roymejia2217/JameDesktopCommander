@@ -34,8 +34,10 @@ test('T011-C DOCX bytes: default outline from an in-memory Buffer', () => {
 test('T011-C DOCX bytes: only the selected subarray is parsed', () => {
     const content = docxFixture();
     const backing = Buffer.concat([Buffer.from([0xff, 0x02]), content, Buffer.from([0xaa, 0xee])]);
-    const bytes = Uint8Array.from(backing.subarray(2, content.length + 2));
+    const bytes = backing.subarray(2, content.length + 2);
+    assert.ok(bytes.byteOffset > 0);
     const result = readDocxBytes(bytes);
+    assert.match(readDocxBytes(Uint8Array.from(content)).content, /Hello T011 DOCX/);
     assert.match(result.content, /Hello T011 DOCX/);
     assert.deepEqual(backing.subarray(0, 2), Buffer.from([0xff, 0x02]));
     assert.deepEqual(backing.subarray(content.length + 2), Buffer.from([0xaa, 0xee]));

@@ -13,6 +13,14 @@ class CapabilityPolicyDenied extends Error {
 
 function deny() { return new CapabilityPolicyDenied(); }
 
+// A versioned native surface: incomplete addons are unavailable, never
+// silently emulated with ambient filesystem operations.
+const REQUIRED_NATIVE_METHODS = Object.freeze([
+  'readBytes', 'writeBytes', 'statRelative', 'listDirectory',
+  'createDirectory', 'moveRelative', 'removeFileRelative',
+  'removeEmptyDirectoryRelative', 'close',
+]);
+
 function validateSnapshot(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       value.mode !== 'restricted' ||
@@ -57,7 +65,7 @@ class RestrictedCapabilityPolicy {
   constructor({ readVerifiedPolicy, RootCapability } = {}) {
     if (typeof readVerifiedPolicy !== 'function' ||
         typeof RootCapability !== 'function' ||
-        !['readBytes', 'writeBytes', 'close'].every(name =>
+        !REQUIRED_NATIVE_METHODS.every(name =>
           typeof RootCapability.prototype?.[name] === 'function')) {
       throw deny(); // A missing/wrong native ABI must never grant pathname fallback.
     }
@@ -105,9 +113,12 @@ class RestrictedCapabilityPolicy {
     try {
       for (const root of snapshot.roots) {
         const capability = new this.#RootCapability(root);
-        if (!capability || !['readBytes', 'writeBytes', 'close'].every(name =>
-            typeof capability[name] === 'function')) throw deny();
+        if (!capability || typeof capability.close !== 'function') throw deny();
+        // Take cleanup responsibility immediately after construction, before
+        // checking the remaining ABI. Rejecting a method must not leak a root.
         created.push({ root, capability });
+        if (!REQUIRED_NATIVE_METHODS.every(name =>
+            typeof capability[name] === 'function')) throw deny();
       }
     } catch {
       let failedClose = false;
@@ -161,6 +172,59 @@ class RestrictedCapabilityPolicy {
     if (!Buffer.isBuffer(bytes) || (mode !== 'rewrite' && mode !== 'append')) throw deny();
     const { capability, relative } = await this.#resolve(requestedPath);
     capability.writeBytes(relative, bytes, mode);
+  }
+
+  async stat(requestedPath) {
+    const { capability, relative } = await this.#resolve(requestedPath);
+    const value = capability.statRelative(relative);
+    if (!value || (value.kind !== 'file' && value.kind !== 'directory') ||
+        typeof value.sizeBytes !== 'string' ||
+        !/^(0|[1-9][0-9]{0,19})$/.test(value.sizeBytes) ||
+        BigInt(value.sizeBytes) > 18446744073709551615n) {
+      this.invalidate();
+      throw deny();
+    }
+    return Object.freeze({ kind: value.kind, sizeBytes: value.sizeBytes });
+  }
+
+  async listDirectory(requestedPath) {
+    const { capability, relative } = await this.#resolve(requestedPath);
+    const names = capability.listDirectory(relative);
+    if (!Array.isArray(names) || names.length > 4096 ||
+        !Array.from({ length: names.length }, (_, i) => i)
+          .every(i => Object.hasOwn(names, i) && typeof names[i] === 'string' &&
+            names[i].length > 0 && names[i] !== '.' && names[i] !== '..' &&
+            !/[\\/\x00]/.test(names[i]))) {
+      this.invalidate();
+      throw deny();
+    }
+    return Object.freeze([...names]);
+  }
+
+  async createDirectory(requestedPath) {
+    const { capability, relative } = await this.#resolve(requestedPath);
+    capability.createDirectory(relative);
+  }
+
+  async removeFile(requestedPath) {
+    const { capability, relative } = await this.#resolve(requestedPath);
+    capability.removeFileRelative(relative);
+  }
+
+  async removeEmptyDirectory(requestedPath) {
+    const { capability, relative } = await this.#resolve(requestedPath);
+    capability.removeEmptyDirectoryRelative(relative);
+  }
+
+  async move(sourcePath, destinationPath) {
+    const generation = this.#generation;
+    const source = await this.#resolve(sourcePath);
+    const target = await this.#resolve(destinationPath);
+    // Never bridge distinct roots by copying or ambient rename. A reload may
+    // replace the capability object between the two asynchronous checks.
+    if (this.#generation !== generation || source.capability !== target.capability ||
+        this.#state !== 'active') throw deny();
+    source.capability.moveRelative(source.relative, target.relative);
   }
 }
 

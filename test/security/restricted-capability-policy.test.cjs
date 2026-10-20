@@ -25,6 +25,27 @@ function mockNative(state) {
       if (this.closed) throw Error('closed');
       state.calls.push(['write', this.root, relative, bytes.toString('hex'), mode]);
     }
+    statRelative(relative) {
+      state.calls.push(['stat', this.root, relative]);
+      return state.badMetadata ? { kind: 'wat', sizeBytes: 2 } :
+        { kind: 'file', sizeBytes: '8' };
+    }
+    listDirectory(relative) {
+      state.calls.push(['list', this.root, relative]);
+      return state.badListing ? ['../escape'] : ['target'];
+    }
+    createDirectory(relative) {
+      state.calls.push(['mkdir', this.root, relative]);
+    }
+    moveRelative(from, to) {
+      state.calls.push(['move', this.root, from, to]);
+    }
+    removeFileRelative(relative) {
+      state.calls.push(['removeFile', this.root, relative]);
+    }
+    removeEmptyDirectoryRelative(relative) {
+      state.calls.push(['rmdir', this.root, relative]);
+    }
     close() { this.closed = true; state.closed.push(this.root); }
   };
 }
@@ -175,5 +196,125 @@ test('filesystem/volume root cannot masquerade as restricted policy', async () =
   const { policy, set } = fixture();
   set({ mode: 'restricted', revision: 'r1', allowedRoots: [path.parse(ROOT).root] });
   await assert.rejects(policy.reload(), denied);
+  assert.equal(policy.state, 'revoked');
+});
+
+test('policy dispatches metadata, listing, mkdir, move and confined deletion via native handles', async () => {
+  const { policy, state } = fixture();
+  await policy.reload();
+  const inside = name => path.join(ROOT, name);
+  await policy.createDirectory(inside('nested'));
+  await policy.move(inside('nested/source'), inside('nested/target'));
+  assert.deepEqual(await policy.stat(inside('nested/target')),
+    { kind: 'file', sizeBytes: '8' });
+  assert.deepEqual(await policy.listDirectory(inside('nested')), ['target']);
+  await policy.removeFile(inside('nested/target'));
+  await policy.removeEmptyDirectory(inside('nested'));
+  assert.deepEqual(state.calls.map(x => x[0]),
+    ['mkdir', 'move', 'stat', 'list', 'removeFile', 'rmdir']);
+  policy.close();
+});
+
+test('all new native operations reject out-of-root and root-level targets', async () => {
+  const { policy, state } = fixture();
+  await policy.reload();
+  const bad = path.join(OTHER, 'file');
+  for (const call of [
+    () => policy.stat(bad), () => policy.listDirectory(bad),
+    () => policy.createDirectory(bad), () => policy.removeFile(bad),
+    () => policy.removeEmptyDirectory(bad), () => policy.move(bad, path.join(ROOT, 'safe')),
+    () => policy.move(path.join(ROOT, 'safe'), bad),
+    () => policy.stat(ROOT), () => policy.removeFile(ROOT),
+  ]) await assert.rejects(call(), denied);
+  assert.equal(state.calls.length, 0);
+  policy.close();
+});
+
+test('cross-root move denies instead of copying or reopening absolute paths', async () => {
+  const { policy, state, set } = fixture();
+  set({ revision: 'r1', mode: 'restricted', allowedRoots: [ROOT, OTHER] });
+  await policy.reload();
+  await assert.rejects(policy.move(path.join(ROOT, 'from'), path.join(OTHER, 'to')), denied);
+  assert.equal(state.calls.length, 0);
+  policy.close();
+});
+
+test('inconsistent native metadata and list return types revoke a policy', async () => {
+  const { policy, state } = fixture();
+  await policy.reload();
+  state.badMetadata = true;
+  await assert.rejects(policy.stat(path.join(ROOT, 'item')), denied);
+  assert.equal(policy.state, 'revoked');
+  assert.equal(state.created[0].closed, true);
+  await policy.reload();
+  state.badMetadata = false;
+  state.badListing = true;
+  await assert.rejects(policy.listDirectory(path.join(ROOT, 'nested')), denied);
+  assert.equal(policy.state, 'revoked');
+  assert.ok(state.created[1].closed);
+});
+
+test('missing new native method fails closed before any capability policy opens', () => {
+  const { policy, state } = fixture();
+  assert.equal(state.created.length, 0);
+  policy.close();
+  class IncompleteNative {
+    readBytes() {}
+    writeBytes() {}
+    close() {}
+  }
+  assert.throws(() => new RestrictedCapabilityPolicy({
+    readVerifiedPolicy: async () => ({ revision: 'r', mode: 'restricted', allowedRoots: [ROOT] }),
+    RootCapability: IncompleteNative,
+  }), denied);
+});
+
+test('native operations deny while snapshot is revoked during async verification', async () => {
+  const { policy, state, setReader } = fixture();
+  await policy.reload();
+  let resume;
+  setReader(() => new Promise(resolve => { resume = resolve; }));
+  const pending = policy.removeFile(path.join(ROOT, 'file'));
+  policy.invalidate();
+  resume({ revision: 'r1', mode: 'restricted', allowedRoots: [ROOT] });
+  await assert.rejects(pending, denied);
+  assert.equal(state.calls.length, 0);
+});
+
+test('pending move cannot cross a policy generation change between its two path checks', async () => {
+  const { policy, state, setReader } = fixture();
+  await policy.reload();
+  let reads = 0, releaseSecond;
+  setReader(() => ++reads === 1
+    ? Promise.resolve({ revision: 'r1', mode: 'restricted', allowedRoots: [ROOT] })
+    : new Promise(resolve => { releaseSecond = resolve; }));
+  const pending = policy.move(path.join(ROOT, 'source'), path.join(ROOT, 'target'));
+  for (let i = 0; i < 10 && !releaseSecond; i++) await Promise.resolve();
+  assert.equal(typeof releaseSecond, 'function', 'destination must reach verification');
+  policy.invalidate();
+  releaseSecond({ revision: 'r1', mode: 'restricted', allowedRoots: [ROOT] });
+  await assert.rejects(pending, denied);
+  assert.equal(state.calls.length, 0);
+});
+
+test('ABI mismatch after native constructor closes the newly opened capability', async () => {
+  let opened = 0, closed = 0;
+  class LateMismatch extends mockNative({ created: [], closed: [], calls: [], failAt: null }) {
+    constructor(root) {
+      super(root);
+      opened++;
+      this.removeEmptyDirectoryRelative = undefined;
+    }
+    close() { super.close(); closed++; }
+  }
+  const policy = new RestrictedCapabilityPolicy({
+    readVerifiedPolicy: async () => ({
+      revision: 'r1', mode: 'restricted', allowedRoots: [ROOT],
+    }),
+    RootCapability: LateMismatch,
+  });
+  await assert.rejects(policy.reload(), denied);
+  assert.equal(opened, 1);
+  assert.equal(closed, 1, 'partially initialized native instance must close');
   assert.equal(policy.state, 'revoked');
 });

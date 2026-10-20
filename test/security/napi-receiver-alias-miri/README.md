@@ -112,8 +112,11 @@ setter on `Array.prototype` synchronously reentered `readText()` on
 the *same* capability while `listDirectory('.')` was in progress.
 `test/security/capability-return-array-reentry-child.cjs` reproduces
 that route in a bounded, isolated child using only temporary files;
-the native Node 24 Windows suite passed 21/21 tests. No experimental
-callback-taking method is required for this specific reentry route.
+the native Node 24 Windows suite passed 21/21 tests. The child also
+verifies that a nested **mutable** borrow is rejected while the outer
+native shared guard is active, forces GC in the callback, and verifies
+that exclusive borrowing recovers after the return conversion.
+No experimental callback-taking method is required for this route.
 
 This is direct evidence of **reachable JavaScript reentry**, not proof
 of Undefined Behavior: the Miri model retains and later reads the

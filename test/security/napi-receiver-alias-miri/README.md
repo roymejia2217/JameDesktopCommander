@@ -187,6 +187,36 @@ The new Miri control requires fresh pinned hosted Miri evidence; stable
 `cargo test` passing is insufficient.
 
 
+## Independent candidate and control execution (2026-10-20)
+
+The CI workflow now runs a **separate** `miri-candidate-controls` matrix
+under pinned official Miri Stacked Borrows and Tree Borrows. It invokes
+`cargo miri test ... candidate_` and `cargo miri test ... control_`.
+Those filters isolate the named alternative-reference and control functions;
+they are **not** authorized production macro expansion or Node-API tests.
+The full `miri-receiver-model` matrix still runs every test, including
+`model_pinned_generated_shared_reentry` and the hypothetical
+`model_inline_borrowed_return_with_nested_generated_receiver`.
+These tests retain their normal, *unsuppressed* failures.
+
+Interpretation of future workflow results must distinguish:
+
+- **Candidate controls PASS:** the alternative Rust expression behaves as
+  tested in the simplified model only; it does not prove Node-API lifetime,
+  sound codegen or approval for a dependency fork.
+- **Full model FAIL:** the exact pinned generated expression continues to
+  trigger Miri in a constructed reentrancy model. Do not relabel it an
+  expected failure, skip it, or waive a security check.
+- **Candidate controls FAIL:** a proposed alternative is also invalid under
+  that model; do not propose it upstream as a proven fix.
+- **CI action status:** this research workflow is **not** a green release
+  gate while a full model fails. Its separation improves diagnosis only.
+
+The matrix uses GitHub-hosted Ubuntu runners and installs no tools on the
+Windows runtime. Pending new CI results; no validation claim yet.
+Read the exact per-case test counts; an empty filtered test selection does
+not qualify as a passing security control.
+
 ## Table of Contents
 
 - [Install](#install)

@@ -30,8 +30,36 @@ fn read_bounded(file: impl Read) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// Some Windows junctions and other reparse points do not present as
+// ordinary symbolic links. Check the OS reparse attribute as well as
+// cap-std's cross-platform file-type classification; deny conservatively.
+fn reject_special_entry(metadata: &cap_std::fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(Error::from_reason("Capability operation rejected: nonregular entry"));
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(Error::from_reason("Capability operation rejected: reparse point"));
+        }
+    }
+    Ok(())
+}
+
 #[napi]
 pub struct RootCapability { root: Mutex<Option<Dir>> }
+
+// Exact byte count is represented as a decimal string to avoid precision
+// loss when JavaScript consumers handle files larger than Number.MAX_SAFE_INTEGER.
+// Only regular files and directories are reported; symbolic links and other
+// special entries are rejected without following them.
+#[napi(object)]
+pub struct CapabilityEntryMetadata {
+    pub kind: String,
+    pub size_bytes: String,
+}
 
 // Create a test-only N-API-wrapped object via the supported safe wrapper.
 // No additional #[napi] native class or filesystem capability is introduced.
@@ -213,6 +241,55 @@ impl RootCapability {
             names.push(name);
         }
         Ok(names)
+    }
+
+    // For existing entries, query via the capability handle rather than
+    // validating an absolute path and reopening it under a mutable namespace.
+    #[napi]
+    pub fn stat_relative(&self, relative: String) -> Result<CapabilityEntryMetadata> {
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let metadata = dir.symlink_metadata(relative).map_err(denied)?;
+        reject_special_entry(&metadata)?;
+        let kind = if metadata.is_file() {
+            "file"
+        } else if metadata.is_dir() {
+            "directory"
+        } else {
+            return Err(Error::from_reason("Capability operation rejected: nonregular entry"));
+        };
+        Ok(CapabilityEntryMetadata {
+            kind: kind.to_owned(),
+            size_bytes: metadata.len().to_string(),
+        })
+    }
+
+    // Intentional file removal only; directory and symlink targets are denied.
+    // The final unlinked name is resolved by cap-std relative to the held root.
+    #[napi]
+    pub fn remove_file_relative(&self, relative: String) -> Result<()> {
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let metadata = dir.symlink_metadata(&relative).map_err(denied)?;
+        reject_special_entry(&metadata)?;
+        if !metadata.is_file() {
+            return Err(Error::from_reason("Capability operation rejected: not a regular file"));
+        }
+        dir.remove_file(relative).map_err(denied)
+    }
+
+    // Deliberately non-recursive. Removing a nonempty directory must fail
+    // without unlinking its children, including under concurrent renames.
+    #[napi]
+    pub fn remove_empty_directory_relative(&self, relative: String) -> Result<()> {
+        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let metadata = dir.symlink_metadata(&relative).map_err(denied)?;
+        reject_special_entry(&metadata)?;
+        if !metadata.is_dir() {
+            return Err(Error::from_reason("Capability operation rejected: not a regular directory"));
+        }
+        dir.remove_dir(relative).map_err(denied)
     }
 
     #[napi]

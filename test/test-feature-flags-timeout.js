@@ -14,6 +14,7 @@
 import { createServer } from 'net';
 import http from 'http';
 import assert from 'assert';
+import { mock } from 'node:test';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -325,49 +326,60 @@ async function testNewUserOnboardingPath() {
  * resolves after 20s. Then we show that Promise.race still saves us.
  */
 async function testBrokenAbortControllerSimulation() {
-  // Simulate a fetch that ignores AbortController (the Windows bug)
-  function brokenFetch() {
-    return new Promise((resolve, reject) => {
-      // This simulates the fetch hanging for 20s regardless of abort
-      setTimeout(() => reject(new Error('OS TCP timeout after 20s')), 20000);
+  // Use Node's built-in virtual clock only for the simulated OS timeout.
+  // The five preceding tests retain real TCP sockets and real elapsed time.
+  const timers = mock.timers;
+  timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  try {
+    // This promise deliberately ignores the AbortSignal.
+    function brokenFetch() {
+      return new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('OS TCP timeout after 20s')), 20000);
+      });
+    }
+
+    const start1 = Date.now();
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5000);
+    let firstSettled = false;
+    const first = brokenFetch().finally(() => { firstSettled = true; });
+
+    timers.tick(5000);
+    assert.equal(controller.signal.aborted, true, 'abort must fire at 5s');
+    await Promise.resolve();
+    assert.equal(firstSettled, false, 'broken fetch must ignore abort');
+    timers.tick(15000);
+    await assert.rejects(first, /OS TCP timeout after 20s/);
+    const elapsed1 = Date.now() - start1;
+    assert.equal(elapsed1, 20000, 'broken fetch must wait the full virtual OS timeout');
+    console.log(`   Broken AbortController (current pattern): ${elapsed1}ms virtual`);
+
+    const start2 = Date.now();
+    const pendingFetch = brokenFetch();
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Hard timeout')), 5000);
     });
+    const raced = Promise.race([pendingFetch, timeoutPromise]);
+    timers.tick(5000);
+    await assert.rejects(raced, /Hard timeout/);
+    const elapsed2 = Date.now() - start2;
+    assert.equal(elapsed2, 5000, 'hard timeout must win at 5s virtual');
+    console.log(`   Broken AbortController (Promise.race fix): ${elapsed2}ms virtual`);
+
+    // The losing fetch remains pending, proving that Promise.race does not
+    // magically cancel an uncooperative operation.
+    let pendingSettled = false;
+    const observedFetch = pendingFetch.finally(() => { pendingSettled = true; });
+    await Promise.resolve();
+    assert.equal(pendingSettled, false, 'losing fetch must remain unresolved at 5s');
+    timers.tick(15000);
+    await assert.rejects(observedFetch, /OS TCP timeout after 20s/);
+    assert.equal(pendingSettled, true, 'broken fetch must eventually reject');
+
+    console.log(`   ✓ Promise.race recovered from broken AbortController (${elapsed1}ms → ${elapsed2}ms virtual)`);
+  } finally {
+    timers.reset();
   }
-
-  // Current pattern: AbortController only — hangs for 20s
-  const start1 = Date.now();
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), 5000);
-  try {
-    await brokenFetch(); // ignores the abort signal
-  } catch (err) {
-    // will take 20s
-  }
-  const elapsed1 = Date.now() - start1;
-  console.log(`   Broken AbortController (current pattern): ${elapsed1}ms`);
-
-  // Fixed pattern: Promise.race — returns in 5s even with broken abort
-  const start2 = Date.now();
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('Hard timeout')), 5000)
-  );
-  try {
-    await Promise.race([brokenFetch(), timeoutPromise]);
-  } catch (err) {
-    // will take 5s thanks to Promise.race
-  }
-  const elapsed2 = Date.now() - start2;
-  console.log(`   Broken AbortController (Promise.race fix): ${elapsed2}ms`);
-
-  assert(
-    elapsed1 > 15000,
-    `Expected broken fetch to hang ~20s but it took ${elapsed1}ms — simulation is wrong`
-  );
-  assert(
-    elapsed2 < 7000,
-    `Promise.race fix should have resolved in ~5s but took ${elapsed2}ms`
-  );
-
-  console.log(`   ✓ Promise.race recovered from broken AbortController (${elapsed1}ms → ${elapsed2}ms)`);
 }
 
 async function main() {

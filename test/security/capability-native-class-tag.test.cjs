@@ -70,7 +70,7 @@ test('production native methods reject object paths without invoking user coerci
 
 test('listDirectory return conversion can reenter a production shared receiver', () => {
   const child = path.join(__dirname, 'capability-return-array-reentry-child.cjs');
-  const result = spawnSync(process.execPath, [child, addonFile], {
+  const result = spawnSync(process.execPath, ['--expose-gc', child, addonFile], {
     timeout: 15_000,
     encoding: 'utf8',
     windowsHide: true,

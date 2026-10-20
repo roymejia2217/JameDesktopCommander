@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 // Research-only, bounded child-process probe. No privileged service or MCP calls.
+assert.equal(typeof global.gc, 'function', 'child requires --expose-gc');
 const addon = require(process.argv[2]);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-return-reentry-'));
 let capability;
@@ -27,6 +28,10 @@ try {
         nestedCalls++;
         assert.equal(capability.readText('readback.txt'), 'KNOWN-CONTENT',
           'reentrant shared native receiver must complete while array is created');
+        assert.throws(() => addon.acceptsMutRootArgument(capability),
+          /borrow|mutabl|exclusive|active/i,
+          'outer return conversion must retain its native shared borrow guard');
+        global.gc();
       }
       Object.defineProperty(this, '1', {
         configurable: true, enumerable: true, writable: true, value,
@@ -44,6 +49,8 @@ try {
     'native Vec<String> conversion must invoke the inherited index setter');
   assert.ok(names.includes('readback.txt'), 'directory conversion must return valid results');
   assert.ok(setterCalls >= 1);
+  assert.equal(addon.acceptsMutRootArgument(capability), true,
+    'exclusive borrow must recover after array conversion completes');
   console.log('PRODUCTION_RECEIVER_REENTRY_OBSERVED=' + nestedCalls);
 } finally {
   insideCall = false;

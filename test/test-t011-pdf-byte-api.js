@@ -25,6 +25,21 @@ test('T011-C: PDF byte parser accepts Buffer and retains source bytes', async ()
     assert.deepEqual(source, snapshot);
 });
 
+test('T011-C: PDF parser handles a sliced Buffer without reading adjacent bytes', async () => {
+    const sourcePdf = Buffer.from(await pdfWithPages(1));
+    const backing = Buffer.concat([
+        Buffer.from([0xff, 0x00, 0xaa]),
+        sourcePdf,
+        Buffer.from([0xee, 0x11]),
+    ]);
+    const source = backing.subarray(3, 3 + sourcePdf.length);
+    const original = Buffer.from(backing);
+    assert.ok(source.byteOffset > 0);
+    const result = await parsePdfBytesToMarkdown(source);
+    assert.equal(result.metadata.totalPages, 1);
+    assert.deepEqual(backing, original);
+});
+
 test('T011-C: PDF byte editor removes pages without mutating input', async () => {
     const source = await pdfWithPages(2);
     const original = Uint8Array.from(source);

@@ -281,7 +281,11 @@ export async function parsePdfBytesToMarkdown(
     if (!(source instanceof Uint8Array)) {
         throw new TypeError('PDF source must be a Uint8Array');
     }
-    return await pdf2md(source, pageNumbers);
+    // Node Buffer inherits Uint8Array, but PDF.js rejects Buffer instances.
+    // Copy only Buffer inputs into a plain Uint8Array; this also preserves
+    // the exact byte window of sliced/pool-backed Buffer views.
+    const pdfBytes = Buffer.isBuffer(source) ? Uint8Array.from(source) : source;
+    return await pdf2md(pdfBytes, pageNumbers);
 }
 
 /**

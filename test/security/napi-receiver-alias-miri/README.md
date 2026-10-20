@@ -87,10 +87,11 @@ This confirms that the generated `&self` receiver can be exercised
 with nested JavaScript callbacks in a test fixture; Node success is
 **not** a soundness proof and does not erase the independent Miri
 diagnostic. Production `RootCapability` methods do not themselves
-accept JavaScript callbacks; reachability in the shipped public API,
-actual unsafe-Rust aliasing under Node-API FFI, and a compatible
-upstream correction all remain security review gates. Leave PR #131
-in draft, issue #124 and CodeQL #12 open, and T011 non-release.
+accept JavaScript callbacks, but their return-value conversion can invoke
+JavaScript-controlled inherited property setters, as demonstrated below.
+Actual unsafe-Rust aliasing under Node-API FFI and a compatible upstream
+correction remain security review gates. Leave PR #131 in draft,
+issue #124 and CodeQL #12 open, and T011 non-release.
 
 A separate isolated Node child
 (`test/security/capability-receiver-coercion-child.cjs`) probes a
@@ -102,6 +103,24 @@ was not changed. On the tested Windows native fixture this is PASS.
 It narrows only this specific implicit-coercion route; it does not
 exclude other JavaScript reentry during FFI conversion, object
 finalization or callbacks, or establish native memory-model soundness.
+
+**Production-method return-conversion reentry (2026-10-19/20):**
+`RootCapability::list_directory(&self) -> Result<Vec<String>>` converts
+its result into a JavaScript array. The locked `napi` implementation
+writes array elements via Node-API. A configurable inherited index-1
+setter on `Array.prototype` synchronously reentered `readText()` on
+the *same* capability while `listDirectory('.')` was in progress.
+`test/security/capability-return-array-reentry-child.cjs` reproduces
+that route in a bounded, isolated child using only temporary files;
+the native Node 24 Windows suite passed 21/21 tests. No experimental
+callback-taking method is required for this specific reentry route.
+
+This is direct evidence of **reachable JavaScript reentry**, not proof
+of Undefined Behavior: the Miri model retains and later reads the
+outer Rust reference, whereas the compiled method/return-conversion
+lifetime may differ. Independent review must compare actual generated
+references, native borrow scope, raw-pointer provenance and finalization.
+The test fixture is non-release; no Rust pins or shipping APIs changed.
 
 
 ## Table of Contents

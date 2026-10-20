@@ -39,11 +39,42 @@ export class ExcelFileHandler implements FileHandler {
 
     async read(path: string, options?: ReadOptions): Promise<FileResult> {
         await this.checkFileSize(path);
-
         const workbook = new ExcelJS.Workbook();
         await workbook.xlsx.readFile(path);
-
         const metadata = await this.extractMetadata(workbook, path);
+        return this.formatReadResult(workbook, metadata, path, options);
+    }
+
+    /**
+     * Process an already-authorized XLSX buffer without opening a pathname.
+     * The optional displayName is presentation-only, never used for I/O.
+     * This does not authorize input or bound decompressed workbook memory.
+     */
+    async readBytes(
+        source: Uint8Array,
+        options?: ReadOptions,
+        displayName = '(authorized bytes)',
+    ): Promise<FileResult> {
+        if (!(source instanceof Uint8Array)) {
+            throw new TypeError('Excel source must be a Uint8Array');
+        }
+        if (source.byteLength > FILE_SIZE_LIMIT) {
+            throw new Error('Excel input exceeds the 10MB compressed-byte limit');
+        }
+        const workbook = new ExcelJS.Workbook();
+        // ExcelJS has a documented in-memory loader. Copy exactly the supplied
+        // byte view rather than reopening a path or retaining a pooled Buffer.
+        await workbook.xlsx.load(Buffer.from(source));
+        const metadata = this.metadataFromSize(workbook, source.byteLength);
+        return this.formatReadResult(workbook, metadata, displayName, options);
+    }
+
+    private formatReadResult(
+        workbook: ExcelJS.Workbook,
+        metadata: ExcelMetadata,
+        displayName: string,
+        options?: ReadOptions,
+    ): FileResult {
         const { sheetName, data, totalRows, returnedRows } = this.worksheetToArray(
             workbook,
             options?.sheet,
@@ -59,7 +90,7 @@ export class ExcelFileHandler implements FileHandler {
 
         const sheetHasSpace = /\s/.test(sheetName);
         const exampleSheet = sheetHasSpace ? sheetName : 'Sheet1';
-        const content = `[Sheet: '${sheetName}' from ${path}]${paginationInfo}
+        const content = `[Sheet: '${sheetName}' from ${displayName}]${paginationInfo}
 [To MODIFY cells: use edit_block with range param, e.g., edit_block(path, {range: "${exampleSheet}!E5", content: [[newValue]]}). read_file accepts the same range form, or pass sheet + range separately.]
 
 ${JSON.stringify(data)}`;
@@ -296,7 +327,10 @@ ${JSON.stringify(data)}`;
 
     private async extractMetadata(workbook: ExcelJS.Workbook, path: string): Promise<ExcelMetadata> {
         const stats = await fs.stat(path);
+        return this.metadataFromSize(workbook, stats.size);
+    }
 
+    private metadataFromSize(workbook: ExcelJS.Workbook, byteLength: number): ExcelMetadata {
         const sheets: ExcelSheet[] = workbook.worksheets.map(ws => ({
             name: ws.name,
             rowCount: ws.actualRowCount || 0,
@@ -305,8 +339,8 @@ ${JSON.stringify(data)}`;
 
         return {
             sheets,
-            fileSize: stats.size,
-            isLargeFile: stats.size > FILE_SIZE_LIMIT
+            fileSize: byteLength,
+            isLargeFile: byteLength > FILE_SIZE_LIMIT
         };
     }
 

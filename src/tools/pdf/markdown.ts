@@ -270,15 +270,28 @@ async function loadPdfToBuffer(source: string): Promise<Buffer | ArrayBuffer> {
 }
 
 /**
- * Convert PDF to Markdown using @opendocsg/pdf2md
+ * Parse already-authorized PDF bytes without resolving a filename or URL.
+ * The caller owns filesystem authorization, file size limits, and cancellation.
+ * This API does not authorize a source and is not itself a confinement boundary.
+ */
+export async function parsePdfBytesToMarkdown(
+    source: Uint8Array,
+    pageNumbers: number[] | PageRange = [],
+): Promise<PdfParseResult> {
+    if (!(source instanceof Uint8Array)) {
+        throw new TypeError('PDF source must be a Uint8Array');
+    }
+    return await pdf2md(source, pageNumbers);
+}
+
+/**
+ * Convert a PDF pathname or URL to Markdown (legacy caller contract).
+ * The path-based API remains unchanged until native capability routing passes T011.
  */
 export async function parsePdfToMarkdown(source: string, pageNumbers: number[] | PageRange = []): Promise<PdfParseResult> {
     try {
         const data = await loadPdfToBuffer(source);
-
-        // @ts-ignore: Type definition mismatch for ESM usage
-        return await pdf2md(new Uint8Array(data), pageNumbers);
-
+        return await parsePdfBytesToMarkdown(new Uint8Array(data), pageNumbers);
     } catch (error) {
         console.error("Error converting PDF to Markdown (v3):", error);
         throw error;

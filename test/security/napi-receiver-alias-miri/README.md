@@ -152,6 +152,33 @@ deliberately **does** read the old reference after a nested conversion;
 its original Stacked/Tree Borrows failures must remain visible.
 Do not equate these two models or infer Rust soundness from either.
 
+Pinned Miri run
+[39423371452](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39423371452)
+confirmed that the last-use control PASSED under **both** Stacked
+Borrows and Tree Borrows; the original overlapping-receiver model
+remained FAIL under both. The updated draft adds two independent cases
+for a *different*, **hypothetical** API: a returned slice that points
+into inline bytes of the original native receiver allocation. The
+plain raw-shared-reference control retains that slice across nested
+shared reentry without recreating Box ownership; the generated-Box
+model repeats the same sequence using the pinned codegen expression.
+This discriminates a live borrowed-return reference from the shipping
+`RootCapability::list_directory` method, which returns an owned
+`Vec<String>` and does **not** retain a borrowed inline slice.
+
+Upstream `napi-rs` already independently tests JavaScript array setter
+reentry while a result contains borrowed strings, in
+`examples/napi/__tests__/values.spec.ts` (file blob
+`9f9f007a4b2d4b6c2337e2e5cc81cefb70b63731`, inspected
+2026-10-20); its test asserts the native shared guard denies an
+overlapping mutable callback. That test is important but does not
+establish the aliasing semantics of a **nested shared** receiver that
+recreates a Box while borrowed data remain live. The new inline-byte
+Miri models are **not a reproducer of any shipping JDC method**, and
+their results must come from the two official hosted Miri modes.
+No conclusion about Rust UB or upstream production exploitability is
+made before those results are read.
+
 The independent Node child now also injects a setter exception during
 array conversion, verifies propagation, tests that the mutable borrow
 guard is released, and reads the capability again after the error.

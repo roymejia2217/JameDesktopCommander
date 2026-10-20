@@ -126,6 +126,52 @@ fn control_return_conversion_reentry_after_last_receiver_use() {
     }
 }
 
+// A return value can borrow bytes inline in its receiver. Unlike a
+// Vec<String> owned return, these byte slices still point into the same
+// allocation while N-API converts the return into a JavaScript array.
+// This is a separate hypothetical upstream API shape, NOT a shipping
+// RootCapability method and not an FFI lifetime proof.
+#[cfg(test)]
+struct InlineBorrowedReturn {
+    inline: [u8; 4],
+}
+
+#[cfg(test)]
+unsafe fn generated_inline_receiver(
+    ptr: *mut InlineBorrowedReturn,
+) -> &'static InlineBorrowedReturn {
+    let this: &InlineBorrowedReturn = Box::leak(unsafe { Box::from_raw(ptr) });
+    this
+}
+
+#[test]
+fn control_inline_borrowed_return_with_nested_plain_shared_receiver() {
+    let ptr = Box::into_raw(Box::new(InlineBorrowedReturn { inline: *b"ABCD" }));
+    unsafe {
+        let outer = &*ptr;
+        let converted_later: &[u8] = &outer.inline;
+        let nested = &*ptr;
+        assert_eq!(nested.inline[0], b'A');
+        assert_eq!(converted_later, b"ABCD");
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[test]
+fn model_inline_borrowed_return_with_nested_generated_receiver() {
+    let ptr = Box::into_raw(Box::new(InlineBorrowedReturn { inline: *b"ABCD" }));
+    unsafe {
+        let outer = generated_inline_receiver(ptr);
+        let converted_later: &[u8] = &outer.inline;
+        // The inner conversion recreates a unique Box while the return
+        // still contains references into the previous receiver allocation.
+        let nested = generated_inline_receiver(ptr);
+        assert_eq!(nested.inline[0], b'A');
+        assert_eq!(converted_later, b"ABCD");
+        drop(Box::from_raw(ptr));
+    }
+}
+
 #[test]
 fn model_pinned_generated_shared_reentry() {
     let ptr = Box::into_raw(Box::new(RootCapability {

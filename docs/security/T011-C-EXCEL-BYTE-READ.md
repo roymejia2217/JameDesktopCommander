@@ -6,14 +6,18 @@
 The existing `ExcelFileHandler.read(path, options)` continues using the
 documented ExcelJS pathname API and the original metadata/stat checks.
 The new `ExcelFileHandler.readBytes(Uint8Array, options, displayName?)`
-uses the officially documented `workbook.xlsx.load(buffer)` API and
-shares the legacy formatting and pagination method. A caller-provided
+uses ExcelJS's documented `workbook.xlsx.read(stream)` API with a
+Node.js in-memory Readable; this avoids the library's legacy Buffer
+TypeScript declaration mismatch without casts or altered dependencies.
+It shares the legacy formatting and pagination method. A caller-provided
 display label affects only returned text; it is not used to authorize,
 resolve or open a file.
 
 In-memory processing accepts Node `Buffer`, ordinary `Uint8Array`, and
 sliced byte views. Bytes are copied to a fresh Buffer before ExcelJS
-parsing so the parser sees only the supplied window. Path strings,
+streaming so the parser sees only the supplied window. The XLSX
+reader still aggregates the stream internally before ZIP parsing; this
+does not make the parser streaming or memory-bounded. Path strings,
 missing inputs and compressed workbooks larger than the existing
 10 MiB limit are rejected before parsing. Unit tests cover workbook
 metadata, secondary-sheet/range pagination, view boundaries, malformed

@@ -5,6 +5,7 @@
 
 import ExcelJS from 'exceljs';
 import fs from 'fs/promises';
+import { Readable } from 'node:stream';
 import {
     FileHandler,
     ReadOptions,
@@ -62,9 +63,10 @@ export class ExcelFileHandler implements FileHandler {
             throw new Error('Excel input exceeds the 10MB compressed-byte limit');
         }
         const workbook = new ExcelJS.Workbook();
-        // ExcelJS has a documented in-memory loader. Copy exactly the supplied
-        // byte view rather than reopening a path or retaining a pooled Buffer.
-        await workbook.xlsx.load(Buffer.from(source));
+        // Use ExcelJS's supported XLSX stream reader to avoid its legacy
+        // Buffer type signature, which conflicts with current Node typings.
+        // Provide one owned copy of the exact input window; no filesystem I/O.
+        await workbook.xlsx.read(Readable.from([Buffer.from(source)]));
         const metadata = this.metadataFromSize(workbook, source.byteLength);
         return this.formatReadResult(workbook, metadata, displayName, options);
     }

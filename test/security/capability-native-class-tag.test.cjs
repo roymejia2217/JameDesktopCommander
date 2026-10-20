@@ -68,6 +68,21 @@ test('production native methods reject object paths without invoking user coerci
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('listDirectory return conversion can reenter a production shared receiver', () => {
+  const child = path.join(__dirname, 'capability-return-array-reentry-child.cjs');
+  const result = spawnSync(process.execPath, [child, addonFile], {
+    timeout: 15_000,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined, 'bounded return-conversion child must finish');
+  assert.equal(result.signal, null, 'native runtime must not crash');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PRODUCTION_RECEIVER_REENTRY_OBSERVED=1/,
+    'the test must actually trigger nested JS during native return conversion');
+});
+
 test('native type tag accepts a legitimate RootCapability argument', () => {
   const os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-napi-tag-'));

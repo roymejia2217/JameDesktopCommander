@@ -217,6 +217,29 @@ Windows runtime. Pending new CI results; no validation claim yet.
 Read the exact per-case test counts; an empty filtered test selection does
 not qualify as a passing security control.
 
+## Independent per-case Miri diagnostics (2026-10-20)
+
+The full pinned-generator Miri jobs in
+[run 39484968229](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39484968229)
+remained FAIL under Stacked Borrows and Tree Borrows. The isolated
+`candidate_` tests passed **2/2** and `control_` tests passed **4/4**
+under each model. This is limited model evidence, not an N-API proof.
+
+The `miri-model-cases` matrix runs
+`model_pinned_generated_shared_reentry` and
+`model_inline_borrowed_return_with_nested_generated_receiver`
+independently under both aliasing models using the exact test name.
+An early Miri abort in the full suite can otherwise leave a later
+scenario unexecuted. Every isolated job retains its actual nonzero
+failure on Undefined Behavior; no test is skipped, reclassified as
+an expected failure, or used to make the full security workflow green.
+If one case passes, report the actual PASS for that case without
+discounting the failures of other cases.
+
+**New matrix not yet verified:** await terminal hosted Miri results;
+inspect each test selection count and diagnostic. This does not enable
+production binaries, close issue #124, or resolve CodeQL alert #12.
+
 ## Table of Contents
 
 - [Install](#install)

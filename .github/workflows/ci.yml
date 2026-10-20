@@ -104,6 +104,15 @@ jobs:
         # Validate the actual GitHub PR_TITLE squash subject, including (#number).
         run: printf '%s (#%s)\n' "$PR_TITLE" "$PR_NUMBER" | npm run --silent lint:commit
 
+      - name: Require blank protected squash body
+        if: github.event_name == 'push'
+        run: |
+          body="$(git log -1 --format=%b)"
+          if [ -n "$body" ]; then
+            echo "::error::Protected squash commit body must be blank; omit merge API metadata overrides."
+            exit 1
+          fi
+
       - name: Validate protected-branch commit
         if: github.event_name == 'push'
         run: >-

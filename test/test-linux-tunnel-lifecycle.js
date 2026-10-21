@@ -39,10 +39,31 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   const calls = [];
   let alive = true;
   let healthy = true;
+  let stopBetweenCheckAndRestart = false;
+  let unintendedStarts = 0;
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
-      if (args[1] === 'show') return alive ? 'ActiveState=active\nUnitFileState=enabled\n' : 'ActiveState=inactive\nUnitFileState=disabled\n';
+      if (args[1] === 'show') {
+        const state = alive ? 'ActiveState=active\nUnitFileState=enabled\n' :
+          'ActiveState=inactive\nUnitFileState=disabled\n';
+        if (stopBetweenCheckAndRestart) {
+          // A separate operator can complete STOP after this read.
+          alive = false;
+          stopBetweenCheckAndRestart = false;
+        }
+        return state;
+      }
+      if (args[1] === 'try-restart') {
+        // Model systemd's documented conditional behavior, not a bespoke
+        // daemon or a mocked successful restart of an inactive unit.
+        if (!alive) return '';
+        return '';
+      }
+      if (args[1] === 'restart') {
+        if (!alive) { unintendedStarts++; alive = true; }
+        return '';
+      }
       return '';
     }
     if (args[0] === 'profiles') return JSON.stringify([{ name: 'jdc', path: profilePath }]);
@@ -87,8 +108,16 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
     assert.ok(calls.slice(beforeRestart).some(c =>
-      c[0] === 'systemctl' && c[2] === 'restart' && c[3] === LINUX_TUNNEL_UNIT),
-      'Use the official user manager for restart');
+      c[0] === 'systemctl' && c[2] === 'try-restart' && c[3] === LINUX_TUNNEL_UNIT),
+      'Use systemd try-restart to preserve STOP under interleaving');
+    stopBetweenCheckAndRestart = true;
+    const beforeInterleaved = calls.length;
+    assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
+    assert.ok(calls.slice(beforeInterleaved).some(c => c[2] === 'try-restart'),
+      'Interleaved STOP must reach conditional restart only');
+    assert.equal(unintendedStarts, 0, 'Interleaved STOP may not revive the tunnel');
+    assert.equal(alive, false, 'Stop between state check and restart must remain effective');
+    alive = true;
     healthy = false;
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, false);
     await assert.rejects(runLinuxTunnelCommand(['restart', '--force'], deps),
@@ -97,12 +126,12 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.active, false);
     const beforeRejectedRestart = calls.length;
     await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
-    assert.ok(!calls.slice(beforeRejectedRestart).some(c => c[2] === 'restart'),
+    assert.ok(!calls.slice(beforeRejectedRestart).some(c => c[2] === 'try-restart' || c[2] === 'restart'),
       'Inactive service must not restart');
     await runLinuxTunnelCommand(['stop'], deps);
     const afterStop = calls.length;
     await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
-    assert.ok(!calls.slice(afterStop).some(c => c[2] === 'restart'),
+    assert.ok(!calls.slice(afterStop).some(c => c[2] === 'try-restart' || c[2] === 'restart'),
       'Explicit operator stop must persist');
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'disable' && c[3] === '--now'));
     await runLinuxTunnelCommand(['uninstall'], deps);

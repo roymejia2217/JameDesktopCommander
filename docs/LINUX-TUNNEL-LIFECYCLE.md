@@ -64,8 +64,10 @@ only**, not remotely connected Linux availability.
 
 ## Explicit restart semantics
 
-The Linux CLI delegates `restart` to the official `systemctl --user restart`
-only after verifying the managed unit is enabled and active. It must never
-reactivate an inactive or deliberately stopped unit. A successful restart
+The Linux CLI delegates `restart` to the official `systemctl --user try-restart`
+only after verifying the managed unit is enabled and active. The native
+conditional operation also avoids reviving a unit that becomes inactive
+after that check and before the manager processes the restart request. It
+must never reactivate an inactive or deliberately stopped unit. A successful restart
 acknowledges only the user-manager operation: `status` separately verifies
 the tunnel's authenticated control-plane readiness.

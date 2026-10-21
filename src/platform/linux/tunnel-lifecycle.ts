@@ -171,7 +171,8 @@ export async function runLinuxTunnelCommand(
     if (action === 'start') {
       await systemctl(['enable', '--now', unit]);
     } else if (action === 'restart') {
-      // Native systemd restart also starts inactive units; preserve STOP.
+      // First reject an inactive/disabled unit; also use try-restart so
+      // the systemd manager cannot revive a unit stopped after this check.
       const state = await systemctl(['show', unit,
         '--property=ActiveState', '--property=UnitFileState', '--no-pager']);
       if (!/^ActiveState=active$/m.test(state) ||
@@ -179,7 +180,7 @@ export async function runLinuxTunnelCommand(
         throw new Error('Linux tunnel restart requires an enabled, active user service.');
       }
       // A successful restart does not establish remote control-plane readiness.
-      await systemctl(['restart', unit]);
+      await systemctl(['try-restart', unit]);
     } else if (action === 'stop' || action === 'uninstall') {
       await systemctl(['disable', '--now', unit]);
       if (action === 'uninstall') {

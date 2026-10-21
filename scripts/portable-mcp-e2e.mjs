@@ -163,6 +163,32 @@ try {
   const prompts = (await bounded('MCP prompts/list', () => client.listPrompts())).prompts;
   assert.ok(Array.isArray(prompts), 'Invalid MCP prompts catalog');
 
+  // Linux first-class development gate: exercise the actual extracted
+  // candidate and shell tool, not a mock or the runner's checkout Node.
+  // The shell uses the fixture's non-root CI identity. The allowedDirectories
+  // filesystem policy does NOT sandbox process-execution tools.
+  if (process.platform === 'linux') {
+    assert.notEqual(process.getuid(), 0, 'Linux candidate must not run as root');
+    assert.ok(names.includes('start_process'), 'Missing Linux process tool');
+    assert.ok(names.includes('computer_inspect'), 'Missing explicit Linux UI status');
+
+    const command = 'printf JDC_LINUX_PROCESS_OK';
+    const launched = await bounded('MCP Linux start_process', () => callFixtureTool(
+      'start_process', { command, shell: '/bin/sh', timeout_ms: 10000 },
+    ));
+    assert.notEqual(launched.isError, true, 'Linux shell process launch failed');
+    assert.match(toolText(launched), /JDC_LINUX_PROCESS_OK/,
+      'The packaged MCP process did not return the shell output');
+
+    // Windows-only Computer Use must deny explicitly on Linux rather than
+    // simulating a desktop snapshot or returning fabricated health.
+    const ui = await bounded('MCP Linux UI unsupported status', () =>
+      callFixtureTool('computer_inspect', { action: 'health' }));
+    assert.equal(ui.isError, true, 'Windows UI Bridge unexpectedly enabled on Linux');
+    assert.match(toolText(ui), /WINDOWS_REQUIRED/,
+      'Unsupported Linux UI must return the stable platform error');
+  }
+
   // T008: live tool calls are confined to disposable CI fixture paths.
   // Check on-disk bytes, not only the tool's success message.
   const listed = await callFixtureTool('list_directory', { path: working, depth: 1 });
@@ -290,7 +316,10 @@ try {
     modeOmissionRejected: true, accessPositiveChecks: 3,
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
-    outsideBytesPreserved: true, releaseEligible: false,
+    outsideBytesPreserved: true,
+    linuxProcessChecks: process.platform === 'linux' ? 1 : 0,
+    linuxUnsupportedUiChecks: process.platform === 'linux' ? 1 : 0,
+    releaseEligible: false,
   }));
 } finally {
   // SDK close() may return after requesting SIGKILL but before the OS has

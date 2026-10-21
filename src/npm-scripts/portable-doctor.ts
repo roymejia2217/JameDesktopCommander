@@ -13,10 +13,13 @@ function safePath(p: unknown): p is string {
   return typeof p === 'string' && p.length > 0 && !p.includes('\\') &&
     !p.startsWith('/') && p.split('/').every(part => part && part !== '.' && part !== '..');
 }
-function permitted(p: string, target: string, native: boolean): boolean {
+function permitted(p: string, target: string, nativePath: string | undefined): boolean {
   if (!p.includes('/')) return ['LICENSE', 'NODE-LICENSE', 'package.json', 'package-lock.json'].includes(p);
   if (p.startsWith('runtime/')) return p === (target === 'linux-x64' ? 'runtime/node' : 'runtime/node.exe');
-  if (p.startsWith('native/')) return native && p === 'native/jdc-capability-probe.node';
+  // Packaging authority is established by the independent build-time gate.
+  // This user-facing diagnostic only checks declared file consistency; it
+  // never identifies or imports an experimental native authority module.
+  if (p.startsWith('native/')) return p === nativePath;
   return p.startsWith('dist/') || p.startsWith('node_modules/');
 }
 async function digest(file: string): Promise<{ sha256: string; byteLength: number }> {
@@ -51,13 +54,14 @@ export async function inspectPortableCandidate(
       m.entrypoint !== 'dist/index.js' || m.runtimeExecutable !== nodePath ||
       !Array.isArray(m.files) || m.fileCount !== m.files.length || m.fileCount < 100 ||
       (m.nativeCapabilityAddon !== undefined &&
-        m.nativeCapabilityAddon !== 'native/jdc-capability-probe.node')) {
+        (!safePath(m.nativeCapabilityAddon) ||
+         !/^native\\/[^/]+\\.node$/.test(m.nativeCapabilityAddon)))) {
     throw new Error('Invalid portable candidate contract');
   }
   const expected = new Map<string, RecordEntry>();
   for (const item of m.files) {
     if (!item || !safePath(item.path) ||
-        !permitted(item.path, target, m.nativeCapabilityAddon !== undefined) ||
+        !permitted(item.path, target, m.nativeCapabilityAddon) ||
         !Number.isSafeInteger(item.byteLength) || item.byteLength < 0 ||
         !hex64.test(item.sha256) || expected.has(item.path.toLowerCase())) {
       throw new Error('Invalid portable inventory record');
@@ -88,7 +92,9 @@ export async function inspectPortableCandidate(
     }
   }
   await scan(root);
-  if (seen.size !== expected.size || !expected.has(nodePath) ||
+  if (seen.size !== expected.size ||
+      (m.nativeCapabilityAddon !== undefined && !expected.has(m.nativeCapabilityAddon)) ||
+      !expected.has(nodePath) ||
       !expected.has('dist/index.js') || !expected.has('dist/build-provenance.json')) {
     throw new Error('Incomplete portable candidate inventory');
   }

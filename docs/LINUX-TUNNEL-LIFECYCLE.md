@@ -4,11 +4,13 @@
 does not install a service on a development host and does not authorize
 processing protected or confidential documents.
 
-The JDC CLI exposes `node dist/index.js tunnel install|start|stop|restart|status|uninstall`
+The JDC CLI exposes `node dist/index.js tunnel doctor|install|start|stop|restart|status|uninstall`
 on Linux. It uses **official `systemctl --user`**, without an intermediate
 shell, hand-rolled watchdog, root service or privileged system directory.
 The user must supply the already-installed official tunnel-client absolute
-path, a profile directory and a profile name. Install invokes
+path, a profile directory and a profile name. The explicit `doctor` CLI
+preflight verifies the existing user manager, binary and profile without
+creating a JDC unit. Install invokes
 `tunnel-client doctor --profile-dir ... --profile ... --explain` before any
 filesystem mutation. No profile secrets or tokens are copied into the unit.
 
@@ -71,3 +73,15 @@ after that check and before the manager processes the restart request. It
 must never reactivate an inactive or deliberately stopped unit. A successful restart
 acknowledges only the user-manager operation: `status` separately verifies
 the tunnel's authenticated control-plane readiness.
+
+## Pre-install diagnostic contract
+
+Invoke `tunnel doctor` with the same three explicit install options. It
+requires a non-root Linux user and a working `systemctl --user` manager,
+verifies the official client executable and profile directory, then executes
+the client's maintained `doctor --explain` preflight. JDC does not create a
+unit or start services in this action. The structured response reports only
+the action and managed unit name, never the supplied profile directory,
+executable path, credentials, or contents. The official client is responsible
+for its own diagnostic behavior. A successful result proves prerequisite
+validation only, **not remote authentication, connection or deployment**.

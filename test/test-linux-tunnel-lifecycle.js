@@ -79,6 +79,22 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   try {
     await assert.rejects(runLinuxTunnelCommand(['install', '--invalid', '/tmp'], deps), /option/i);
     assert.equal(calls.length, 1, 'Only user-manager availability checked for invalid inputs');
+    // The public CLI preflight verifies the same client/profile contract as
+    // install without registering or mutating a systemd unit.
+    const doctorResult = await runLinuxTunnelCommand([
+      'doctor', '--tunnel-client-bin', process.execPath,
+      '--profile-dir', profiles, '--profile', 'jdc',
+    ], deps);
+    assert.deepEqual(doctorResult, { action: 'doctor', unit: LINUX_TUNNEL_UNIT });
+    await assert.rejects(stat(file), { code: 'ENOENT' },
+      'Doctor must not install any unit');
+    assert.ok(calls.some(c => c[0] === process.execPath && c[1] === 'doctor'),
+      'Doctor must call the official tunnel client');
+    await assert.rejects(runLinuxTunnelCommand([
+      'doctor', '--tunnel-client-bin', process.execPath,
+      '--profile-dir', profiles, '--profile', 'invalid;name',
+    ], deps), /valid --profile/,
+      'Doctor must reject untrusted profile names');
     await runLinuxTunnelCommand([
       'install', '--tunnel-client-bin', process.execPath,
       '--profile-dir', profiles, '--profile', 'jdc',

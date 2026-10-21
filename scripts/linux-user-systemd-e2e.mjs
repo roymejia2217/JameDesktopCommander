@@ -72,6 +72,10 @@ try {
 
   const options = ['install', '--tunnel-client-bin', bin,
     '--profile-dir', workspace, '--profile', 'ci'];
+  assert.deepEqual(await runLinuxTunnelCommand(['doctor', ...options.slice(1)]),
+    { action: 'doctor', unit: LINUX_TUNNEL_UNIT });
+  await assert.rejects(lstat(unitFile), { code: 'ENOENT' },
+    'Pre-install doctor must not create the unit');
   await runLinuxTunnelCommand(options);
   installed = true;
   assert.equal((await lstat(unitFile)).mode & 0o077, 0, 'Unit permissions must be private');

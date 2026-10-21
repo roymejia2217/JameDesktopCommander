@@ -21,7 +21,7 @@ if (process.platform === 'linux') {
   // The packaged Linux CLI intentionally exposes the user systemd lifecycle,
   // not Windows Scheduled Tasks or the Windows-only restart supervisor.
   assert.match(result.stdout, /Linux tunnel:/);
-  assert.match(result.stdout, /install --tunnel-client-bin/);
+  assert.match(result.stdout, /doctor\|install --tunnel-client-bin/);
   assert.match(result.stdout, /start \| stop \| restart \| status \| uninstall/);
   assert.doesNotMatch(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
   assert.doesNotMatch(result.stdout, /restart supervisor/i);

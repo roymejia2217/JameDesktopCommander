@@ -144,13 +144,13 @@ export async function runLinuxTunnelCommand(
   const run = dependencies.run ?? defaultRun;
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
-  if (!['install', 'start', 'stop', 'restart', 'status', 'uninstall'].includes(action ?? '')) {
-    throw new Error('Linux tunnel supports install, start, stop, restart, status and uninstall.');
+  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'uninstall'].includes(action ?? '')) {
+    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status and uninstall.');
   }
   // Do not mutate files when the user manager or DBus session is absent.
   await systemctl(['show-environment']);
   const unit = LINUX_TUNNEL_UNIT;
-  if (action === 'install') {
+  if (action === 'install' || action === 'doctor') {
     const parsed = parseOptions(options);
     const executable = await realpath(parsed.executable);
     const profileDir = await realpath(parsed.profileDir);
@@ -159,6 +159,9 @@ export async function runLinuxTunnelCommand(
     await access(executable, constants.X_OK);
     if (!(await stat(profileDir)).isDirectory()) throw new Error('Tunnel profile directory unavailable.');
     await run(executable, ['doctor', '--profile-dir', profileDir, '--profile', parsed.profile, '--explain']);
+    // A read-only JDC preflight must never create a unit or change its state.
+    // The official client doctor owns its own diagnostic behavior.
+    if (action === 'doctor') return { action, unit };
     await ensureUserDirectory(home);
     const unitFile = unitPath(home);
     await writeFile(unitFile, buildLinuxTunnelUnit(executable, profileDir, parsed.profile),

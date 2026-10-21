@@ -69,6 +69,18 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       'install', '--tunnel-client-bin', process.execPath,
       '--profile-dir', profiles, '--profile', 'jdc',
     ], deps), { code: 'EEXIST' }, 'Never overwrite an existing managed unit');
+    // A JDC marker and valid ExecStart must not authorize additional
+    // directives (including ones that can spawn unrelated commands).
+    const originalUnit = await readFile(file, 'utf8');
+    await writeFile(file, originalUnit + 'ExecStartPre=/usr/bin/true\n', { mode: 0o600 });
+    const beforeMutation = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /differs from the managed template/i);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /differs from the managed template/i);
+    assert.equal(calls.length, beforeMutation + 2,
+      'Tampered unit may only trigger non-mutating user-manager preflights');
+    await writeFile(file, originalUnit, { mode: 0o600 });
     await runLinuxTunnelCommand(['start'], deps);
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'enable' && c[3] === '--now'));
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);

@@ -86,14 +86,21 @@ function unitPath(home: string): string {
 async function unitRegistration(home: string): Promise<{ executable: string; profileDir: string; profile: string }> {
   const file = unitPath(home);
   const metadata = await lstat(file);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.mode & 0o022) {
-    throw new Error('Linux tunnel unit has unsafe file type or permissions.');
+  if (!metadata.isFile() || metadata.isSymbolicLink() ||
+      metadata.uid !== (process.getuid?.() ?? -1) || (metadata.mode & 0o022)) {
+    throw new Error('Linux tunnel unit has unsafe ownership, file type or permissions.');
   }
   const content = await readFile(file, 'utf8');
   if (!content.startsWith(marker + '\n')) throw new Error('Linux tunnel unit is not JDC-managed.');
   const match = unitExec.exec(content);
   if (!match || content.match(/^ExecStart=/gm)?.length !== 1) {
     throw new Error('Linux tunnel unit has an invalid execution contract.');
+  }
+  // A marker and one plausible ExecStart are insufficient: extra systemd
+  // directives could execute additional programs under this user account.
+  // Only the exact versioned template written by this lifecycle is trusted.
+  if (content !== buildLinuxTunnelUnit(match[1], match[2], match[3])) {
+    throw new Error('Linux tunnel unit differs from the managed template.');
   }
   return { executable: safePath(match[1]), profileDir: safePath(match[2]), profile: match[3] };
 }

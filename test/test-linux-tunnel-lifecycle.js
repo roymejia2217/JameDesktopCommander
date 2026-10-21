@@ -41,9 +41,20 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let healthy = true;
   let stopBetweenCheckAndRestart = false;
   let unintendedStarts = 0;
+  let injectedDropIn = '';
+  let injectedFragment = file;
+  let injectedReload = 'no';
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
+      if (args[1] === 'show' && args.includes('--property=FragmentPath')) {
+        return [
+          'FragmentPath=' + injectedFragment,
+          'DropInPaths=' + injectedDropIn,
+          'LoadState=loaded',
+          'NeedDaemonReload=' + injectedReload,
+        ].join('\n') + '\n';
+      }
       if (args[1] === 'show') {
         const state = alive ? 'ActiveState=active\nUnitFileState=enabled\n' :
           'ActiveState=inactive\nUnitFileState=disabled\n';
@@ -118,8 +129,34 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal(calls.length, beforeMutation + 2,
       'Tampered unit may only trigger non-mutating user-manager preflights');
     await writeFile(file, originalUnit, { mode: 0o600 });
+    // The manager can load extra directives even when the JDC .service file
+    // matches its byte-for-byte template. All execution routes must deny it.
+    injectedDropIn = path.join(home, 'untrusted-override.conf');
+    const beforeDropInStart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /effective systemd unit/i);
+    assert.ok(!calls.slice(beforeDropInStart).some(c => c[2] === 'enable'),
+      'A manager-loaded drop-in must block service activation');
+    injectedDropIn = '';
+    injectedReload = 'yes';
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /effective systemd unit/i, 'Stale systemd manager state must fail closed');
+    injectedReload = 'no';
+    injectedFragment = path.join(home, 'unrelated.service');
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /effective systemd unit/i, 'Unexpected loaded unit fragment must be denied');
+    injectedFragment = file;
     await runLinuxTunnelCommand(['start'], deps);
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'enable' && c[3] === '--now'));
+    injectedDropIn = path.join(home, 'untrusted-override.conf');
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /effective systemd unit/i);
+    const beforeDropInRestart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['restart'], deps),
+      /effective systemd unit/i);
+    assert.ok(!calls.slice(beforeDropInRestart).some(c => c[2] === 'try-restart'),
+      'Drop-in must block restart before any executable transition');
+    injectedDropIn = '';
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');

@@ -3,7 +3,7 @@
 // tunnel client: does NOT authenticate to the production control plane.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -36,6 +36,9 @@ const executeCli = (args, expectedStatus = 0) => {
 
 const userHome = homedir();
 const unitFile = join(userHome, '.config/systemd/user', LINUX_TUNNEL_UNIT);
+const dropInDir = unitFile + '.d';
+const dropInFile = join(dropInDir, '99-jdc-ci-adversarial.conf');
+let dropInCreated = false;
 await assert.rejects(lstat(unitFile), { code: 'ENOENT' },
   'Never operate on an existing, potentially user-owned tunnel unit');
 
@@ -97,6 +100,21 @@ try {
 
   assert.deepEqual(executeCli(['start']), { action: 'start', unit: LINUX_TUNNEL_UNIT });
   const first = pid();
+  // Test against the actual manager-loaded unit, not a path-only inspection.
+  // A harmless injected environment directive proves that drop-ins are
+  // loaded even while the managed .service file remains untouched.
+  await mkdir(dropInDir, { mode: 0o700 });
+  dropInCreated = true;
+  await writeFile(dropInFile, '[Service]\nEnvironment=JDC_UNTRUSTED_OVERRIDE=1\n',
+    { flag: 'wx', mode: 0o600 });
+  runUnit(['daemon-reload']);
+  assert.match(executeCli(['status'], 1).error, /effective systemd unit/i);
+  assert.match(executeCli(['restart'], 1).error, /effective systemd unit/i);
+  assert.equal(pid(), first, 'Rejected drop-in must not restart the service');
+  await rm(dropInFile);
+  await rm(dropInDir, { recursive: false });
+  dropInCreated = false;
+  runUnit(['daemon-reload']);
   assert.equal(executeCli(['status']).status?.active, true);
   assert.equal(executeCli(['status']).status?.enabled, true);
   // The synthetic health response verifies CLI parsing only. It is NOT a
@@ -113,9 +131,16 @@ try {
   console.log('Real Linux systemd user-service lifecycle: PASS (synthetic client; no remote authentication)');
 } finally {
   try {
-    if (installed) assert.deepEqual(executeCli(['uninstall']),
-      { action: 'uninstall', unit: LINUX_TUNNEL_UNIT });
+    if (dropInCreated) {
+      await rm(dropInDir, { recursive: true, force: true });
+      runUnit(['daemon-reload']);
+    }
   } finally {
-    await rm(workspace, { recursive: true, force: true });
+    try {
+      if (installed) assert.deepEqual(executeCli(['uninstall']),
+        { action: 'uninstall', unit: LINUX_TUNNEL_UNIT });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   }
 }

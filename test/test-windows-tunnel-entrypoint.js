@@ -17,10 +17,21 @@ const result = spawnSync(
 
 assert.equal(result.error, undefined);
 assert.equal(result.status, 0, result.stderr);
-assert.match(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
-assert.match(result.stdout, /desktop-commander tunnel install/);
-assert.match(result.stdout, /desktop-commander tunnel restart/);
-assert.match(result.stdout, /desktop-commander tunnel status/);
+if (process.platform === 'linux') {
+  // The packaged Linux CLI intentionally exposes the user systemd lifecycle,
+  // not Windows Scheduled Tasks or the Windows-only restart supervisor.
+  assert.match(result.stdout, /Linux tunnel:/);
+  assert.match(result.stdout, /install --tunnel-client-bin/);
+  assert.match(result.stdout, /start \| stop \| status \| uninstall/);
+  assert.doesNotMatch(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
+  assert.doesNotMatch(result.stdout, /restart supervisor/i);
+} else {
+  // Preserve every original Windows help-contract assertion unchanged.
+  assert.match(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
+  assert.match(result.stdout, /desktop-commander tunnel install/);
+  assert.match(result.stdout, /desktop-commander tunnel restart/);
+  assert.match(result.stdout, /desktop-commander tunnel status/);
+}
 assert.doesNotMatch(result.stdout, /jsonrpc/);
 
-console.log('Windows tunnel entrypoint contract: PASS');
+console.log('Platform tunnel entrypoint contract: PASS');

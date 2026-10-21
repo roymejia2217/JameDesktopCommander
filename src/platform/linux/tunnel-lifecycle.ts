@@ -148,17 +148,22 @@ async function assertTrustedLoadedUnit(
   }
 }
 
-async function ensureUserDirectory(home: string): Promise<void> {
+async function ensureUserDirectory(home: string, create = true): Promise<void> {
   const resolvedHome = await realpath(home);
   if (resolvedHome !== home) throw new Error('HOME must be its canonical directory.');
   for (const dir of [home, path.join(home, '.config'), path.join(home, '.config', 'systemd'),
     path.join(home, '.config', 'systemd', 'user')]) {
-    if (dir !== home) await mkdir(dir, { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => {
+    if (create && dir !== home) await mkdir(dir, { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => {
       if (e.code !== 'EEXIST') throw e;
     });
     const st = await lstat(dir);
     if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid?.()) {
       throw new Error('Linux tunnel configuration directory is not owned by the current user.');
+    }
+    // Ownership alone does not protect an OS unit from a different principal
+    // allowed to write to one of its ancestor directories.
+    if ((st.mode & 0o022) !== 0) {
+      throw new Error('Linux tunnel configuration directory is writable by another principal.');
     }
   }
 }
@@ -214,6 +219,13 @@ export async function runLinuxTunnelCommand(
   } else {
     if (options.length) throw new Error('Linux tunnel action accepts no extra arguments.');
     const recovery = action === 'stop' || action === 'uninstall';
+    // Verify every ancestor on executable/health paths before trusting the
+    // owned unit. UNINSTALL also requires a protected parent to unlink safely.
+    // STOP deliberately remains available when the parent is compromised:
+    // disabling the fixed systemd unit name must not require deleting files.
+    if (action !== 'stop') {
+      await ensureUserDirectory(home, false);
+    }
     // STOP/UNINSTALL must be available for an altered but still user-owned
     // JDC-marked unit. START/RESTART/STATUS require the exact executable
     // template and reject it if modified.

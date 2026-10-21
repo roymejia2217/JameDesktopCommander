@@ -130,3 +130,28 @@ unrelated file. The Ubuntu portable acceptance similarly mutates the unit
 after stopping the synthetic process and verifies safe recovery through the
 packaged CLI. These tests do not grant an attacker with the same OS principal
 a distinct security boundary.
+
+## Linux user-directory integrity gate
+
+The initial installer and every subsequent `start`, `restart`, `status`
+and `uninstall` operation check the canonical HOME and each ancestor of the
+managed user unit. They must be ordinary directories owned by the effective
+user **and not group/world writable**. Merely checking ownership of the unit
+file is insufficient if its parent can be modified by another principal.
+The installer creates missing private directories where supported, but
+existing insecure directories are rejected; start/status/uninstall never
+create missing directories. The operator can correct directory permissions
+outside JDC using documented OS administration procedures.
+
+Emergency `stop` remains available when directory modes are compromised,
+provided the service file still passes its existing regular-file, ownership,
+permission and JDC-marker checks. This invokes only the fixed
+`systemctl --user disable --now` action and does not trust execution
+directives or remove the file. `uninstall` refuses to unlink from a parent
+writable by another principal. The negative tests verify that no activating
+manager operation occurs and that the owned unit cannot be removed through
+an unsafe directory.
+
+This mode/ownership guard does not constitute a separate security boundary
+against arbitrary processes running as the **same OS user**, nor does it
+remove the independently required native T011 confinement gates.

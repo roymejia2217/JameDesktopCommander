@@ -470,6 +470,29 @@ export async function runTunnel(
     args: readonly string[] = process.argv.slice(3),
     dependencies: WindowsTunnelCommandDependencies = {},
 ): Promise<void> {
+    const platform = dependencies.platform ?? process.platform;
+    if (platform === 'linux') {
+        if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+            console.log('Linux tunnel: install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | status | uninstall');
+            return;
+        }
+        try {
+            // Import only on Linux: Windows lifecycle and existing tests remain untouched.
+            const { runLinuxTunnelCommand } = await import('../platform/linux/tunnel-lifecycle.js');
+            const result = await runLinuxTunnelCommand(args, { platform });
+            console.log(JSON.stringify(result, null, 2));
+            if (result.action === 'status' &&
+                (!result.status?.active || !result.status.enabled || !result.status.healthy ||
+                 !result.status.controlPlanePoll)) {
+                process.exitCode = 1;
+            }
+        } catch (error) {
+            console.error('Linux tunnel command failed: ' +
+                (error instanceof Error ? error.message : 'Unknown error'));
+            process.exitCode = 1;
+        }
+        return;
+    }
     if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
         printTunnelHelp();
         return;

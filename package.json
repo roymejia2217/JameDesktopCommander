@@ -109,7 +109,7 @@
     "highlight.js": "^11.11.1",
     "isbinaryfile": "^5.0.4",
     "koffi": "3.3.2",
-    "markdown-it": "^14.1.0",
+    "markdown-it": "14.3.3",
     "open": "^10.2.0",
     "pdf-lib": "^1.17.1",
     "pizzip": "^3.2.0",

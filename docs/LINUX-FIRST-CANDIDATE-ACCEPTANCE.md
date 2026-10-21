@@ -3,7 +3,7 @@
 **Status:** No public release. Linux x64 portable candidate is internal and
 `releaseEligible: false` until the repository's protected gates pass.
 This document does not authorize installing the candidate into an operational
-environment or processing sensitive SENAE data.
+environment or processing sensitive institutional data.
 
 ## Existing portable capability
 
@@ -51,7 +51,7 @@ and independently reviewed isolation for any high-trust deployment.
 - **Security:** T011 #139 and hard-link object isolation #148 are
   independently open. The experimental native capability is blocked by #124
   N-API ownership and #80 service authority. No adapter or native test may
-  be skipped to publish a Linux variant. Do not process SENAE credentials
+  be skipped to publish a Linux variant. Do not process institutional credentials
   or protected files with this unapproved candidate.
 - **Desktop capabilities:** Linux `computer_inspect` requires a separate
   accessibility/portal implementation and real Wayland/X11 desktop tests.

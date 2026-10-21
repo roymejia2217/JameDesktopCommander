@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -107,6 +107,17 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       '--profile-dir', profiles, '--profile', 'invalid;name',
     ], deps), /valid --profile/,
       'Doctor must reject untrusted profile names');
+    const configDir = path.join(home, '.config');
+    await mkdir(configDir, { mode: 0o700 });
+    await chmod(configDir, 0o777);
+    await assert.rejects(runLinuxTunnelCommand([
+      'install', '--tunnel-client-bin', process.execPath,
+      '--profile-dir', profiles, '--profile', 'jdc',
+    ], deps), /configuration directory.*writable/i,
+    'Installation must reject directories writable by another principal');
+    await assert.rejects(stat(file), { code: 'ENOENT' },
+      'Unsafe parent must be rejected before installing any unit');
+    await chmod(configDir, 0o700);
     await runLinuxTunnelCommand([
       'install', '--tunnel-client-bin', process.execPath,
       '--profile-dir', profiles, '--profile', 'jdc',
@@ -147,6 +158,29 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     await assert.rejects(runLinuxTunnelCommand(['start'], deps),
       /effective systemd unit/i, 'Unexpected loaded unit fragment must be denied');
     injectedFragment = file;
+    const unitParent = path.dirname(file);
+    await chmod(unitParent, 0o777);
+    const beforeUnsafeStart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /configuration directory.*writable/i,
+      'Start must reject a writable service parent');
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /configuration directory.*writable/i,
+      'Status must not claim health for a writable service parent');
+    await assert.rejects(runLinuxTunnelCommand(['restart'], deps),
+      /configuration directory.*writable/i,
+      'Restart must reject a writable service parent');
+    assert.ok(!calls.slice(beforeUnsafeStart).some(c =>
+      ['enable', 'start', 'restart', 'try-restart'].includes(c[2])),
+    'No activating systemd command is permitted on a writable parent');
+    // Emergency STOP remains available even if the owner cannot immediately
+    // repair the compromised parent permissions.
+    assert.equal((await runLinuxTunnelCommand(['stop'], deps)).action, 'stop');
+    await assert.rejects(runLinuxTunnelCommand(['uninstall'], deps),
+      /configuration directory.*writable/i,
+      'Do not unlink units from directories writable by another principal');
+    assert.equal((await stat(file)).isFile(), true);
+    await chmod(unitParent, 0o700);
     await runLinuxTunnelCommand(['start'], deps);
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'enable' && c[3] === '--now'));
     injectedDropIn = path.join(home, 'untrusted-override.conf');

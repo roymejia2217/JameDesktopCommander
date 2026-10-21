@@ -196,6 +196,50 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   }
 });
 
+test('Linux recovery disables and removes an owned altered JDC unit without running it', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'jdc-linux-recovery-'));
+  const unitFile = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push([bin, ...args]);
+    return '';
+  };
+  const deps = { home, platform: 'linux', run };
+  try {
+    await mkdir(path.dirname(unitFile), { recursive: true, mode: 0o700 });
+    const clean = buildLinuxTunnelUnit('/usr/bin/tunnel-client', '/tmp/jdc-ci-profile', 'ci');
+    await writeFile(unitFile, clean + 'ExecStartPre=/usr/bin/true\n', { mode: 0o600 });
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /differs from the managed template/);
+    await assert.rejects(runLinuxTunnelCommand(['restart'], deps),
+      /differs from the managed template/);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /differs from the managed template/);
+    const beforeRecovery = calls.length;
+    assert.deepEqual(await runLinuxTunnelCommand(['stop'], deps),
+      { action: 'stop', unit: LINUX_TUNNEL_UNIT });
+    assert.deepEqual(await runLinuxTunnelCommand(['uninstall'], deps),
+      { action: 'uninstall', unit: LINUX_TUNNEL_UNIT });
+    await assert.rejects(stat(unitFile), { code: 'ENOENT' });
+    const recovery = calls.slice(beforeRecovery);
+    assert.equal(recovery.filter(c =>
+      c[0] === 'systemctl' && c[2] === 'disable' && c[3] === '--now').length, 2);
+    assert.ok(!recovery.some(c => ['enable', 'start', 'restart', 'try-restart'].includes(c[2])),
+      'Recovery must not execute an altered unit');
+    await writeFile(unitFile, '# unrelated user-owned service\n', { mode: 0o600 });
+    const beforeUnrelated = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['uninstall'], deps),
+      /not JDC-managed/, 'Never delete an unrelated unit');
+    assert.equal(calls.length, beforeUnrelated + 1,
+      'Unrelated units permit only non-mutating user-manager preflight');
+    assert.equal((await stat(unitFile)).isFile(), true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('Linux no user systemd session must fail before writing a service', {
   skip: process.platform !== 'linux',
 }, async () => {

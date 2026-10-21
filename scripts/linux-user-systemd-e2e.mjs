@@ -128,6 +128,13 @@ try {
   runUnit(['try-restart', LINUX_TUNNEL_UNIT]);
   assert.equal(JSON.parse(executeCli(['status'], 1).stdout).status?.active, false,
     'Native try-restart must not revive a stopped service');
+  // Recovery must remain operable even when the owned JDC unit's execution
+  // contract is corrupted. Never start that altered service.
+  const cleanUnitBytes = await readFile(unitFile, 'utf8');
+  await writeFile(unitFile, cleanUnitBytes + 'ExecStartPre=/usr/bin/true\n',
+    { mode: 0o600 });
+  assert.match(executeCli(['status'], 1).error, /differs from the managed template/);
+  assert.deepEqual(executeCli(['stop']), { action: 'stop', unit: LINUX_TUNNEL_UNIT });
   console.log('Real Linux systemd user-service lifecycle: PASS (synthetic client; no remote authentication)');
 } finally {
   try {

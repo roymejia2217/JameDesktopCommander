@@ -83,7 +83,9 @@ function unitPath(home: string): string {
   return path.join(safePath(home), '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
 }
 
-async function unitRegistration(home: string): Promise<{ executable: string; profileDir: string; profile: string }> {
+// Recovery is authorized by a JDC marker and protected user-owned file.
+// It does NOT grant permission to execute altered service content.
+async function readOwnedManagedUnit(home: string): Promise<string> {
   const file = unitPath(home);
   const metadata = await lstat(file);
   if (!metadata.isFile() || metadata.isSymbolicLink() ||
@@ -92,6 +94,11 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   }
   const content = await readFile(file, 'utf8');
   if (!content.startsWith(marker + '\n')) throw new Error('Linux tunnel unit is not JDC-managed.');
+  return content;
+}
+
+async function unitRegistration(home: string): Promise<{ executable: string; profileDir: string; profile: string }> {
+  const content = await readOwnedManagedUnit(home);
   const match = unitExec.exec(content);
   if (!match || content.match(/^ExecStart=/gm)?.length !== 1) {
     throw new Error('Linux tunnel unit has an invalid execution contract.');
@@ -206,7 +213,13 @@ export async function runLinuxTunnelCommand(
     await systemctl(['daemon-reload']);
   } else {
     if (options.length) throw new Error('Linux tunnel action accepts no extra arguments.');
-    const registration = await unitRegistration(home);
+    const recovery = action === 'stop' || action === 'uninstall';
+    // STOP/UNINSTALL must be available for an altered but still user-owned
+    // JDC-marked unit. START/RESTART/STATUS require the exact executable
+    // template and reject it if modified.
+    const registration = recovery
+      ? (await readOwnedManagedUnit(home), null)
+      : await unitRegistration(home);
     // Never activate, conditionally restart, or claim health for a unit whose
     // manager-loaded definition differs from the sole JDC-owned fragment.
     // STOP and UNINSTALL remain available to recover a compromised service.
@@ -238,6 +251,7 @@ export async function runLinuxTunnelCommand(
       const enabled = /^UnitFileState=enabled$/m.test(raw);
       let health = { healthy: false, controlPlanePoll: false };
       if (active) {
+        if (!registration) throw new Error('Linux tunnel registration unavailable.');
         const list = JSON.parse(await run(registration.executable,
           ['profiles', 'list', '--profile-dir', registration.profileDir, '--json'])) as unknown;
         if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');

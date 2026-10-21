@@ -109,3 +109,24 @@ a configuration change, so an operator can disable a suspect service. This
 manager-state check does not create a security boundary against arbitrary
 malicious processes running as the *same* OS principal; a reviewed deployment
 identity and privilege policy are separate requirements.
+
+## Recovery from a modified managed service
+
+The execution guard applies to `start`, `restart` and `status` and rejects
+any changed managed unit or manager-loaded override. An operator must still
+be able to stop an already-running suspicious unit and remove its JDC-owned
+main unit file. `stop` and `uninstall` therefore require a regular
+user-owned, non-group/world-writable service file with the exact JDC
+management marker, **without trusting or executing any modified ExecStart
+directives**. An unrelated unit or link is never deleted by this contract.
+Both recovery operations invoke only `systemctl --user disable --now`; the
+uninstall then removes the owned unit and reloads the manager. Foreign
+drop-in files are deliberately not deleted without independent ownership
+verification, and will still be rejected by the effective-unit check.
+
+The Linux Node regression test checks rejection for start/restart/status and
+successful stop/uninstall on a modified JDC-marked file, plus denial on an
+unrelated file. The Ubuntu portable acceptance similarly mutates the unit
+after stopping the synthetic process and verifies safe recovery through the
+packaged CLI. These tests do not grant an attacker with the same OS principal
+a distinct security boundary.

@@ -107,4 +107,13 @@ jobs:
       - name: Run selected unsuppressed model
         env:
           MIRIFLAGS: ${{ matrix.borrow_model.flags }}
-        run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml ${{ matrix.case_name }} -- --exact
+          CASE_NAME: ${{ matrix.case_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail closed if a renamed test would otherwise yield 0/0 PASS.
+          selected="$(cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml "$CASE_NAME" -- --exact --list)"
+          printf '%s\n' "$selected"
+          printf '%s\n' "$selected" | grep -Fx -- "$CASE_NAME: test"
+          # Actual UB is a normal nonzero test failure: never mask it.
+          cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml "$CASE_NAME" -- --exact

@@ -240,6 +240,31 @@ discounting the failures of other cases.
 inspect each test selection count and diagnostic. This does not enable
 production binaries, close issue #124, or resolve CodeQL alert #12.
 
+**Verified per-case results at head 9c2c9476e2d1625fc096c793929fe3de28a1c69b:**
+
+| Original model case (one selected test per isolated run) | Stacked Borrows | Tree Borrows |
+| --- | --- | --- |
+| `model_pinned_generated_shared_reentry` | **FAIL**, Miri UB on retagging | **FAIL**, Miri UB on forbidden read |
+| `model_inline_borrowed_return_with_nested_generated_receiver` | **FAIL**, Miri UB on shared read retagging | **PASS**, 1/1 |
+
+[CI run 39486845708](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39486845708)
+also reports full-model **FAIL** in both modes and separate
+`candidate_` **2/2 PASS** and `control_` **4/4 PASS** per model.
+These experimental aliasing results do not establish undefined behavior
+in a shipping JDC handler. The inline borrowed-return scenario is
+hypothetical, unlike the actual owned `Vec<String>` return of `list_directory`.
+The actual FFI pointer provenance, guard lifetime, rooting/finalization and
+JavaScript reentrancy path remain independent blockers.
+
+**Fail-closed test selection:** Rust test harness can exit successfully
+after selecting zero tests when an exact-name filter is outdated.
+The new job uses official Miri test-listing mode and requires an exact
+`case-name: test` entry before running the unchanged failing model.
+Missing/renamed tests fail; Miri undefined behavior retains its
+nonzero failure. A local positive/negative Bash exact-match check passed.
+**Modified CI results pending**: no approval, suppression, skip, production
+binding, SCM privilege or release authorization is implied.
+
 ## Table of Contents
 
 - [Install](#install)

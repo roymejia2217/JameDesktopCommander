@@ -85,3 +85,27 @@ the action and managed unit name, never the supplied profile directory,
 executable path, credentials, or contents. The official client is responsible
 for its own diagnostic behavior. A successful result proves prerequisite
 validation only, **not remote authentication, connection or deployment**.
+
+## Loaded service definition integrity
+
+Validating the JDC-managed service file alone does not validate the service
+configuration that systemd actually loads. Before `start`, `restart` or
+`status`, JDC now inspects `FragmentPath`, `DropInPaths`, `LoadState` and
+`NeedDaemonReload` through the official `systemctl --user show` interface.
+It requires the exact canonical JDC-owned fragment, no manager-loaded drop-ins,
+a loaded unit and no pending unit reload. Missing or malformed properties fail
+closed, without printing paths or manager metadata. The guard covers systemd's
+full resolved unit/drop-in search paths (including name-prefix and type-wide
+drop-ins); it does not substitute an ad hoc search of one directory.
+
+The integration test adds a harmless `Environment=` override through an
+actual temporary user-service drop-in, reloads the real Ubuntu manager and
+requires the packaged CLI to reject both `status` and `restart` without
+restarting the existing process. It removes the override and reloads the
+manager before continuing normal lifecycle acceptance.
+
+`stop` and `uninstall` intentionally remain available even after such
+a configuration change, so an operator can disable a suspect service. This
+manager-state check does not create a security boundary against arbitrary
+malicious processes running as the *same* OS principal; a reviewed deployment
+identity and privilege policy are separate requirements.

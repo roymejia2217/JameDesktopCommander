@@ -105,6 +105,42 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   return { executable: safePath(match[1]), profileDir: safePath(match[2]), profile: match[3] };
 }
 
+// systemd merges manager-selected fragments and drop-ins across its entire
+// unit search path. Trust the *loaded* manager metadata, not a file scan.
+async function assertTrustedLoadedUnit(
+  home: string,
+  systemctl: (args: readonly string[]) => Promise<string>,
+): Promise<void> {
+  const output = await systemctl([
+    'show', LINUX_TUNNEL_UNIT,
+    '--property=FragmentPath',
+    '--property=DropInPaths',
+    '--property=LoadState',
+    '--property=NeedDaemonReload',
+    '--no-pager',
+  ]);
+  const expectedKeys = new Set(['FragmentPath', 'DropInPaths', 'LoadState', 'NeedDaemonReload']);
+  const props = new Map<string, string>();
+  for (const line of output.trimEnd().split('\n')) {
+    const idx = line.indexOf('=');
+    const key = line.slice(0, idx);
+    if (idx < 1 || !expectedKeys.has(key) || props.has(key)) {
+      throw new Error('Linux tunnel effective systemd unit metadata is invalid.');
+    }
+    props.set(key, line.slice(idx + 1));
+  }
+  const fragment = await realpath(unitPath(home));
+  // Fail closed if configuration is stale or another fragment/drop-in is
+  // loaded. No untrusted manager paths are copied to logs or CLI errors.
+  if (props.size !== expectedKeys.size ||
+      props.get('FragmentPath') !== fragment ||
+      props.get('DropInPaths') !== '' ||
+      props.get('LoadState') !== 'loaded' ||
+      props.get('NeedDaemonReload') !== 'no') {
+    throw new Error('Linux tunnel effective systemd unit differs from the managed definition.');
+  }
+}
+
 async function ensureUserDirectory(home: string): Promise<void> {
   const resolvedHome = await realpath(home);
   if (resolvedHome !== home) throw new Error('HOME must be its canonical directory.');
@@ -171,6 +207,12 @@ export async function runLinuxTunnelCommand(
   } else {
     if (options.length) throw new Error('Linux tunnel action accepts no extra arguments.');
     const registration = await unitRegistration(home);
+    // Never activate, conditionally restart, or claim health for a unit whose
+    // manager-loaded definition differs from the sole JDC-owned fragment.
+    // STOP and UNINSTALL remain available to recover a compromised service.
+    if (action === 'start' || action === 'restart' || action === 'status') {
+      await assertTrustedLoadedUnit(home, systemctl);
+    }
     if (action === 'start') {
       await systemctl(['enable', '--now', unit]);
     } else if (action === 'restart') {

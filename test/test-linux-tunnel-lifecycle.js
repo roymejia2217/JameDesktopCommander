@@ -84,11 +84,26 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     await runLinuxTunnelCommand(['start'], deps);
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'enable' && c[3] === '--now'));
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const beforeRestart = calls.length;
+    assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
+    assert.ok(calls.slice(beforeRestart).some(c =>
+      c[0] === 'systemctl' && c[2] === 'restart' && c[3] === LINUX_TUNNEL_UNIT),
+      'Use the official user manager for restart');
     healthy = false;
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, false);
+    await assert.rejects(runLinuxTunnelCommand(['restart', '--force'], deps),
+      /no extra arguments/, 'Unrecognized restart options must fail closed');
     alive = false;
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.active, false);
+    const beforeRejectedRestart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
+    assert.ok(!calls.slice(beforeRejectedRestart).some(c => c[2] === 'restart'),
+      'Inactive service must not restart');
     await runLinuxTunnelCommand(['stop'], deps);
+    const afterStop = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
+    assert.ok(!calls.slice(afterStop).some(c => c[2] === 'restart'),
+      'Explicit operator stop must persist');
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'disable' && c[3] === '--now'));
     await runLinuxTunnelCommand(['uninstall'], deps);
     await assert.rejects(stat(file), { code: 'ENOENT' });

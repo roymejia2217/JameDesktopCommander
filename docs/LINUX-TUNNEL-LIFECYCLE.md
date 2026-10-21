@@ -1,10 +1,10 @@
 # Linux tunnel lifecycle: user service, no privileged install
 
 **Status:** development-only, non-release integration for issue #150. This
-does not install a service on the user host and does not authorize SENAE data
-access.
+does not install a service on a development host and does not authorize
+processing protected or confidential documents.
 
-The JDC CLI exposes `node dist/index.js tunnel install|start|stop|status|uninstall`
+The JDC CLI exposes `node dist/index.js tunnel install|start|stop|restart|status|uninstall`
 on Linux. It uses **official `systemctl --user`**, without an intermediate
 shell, hand-rolled watchdog, root service or privileged system directory.
 The user must supply the already-installed official tunnel-client absolute
@@ -61,3 +61,11 @@ and are not constrained by `allowedDirectories`.
 
 A green workflow on this slice is evidence for **CLI and user-unit contract
 only**, not remotely connected Linux availability.
+
+## Explicit restart semantics
+
+The Linux CLI delegates `restart` to the official `systemctl --user restart`
+only after verifying the managed unit is enabled and active. It must never
+reactivate an inactive or deliberately stopped unit. A successful restart
+acknowledges only the user-manager operation: `status` separately verifies
+the tunnel's authenticated control-plane readiness.

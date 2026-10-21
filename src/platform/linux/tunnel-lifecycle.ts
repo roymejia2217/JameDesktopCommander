@@ -144,8 +144,8 @@ export async function runLinuxTunnelCommand(
   const run = dependencies.run ?? defaultRun;
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
-  if (!['install', 'start', 'stop', 'status', 'uninstall'].includes(action ?? '')) {
-    throw new Error('Linux tunnel supports install, start, stop, status and uninstall.');
+  if (!['install', 'start', 'stop', 'restart', 'status', 'uninstall'].includes(action ?? '')) {
+    throw new Error('Linux tunnel supports install, start, stop, restart, status and uninstall.');
   }
   // Do not mutate files when the user manager or DBus session is absent.
   await systemctl(['show-environment']);
@@ -170,6 +170,16 @@ export async function runLinuxTunnelCommand(
     const registration = await unitRegistration(home);
     if (action === 'start') {
       await systemctl(['enable', '--now', unit]);
+    } else if (action === 'restart') {
+      // Native systemd restart also starts inactive units; preserve STOP.
+      const state = await systemctl(['show', unit,
+        '--property=ActiveState', '--property=UnitFileState', '--no-pager']);
+      if (!/^ActiveState=active$/m.test(state) ||
+          !/^UnitFileState=enabled$/m.test(state)) {
+        throw new Error('Linux tunnel restart requires an enabled, active user service.');
+      }
+      // A successful restart does not establish remote control-plane readiness.
+      await systemctl(['restart', unit]);
     } else if (action === 'stop' || action === 'uninstall') {
       await systemctl(['disable', '--now', unit]);
       if (action === 'uninstall') {

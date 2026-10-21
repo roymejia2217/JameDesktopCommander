@@ -55,7 +55,10 @@ export async function inspectPortableCandidate(
       !Array.isArray(m.files) || m.fileCount !== m.files.length || m.fileCount < 100 ||
       (m.nativeCapabilityAddon !== undefined &&
         (!safePath(m.nativeCapabilityAddon) ||
-         !/^native\\/[^/]+\\.node$/.test(m.nativeCapabilityAddon)))) {
+         m.nativeCapabilityAddon.split('/').length !== 2 ||
+         !m.nativeCapabilityAddon.startsWith('native/') ||
+         !m.nativeCapabilityAddon.endsWith('.node') ||
+         m.nativeCapabilityAddon.length <= 'native/.node'.length))) {
     throw new Error('Invalid portable candidate contract');
   }
   const expected = new Map<string, RecordEntry>();

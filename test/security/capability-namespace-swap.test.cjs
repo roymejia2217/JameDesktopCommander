@@ -165,6 +165,25 @@ test('native restricted append must not change outside bytes via a hard-link ali
   });
 });
 
+test('final-component replacement with a hard link after an in-root checkpoint is denied', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const name = 'linked-outside-sentinel.bin';
+    const legitimate = path.join(allowed, name);
+    const benign = Buffer.from([0x21, 0x22]);
+    fs.writeFileSync(legitimate, benign);
+    // Confirm legitimate in-root access before the attacker-controlled change.
+    assert.deepEqual(cap.readBytes(name), benign);
+
+    // Deterministic sequential interleaving: replace the final filename
+    // after the checkpoint, before a native destructive write.
+    fs.unlinkSync(legitimate);
+    assert.equal(installCrossRootHardLink(allowed, sentinel, original), name);
+    assert.throws(() => cap.writeBytes(name, Buffer.from([0xa0, 0xb1]), 'rewrite'),
+      'Replacing an authorized final name with a hard link must not affect outside bytes');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
 test('closed handle fails for all added directory operations', () => {
   withIsolatedRoot(({ cap }) => {
     cap.close();

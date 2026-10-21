@@ -42,7 +42,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let stopBetweenCheckAndRestart = false;
   let unintendedStarts = 0;
   let injectedDropIn = '';
-  let injectedFragment = file;
+  let injectedFragment = '';
   let injectedReload = 'no';
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
@@ -87,6 +87,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   };
   const deps = { platform: 'linux', home, run };
   const file = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  injectedFragment = file;
   try {
     await assert.rejects(runLinuxTunnelCommand(['install', '--invalid', '/tmp'], deps), /option/i);
     assert.equal(calls.length, 1, 'Only user-manager availability checked for invalid inputs');

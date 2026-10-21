@@ -3,7 +3,7 @@
 // tunnel client: does NOT authenticate to the production control plane.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -112,7 +112,7 @@ try {
   assert.match(executeCli(['restart'], 1).error, /effective systemd unit/i);
   assert.equal(pid(), first, 'Rejected drop-in must not restart the service');
   await rm(dropInFile);
-  await rm(dropInDir, { recursive: false });
+  await rmdir(dropInDir);
   dropInCreated = false;
   runUnit(['daemon-reload']);
   assert.equal(executeCli(['status']).status?.active, true);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -242,6 +242,28 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
         'Ambiguous profiles must not trigger a health check');
     }
     profileListOverride = null;
+    // A unique name does not prove the client's resolved profile belongs to
+    // the explicitly registered --profile-dir. Use real disk fixtures:
+    // a sibling whose textual prefix matches and an in-root symlink outside.
+    const sibling = path.join(home, 'profiles-unregistered');
+    await mkdir(sibling);
+    const externalProfile = path.join(sibling, 'external.yaml');
+    await writeFile(externalProfile, 'health:\n  url_file: ' + profileUrl + '\n');
+    const symlinkProfile = path.join(profiles, 'alias.yaml');
+    await symlink(externalProfile, symlinkProfile);
+    for (const filePath of [externalProfile, symlinkProfile]) {
+      profileListOverride = [{ name: 'jdc', path: filePath }];
+      const beforeOutOfRoot = calls.length;
+      await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+        /profile.*outside.*directory/i,
+        'Unregistered and symlink-escaped profiles must fail closed');
+      assert.ok(!calls.slice(beforeOutOfRoot).some(c => c[1] === 'health'),
+        'An out-of-root profile must never trigger health');
+    }
+    profileListOverride = null;
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'The registered in-root profile must remain usable');
+
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
     assert.ok(calls.slice(beforeRestart).some(c =>

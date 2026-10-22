@@ -150,6 +150,35 @@ after stopping the synthetic process and verifies safe recovery through the
 packaged CLI. These tests do not grant an attacker with the same OS principal
 a distinct security boundary.
 
+## Executable path custody (partial fail-closed gate)
+
+Before `doctor` or `install` executes the official client, JDC resolves the
+provided binary path canonically, checks it is an executable regular file
+owned by root or the current Linux UID, and inspects its canonical parent
+directories up to the filesystem root. Group/world-writable executables or
+directories are rejected. A **root-owned sticky directory** (such as `/tmp`)
+may be traversed because other UIDs cannot rename existing entries there;
+a private descendant must still satisfy the ordinary ownership/mode checks.
+The installed unit records the verified canonical executable path rather
+than the user's original symlink.
+
+Before `start`, `restart`, or `status`, JDC additionally requires the
+stored executable to resolve to the **same** canonical location and pass
+these ownership/mode checks again. Its explicit recovery commands `stop`
+and `uninstall` intentionally do not execute or validate the client so
+an operator can disable a suspect unit.
+
+The Linux regression covers group/world-writable executable bytes,
+a writable executable parent, refusal before doctor/service activation,
+an accepted private-user fixture and recovery after trust loss.
+These are **point-in-time checks, not full executable attestation**:
+same-UID mutation, racing path replacement, bind mounts and publisher
+identity remain outside their guarantee. For a production service, require
+separately reviewed official-client provenance, update policy and
+real-device authenticated/reconnection acceptance; do not infer any of
+those from the successful client `doctor` result alone. This remains a
+non-release feature.
+
 ## Linux user-directory integrity gate
 
 The initial installer and every subsequent `start`, `restart`, `status`

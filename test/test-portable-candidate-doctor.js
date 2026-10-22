@@ -75,3 +75,34 @@ test('portable doctor rejects links and a modified release contract', async () =
     await assert.rejects(inspectPortableCandidate(destination, 'linux-x64'), /contract/);
   });
 });
+
+test('portable doctor rejects internally coherent inventories missing required distribution files', async () => {
+  await fixture(async ({ destination }) => {
+    const manifestPath = join(destination, 'candidate-manifest.json');
+    const completeManifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+
+    for (const missing of [
+      'LICENSE', 'NODE-LICENSE', 'package-lock.json',
+      'dist/npm-scripts/verify-ripgrep.js',
+    ]) {
+      const originalRecord = completeManifest.files.find(entry => entry.path === missing);
+      assert.ok(originalRecord, `Fixture must contain required entry ${missing}`);
+      const filePath = join(destination, ...missing.split('/'));
+      const bytes = await readFile(filePath);
+      const files = completeManifest.files.filter(entry => entry.path !== missing);
+      await rm(filePath);
+      await writeFile(manifestPath, JSON.stringify({
+        ...completeManifest, files, fileCount: files.length,
+      }));
+
+      await assert.rejects(
+        inspectPortableCandidate(destination, 'linux-x64'),
+        /Incomplete portable candidate inventory/,
+        `Missing mandatory payload entry must be rejected: ${missing}`,
+      );
+
+      await writeFile(filePath, bytes);
+      await writeFile(manifestPath, JSON.stringify(completeManifest));
+    }
+  });
+});

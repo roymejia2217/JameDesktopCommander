@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -122,6 +123,34 @@ try {
   assert.deepEqual(executeCli(['restart']), { action: 'restart', unit: LINUX_TUNNEL_UNIT });
   const second = pid();
   assert.notEqual(second, first, 'A real systemd restart must create a fresh process');
+
+  // Exercise native systemd Restart=on-failure with a synthetic CI process.
+  // No JDC CLI start/restart is invoked during automatic recovery.
+  const restartCount = () => {
+    const output = runUnit(['show', LINUX_TUNNEL_UNIT, '--property=NRestarts', '--no-pager']);
+    const match = /^NRestarts=(\d+)$/.exec(output);
+    assert.ok(match, 'Missing systemd restart counter');
+    return Number(match[1]);
+  };
+  const beforeRecovery = restartCount();
+  runUnit(['kill', '--kill-whom=main', '--signal=SIGKILL', LINUX_TUNNEL_UNIT]);
+  let recoveredPid = 0;
+  const deadline = Date.now() + 40000;
+  while (Date.now() < deadline) {
+    const output = runUnit(['show', LINUX_TUNNEL_UNIT, '--property=MainPID', '--no-pager']);
+    const match = /^MainPID=(\d+)$/.exec(output);
+    if (match && Number(match[1]) > 0 && Number(match[1]) !== second &&
+        restartCount() > beforeRecovery) {
+      recoveredPid = Number(match[1]);
+      break;
+    }
+    await delay(500);
+  }
+  assert.ok(recoveredPid > 0, 'systemd did not autonomously recover the failed CI tunnel');
+  assert.equal(pid(), recoveredPid, 'Recovered synthetic process must remain active');
+  assert.equal(executeCli(['status']).status?.healthy, true,
+    'Packaged CLI must observe recovery through the user manager');
+
   assert.deepEqual(executeCli(['stop']), { action: 'stop', unit: LINUX_TUNNEL_UNIT });
   assert.equal(JSON.parse(executeCli(['status'], 1).stdout).status?.active, false);
   assert.match(executeCli(['restart'], 1).error, /enabled, active/);

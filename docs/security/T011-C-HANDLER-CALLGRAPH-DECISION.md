@@ -32,6 +32,23 @@ pathname check must not be described as native object authorization.
 | Search fallback and Office search | `src/tools/filesystem.ts:843-887`; `src/search-manager.ts:389,460-481,559,616-636` | Node recursive fallback and Excel/DOCX search walk or reopen child paths; no native confinement propagates into each descendant. |
 | UI directory/document workspace | `src/ui/file-preview/src/directory-controller.ts:192`; `src/ui/file-preview/src/markdown/controller.ts:372-400` | UI calls public list/read/edit tool contracts; cannot grant a UI-origin bypass or treat preview metadata as a filesystem authority. |
 
+### Separate URL/network authority (`read_file.isUrl`)
+
+`src/handlers/filesystem-handlers.ts:111-124` forwards the caller-selected
+`isUrl` option. `src/tools/filesystem.ts:566-574` routes that option to
+`readFileFromUrl`, **not** to `readFileFromDisk` or `validatePath`.
+`src/tools/filesystem.ts:350-403` performs a network `fetch(url)`; the PDF
+branch also passes the URL to `parsePdfToMarkdown(url)` for document loading.
+Thus, the same public `read_file` tool has two different authority domains.
+
+A file-directory capability **cannot** confine network egress. URL schemes,
+destinations, redirects, credentials, response size and download cancellation
+require a separate network/egress threat model and review. This inventory
+does **not** establish an SSRF mitigation or authorize an unrestricted URL
+reader in a restricted deployment. The future T011 adapter must preserve the
+distinction, never imply that `allowedDirectories` constrains remote URLs,
+and must not silently reinterpret URL inputs as native filesystem paths.
+
 ### Specialized read/write adaptors
 
 `src/utils/files/factory.ts:76-103` dispatches among DOCX, PDF, Excel,

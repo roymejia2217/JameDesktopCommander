@@ -64,6 +64,30 @@ test('portable doctor rejects modified or injected bytes and files', async () =>
   });
 });
 
+test('both candidate verifiers reject undeclared top-level candidate directories', async () => {
+  await fixture(async ({ destination, target, sourceCommit, runId, attempt }) => {
+    const verifyOptions = { destination, target, sourceCommit, runId, attempt };
+    for (const rootName of ['untracked-empty-root', 'native']) {
+      const extraDirectory = join(destination, rootName);
+      await mkdir(extraDirectory);
+      try {
+        await assert.rejects(
+          inspectPortableCandidate(destination, 'linux-x64'),
+          /Unapproved portable root directory/,
+          'Portable doctor must reject extra empty root: ' + rootName,
+        );
+        await assert.rejects(
+          verifyCandidate(verifyOptions),
+          /Unapproved candidate root directory/,
+          'Independent verifier must reject extra empty root: ' + rootName,
+        );
+      } finally {
+        await rm(extraDirectory, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
 test('portable doctor rejects links and a modified release contract', async () => {
   await fixture(async ({ destination }) => {
     await symlink(join(destination, 'dist'), join(destination, 'link'), 'dir');

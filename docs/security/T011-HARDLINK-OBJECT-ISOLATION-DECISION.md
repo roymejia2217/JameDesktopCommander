@@ -13,8 +13,8 @@ prerequisites [#124](https://github.com/roymejia2217/JameDesktopCommander/issues
 [#139](https://github.com/roymejia2217/JameDesktopCommander/issues/139), and
 [#80](https://github.com/roymejia2217/JameDesktopCommander/issues/80).
 Complementary callgraph in
-[T011-C handler decision](T011-C-HANDLER-CALLGRAPH-DECISION.md)
-(currently proposed in [draft #153](https://github.com/roymejia2217/JameDesktopCommander/pull/153)).
+[T011-C handler decision (draft #153)](https://github.com/roymejia2217/JameDesktopCommander/pull/153)
+(the referenced document is not yet on protected `main`).
 
 ## 1. Required security claim: decide what is authorized
 

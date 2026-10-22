@@ -9,9 +9,12 @@ missing and extra files, unexpected top-level directories (including an
 unapproved `native` root), symlinks, case-folded file collisions, and build
 provenance. It reads files only and never installs services.
 Both the independent artifact verifier and the local doctor reject undeclared
-root directories, even when empty. Empty nested package directories are not
-part of the file inventory; this check is not a filesystem-object confinement
-or publisher-authentication guarantee.
+root directories, even when empty. Because `runtime/` may contain only
+the selected Node executable, both also deny unexpected nested runtime
+directories, even when empty. Empty nested directories within normal
+`dist/` and `node_modules/` package trees are not part of the file inventory;
+these checks are neither filesystem-object confinement nor a
+publisher-authentication guarantee.
 
 This diagnostic establishes internal consistency, **not publisher
 authenticity**. A separate externally trusted release signature, provenance

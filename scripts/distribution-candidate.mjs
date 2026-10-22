@@ -77,6 +77,9 @@ async function scanRegularFiles(root, target, nativeAddonIncluded) {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       const absolute = join(dir, entry.name);
       if (entry.isDirectory()) {
+        if (dir === join(root, 'runtime')) {
+          assert.fail('Unapproved candidate runtime directory');
+        }
         if (dir === root &&
             !(entry.name === 'runtime' || permittedDirectories.has(entry.name) ||
               (nativeAddonIncluded && entry.name === 'native'))) {

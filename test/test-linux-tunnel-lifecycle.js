@@ -45,6 +45,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let injectedFragment = '';
   let injectedReload = 'no';
   let injectedActivation = null;
+  let profileListOverride = null;
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
@@ -78,7 +79,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       }
       return '';
     }
-    if (args[0] === 'profiles') return JSON.stringify([{ name: 'jdc', path: profilePath }]);
+    if (args[0] === 'profiles') return JSON.stringify(profileListOverride ?? [{ name: 'jdc', path: profilePath }]);
     if (args[0] === 'health') return JSON.stringify({
       result: healthy ? 'ok' : 'degraded',
       healthz: { ok: true }, readyz: { ok: true },
@@ -211,6 +212,21 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       'Drop-in must block restart before any executable transition');
     injectedDropIn = '';
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    // A client reporting two entries for one configured profile is ambiguous.
+    // Do not select the first entry and claim authenticated readiness.
+    for (const duplicate of [
+      [{ name: 'jdc', path: profilePath }, { name: 'jdc', path: profilePath }],
+      [{ name: 'jdc', path: profilePath },
+        { name: 'jdc', path: path.join(home, 'alternate-profile.yaml') }],
+    ]) {
+      profileListOverride = duplicate;
+      const beforeAmbiguous = calls.length;
+      await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+        /profile.*ambiguous/i, 'Duplicate profile names must be rejected');
+      assert.ok(!calls.slice(beforeAmbiguous).some(c => c[1] === 'health'),
+        'Ambiguous profiles must not trigger a health check');
+    }
+    profileListOverride = null;
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
     assert.ok(calls.slice(beforeRestart).some(c =>

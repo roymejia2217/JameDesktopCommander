@@ -193,6 +193,9 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       'ActiveState=active\nUnitFileState=enabled\nUnitFileState=disabled\n',
       'ActiveState=active\nActiveState=active\nUnitFileState=enabled\n',
       'ActiveState=active\nUnitFileState=enabled\nUnknownField=yes\n',
+      'ActiveState=unknown\nUnitFileState=enabled\n',
+      'ActiveState=active\nUnitFileState=unknown\n',
+      'ActiveState=active\nUnitFileState=enabled-but-not-really\n',
     ]) {
       injectedActivation = contradictory;
       const beforeMalformed = calls.length;
@@ -200,6 +203,18 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /invalid.*state/i);
       assert.ok(!calls.slice(beforeMalformed).some(c => c[2] === 'try-restart'),
         'Malformed state must not restart the service');
+    }
+    // systemd documents these non-ready states; they are valid reports,
+    // unlike unknown values, and must not turn into fabricated readiness.
+    for (const [value, active, enabled] of [
+      ['ActiveState=failed\nUnitFileState=enabled\n', false, true],
+      ['ActiveState=activating\nUnitFileState=disabled\n', false, false],
+      ['ActiveState=active\nUnitFileState=enabled-runtime\n', true, false],
+    ]) {
+      injectedActivation = value;
+      const status = (await runLinuxTunnelCommand(['status'], deps)).status;
+      assert.equal(status.active, active);
+      assert.equal(status.enabled, enabled);
     }
     injectedActivation = null;
     injectedDropIn = path.join(home, 'untrusted-override.conf');

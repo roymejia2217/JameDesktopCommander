@@ -314,7 +314,21 @@ export async function runLinuxTunnelCommand(
         if (matches.length !== 1) throw new Error('Tunnel profile missing or ambiguous.');
         const entry = matches[0] as { path?: unknown };
         if (typeof entry.path !== 'string') throw new Error('Tunnel profile not found.');
+        // The selected profile must belong to the profile directory
+        // registered at install time. Resolve links before comparing path
+        // components; a text prefix test accepts sibling directories, while
+        // a lexical-only check misses links escaping the registered root.
+        const canonicalProfileDir = await realpath(registration.profileDir);
+        if (canonicalProfileDir !== registration.profileDir) {
+          throw new Error('Tunnel registered profile directory changed.');
+        }
         const profileFile = await realpath(safePath(entry.path));
+        const relativeProfile = path.relative(canonicalProfileDir, profileFile);
+        if (!relativeProfile || relativeProfile === '..' ||
+            relativeProfile.startsWith('..' + path.sep) ||
+            path.isAbsolute(relativeProfile)) {
+          throw new Error('Tunnel profile is outside registered profile directory.');
+        }
         const profile = YAML.parse(await readFile(profileFile, 'utf8')) as { health?: { url_file?: unknown } };
         if (typeof profile?.health?.url_file !== 'string') throw new Error('Missing tunnel health URL reference.');
         const urlFile = safePath(profile.health.url_file);

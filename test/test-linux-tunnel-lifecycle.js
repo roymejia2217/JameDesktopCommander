@@ -19,6 +19,56 @@ test('Linux unit generation rejects systemd expansion and invalid names', () => 
   assert.throws(() => buildLinuxTunnelUnit('/bin/true', '/tmp/profiles', 'a;evil'));
 });
 
+test('Linux tunnel denies untrusted executable custody before doctor or activation', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'jdc-linux-executable-custody-'));
+  const client = path.join(home, 'tunnel-client');
+  const profiles = path.join(home, 'profiles');
+  const unit = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push([bin, ...args]);
+    if (bin === 'systemctl' && args[1] === 'show' && args.includes('--property=FragmentPath')) {
+      return 'FragmentPath=' + unit + '\nDropInPaths=\nLoadState=loaded\nNeedDaemonReload=no\n';
+    }
+    return '';
+  };
+  const deps = { platform: 'linux', home, run };
+  const args = ['--tunnel-client-bin', client, '--profile-dir', profiles, '--profile', 'jdc'];
+  try {
+    await mkdir(profiles);
+    await writeFile(client, 'fixture only: never executed by injected runner\n', { mode: 0o700 });
+    for (const mode of [0o777, 0o770]) {
+      await chmod(client, mode);
+      calls.length = 0;
+      await assert.rejects(runLinuxTunnelCommand(['doctor', ...args], deps), /executable.*(writ|custod|trust)/i);
+      assert.ok(!calls.some(c => c[0] === client), 'Untrusted client must not be executed for doctor');
+      await assert.rejects(stat(unit), { code: 'ENOENT' }, 'Doctor must not install a unit');
+    }
+    await chmod(client, 0o700);
+    await chmod(home, 0o777);
+    calls.length = 0;
+    await assert.rejects(runLinuxTunnelCommand(['install', ...args], deps), /executable.*(writ|custod|trust)/i);
+    assert.ok(!calls.some(c => c[0] === client), 'Writable ancestor must reject before client execution');
+    await assert.rejects(stat(unit), { code: 'ENOENT' });
+    await chmod(home, 0o700);
+    await runLinuxTunnelCommand(['install', ...args], deps);
+    await chmod(client, 0o777);
+    calls.length = 0;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps), /executable.*(writ|custod|trust)/i);
+    assert.ok(!calls.some(c => c[0] === 'systemctl' && c[2] === 'enable'),
+      'Untrusted installed executable must not be activated');
+    assert.equal((await runLinuxTunnelCommand(['stop'], deps)).action, 'stop',
+      'Emergency stop must remain available after executable custody is lost');
+    assert.equal((await runLinuxTunnelCommand(['uninstall'], deps)).action, 'uninstall',
+      'Owned unit must remain removable after executable custody is lost');
+  } finally {
+    await chmod(home, 0o700).catch(() => {});
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('Linux tunnel rejects other platforms and root before external calls', async () => {
   let count = 0;
   const dep = { home: '/tmp', run: async () => { count++; return ''; } };

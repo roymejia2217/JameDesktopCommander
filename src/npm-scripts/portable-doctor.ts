@@ -95,10 +95,16 @@ export async function inspectPortableCandidate(
     }
   }
   await scan(root);
+  // Match the build-time contract, including licenses and the locked runtime
+  // payload. The inventory map is case-folded, so compare canonical casing too.
+  const requiredFiles = [
+    nodePath, 'LICENSE', 'NODE-LICENSE', 'package.json', 'package-lock.json',
+    'dist/index.js', 'dist/npm-scripts/verify-ripgrep.js',
+    'dist/build-provenance.json',
+  ];
   if (seen.size !== expected.size ||
       (m.nativeCapabilityAddon !== undefined && !expected.has(m.nativeCapabilityAddon)) ||
-      !expected.has(nodePath) ||
-      !expected.has('dist/index.js') || !expected.has('dist/build-provenance.json')) {
+      requiredFiles.some(name => expected.get(name.toLowerCase())?.path !== name)) {
     throw new Error('Incomplete portable candidate inventory');
   }
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as

@@ -4,7 +4,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(test)]
-use std::sync::Mutex;
+use std::{cell::Cell, sync::Mutex};
 
 #[cfg(test)]
 struct RootCapability {
@@ -122,6 +122,78 @@ fn control_return_conversion_reentry_after_last_receiver_use() {
         let nested = generated_shared_receiver(ptr);
         assert_eq!(*nested.root.lock().unwrap(), Some(7));
         assert_eq!(owned_result, Some(7));
+        drop(Box::from_raw(ptr));
+    }
+}
+
+// This is an admission-count *model* of the pinned native shared borrow
+// registry, not an implementation or proof of its full Node-API lifetime.
+// It allows two simultaneous shared entries and tracks deterministic release.
+#[cfg(test)]
+struct ModelSharedGuard<'a> {
+    shared: &'a Cell<usize>,
+}
+
+#[cfg(test)]
+impl Drop for ModelSharedGuard<'_> {
+    fn drop(&mut self) {
+        let current = self.shared.get();
+        assert!(current > 0, "model guard released without acquisition");
+        self.shared.set(current - 1);
+    }
+}
+
+#[cfg(test)]
+fn acquire_model_shared(shared: &Cell<usize>) -> ModelSharedGuard<'_> {
+    shared.set(shared.get() + 1);
+    ModelSharedGuard { shared }
+}
+
+// Positive control: shared borrow admission does not itself invalidate two
+// ordinary raw-pointer-derived &T references. One Box retains ownership.
+#[test]
+fn control_shared_guards_with_plain_raw_reentry() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    let shared = Cell::new(0);
+    unsafe {
+        let outer_guard = acquire_model_shared(&shared);
+        let outer = &*ptr;
+        let nested_guard = acquire_model_shared(&shared);
+        let nested = &*ptr;
+        assert_eq!(shared.get(), 2, "both shared entries must be admitted");
+        assert_eq!(*nested.root.lock().unwrap(), Some(7));
+        assert_eq!(*outer.root.lock().unwrap(), Some(7));
+        drop(nested_guard);
+        drop(outer_guard);
+        assert_eq!(shared.get(), 0, "all model guards must release");
+        drop(Box::from_raw(ptr));
+    }
+}
+
+// Negative experimental model: the very same legal shared/shared admissions
+// DO NOT prove that reconstructing Box ownership twice is sound. Keep this
+// under official Miri (both borrow models) without expected-failure masking.
+// A UB result means the source-expression model violates Miri, NOT that a
+// shipping Node-API call has independently reproduced that exact violation.
+#[test]
+fn model_shared_guards_with_pinned_generated_reentry() {
+    let ptr = Box::into_raw(Box::new(RootCapability {
+        root: Mutex::new(Some(7)),
+    }));
+    let shared = Cell::new(0);
+    unsafe {
+        let outer_guard = acquire_model_shared(&shared);
+        let outer = generated_shared_receiver(ptr);
+        let nested_guard = acquire_model_shared(&shared);
+        let nested = generated_shared_receiver(ptr);
+        assert_eq!(shared.get(), 2, "the model must admit nested shared use");
+        assert_eq!(*nested.root.lock().unwrap(), Some(7));
+        assert_eq!(*outer.root.lock().unwrap(), Some(7));
+        drop(nested_guard);
+        drop(outer_guard);
+        assert_eq!(shared.get(), 0);
         drop(Box::from_raw(ptr));
     }
 }

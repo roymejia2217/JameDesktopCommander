@@ -29,12 +29,20 @@ Starting enables and starts the unit via `systemctl --user enable --now`.
 Stopping calls `disable --now`, preserving an intentional stopped state on
 subsequent user-session startups. Uninstall requires an existing JDC-marked
 unit and disables/stops it before removal and a manager reload. The
-`status` operation checks actual service state; if active it resolves the
-registered official profile using `profiles list --json` and reads only the
-profile's local `health.url_file` reference, then invokes official
+`status` operation checks actual service state. If active, it requires
+exactly one official profile matching the registered name from
+`profiles list --json`. The returned profile file and the registered
+profile directory are resolved to canonical paths; files outside that
+directory, including sibling paths with matching text prefixes or
+symlinks escaping the directory, are rejected before YAML loading or
+the official client health request. Only then does it read the selected
+profile's `health.url_file` reference and invoke
 `health --json --url-file ... --require-control-plane-poll`.
 A running unit without liveness, readiness and control-plane poll is
-**not** a healthy tunnel; the CLI exits nonzero.
+**not** a healthy tunnel; the CLI exits nonzero. This path-selection
+guard does **not** provide race-free OS-object custody: hard links,
+mounts and same-principal concurrent modification remain outside its
+proof and subject to independent T011 security review.
 
 The unit is **not a privileged filesystem authority**: this feature must
 not be confused with T011's blocked service and OS-principal custody

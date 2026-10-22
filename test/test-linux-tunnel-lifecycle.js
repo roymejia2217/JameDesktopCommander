@@ -81,6 +81,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   skip: process.platform !== 'linux',
 }, async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'jdc-linux-tunnel-'));
+  const client = path.join(home, 'test-tunnel-client');
   const profiles = path.join(home, 'profiles');
   const profilePath = path.join(profiles, 'profile.yaml');
   const profileUrl = path.join(home, 'health.url');
@@ -141,21 +142,25 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   const file = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
   injectedFragment = file;
   try {
+    // Only the injected run delegate observes this file; it is never launched.
+    // Keep its owner and modes under the test fixture rather than trusting
+    // the hosted runner's Node executable layout and permissions.
+    await writeFile(client, 'Non-executed test tunnel client fixture\n', { mode: 0o700 });
     await assert.rejects(runLinuxTunnelCommand(['install', '--invalid', '/tmp'], deps), /option/i);
     assert.equal(calls.length, 1, 'Only user-manager availability checked for invalid inputs');
     // The public CLI preflight verifies the same client/profile contract as
     // install without registering or mutating a systemd unit.
     const doctorResult = await runLinuxTunnelCommand([
-      'doctor', '--tunnel-client-bin', process.execPath,
+      'doctor', '--tunnel-client-bin', client,
       '--profile-dir', profiles, '--profile', 'jdc',
     ], deps);
     assert.deepEqual(doctorResult, { action: 'doctor', unit: LINUX_TUNNEL_UNIT });
     await assert.rejects(stat(file), { code: 'ENOENT' },
       'Doctor must not install any unit');
-    assert.ok(calls.some(c => c[0] === process.execPath && c[1] === 'doctor'),
+    assert.ok(calls.some(c => c[0] === client && c[1] === 'doctor'),
       'Doctor must call the official tunnel client');
     await assert.rejects(runLinuxTunnelCommand([
-      'doctor', '--tunnel-client-bin', process.execPath,
+      'doctor', '--tunnel-client-bin', client,
       '--profile-dir', profiles, '--profile', 'invalid;name',
     ], deps), /valid --profile/,
       'Doctor must reject untrusted profile names');
@@ -163,7 +168,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     await mkdir(configDir, { mode: 0o700 });
     await chmod(configDir, 0o777);
     await assert.rejects(runLinuxTunnelCommand([
-      'install', '--tunnel-client-bin', process.execPath,
+      'install', '--tunnel-client-bin', client,
       '--profile-dir', profiles, '--profile', 'jdc',
     ], deps), /configuration directory.*writable/i,
     'Installation must reject directories writable by another principal');
@@ -171,14 +176,14 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       'Unsafe parent must be rejected before installing any unit');
     await chmod(configDir, 0o700);
     await runLinuxTunnelCommand([
-      'install', '--tunnel-client-bin', process.execPath,
+      'install', '--tunnel-client-bin', client,
       '--profile-dir', profiles, '--profile', 'jdc',
     ], deps);
     const saved = await readFile(file, 'utf8');
     assert.match(saved, /Managed by JameDesktopCommander/);
     assert.equal((await stat(file)).mode & 0o077, 0, 'Unit must not be group/world readable');
     await assert.rejects(runLinuxTunnelCommand([
-      'install', '--tunnel-client-bin', process.execPath,
+      'install', '--tunnel-client-bin', client,
       '--profile-dir', profiles, '--profile', 'jdc',
     ], deps), { code: 'EEXIST' }, 'Never overwrite an existing managed unit');
     // A JDC marker and valid ExecStart must not authorize additional

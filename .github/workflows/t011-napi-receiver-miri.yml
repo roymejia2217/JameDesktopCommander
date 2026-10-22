@@ -40,14 +40,14 @@ jobs:
           cargo +nightly-2026-06-29 rustc --locked --manifest-path native/capability-probe/Cargo.toml --lib --features receiver-test-fixture -- -Zunpretty=expanded > "$output"
           test -s "$output"
           # Fail closed if the expected production class/method was not expanded.
-          rg -q --fixed-strings 'struct RootCapability' "$output"
-          rg -q --fixed-strings 'fn list_directory' "$output"
+          grep -F -q -- 'struct RootCapability' "$output"
+          grep -F -q -- 'fn list_directory' "$output"
           sha256sum "$output" > "${RUNNER_TEMP}/jdc-napi-generated-receivers.sha256"
           printf 'GENERATED_RECEIVER_SOURCE_SHA256='
           cut -d ' ' -f 1 "${RUNNER_TEMP}/jdc-napi-generated-receivers.sha256"
           # Preserve the actual expression for independent review; never
           # infer its safety from a successful macro expansion.
-          rg -n --fixed-strings 'from_raw' "$output" | head -n 15 || :
+          grep -F -n -- 'from_raw' "$output" | head -n 15 || :
 
       - name: Retain short-lived source evidence without publishing an addon
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

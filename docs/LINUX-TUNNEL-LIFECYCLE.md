@@ -47,14 +47,25 @@ and are not constrained by `allowedDirectories`.
   exact commit. Tests must prove unit content, rejected unsafe names,
   no-root policy, no-user-manager denial without side effects, non-overwrite,
   start/stop intent, and health/degraded/inactive outcomes.
-- A real Ubuntu **user-manager** lifecycle test is still required on a
-  disposable user session. Mocks are not a replacement for the real bus,
-  CLI binary, profile authentication and reconnection. A clean Linux laptop
-  acceptance must prove startup, restart, intentional stop, logout/login,
-  network outage recovery, fresh ChatGPT MCP round trip and rollback.
-- Standard official `tunnel-client` CLI and managed unit names must be
-  independently verified. The binary path must be durable across upgrades.
-  No root, manual tunnel process killing, shell-script service substitute,
+- The independently restored Linux candidate already runs an actual Ubuntu
+  **user-manager** lifecycle test with its bundled Node runtime and a
+  disposable synthetic tunnel client. It validates installed unit contents,
+  start/restart/stop behavior, loaded drop-in rejection, recovery from an
+  altered managed unit and the packaged CLI status contract. This establishes
+  real local systemd behavior, not remote authentication.
+- The synthetic failure-recovery acceptance uses the official
+  `systemctl --user kill` operation **only inside disposable CI** to
+  terminate that test process abnormally. It requires a new live MainPID,
+  an increased systemd NRestarts counter and a healthy packaged CLI result,
+  without invoking JDC start/restart during recovery. The wait is bounded;
+  missing recovery fails the test. This proves `Restart=on-failure`
+  under controlled conditions, not recovery from an actual network outage.
+- Separate clean-workstation acceptance must still prove official client
+  authentication, login/logout behavior, outage reconnection, a fresh
+  ChatGPT MCP round trip, rollback, and persistent executable paths.
+- Standard official `tunnel-client` CLI and managed unit names
+  must be independently verified. Do not use manual process termination as
+  an operational recovery policy. No root, shell-script service substitute,
   daemon replacement or copying secrets to systemd units.
 - Security patch PR #146 is a predecessor; T011 #124/#139/#148, privilege
   #80, Linux release identity and signed distribution remain open. Do not

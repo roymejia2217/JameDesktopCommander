@@ -76,6 +76,9 @@ export async function inspectPortableCandidate(
     for (const child of await readdir(dir, { withFileTypes: true })) {
       const absolute = join(dir, child.name);
       if (child.isDirectory()) {
+        if (dir === join(root, 'runtime')) {
+          throw new Error('Unapproved portable runtime directory');
+        }
         if (dir === root &&
             !(['runtime', 'dist', 'node_modules'].includes(child.name) ||
               (m.nativeCapabilityAddon !== undefined && child.name === 'native'))) {

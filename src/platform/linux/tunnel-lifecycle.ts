@@ -292,9 +292,13 @@ export async function runLinuxTunnelCommand(
         const list = JSON.parse(await run(registration.executable,
           ['profiles', 'list', '--profile-dir', registration.profileDir, '--json'])) as unknown;
         if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
-        const entry = list.find((item) => typeof item === 'object' && item !== null &&
-          (item as { name?: unknown }).name === registration.profile) as { path?: unknown } | undefined;
-        if (!entry || typeof entry.path !== 'string') throw new Error('Tunnel profile not found.');
+        // The official client must identify one unambiguous profile.
+        // Selecting the first match can report readiness for the wrong entry.
+        const matches = list.filter((item) => typeof item === 'object' && item !== null &&
+          !Array.isArray(item) && (item as { name?: unknown }).name === registration.profile);
+        if (matches.length !== 1) throw new Error('Tunnel profile missing or ambiguous.');
+        const entry = matches[0] as { path?: unknown };
+        if (typeof entry.path !== 'string') throw new Error('Tunnel profile not found.');
         const profileFile = await realpath(safePath(entry.path));
         const profile = YAML.parse(await readFile(profileFile, 'utf8')) as { health?: { url_file?: unknown } };
         if (typeof profile?.health?.url_file !== 'string') throw new Error('Missing tunnel health URL reference.');

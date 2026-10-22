@@ -49,6 +49,9 @@ const env = {
   DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1',
   PUPPETEER_SKIP_DOWNLOAD: '1',
   DC_FLAG_URL: 'http://127.0.0.1:9/',
+  // Force a missing synthetic bridge credential. Never inherit a CI or host
+  // OpenCode connection when testing a restored, non-release candidate.
+  OPENCODE_GATEWAY_RDC_BRIDGE_TOKEN_FILE: join(isolated, 'missing-opencode-bridge.token'),
   PATH: process.platform === 'win32'
     ? [join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
       process.env.SystemRoot || 'C:\\Windows'].join(';')
@@ -162,6 +165,22 @@ try {
   assert.ok(read.contents?.length > 0, 'MCP resource was empty');
   const prompts = (await bounded('MCP prompts/list', () => client.listPrompts())).prompts;
   assert.ok(Array.isArray(prompts), 'Invalid MCP prompts catalog');
+
+  // Issue #150: exercise the packaged OpenCode handler over real MCP stdio.
+  // The isolated child has no bridge token and no real gateway profile.
+  // Missing authentication must fail before any OpenCode connection or task.
+  assert.ok(names.includes('opencode_read'), 'Missing packaged OpenCode read tool');
+  const deniedOpenCode = await bounded('MCP OpenCode unavailable without bridge token',
+    () => callFixtureTool('opencode_read', { action: 'health' }));
+  assert.equal(deniedOpenCode.isError, true,
+    'OpenCode unexpectedly authorized a missing bridge credential');
+  const deniedOpenCodeText = toolText(deniedOpenCode);
+  assert.match(deniedOpenCodeText, /OpenCode gateway token is unavailable/,
+    'Missing bridge credentials must return a stable, explicit failure');
+  assert.ok(!deniedOpenCodeText.includes(isolated),
+    'OpenCode denial must not expose its temporary credential path');
+  assert.equal(await readFile(fixture, 'utf8'), original,
+    'Denied OpenCode health must not modify the disposable fixture');
 
   // Linux first-class development gate: exercise the actual extracted
   // candidate and shell tool, not a mock or the runner's checkout Node.
@@ -317,6 +336,7 @@ try {
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
     outsideBytesPreserved: true,
+    opencodeMissingTokenDenied: true,
     linuxProcessChecks: process.platform === 'linux' ? 1 : 0,
     linuxUnsupportedUiChecks: process.platform === 'linux' ? 1 : 0,
     releaseEligible: false,

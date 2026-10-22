@@ -88,6 +88,27 @@ test('both candidate verifiers reject undeclared top-level candidate directories
   });
 });
 
+test('both candidate verifiers reject unexpected runtime subdirectories', async () => {
+  await fixture(async ({ destination, target, sourceCommit, runId, attempt }) => {
+    const unexpected = join(destination, 'runtime', 'untracked-empty');
+    await mkdir(unexpected);
+    try {
+      await assert.rejects(
+        inspectPortableCandidate(destination, 'linux-x64'),
+        /Unapproved portable runtime directory/,
+        'Portable doctor must reject undeclared runtime directory',
+      );
+      await assert.rejects(
+        verifyCandidate({ destination, target, sourceCommit, runId, attempt }),
+        /Unapproved candidate runtime directory/,
+        'Independent artifact verifier must reject undeclared runtime directory',
+      );
+    } finally {
+      await rm(unexpected, { recursive: true, force: true });
+    }
+  });
+});
+
 test('portable doctor rejects links and a modified release contract', async () => {
   await fixture(async ({ destination }) => {
     await symlink(join(destination, 'dist'), join(destination, 'link'), 'dir');

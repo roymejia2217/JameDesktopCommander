@@ -199,6 +199,46 @@ try {
     assert.match(toolText(launched), /JDC_LINUX_PROCESS_OK/,
       'The packaged MCP process did not return the shell output');
 
+    // #150: an independently packaged MCP instance must retain session state
+    // through a real Linux shell process and one event-based exit wait.
+    // The disposable process exits by itself; no PID from the runner or host is used.
+    assert.ok(names.includes('list_sessions'), 'Missing Linux session tool');
+    assert.ok(names.includes('read_process_output'), 'Missing Linux output tool');
+    const lifecycle = await bounded('MCP Linux process lifecycle start', () =>
+      callFixtureTool('start_process', {
+        command: 'printf JDC_LINUX_SESSION_STARTED; sleep 6; printf JDC_LINUX_SESSION_DONE',
+        shell: '/bin/sh', timeout_ms: 1500,
+      }));
+    assert.notEqual(lifecycle.isError, true, 'Linux session process launch failed');
+    const lifecycleText = toolText(lifecycle);
+    assert.match(lifecycleText, /JDC_LINUX_SESSION_STARTED/,
+      'Linux lifecycle fixture did not produce its initial marker');
+    const pidMatch = /Process started with PID ([0-9]+)/.exec(lifecycleText);
+    assert.ok(pidMatch, 'Packaged MCP launch must return a real process PID');
+    const lifecyclePid = Number(pidMatch[1]);
+    assert.ok(Number.isSafeInteger(lifecyclePid) && lifecyclePid > 0,
+      'Linux lifecycle PID must be a positive safe integer');
+    const activeSessions = await bounded('MCP Linux active session catalog',
+      () => callFixtureTool('list_sessions', {}));
+    assert.notEqual(activeSessions.isError, true, 'Linux session catalog failed');
+    assert.ok(toolText(activeSessions).includes('PID: ' + lifecyclePid + ','),
+      'Packaged MCP did not retain its started shell session');
+    const completed = await bounded('MCP Linux wait for real process exit',
+      () => callFixtureTool('read_process_output', {
+        pid: lifecyclePid, wait_for: 'exit', offset: -20,
+        length: 20, timeout_ms: 15000,
+      }));
+    assert.notEqual(completed.isError, true, 'Linux exit-read tool failed');
+    assert.match(toolText(completed), /JDC_LINUX_SESSION_DONE/,
+      'Exit-read omitted the final shell output');
+    assert.match(toolText(completed), /Process completed with exit code 0/,
+      'Exit-read did not report the real successful process exit');
+    const afterExit = await bounded('MCP Linux post-exit session catalog',
+      () => callFixtureTool('list_sessions', {}));
+    assert.notEqual(afterExit.isError, true, 'Post-exit Linux catalog failed');
+    assert.ok(!toolText(afterExit).includes('PID: ' + lifecyclePid + ','),
+      'Completed Linux session incorrectly remains active');
+
     // Windows-only Computer Use must deny explicitly on Linux rather than
     // simulating a desktop snapshot or returning fabricated health.
     const ui = await bounded('MCP Linux UI unsupported status', () =>
@@ -337,7 +377,7 @@ try {
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
     outsideBytesPreserved: true,
     opencodeMissingTokenDenied: true,
-    linuxProcessChecks: process.platform === 'linux' ? 1 : 0,
+    linuxProcessChecks: process.platform === 'linux' ? 3 : 0,
     linuxUnsupportedUiChecks: process.platform === 'linux' ? 1 : 0,
     releaseEligible: false,
   }));

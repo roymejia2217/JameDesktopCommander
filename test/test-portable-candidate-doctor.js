@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildCandidate } from '../scripts/distribution-candidate.mjs';
+import { buildCandidate, verifyCandidate } from '../scripts/distribution-candidate.mjs';
 import { inspectPortableCandidate } from '../dist/npm-scripts/portable-doctor.js';
 
 async function fixture(callback) {
@@ -99,6 +99,38 @@ test('portable doctor rejects internally coherent inventories missing required d
         inspectPortableCandidate(destination, 'linux-x64'),
         /Incomplete portable candidate inventory/,
         `Missing mandatory payload entry must be rejected: ${missing}`,
+      );
+
+      await writeFile(filePath, bytes);
+      await writeFile(manifestPath, JSON.stringify(completeManifest));
+    }
+  });
+});
+
+test('independent verifier rejects internally coherent inventories missing required files', async () => {
+  await fixture(async ({ destination, target, sourceCommit, runId, attempt }) => {
+    const options = { destination, target, sourceCommit, runId, attempt };
+    const manifestPath = join(destination, 'candidate-manifest.json');
+    const completeManifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    assert.equal((await verifyCandidate(options)).fileCount, completeManifest.fileCount);
+
+    for (const missing of [
+      'LICENSE', 'NODE-LICENSE', 'package-lock.json',
+      'dist/npm-scripts/verify-ripgrep.js',
+    ]) {
+      assert.ok(completeManifest.files.some(entry => entry.path === missing));
+      const filePath = join(destination, ...missing.split('/'));
+      const bytes = await readFile(filePath);
+      const files = completeManifest.files.filter(entry => entry.path !== missing);
+      await rm(filePath);
+      await writeFile(manifestPath, JSON.stringify({
+        ...completeManifest, files, fileCount: files.length,
+      }));
+
+      await assert.rejects(
+        verifyCandidate(options),
+        /Missing required runtime file/,
+        `Independent verifier must reject absent required payload: ${missing}`,
       );
 
       await writeFile(filePath, bytes);

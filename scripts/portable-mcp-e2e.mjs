@@ -258,6 +258,28 @@ try {
   assert.notEqual(initialRead.isError, true, 'Fixture read failed');
   assert.ok(toolText(initialRead).includes(original.trim()), 'Initial file contents differ');
 
+  // #150: verify the actual packaged workspace preview, not only raw read_file.
+  // Metadata belongs to the same disposable fixture and MCP tool response.
+  const workspaceFile = await bounded('MCP packaged text workspace',
+    () => callFixtureTool('render_workspace', { path: fixture }));
+  assert.notEqual(workspaceFile.isError, true, 'Packaged file workspace failed');
+  assert.equal(workspaceFile.structuredContent?.filePath, fixture,
+    'Workspace metadata must refer to the requested fixture');
+  assert.equal(workspaceFile.structuredContent?.fileName, 'portable-mcp-fixture.txt');
+  assert.equal(typeof workspaceFile.structuredContent?.fileType, 'string',
+    'Text workspace must identify its file type');
+  assert.ok(toolText(workspaceFile).includes(original.trim()),
+    'Packaged workspace omitted fixture text');
+
+  const workspaceDirectory = await bounded('MCP packaged directory workspace',
+    () => callFixtureTool('render_workspace', { path: working, depth: 1 }));
+  assert.notEqual(workspaceDirectory.isError, true, 'Packaged directory workspace failed');
+  assert.equal(workspaceDirectory.structuredContent?.filePath, working);
+  assert.equal(workspaceDirectory.structuredContent?.fileType, 'directory');
+  assert.ok(toolText(workspaceDirectory).includes('[FILE] portable-mcp-fixture.txt'),
+    'Packaged directory workspace omitted its disposable fixture');
+
+
   const rejected = await callFixtureTool('write_file', {
     path: fixture, content: 'unapproved-overwrite\n',
   });
@@ -335,6 +357,16 @@ try {
     assert.equal(result.isError, true, 'Unauthorized MCP access succeeded: ' + name);
   }
   await assertDenied('read_file', { path: deniedFile });
+
+  const deniedWorkspace = await bounded('MCP restricted workspace denial',
+    () => callFixtureTool('render_workspace', { path: deniedFile }));
+  assert.equal(deniedWorkspace.isError, true,
+    'Restricted workspace leaked access outside allowedDirectories');
+  assert.ok(!toolText(deniedWorkspace).includes('outside-initial'),
+    'Restricted workspace exposed outside fixture contents');
+  assert.equal(await readFile(deniedFile, 'utf8'), 'outside-initial\n',
+    'Denied workspace must preserve the outside fixture bytes');
+
   await assertDenied('write_file', {
     path: deniedFile, content: 'unauthorized\n', mode: 'rewrite',
   });
@@ -375,7 +407,7 @@ try {
     modeOmissionRejected: true, accessPositiveChecks: 3,
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
-    outsideBytesPreserved: true,
+    outsideBytesPreserved: true, packagedWorkspaceChecks: 3,
     opencodeMissingTokenDenied: true,
     linuxProcessChecks: process.platform === 'linux' ? 3 : 0,
     linuxUnsupportedUiChecks: process.platform === 'linux' ? 1 : 0,

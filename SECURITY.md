@@ -71,13 +71,13 @@ pull request, discussion, CI log, or artifact.**
    vulnerability** if GitHub private vulnerability reporting is enabled.
    Repository settings control whether this option is available; this document
    does not claim that it is currently enabled.
-2. If that private reporting option is unavailable, [open a JDC issue](
-   https://github.com/roymejia2217/JameDesktopCommander/issues/new) containing
+2. If that private reporting option is unavailable, open a
+   [JDC issue](https://github.com/roymejia2217/JameDesktopCommander/issues/new) containing
    **only a non-sensitive request** to establish a private disclosure channel.
    Do not attach the exploit or include enough technical detail to reproduce it.
    Share sensitive details only after an appropriate private channel is agreed.
-3. For ordinary, non-security defects, use the [JDC issue tracker](
-   https://github.com/roymejia2217/JameDesktopCommander/issues) with sanitized
+3. For ordinary, non-security defects, use the
+   [JDC issue tracker](https://github.com/roymejia2217/JameDesktopCommander/issues) with sanitized
    reproduction steps and diagnostic information.
 
 Maintainers should assess the report, coordinate a mitigation and appropriate

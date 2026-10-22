@@ -48,8 +48,8 @@ jobs:
           grep -F -q -- 'Box::leak(Box::from_raw(this_ptr))' "$output"
           printf 'GENERATED_BOX_RECEIVER_OCCURRENCES='
           grep -F -c -- 'Box::leak(Box::from_raw(this_ptr))' "$output"
-          # Hash the archived basename, not a runner-specific absolute path,
-          # so a reviewer can verify the downloaded zip independently.
+          # Hash the fixed basename and verify it inside the ephemeral CI job.
+          # Repository policy forbids creating a third public artifact upload.
           (
             cd "$RUNNER_TEMP"
             sha256sum jdc-napi-generated-receivers.rs > jdc-napi-generated-receivers.sha256
@@ -60,16 +60,6 @@ jobs:
           # Show the generated expression locations, without asserting that
           # successful compilation makes the receiver ownership sound.
           grep -F -n -- 'Box::leak(Box::from_raw(this_ptr))' "$output" | head -n 15
-
-      - name: Retain short-lived source evidence without publishing an addon
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: UNPUBLISHED-t011-napi-generated-receivers
-          path: |
-            ${{ runner.temp }}/jdc-napi-generated-receivers.rs
-            ${{ runner.temp }}/jdc-napi-generated-receivers.sha256
-          if-no-files-found: error
-          retention-days: 1
 
   miri-receiver-model:
     name: Miri receiver model (${{ matrix.borrow_model.name }}, linux-x64)

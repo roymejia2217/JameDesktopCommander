@@ -44,6 +44,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let injectedDropIn = '';
   let injectedFragment = '';
   let injectedReload = 'no';
+  let injectedActivation = null;
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
@@ -56,8 +57,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
         ].join('\n') + '\n';
       }
       if (args[1] === 'show') {
-        const state = alive ? 'ActiveState=active\nUnitFileState=enabled\n' :
-          'ActiveState=inactive\nUnitFileState=disabled\n';
+        const state = injectedActivation ?? (alive ? 'ActiveState=active\nUnitFileState=enabled\n' :
+          'ActiveState=inactive\nUnitFileState=disabled\n');
         if (stopBetweenCheckAndRestart) {
           // A separate operator can complete STOP after this read.
           alive = false;
@@ -183,6 +184,23 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     await chmod(unitParent, 0o700);
     await runLinuxTunnelCommand(['start'], deps);
     assert.ok(calls.some(c => c[0] === 'systemctl' && c[2] === 'enable' && c[3] === '--now'));
+    // A manager response containing conflicting activation properties must
+    // not authorize status or trigger a restart, even if the first value is
+    // the desired active/enabled pair.
+    for (const contradictory of [
+      'ActiveState=active\nUnitFileState=enabled\nActiveState=inactive\n',
+      'ActiveState=active\nUnitFileState=enabled\nUnitFileState=disabled\n',
+      'ActiveState=active\nActiveState=active\nUnitFileState=enabled\n',
+      'ActiveState=active\nUnitFileState=enabled\nUnknownField=yes\n',
+    ]) {
+      injectedActivation = contradictory;
+      const beforeMalformed = calls.length;
+      await assert.rejects(runLinuxTunnelCommand(['status'], deps), /invalid.*state/i);
+      await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /invalid.*state/i);
+      assert.ok(!calls.slice(beforeMalformed).some(c => c[2] === 'try-restart'),
+        'Malformed state must not restart the service');
+    }
+    injectedActivation = null;
     injectedDropIn = path.join(home, 'untrusted-override.conf');
     await assert.rejects(runLinuxTunnelCommand(['status'], deps),
       /effective systemd unit/i);

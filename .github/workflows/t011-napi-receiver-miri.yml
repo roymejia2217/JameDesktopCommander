@@ -93,6 +93,7 @@ jobs:
             flags: "-Zmiri-tree-borrows"
         case_name:
           - model_pinned_generated_shared_reentry
+          - model_shared_guards_with_pinned_generated_reentry
           - model_inline_borrowed_return_with_nested_generated_receiver
     steps:
       - name: Checkout exact PR source

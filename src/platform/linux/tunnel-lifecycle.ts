@@ -79,6 +79,44 @@ export function buildLinuxTunnelUnit(executable: string, profileDir: string, pro
   ].join('\n');
 }
 
+// Point-in-time custody check against different-UID path mutation. All
+// executable launches use the canonical path, never the original symlink.
+// This cannot prevent same-UID replacement or a race before systemd exec;
+// those require a separately approved deployment identity and attestation.
+async function resolveTrustedExecutable(executable: string): Promise<string> {
+  try {
+    const canonical = await realpath(executable);
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error('Missing Linux identity');
+    let current = canonical;
+    let leaf = true;
+    for (;;) {
+      const info = await lstat(current);
+      if (info.isSymbolicLink() ||
+          (leaf ? !info.isFile() : !info.isDirectory()) ||
+          (info.uid !== 0 && info.uid !== uid)) {
+        throw new Error('Untrusted executable component');
+      }
+      // A root-owned sticky directory such as /tmp prevents *other* users
+      // from replacing an existing entry, but is not a same-UID boundary.
+      const trustedSticky = !leaf && info.uid === 0 &&
+        (info.mode & 0o1000) !== 0;
+      if ((info.mode & 0o022) !== 0 && !trustedSticky) {
+        throw new Error('Writable executable component');
+      }
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+      leaf = false;
+    }
+    await access(canonical, constants.X_OK);
+    return canonical;
+  } catch {
+    // Do not leak absolute executable paths or host filesystem errors.
+    throw new Error('Linux tunnel executable custody cannot be verified.');
+  }
+}
+
 function unitPath(home: string): string {
   return path.join(safePath(home), '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
 }
@@ -109,7 +147,12 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   if (content !== buildLinuxTunnelUnit(match[1], match[2], match[3])) {
     throw new Error('Linux tunnel unit differs from the managed template.');
   }
-  return { executable: safePath(match[1]), profileDir: safePath(match[2]), profile: match[3] };
+  const recordedExecutable = safePath(match[1]);
+  const executable = await resolveTrustedExecutable(recordedExecutable);
+  if (executable !== recordedExecutable) {
+    throw new Error('Linux tunnel executable registration changed.');
+  }
+  return { executable, profileDir: safePath(match[2]), profile: match[3] };
 }
 
 // systemd merges manager-selected fragments and drop-ins across its entire
@@ -241,11 +284,8 @@ export async function runLinuxTunnelCommand(
   const unit = LINUX_TUNNEL_UNIT;
   if (action === 'install' || action === 'doctor') {
     const parsed = parseOptions(options);
-    const executable = await realpath(parsed.executable);
+    const executable = await resolveTrustedExecutable(parsed.executable);
     const profileDir = await realpath(parsed.profileDir);
-    const binary = await stat(executable);
-    if (!binary.isFile()) throw new Error('Tunnel executable must be a regular file.');
-    await access(executable, constants.X_OK);
     if (!(await stat(profileDir)).isDirectory()) throw new Error('Tunnel profile directory unavailable.');
     await run(executable, ['doctor', '--profile-dir', profileDir, '--profile', parsed.profile, '--explain']);
     // A read-only JDC preflight must never create a unit or change its state.

@@ -16,6 +16,49 @@ permissions:
   contents: read
 
 jobs:
+  pinned-receiver-expansion:
+    # Captures the *actual* macro-generated wrapper of the pinned native crate.
+    # It is evidence for #124, not a soundness proof or a releasable artifact.
+    name: Pinned N-API generated receiver expansion (non-release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Rust nightly without modifying host runtime
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal
+
+      - name: Expand real fixture-enabled N-API receiver macros from locked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/jdc-napi-generated-receivers.rs"
+          cargo +nightly-2026-06-29 rustc --locked --manifest-path native/capability-probe/Cargo.toml --lib --features receiver-test-fixture -- -Zunpretty=expanded > "$output"
+          test -s "$output"
+          # Fail closed if the expected production class/method was not expanded.
+          rg -q --fixed-strings 'struct RootCapability' "$output"
+          rg -q --fixed-strings 'fn list_directory' "$output"
+          sha256sum "$output" > "${RUNNER_TEMP}/jdc-napi-generated-receivers.sha256"
+          printf 'GENERATED_RECEIVER_SOURCE_SHA256='
+          cut -d ' ' -f 1 "${RUNNER_TEMP}/jdc-napi-generated-receivers.sha256"
+          # Preserve the actual expression for independent review; never
+          # infer its safety from a successful macro expansion.
+          rg -n --fixed-strings 'from_raw' "$output" | head -n 15 || :
+
+      - name: Retain short-lived source evidence without publishing an addon
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: UNPUBLISHED-t011-napi-generated-receivers
+          path: |
+            ${{ runner.temp }}/jdc-napi-generated-receivers.rs
+            ${{ runner.temp }}/jdc-napi-generated-receivers.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   miri-receiver-model:
     name: Miri receiver model (${{ matrix.borrow_model.name }}, linux-x64)
     runs-on: ubuntu-24.04

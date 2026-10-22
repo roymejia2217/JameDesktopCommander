@@ -26,6 +26,15 @@ const permittedRootFiles = new Set([
   'LICENSE', 'NODE-LICENSE', 'package.json', 'package-lock.json', manifestName,
 ]);
 
+// One required-payload contract for the builder and the independent verifier.
+function requiredCandidatePaths(runtimeExecutable) {
+  return [
+    runtimeExecutable, 'NODE-LICENSE', 'LICENSE', 'package.json',
+    'package-lock.json', 'dist/index.js',
+    'dist/npm-scripts/verify-ripgrep.js', 'dist/build-provenance.json',
+  ];
+}
+
 function approvedCandidatePath(path, target, nativeAddonIncluded) {
   const firstSeparator = path.indexOf('/');
   if (firstSeparator === -1) return permittedRootFiles.has(path);
@@ -163,8 +172,7 @@ export async function buildCandidate({ source, destination, nodeExecutable, node
 
   const files = await scanRegularFiles(destination, target, nativeAddon !== undefined);
   assert.ok(files.length > 100, 'Candidate has an unexpectedly small runtime payload');
-  for (const mandatory of [binary, 'NODE-LICENSE', 'LICENSE', 'package.json',
-    'package-lock.json', 'dist/index.js', 'dist/npm-scripts/verify-ripgrep.js']) {
+  for (const mandatory of requiredCandidatePaths(binary)) {
     assert.ok(files.some(file => file.path === mandatory), 'Missing required runtime file');
   }
   const manifest = {
@@ -210,6 +218,9 @@ export async function verifyCandidate({ destination, target, sourceCommit, runId
   for (const record of manifest.files) {
     assert.ok(safeRelative(record.path) && Number.isSafeInteger(record.byteLength) &&
       record.byteLength >= 0 && digestPattern.test(record.sha256), 'Invalid manifest file entry');
+  }
+  for (const mandatory of requiredCandidatePaths(manifest.runtimeExecutable)) {
+    assert.ok(manifest.files.some(file => file.path === mandatory), 'Missing required runtime file');
   }
   const observed = await scanRegularFiles(destination, target, nativeAddon !== undefined);
   const actual = observed.filter(item => item.path !== manifestName);

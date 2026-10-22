@@ -41,6 +41,26 @@ requires it. Reducing the contract to N requires a separately approved
 security/product decision and equivalent user-visible disclosure; it must
 not happen by weakening, skipping or deleting the RED tests.
 
+### Tool-catalog authority is a separate boundary
+
+Invariant O is scoped to **filesystem operations actually routed through an
+enforced restricted-mode capability** under the independently approved storage
+and principal model. It does **not** mean the entire MCP server is sandboxed.
+`start_process`, interactive shells, OpenCode providers and `read_file` with
+`isUrl: true` have separate process or network authority; a native directory
+handle cannot constrain those ambient execution/egress paths. A restricted
+filesystem test passing does not establish confidentiality when the same MCP
+client can invoke an independently privileged tool.
+
+Before a feature-scoped release, enumerate the full exposed tool catalog,
+delegated processes, URLs/redirects, credentials and effective OS principals.
+Either enforce separately reviewed tool-specific restrictions and denial tests,
+or explicitly exclude the wider isolation claim in the documented deployment
+contract. The current `allowedDirectories: []` setting means **unrestricted**,
+not a sandbox. This scope clarification does not authorize changing existing
+process or network behavior, nor does it relax the four hard-link RED cases.
+See the non-shipping handler and URL authority audit in draft PR #153.
+
 ## 2. Reproducible evidence and current implementation
 
 Source: `test/security/capability-namespace-swap.test.cjs` on PR #147, tests

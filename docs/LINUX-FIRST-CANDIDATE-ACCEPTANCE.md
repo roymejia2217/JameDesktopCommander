@@ -28,11 +28,19 @@ The unpacked **same candidate runtime** now additionally must:
 3. Invoke `computer_inspect` with `action: health` and receive the
    explicit `WINDOWS_REQUIRED` error. Windows UI Automation functionality
    is **not** falsely advertised as supported on Linux.
-4. Preserve all existing packaged MCP, runtime hashes, access-policy and
+4. Invoke `opencode_read` (`action: health`) over packaged MCP stdio with
+   a deliberately missing synthetic bridge-token file. The tool must return
+   `isError: true` and the explicit unavailable-token diagnostic without
+   exposing the file path or modifying the disposable fixture. This is a
+   **negative authentication test**, not an actual gateway connectivity or
+   OpenCode task/execution test; it runs on Linux and Windows candidates.
+5. Preserve all existing packaged MCP, runtime hashes, access-policy and
    outside-byte sentinel checks without skipping Windows tests.
 
 The additional tools are checked against the actual packaged executable and
 real protocol transport, not a local TypeScript module or a mock server.
+The OpenCode denial requires no real token, service, outbound request or
+configured project alias; it does not establish authenticated bridge health.
 The process execution smoke deliberately confirms functionality, **not OS
 confinement**: `allowedDirectories` is an application filesystem policy and
 does not restrict `start_process`. Use a dedicated, least-privileged OS user

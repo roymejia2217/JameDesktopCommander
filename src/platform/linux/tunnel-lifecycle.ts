@@ -188,10 +188,25 @@ function parseActivationState(response: string): { active: boolean; enabled: boo
   if (entries.size !== expected.size) {
     throw new Error('Invalid Linux tunnel systemd activation state response.');
   }
-  return {
-    active: entries.get('ActiveState') === 'active',
-    enabled: entries.get('UnitFileState') === 'enabled',
-  };
+  // Values come from systemd's documented high-level activation and unit
+  // installation states. Unknown output must not be silently interpreted as
+  // a valid "inactive" or "disabled" service. New systemd values fail closed
+  // until this contract is independently reviewed.
+  const activeStates = new Set([
+    'active', 'inactive', 'failed', 'activating', 'deactivating',
+    'maintenance', 'reloading', 'refreshing',
+  ]);
+  const unitFileStates = new Set([
+    'enabled', 'enabled-runtime', 'disabled', 'linked', 'linked-runtime',
+    'masked', 'masked-runtime', 'static', 'invalid', 'alias', 'indirect',
+    'generated', 'transient', 'bad', 'not-found',
+  ]);
+  const activeState = entries.get('ActiveState') ?? '';
+  const unitFileState = entries.get('UnitFileState') ?? '';
+  if (!activeStates.has(activeState) || !unitFileStates.has(unitFileState)) {
+    throw new Error('Invalid Linux tunnel systemd activation state response.');
+  }
+  return { active: activeState === 'active', enabled: unitFileState === 'enabled' };
 }
 
 function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: boolean } {

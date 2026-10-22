@@ -168,6 +168,32 @@ async function ensureUserDirectory(home: string, create = true): Promise<void> {
   }
 }
 
+// Parse the manager's exact two-property response once. A regex presence
+// check could accept contradictory or duplicated state declarations and
+// wrongly report health or authorize try-restart.
+function parseActivationState(response: string): { active: boolean; enabled: boolean } {
+  const expected = new Set(['ActiveState', 'UnitFileState']);
+  const entries = new Map<string, string>();
+  const lines = (response.endsWith('\n') ? response.slice(0, -1) : response).split('\n');
+  for (const line of lines) {
+    const index = line.indexOf('=');
+    const key = line.slice(0, index);
+    const value = line.slice(index + 1);
+    if (index < 1 || !expected.has(key) || entries.has(key) ||
+        !value || value.trim() !== value) {
+      throw new Error('Invalid Linux tunnel systemd activation state response.');
+    }
+    entries.set(key, value);
+  }
+  if (entries.size !== expected.size) {
+    throw new Error('Invalid Linux tunnel systemd activation state response.');
+  }
+  return {
+    active: entries.get('ActiveState') === 'active',
+    enabled: entries.get('UnitFileState') === 'enabled',
+  };
+}
+
 function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: boolean } {
   const parsed: unknown = JSON.parse(value);
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('Invalid tunnel health response.');
@@ -243,10 +269,9 @@ export async function runLinuxTunnelCommand(
     } else if (action === 'restart') {
       // First reject an inactive/disabled unit; also use try-restart so
       // the systemd manager cannot revive a unit stopped after this check.
-      const state = await systemctl(['show', unit,
-        '--property=ActiveState', '--property=UnitFileState', '--no-pager']);
-      if (!/^ActiveState=active$/m.test(state) ||
-          !/^UnitFileState=enabled$/m.test(state)) {
+      const state = parseActivationState(await systemctl(['show', unit,
+        '--property=ActiveState', '--property=UnitFileState', '--no-pager']));
+      if (!state.active || !state.enabled) {
         throw new Error('Linux tunnel restart requires an enabled, active user service.');
       }
       // A successful restart does not establish remote control-plane readiness.
@@ -258,9 +283,9 @@ export async function runLinuxTunnelCommand(
         await systemctl(['daemon-reload']);
       }
     } else if (action === 'status') {
-      const raw = await systemctl(['show', unit, '--property=ActiveState', '--property=UnitFileState', '--no-pager']);
-      const active = /^ActiveState=active$/m.test(raw);
-      const enabled = /^UnitFileState=enabled$/m.test(raw);
+      const { active, enabled } = parseActivationState(
+        await systemctl(['show', unit, '--property=ActiveState', '--property=UnitFileState', '--no-pager']),
+      );
       let health = { healthy: false, controlPlanePoll: false };
       if (active) {
         if (!registration) throw new Error('Linux tunnel registration unavailable.');

@@ -60,11 +60,13 @@ test('empty, capped and invalid envelopes remain observational only', () => {
 test('query is bounded, read-only, safely quotes task names and excludes raw messages', () => {
     const source = buildWindowsTunnelTaskEventsPowerShell("Tunnel's task");
     assert.match(source, /Get-WinEvent/);
-    assert.match(source, /-MaxEvents 5000/);
-    assert.match(source, /\.AddHours\(-72\)/);
-    assert.match(source, /Tunnel''s task/);
+    assert.match(source, /-FilterXml \$filterXml -MaxEvents 51/);
+    assert.match(source, /TimeCreated\[timediff\(@SystemTime\) &lt;= 259200000\]/);
+    assert.match(source, /EventData\[Data\[/);
+    assert.doesNotMatch(source, /-FilterHashtable|-MaxEvents 5000/);
+    assert.match(source, /Tunnel's task/);
     assert.match(source, /ConvertTo-Json/);
-    assert.match(source, /\$matched\.Count -gt 50/);
+    assert.match(source, /\$records\.Count -gt 50/);
     // TaskScheduler stores root task names under a leading backslash and
     // also carries unrelated action names; match the named TaskName field.
     assert.match(source, /\$canonicalName/);
@@ -74,6 +76,15 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
     assert.doesNotMatch(source,
         /Start-ScheduledTask|Stop-ScheduledTask|Register-ScheduledTask|Remove-Item|Invoke-Expression/);
     assert.throws(() => buildWindowsTunnelTaskEventsPowerShell('bad\r\nname'));
+
+    // XPath construction is XML-safe even for both quote kinds and markup.
+    const hostile = buildWindowsTunnelTaskEventsPowerShell(
+        `Task's "fixture" <xml>&`,
+    );
+    assert.match(hostile, /concat\(/);
+    assert.match(hostile, /&lt;xml&gt;&amp;/);
+    assert.doesNotMatch(hostile, /<xml>/);
+
 });
 
 test('only OS PowerShell is used, with a bounded single invocation', async () => {

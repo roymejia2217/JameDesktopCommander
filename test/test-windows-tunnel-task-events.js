@@ -64,6 +64,7 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
     assert.match(source, /\.AddHours\(-72\)/);
     assert.match(source, /Tunnel''s task/);
     assert.match(source, /ConvertTo-Json/);
+    assert.match(source, /\$matched\.Count -gt 50/);
     assert.doesNotMatch(source,
         /Start-ScheduledTask|Stop-ScheduledTask|Register-ScheduledTask|Remove-Item|Invoke-Expression/);
     assert.throws(() => buildWindowsTunnelTaskEventsPowerShell('bad\r\nname'));

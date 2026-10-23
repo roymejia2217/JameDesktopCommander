@@ -132,7 +132,7 @@
     "@commitlint/cli": "21.2.3",
     "@commitlint/config-conventional": "21.2.3",
     "@modelcontextprotocol/ext-apps": "^1.0.1",
-    "@modelcontextprotocol/inspector": "2.9.0",
+    "@modelcontextprotocol/inspector": "2.12.0",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "22.20.5",
     "@types/proper-lockfile": "^4.1.4",

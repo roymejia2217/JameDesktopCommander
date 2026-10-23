@@ -182,10 +182,15 @@ non-release feature.
 ## Linux user-directory integrity gate
 
 The initial installer and every subsequent `start`, `restart`, `status`
-and `uninstall` operation check the canonical HOME and each ancestor of the
-managed user unit. They must be ordinary directories owned by the effective
-user **and not group/world writable**. Merely checking ownership of the unit
-file is insufficient if its parent can be modified by another principal.
+and `uninstall` operation check the canonical HOME, all parent directories
+from the filesystem root down to HOME, and the managed user-unit directories.
+HOME and its managed descendants must be owned by the effective user and
+not group/world writable. Higher ancestors may be owned by root or the user,
+but may not be group/world writable except root-owned sticky directories
+(such as the conventional `/tmp`) that protect existing entries from
+replacement by unrelated users. Merely checking ownership of the unit
+file or HOME is insufficient if an earlier path component can be changed
+by another principal.
 The installer creates missing private directories where supported, but
 existing insecure directories are rejected; start/status/uninstall never
 create missing directories. The operator can correct directory permissions

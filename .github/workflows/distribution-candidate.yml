@@ -117,3 +117,28 @@ jobs:
 
       - name: Real MCP client acceptance outside checkout
         run: node scripts/portable-mcp-e2e.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}"
+      - name: Provision real hosted Linux user manager
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          sudo loginctl enable-linger "$(id -un)"
+          printf 'XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u)" >> "$GITHUB_ENV"
+          printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' "$(id -u)" >> "$GITHUB_ENV"
+
+      - name: Accept the packaged Linux tunnel lifecycle with real systemd
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemctl --user show-environment > /dev/null
+          node scripts/linux-user-systemd-e2e.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}"
+
+      - name: Disable temporary Linux user lingering
+        if: ${{ always() && matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo loginctl disable-linger "$(id -un)"
+

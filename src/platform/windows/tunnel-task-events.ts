@@ -96,8 +96,8 @@ export function buildWindowsTunnelTaskEventsPowerShell(taskName: string): string
         "    throw 'Scheduler operational event query failed.'",
         '  }',
         '}',
-        '$rows=@($records | Where-Object { @($_.Properties.Value) -contains $taskName } |',
-        '  Select-Object -First 50 | ForEach-Object {',
+        '$matched=@($records | Where-Object { @($_.Properties.Value) -contains $taskName })',
+        '$rows=@($matched | Select-Object -First 50 | ForEach-Object {',
         '    $resultCode=$null',
         '    if($_.Id -eq 201){',
         '      [xml]$xml=$_.ToXml()',
@@ -111,7 +111,7 @@ export function buildWindowsTunnelTaskEventsPowerShell(taskName: string): string
         '      resultCode=$resultCode',
         '    }',
         '  })',
-        "[pscustomobject]@{kind='observational_only';capped=($records.Count -ge 5000);events=$rows} |",
+        "[pscustomobject]@{kind='observational_only';capped=(($records.Count -ge 5000) -or ($matched.Count -gt 50));events=$rows} |",
         '  ConvertTo-Json -Depth 4 -Compress',
     ].join('\r\n');
 }

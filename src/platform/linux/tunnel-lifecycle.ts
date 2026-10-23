@@ -288,7 +288,20 @@ export async function runLinuxTunnelCommand(
 ): Promise<{ action: string; unit: string; status?: LinuxTunnelStatus }> {
   requireLinux(dependencies);
   const home = safePath(dependencies.home ?? process.env.HOME ?? '');
-  const run = dependencies.run ?? defaultRun;
+  const externalRun = dependencies.run ?? defaultRun;
+  // External command diagnostics can include executable paths, profile data,
+  // or bearer material. Never forward their message/cause to the CLI.
+  // Preserve command category so operators can distinguish service failures
+  // from official client failures without disclosing sensitive values.
+  const run = async (executable: string, parts: readonly string[]): Promise<string> => {
+    try {
+      return await externalRun(executable, parts);
+    } catch {
+      throw new Error(executable === 'systemctl'
+        ? 'Linux tunnel user manager command failed.'
+        : 'Linux tunnel client command failed.');
+    }
+  };
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
   if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'uninstall'].includes(action ?? '')) {

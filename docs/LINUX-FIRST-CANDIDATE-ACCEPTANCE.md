@@ -24,15 +24,32 @@ The unpacked **same candidate runtime** now additionally must:
 1. Run under the non-root, disposable GitHub-hosted Linux user.
 2. Invoke `start_process` through a real MCP `tools/call` using the
    official `/bin/sh` and a fixed `printf` command, and receive its exact
-   marker. No terminal UI, system service or network port is started.
+   marker. Additionally, use a bounded self-terminating shell process to
+   validate the real PID, `list_sessions`, one event-based
+   `read_process_output(wait_for: 'exit')` call, exit code 0, and removal
+   from active sessions. No terminal UI, system service or network port
+   is started.
 3. Invoke `computer_inspect` with `action: health` and receive the
    explicit `WINDOWS_REQUIRED` error. Windows UI Automation functionality
    is **not** falsely advertised as supported on Linux.
-4. Preserve all existing packaged MCP, runtime hashes, access-policy and
+4. Invoke `opencode_read` (`action: health`) over packaged MCP stdio with
+   a deliberately missing synthetic bridge-token file. The tool must return
+   `isError: true` and the explicit unavailable-token diagnostic without
+   exposing the file path or modifying the disposable fixture. This is a
+   **negative authentication test**, not an actual gateway connectivity or
+   OpenCode task/execution test; it runs on Linux and Windows candidates.
+5. Exercise `render_workspace` through the actual packaged MCP runtime:
+   text-file content and metadata, a directory preview containing the fixture,
+   and a restricted-path denial with unchanged outside-file bytes. These
+   checks validate UX data routing for disposable paths, **not** race-free
+   filesystem object confinement; T011 #139/#148 remain open.
+6. Preserve all existing packaged MCP, runtime hashes, access-policy and
    outside-byte sentinel checks without skipping Windows tests.
 
 The additional tools are checked against the actual packaged executable and
 real protocol transport, not a local TypeScript module or a mock server.
+The OpenCode denial requires no real token, service, outbound request or
+configured project alias; it does not establish authenticated bridge health.
 The process execution smoke deliberately confirms functionality, **not OS
 confinement**: `allowedDirectories` is an application filesystem policy and
 does not restrict `start_process`. Use a dedicated, least-privileged OS user
@@ -40,9 +57,11 @@ and independently reviewed isolation for any high-trust deployment.
 
 ## Linux delivery critical path
 
-- **Dependency hygiene:** PR #146 supplies patched `markdown-it` and must
-  receive independent review and merge before further integration; this
-  PR is based on its exact commit only to keep runtime audit clean.
+- **Dependency hygiene:** protected `main` now includes the reviewed,
+  owner-authorized remediation from PR #146: `markdown-it@14.3.3` and
+  `ip-address@10.7.4`. The portable acceptance branch must retain both
+  patched dependencies through official lockfile resolution and runtime
+  auditing; never restore an older lockfile during integration.
 - **Linux minimum:** the extracted archive must pass integrity,
   initialization, discovered tools, real process launch, filesystem fixture
   contract and explicit unsupported-UI rejection on Ubuntu. A local Linux

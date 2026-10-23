@@ -130,3 +130,51 @@ export async function editPdf(
 
     return await pdfDoc.save();
 }
+
+/**
+ * T011-C internal-only byte-oriented PDF operations.
+ *
+ * No path, URL or Markdown source is accepted. Callers must obtain all PDF
+ * bytes through independently authorized capabilities before invoking this
+ * function. This is not connected to MCP production handlers.
+ */
+export type PdfByteEditOperation =
+    | { type: 'delete'; pageIndexes: number[] }
+    | { type: 'insert'; pageIndex: number; sourcePdfBytes: Uint8Array };
+
+export async function editPdfBytes(
+    sourcePdfBytes: Uint8Array,
+    operations: readonly PdfByteEditOperation[],
+): Promise<Uint8Array> {
+    if (!(sourcePdfBytes instanceof Uint8Array)) {
+        throw new TypeError('PDF source must be a Uint8Array');
+    }
+    if (!Array.isArray(operations)) {
+        throw new TypeError('PDF operations must be an array');
+    }
+
+    // No side effects outside the supplied bytes. A failure before save()
+    // cannot create an output file; callers own the subsequent authorized write.
+    const pdfDoc = await loadPdfDocumentFromBuffer(sourcePdfBytes);
+    for (const operation of operations) {
+        if (operation.type === 'delete') {
+            if (!Array.isArray(operation.pageIndexes)
+                || !operation.pageIndexes.every(Number.isInteger)) {
+                throw new TypeError('PDF delete indexes must be integers');
+            }
+            deletePages(pdfDoc, operation.pageIndexes);
+        } else if (operation.type === 'insert') {
+            if (!Number.isInteger(operation.pageIndex)
+                || !(operation.sourcePdfBytes instanceof Uint8Array)
+                || 'sourcePdfPath' in operation
+                || 'markdown' in operation) {
+                throw new TypeError('PDF byte insert requires an integer index and sourcePdfBytes only');
+            }
+            const sourceDocument = await loadPdfDocumentFromBuffer(operation.sourcePdfBytes);
+            await insertPages(pdfDoc, operation.pageIndex, sourceDocument);
+        } else {
+            throw new TypeError('Unsupported PDF byte operation');
+        }
+    }
+    return await pdfDoc.save();
+}

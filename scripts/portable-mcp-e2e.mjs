@@ -4,7 +4,6 @@
  * Never invokes tools, installs services, or uses host configuration.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,6 +27,8 @@ for (const file of [binary, entrypoint]) {
   assert.ok((await lstat(file)).isFile(), 'Missing packaged runtime file');
 }
 
+// Verify candidate integrity before launching the packaged MCP server.
+// Retain all existing real-client, OpenCode-denial, workspace and session probes.
 const doctor = spawnSync(binary, [entrypoint, 'portable', 'doctor'], {
   cwd: candidate, encoding: 'utf8', timeout: 120000, maxBuffer: 65536,
   env: { ...process.env, NODE_OPTIONS: '' },
@@ -62,6 +63,9 @@ const env = {
   DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1',
   PUPPETEER_SKIP_DOWNLOAD: '1',
   DC_FLAG_URL: 'http://127.0.0.1:9/',
+  // Force a missing synthetic bridge credential. Never inherit a CI or host
+  // OpenCode connection when testing a restored, non-release candidate.
+  OPENCODE_GATEWAY_RDC_BRIDGE_TOKEN_FILE: join(isolated, 'missing-opencode-bridge.token'),
   PATH: process.platform === 'win32'
     ? [join(process.env.SystemRoot || 'C:\\Windows', 'System32'),
       process.env.SystemRoot || 'C:\\Windows'].join(';')
@@ -176,6 +180,22 @@ try {
   const prompts = (await bounded('MCP prompts/list', () => client.listPrompts())).prompts;
   assert.ok(Array.isArray(prompts), 'Invalid MCP prompts catalog');
 
+  // Issue #150: exercise the packaged OpenCode handler over real MCP stdio.
+  // The isolated child has no bridge token and no real gateway profile.
+  // Missing authentication must fail before any OpenCode connection or task.
+  assert.ok(names.includes('opencode_read'), 'Missing packaged OpenCode read tool');
+  const deniedOpenCode = await bounded('MCP OpenCode unavailable without bridge token',
+    () => callFixtureTool('opencode_read', { action: 'health' }));
+  assert.equal(deniedOpenCode.isError, true,
+    'OpenCode unexpectedly authorized a missing bridge credential');
+  const deniedOpenCodeText = toolText(deniedOpenCode);
+  assert.match(deniedOpenCodeText, /OpenCode gateway token is unavailable/,
+    'Missing bridge credentials must return a stable, explicit failure');
+  assert.ok(!deniedOpenCodeText.includes(isolated),
+    'OpenCode denial must not expose its temporary credential path');
+  assert.equal(await readFile(fixture, 'utf8'), original,
+    'Denied OpenCode health must not modify the disposable fixture');
+
   // Linux first-class development gate: exercise the actual extracted
   // candidate and shell tool, not a mock or the runner's checkout Node.
   // The shell uses the fixture's non-root CI identity. The allowedDirectories
@@ -192,6 +212,46 @@ try {
     assert.notEqual(launched.isError, true, 'Linux shell process launch failed');
     assert.match(toolText(launched), /JDC_LINUX_PROCESS_OK/,
       'The packaged MCP process did not return the shell output');
+
+    // #150: an independently packaged MCP instance must retain session state
+    // through a real Linux shell process and one event-based exit wait.
+    // The disposable process exits by itself; no PID from the runner or host is used.
+    assert.ok(names.includes('list_sessions'), 'Missing Linux session tool');
+    assert.ok(names.includes('read_process_output'), 'Missing Linux output tool');
+    const lifecycle = await bounded('MCP Linux process lifecycle start', () =>
+      callFixtureTool('start_process', {
+        command: 'printf JDC_LINUX_SESSION_STARTED; sleep 6; printf JDC_LINUX_SESSION_DONE',
+        shell: '/bin/sh', timeout_ms: 1500,
+      }));
+    assert.notEqual(lifecycle.isError, true, 'Linux session process launch failed');
+    const lifecycleText = toolText(lifecycle);
+    assert.match(lifecycleText, /JDC_LINUX_SESSION_STARTED/,
+      'Linux lifecycle fixture did not produce its initial marker');
+    const pidMatch = /Process started with PID ([0-9]+)/.exec(lifecycleText);
+    assert.ok(pidMatch, 'Packaged MCP launch must return a real process PID');
+    const lifecyclePid = Number(pidMatch[1]);
+    assert.ok(Number.isSafeInteger(lifecyclePid) && lifecyclePid > 0,
+      'Linux lifecycle PID must be a positive safe integer');
+    const activeSessions = await bounded('MCP Linux active session catalog',
+      () => callFixtureTool('list_sessions', {}));
+    assert.notEqual(activeSessions.isError, true, 'Linux session catalog failed');
+    assert.ok(toolText(activeSessions).includes('PID: ' + lifecyclePid + ','),
+      'Packaged MCP did not retain its started shell session');
+    const completed = await bounded('MCP Linux wait for real process exit',
+      () => callFixtureTool('read_process_output', {
+        pid: lifecyclePid, wait_for: 'exit', offset: -20,
+        length: 20, timeout_ms: 15000,
+      }));
+    assert.notEqual(completed.isError, true, 'Linux exit-read tool failed');
+    assert.match(toolText(completed), /JDC_LINUX_SESSION_DONE/,
+      'Exit-read omitted the final shell output');
+    assert.match(toolText(completed), /Process completed with exit code 0/,
+      'Exit-read did not report the real successful process exit');
+    const afterExit = await bounded('MCP Linux post-exit session catalog',
+      () => callFixtureTool('list_sessions', {}));
+    assert.notEqual(afterExit.isError, true, 'Post-exit Linux catalog failed');
+    assert.ok(!toolText(afterExit).includes('PID: ' + lifecyclePid + ','),
+      'Completed Linux session incorrectly remains active');
 
     // Windows-only Computer Use must deny explicitly on Linux rather than
     // simulating a desktop snapshot or returning fabricated health.
@@ -211,6 +271,28 @@ try {
   const initialRead = await callFixtureTool('read_file', { path: fixture, offset: 0, length: 10 });
   assert.notEqual(initialRead.isError, true, 'Fixture read failed');
   assert.ok(toolText(initialRead).includes(original.trim()), 'Initial file contents differ');
+
+  // #150: verify the actual packaged workspace preview, not only raw read_file.
+  // Metadata belongs to the same disposable fixture and MCP tool response.
+  const workspaceFile = await bounded('MCP packaged text workspace',
+    () => callFixtureTool('render_workspace', { path: fixture }));
+  assert.notEqual(workspaceFile.isError, true, 'Packaged file workspace failed');
+  assert.equal(workspaceFile.structuredContent?.filePath, fixture,
+    'Workspace metadata must refer to the requested fixture');
+  assert.equal(workspaceFile.structuredContent?.fileName, 'portable-mcp-fixture.txt');
+  assert.equal(typeof workspaceFile.structuredContent?.fileType, 'string',
+    'Text workspace must identify its file type');
+  assert.ok(toolText(workspaceFile).includes(original.trim()),
+    'Packaged workspace omitted fixture text');
+
+  const workspaceDirectory = await bounded('MCP packaged directory workspace',
+    () => callFixtureTool('render_workspace', { path: working, depth: 1 }));
+  assert.notEqual(workspaceDirectory.isError, true, 'Packaged directory workspace failed');
+  assert.equal(workspaceDirectory.structuredContent?.filePath, working);
+  assert.equal(workspaceDirectory.structuredContent?.fileType, 'directory');
+  assert.ok(toolText(workspaceDirectory).includes('[FILE] portable-mcp-fixture.txt'),
+    'Packaged directory workspace omitted its disposable fixture');
+
 
   const rejected = await callFixtureTool('write_file', {
     path: fixture, content: 'unapproved-overwrite\n',
@@ -289,6 +371,16 @@ try {
     assert.equal(result.isError, true, 'Unauthorized MCP access succeeded: ' + name);
   }
   await assertDenied('read_file', { path: deniedFile });
+
+  const deniedWorkspace = await bounded('MCP restricted workspace denial',
+    () => callFixtureTool('render_workspace', { path: deniedFile }));
+  assert.equal(deniedWorkspace.isError, true,
+    'Restricted workspace leaked access outside allowedDirectories');
+  assert.ok(!toolText(deniedWorkspace).includes('outside-initial'),
+    'Restricted workspace exposed outside fixture contents');
+  assert.equal(await readFile(deniedFile, 'utf8'), 'outside-initial\n',
+    'Denied workspace must preserve the outside fixture bytes');
+
   await assertDenied('write_file', {
     path: deniedFile, content: 'unauthorized\n', mode: 'rewrite',
   });
@@ -329,8 +421,9 @@ try {
     modeOmissionRejected: true, accessPositiveChecks: 3,
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
-    outsideBytesPreserved: true,
-    linuxProcessChecks: process.platform === 'linux' ? 1 : 0,
+    outsideBytesPreserved: true, packagedWorkspaceChecks: 3,
+    opencodeMissingTokenDenied: true,
+    linuxProcessChecks: process.platform === 'linux' ? 3 : 0,
     linuxUnsupportedUiChecks: process.platform === 'linux' ? 1 : 0,
     releaseEligible: false,
   }));

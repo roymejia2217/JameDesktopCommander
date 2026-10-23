@@ -194,6 +194,21 @@ async function assertTrustedLoadedUnit(
 async function ensureUserDirectory(home: string, create = true): Promise<void> {
   const resolvedHome = await realpath(home);
   if (resolvedHome !== home) throw new Error('HOME must be its canonical directory.');
+  // Validate directories ABOVE HOME before creating any managed config.
+  // Ownership of HOME itself does not prevent another user from replacing a
+  // component of an unprotected parent path. Root-owned sticky /tmp is a
+  // supported exception; the final HOME and its children remain private.
+  for (let ancestor = path.dirname(home); ; ancestor = path.dirname(ancestor)) {
+    const metadata = await lstat(ancestor);
+    const owner = process.getuid?.();
+    const rootOwnedSticky = metadata.uid === 0 && (metadata.mode & 0o1000) !== 0;
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() ||
+        (metadata.uid !== 0 && metadata.uid !== owner) ||
+        ((metadata.mode & 0o022) !== 0 && !rootOwnedSticky)) {
+      throw new Error('Linux tunnel configuration ancestor is writable or untrusted.');
+    }
+    if (path.dirname(ancestor) === ancestor) break;
+  }
   for (const dir of [home, path.join(home, '.config'), path.join(home, '.config', 'systemd'),
     path.join(home, '.config', 'systemd', 'user')]) {
     if (create && dir !== home) await mkdir(dir, { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => {

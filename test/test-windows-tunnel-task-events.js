@@ -77,15 +77,16 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
         /Start-ScheduledTask|Stop-ScheduledTask|Register-ScheduledTask|Remove-Item|Invoke-Expression/);
     assert.throws(() => buildWindowsTunnelTaskEventsPowerShell('bad\r\nname'));
 
-    // XPath construction is XML-safe even for both quote kinds and markup.
-    const hostile = buildWindowsTunnelTaskEventsPowerShell(
-        `Task's "fixture" <xml>&`,
-    );
-    assert.match(hostile, /concat\(/);
-    assert.match(hostile, /-FilterXml \$filterXml -MaxEvents 51/);
-    assert.doesNotMatch(hostile, /-FilterHashtable/);
-    assert.match(hostile, /&lt;xml&gt;&amp;/);
-    assert.doesNotMatch(hostile, /<xml>/);
+    // Windows Event Log XPath is a restricted subset with no concat().
+    const quoted = buildWindowsTunnelTaskEventsPowerShell(`Task's <xml>&`);
+    assert.match(quoted, /-FilterXml \$filterXml -MaxEvents 51/);
+    assert.doesNotMatch(quoted, /-FilterHashtable/);
+    assert.match(quoted, /&lt;xml&gt;&amp;/);
+    assert.doesNotMatch(quoted, /<xml>/);
+    assert.match(buildWindowsTunnelTaskEventsPowerShell('Task "double"'),
+        /Task "double"/);
+    assert.throws(() => buildWindowsTunnelTaskEventsPowerShell(
+        `Task's "double" <xml>&`), /XPath/);
 
 });
 

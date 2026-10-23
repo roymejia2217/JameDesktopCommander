@@ -23,3 +23,31 @@ production deployment. Tracked under issue #98. Security gate #80
 remains deny-only/non-release.
 
 No live tunnel restart or configuration mutation is part of this increment.
+
+
+## Task Scheduler history when the tunnel is offline
+
+The read-only `desktop-commander tunnel events` command reads the native Windows
+Task Scheduler Operational log without contacting the tunnel-client health API,
+starting, stopping, or re-registering a task. It is intended for incidents such as
+a stopped task with `LastTaskResult=1` and routed MCP `Session terminated`.
+
+The query is bounded to the preceding 72 hours and at most 5,000 Scheduler
+records; it emits at most the 50 most recent **matching task** records. Its
+`capped` field is true when either bound is reached. An empty or truncated
+result is **not** evidence that no other relevant events occurred.
+
+Only UTC timestamps, allowlisted numeric Event IDs (100, 102, 110, 111, 118,
+129, 200, 201, 325) and an optional decimal result code for Event 201 appear
+in the output. No native event messages, task arguments, profile paths,
+process identifiers or raw Windows logs are exported. The native PowerShell
+invocation is launched without shell expansion, a 10-second timeout and a
+64-KiB output ceiling. The parser rejects unexpected fields and malformed
+records; disabled or inaccessible logs fail rather than return a fabricated
+healthy status.
+
+Event 201 represents action completion, not the precise cause of a failing
+executable. Boot-triggered action starts during an OS reboot must not be
+counted as application self-recovery. This diagnostic supplies **no automatic
+restart authority or functional MCP round-trip verification**; those
+require independent Windows acceptance under issues #96 and #98.

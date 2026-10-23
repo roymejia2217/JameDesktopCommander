@@ -1,0 +1,165 @@
+name: T011 N-API Receiver Aliasing (non-release)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/t011-napi-receiver-miri.yml
+      - test/security/napi-receiver-alias-miri/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/t011-napi-receiver-miri.yml
+      - test/security/napi-receiver-alias-miri/**
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-receiver-expansion:
+    # Captures the *actual* macro-generated wrapper of the pinned native crate.
+    # It is evidence for #124, not a soundness proof or a releasable artifact.
+    name: Pinned N-API generated receiver expansion (non-release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Rust nightly without modifying host runtime
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal
+
+      - name: Expand real fixture-enabled N-API receiver macros from locked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/jdc-napi-generated-receivers.rs"
+          cargo +nightly-2026-06-29 rustc --locked --manifest-path native/capability-probe/Cargo.toml --lib --features receiver-test-fixture -- -Zunpretty=expanded > "$output"
+          test -s "$output"
+          # Fail closed if the expected production class/method was not expanded.
+          grep -F -q -- 'struct RootCapability' "$output"
+          grep -F -q -- 'fn list_directory' "$output"
+          # This investigation is locked to the risky generated expression.
+          # A changed generator must be independently re-reviewed, not silently
+          # accepted as equivalent evidence.
+          grep -F -q -- 'Box::leak(Box::from_raw(this_ptr))' "$output"
+          printf 'GENERATED_BOX_RECEIVER_OCCURRENCES='
+          grep -F -c -- 'Box::leak(Box::from_raw(this_ptr))' "$output"
+          # Hash the fixed basename and verify it inside the ephemeral CI job.
+          # Repository policy forbids creating a third public artifact upload.
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum jdc-napi-generated-receivers.rs > jdc-napi-generated-receivers.sha256
+            sha256sum --check jdc-napi-generated-receivers.sha256
+          )
+          printf 'GENERATED_RECEIVER_SOURCE_SHA256='
+          cut -d ' ' -f 1 "${RUNNER_TEMP}/jdc-napi-generated-receivers.sha256"
+          # Show the generated expression locations, without asserting that
+          # successful compilation makes the receiver ownership sound.
+          grep -F -n -- 'Box::leak(Box::from_raw(this_ptr))' "$output" | head -n 15
+
+  miri-receiver-model:
+    name: Miri receiver model (${{ matrix.borrow_model.name }}, linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        borrow_model:
+          - name: stacked
+            flags: ""
+          - name: tree
+            flags: "-Zmiri-tree-borrows"
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Miri on ephemeral CI only
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal --component miri
+
+      - name: Execute receiver ownership and aliasing model without masking failures
+        env:
+          MIRIFLAGS: ${{ matrix.borrow_model.flags }}
+        run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml
+
+  miri-candidate-controls:
+    # These jobs must be independently visible, without changing the original
+    # model job (which remains RED on a genuine Undefined Behavior diagnostic).
+    name: Miri candidate and controls (${{ matrix.borrow_model.name }}, linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        borrow_model:
+          - name: stacked
+            flags: ""
+          - name: tree
+            flags: "-Zmiri-tree-borrows"
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Miri on ephemeral CI only
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal --component miri
+
+      - name: Verify raw-reference candidate tests without altering the failing model
+        env:
+          MIRIFLAGS: ${{ matrix.borrow_model.flags }}
+        run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml candidate_
+
+      - name: Verify independent receiver control tests
+        env:
+          MIRIFLAGS: ${{ matrix.borrow_model.flags }}
+        run: cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml control_
+
+  miri-model-cases:
+    # Separate diagnostic runs: the full model matrix remains unchanged.
+    # No masking, skip, expected-failure or continue-on-error semantics.
+    name: Miri original (${{ matrix.borrow_model.name }}, ${{ matrix.case_name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        borrow_model:
+          - name: stacked
+            flags: ""
+          - name: tree
+            flags: "-Zmiri-tree-borrows"
+        case_name:
+          - model_pinned_generated_shared_reentry
+          - model_shared_guards_with_pinned_generated_reentry
+          - model_inline_borrowed_return_with_nested_generated_receiver
+    steps:
+      - name: Checkout exact PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned official Miri on ephemeral CI only
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal --component miri
+
+      - name: Run selected unsuppressed model
+        env:
+          MIRIFLAGS: ${{ matrix.borrow_model.flags }}
+          CASE_NAME: ${{ matrix.case_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail closed if a renamed test would otherwise yield 0/0 PASS.
+          selected="$(cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml "$CASE_NAME" -- --exact --list)"
+          printf '%s\n' "$selected"
+          printf '%s\n' "$selected" | grep -Fx -- "$CASE_NAME: test"
+          # Actual UB is a normal nonzero test failure: never mask it.
+          cargo +nightly-2026-06-29 miri test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml "$CASE_NAME" -- --exact

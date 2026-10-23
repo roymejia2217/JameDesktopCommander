@@ -132,6 +132,23 @@ pub fn probe_null_native_borrow(mutable: bool) -> Result<()> {
     Ok(())
 }
 
+// Keep the entire macro expansion feature-gated. Gating only one
+// method inside an always-enabled #[napi] impl leaves a stale registration.
+#[cfg(feature = "receiver-test-fixture")]
+#[napi]
+impl RootCapability {
+    #[napi]
+    pub fn probe_receiver_across_js_callback(
+        &self,
+        callback: Function<'_, (), ()>,
+    ) -> Result<bool> {
+        callback.call(())?;
+        let guard = self.root.lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        Ok(guard.is_some())
+    }
+}
+
 #[napi]
 impl RootCapability {
     #[napi(constructor)]

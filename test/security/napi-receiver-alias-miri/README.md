@@ -1,0 +1,297 @@
+# napi-receiver-alias-miri
+
+**Issue:** #124 / CodeQL HIGH #12. **Status:** research, non-release.
+
+This zero-dependency crate models the **specific** receiver expression emitted by
+locked `napi-derive-backend 6.1.5` in `src/codegen/fn.rs:402–439`:
+`Box::leak(Box::from_raw(this_ptr))`. It preserves a shared reference across
+a second conversion of the same `RootCapability` allocation and reads the
+outer reference afterwards. The first control creates shared Rust references
+without reconstructing ownership while the callback is active. A second
+control exercises the **same** `Box::leak(Box::from_raw(ptr))` conversion
+in two *sequential, nonoverlapping* calls. Under pinned **Stacked
+Borrows Miri**, both controls PASS and the reentrant generated-expression
+case FAILS. In run
+[39252422133](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39252422133),
+**Tree Borrows also reported Undefined Behavior** in the reentrant case;
+both control cases passed under both models.
+
+The current upstream `napi-rs/napi-rs` generator still contains the same
+conversion in `crates/backend/src/codegen/fn.rs` (file blob
+`3f1229e089d471ff05840af9074450c3165c90d8`, inspected 2026-10-19).
+Upstream [#3378](https://github.com/napi-rs/napi-rs/issues/3378) was
+resolved by [PR #3392](https://github.com/napi-rs/napi-rs/pull/3392),
+which changes the **ordering of JS argument conversion vs receiver borrowing**.
+That fix is related but **does not remove** the reconstructed-`Box`
+expression or prove this reentrant ownership model sound.
+
+The official Miri interpreter runs on ephemeral Ubuntu 24.04 runners with
+pinned Rust `nightly-2026-06-29`; it is **not** installed on the user's Windows
+machine. Two independent CI matrix jobs execute the same test set under
+default **Stacked Borrows** and `MIRIFLAGS=-Zmiri-tree-borrows` (**Tree Borrows**).
+Both are experimental Rust aliasing models and neither is a definitive
+specification of Rust's future memory model. `fail-fast: false` allows
+both outcomes to be collected, while **each job fails normally** on a Miri
+diagnostic, without suppression or an expected-failure bypass. Ordinary
+stable Rust tests and Clippy are separate, insufficient controls.
+
+**Interpretation:** even a Miri aliasing diagnostic only establishes a violation
+in this *model*, not automatically in the entire `napi_wrap`/FFI callback
+execution. Review the actual macro expansion, guard lifetime, source pointer
+provenance, and Node-API ownership boundaries independently. If Miri passes,
+it likewise cannot prove that production has no undefined behavior.
+
+Do not suppress CodeQL #12, relax CI, activate privileged SCM, or publish
+a release based on this experiment. Any supported upstream fix needs pinned
+source review and full Windows/Linux native validation.
+
+
+**Recorded experimental outcome**
+
+PR #131, workflow run
+[39243989005](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39243989005)
+successfully installed the pinned official Miri toolchain. The direct
+shared-pointer control **passed**, but the generated-expression model
+**failed** with `Undefined Behavior`: a second `Box::from_raw`
+performed a `Unique` retag and invalidated the earlier shared reference.
+The error surfaced when the outer reference was read after reentry.
+This is a reproducible model failure, **not** a missing Rust toolchain.
+
+**Candidate raw-reference model (research only)**
+
+Additional test cases use `unsafe { &*ptr }` for shared receivers and
+`unsafe { &mut *ptr }` for one exclusive receiver, with no intermediate
+`Box::from_raw`. The shared model retains an outer reference across a nested
+receiver conversion; the exclusive model uses one mutable receiver without
+overlap. These tests ask whether a change of receiver *expression* avoids
+the demonstrated aliasing diagnostic in the simplified model.
+
+They do **not** prove the candidate codegen is sound under N-API. In
+particular the C/JS runtime must guarantee allocation liveness,
+correct alignment/type/provenance, exclusive-vs-shared guard ordering,
+and correct finalization across exceptions. An upstream patch and
+independent review remain prerequisites to any production migration.
+
+**Native reachability fixture**
+
+Under `receiver-test-fixture` **only**, `RootCapability` also exposes
+`probeReceiverAcrossJsCallback` through an entire feature-gated
+`#[napi] impl` block. The Node subprocess in
+`test/security/capability-reentrant-borrow-child.cjs` invokes that
+method recursively, retains the outer `&self` across the inner call,
+runs explicit GC, denies an overlapping mutable argument borrow, and
+checks guard release after normal and exceptional returns.
+The default-feature artifact must **not** expose this method.
+
+This confirms that the generated `&self` receiver can be exercised
+with nested JavaScript callbacks in a test fixture; Node success is
+**not** a soundness proof and does not erase the independent Miri
+diagnostic. Production `RootCapability` methods do not themselves
+accept JavaScript callbacks, but their return-value conversion can invoke
+JavaScript-controlled inherited property setters, as demonstrated below.
+Actual unsafe-Rust aliasing under Node-API FFI and a compatible upstream
+correction remain security review gates. Leave PR #131 in draft,
+issue #124 and CodeQL #12 open, and T011 non-release.
+
+A separate isolated Node child
+(`test/security/capability-receiver-coercion-child.cjs`) probes a
+production-method argument-conversion route without modifying any
+shipping method. It supplies a plain object with `Symbol.toPrimitive`,
+`toString`, and `valueOf` hooks to eight path-taking methods, then
+checks the calls were rejected, no hook executed, and a control file
+was not changed. On the tested Windows native fixture this is PASS.
+It narrows only this specific implicit-coercion route; it does not
+exclude other JavaScript reentry during FFI conversion, object
+finalization or callbacks, or establish native memory-model soundness.
+
+**Production-method return-conversion reentry (2026-10-19/20):**
+`RootCapability::list_directory(&self) -> Result<Vec<String>>` converts
+its result into a JavaScript array. The locked `napi` implementation
+writes array elements via Node-API. A configurable inherited index-1
+setter on `Array.prototype` synchronously reentered `readText()` on
+the *same* capability while `listDirectory('.')` was in progress.
+`test/security/capability-return-array-reentry-child.cjs` reproduces
+that route in a bounded, isolated child using only temporary files;
+the native Node 24 Windows suite passed 21/21 tests. The child also
+verifies that a nested **mutable** borrow is rejected while the outer
+native shared guard is active, forces GC in the callback, and verifies
+that exclusive borrowing recovers after the return conversion.
+No experimental callback-taking method is required for this route.
+
+This is direct evidence of **reachable JavaScript reentry**, not proof
+of Undefined Behavior: the Miri model retains and later reads the
+outer Rust reference, whereas the compiled method/return-conversion
+lifetime may differ. Independent review must compare actual generated
+references, native borrow scope, raw-pointer provenance and finalization.
+The test fixture is non-release; no Rust pins or shipping APIs changed.
+
+**Pinned-source lifetime trace (2026-10-20; research only):**
+
+1. `napi-derive-backend 6.1.5/src/codegen/fn.rs` converts arguments,
+   unwraps the receiver, registers a native shared borrow and constructs
+   `&RootCapability` through `Box::leak(Box::from_raw(this_ptr))`.
+2. Its generated synchronous callback first invokes the Rust method and
+   then converts the returned value; the `NativeBorrowScope` continues
+   holding native alias guards until the callback returns.
+3. `RootCapability::list_directory(&self)` returns an **owned**
+   `Vec<String>`. Its Rust borrow is last read inside the method, before
+   the `Vec<String>` is converted to a JavaScript value.
+4. `napi 3.14.2/src/bindgen_runtime/js_values/array.rs` implements
+   `ToNapiValue for Vec<T>` using `Array::set`, which calls
+   `napi_set_element`. An inherited JavaScript index setter can execute
+   during this **return-conversion** stage.
+5. `napi 3.14.2/src/bindgen_runtime/native_borrow.rs` separates the
+   native alias guard from the generated Rust reference. Its scope drops
+   guards on both normal and error exits.
+
+The new Miri control `control_return_conversion_reentry_after_last_receiver_use`
+retains the pinned `Box::from_raw` expression but deliberately copies
+the method result **before** reentry and never reads the outer reference
+afterwards. The existing `model_pinned_generated_shared_reentry`
+deliberately **does** read the old reference after a nested conversion;
+its original Stacked/Tree Borrows failures must remain visible.
+Do not equate these two models or infer Rust soundness from either.
+
+Pinned Miri run
+[39423371452](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39423371452)
+confirmed that the last-use control PASSED under **both** Stacked
+Borrows and Tree Borrows; the original overlapping-receiver model
+remained FAIL under both. The updated draft adds two independent cases
+for a *different*, **hypothetical** API: a returned slice that points
+into inline bytes of the original native receiver allocation. The
+plain raw-shared-reference control retains that slice across nested
+shared reentry without recreating Box ownership; the generated-Box
+model repeats the same sequence using the pinned codegen expression.
+This discriminates a live borrowed-return reference from the shipping
+`RootCapability::list_directory` method, which returns an owned
+`Vec<String>` and does **not** retain a borrowed inline slice.
+
+Upstream `napi-rs` already independently tests JavaScript array setter
+reentry while a result contains borrowed strings, in
+`examples/napi/__tests__/values.spec.ts` (file blob
+`9f9f007a4b2d4b6c2337e2e5cc81cefb70b63731`, inspected
+2026-10-20); its test asserts the native shared guard denies an
+overlapping mutable callback. That test is important but does not
+establish the aliasing semantics of a **nested shared** receiver that
+recreates a Box while borrowed data remain live. The new inline-byte
+Miri models are **not a reproducer of any shipping JDC method**, and
+their results must come from the two official hosted Miri modes.
+No conclusion about Rust UB or upstream production exploitability is
+made before those results are read.
+
+The independent Node child now also injects a setter exception during
+array conversion, verifies propagation, tests that the mutable borrow
+guard is released, and reads the capability again after the error.
+This does not prove allocation liveness or FFI pointer provenance.
+The new Miri control requires fresh pinned hosted Miri evidence; stable
+`cargo test` passing is insufficient.
+
+
+## Independent candidate and control execution (2026-10-20)
+
+The CI workflow now runs a **separate** `miri-candidate-controls` matrix
+under pinned official Miri Stacked Borrows and Tree Borrows. It invokes
+`cargo miri test ... candidate_` and `cargo miri test ... control_`.
+Those filters isolate the named alternative-reference and control functions;
+they are **not** authorized production macro expansion or Node-API tests.
+The full `miri-receiver-model` matrix still runs every test, including
+`model_pinned_generated_shared_reentry` and the hypothetical
+`model_inline_borrowed_return_with_nested_generated_receiver`.
+These tests retain their normal, *unsuppressed* failures.
+
+Interpretation of future workflow results must distinguish:
+
+- **Candidate controls PASS:** the alternative Rust expression behaves as
+  tested in the simplified model only; it does not prove Node-API lifetime,
+  sound codegen or approval for a dependency fork.
+- **Full model FAIL:** the exact pinned generated expression continues to
+  trigger Miri in a constructed reentrancy model. Do not relabel it an
+  expected failure, skip it, or waive a security check.
+- **Candidate controls FAIL:** a proposed alternative is also invalid under
+  that model; do not propose it upstream as a proven fix.
+- **CI action status:** this research workflow is **not** a green release
+  gate while a full model fails. Its separation improves diagnosis only.
+
+The matrix uses GitHub-hosted Ubuntu runners and installs no tools on the
+Windows runtime. Pending new CI results; no validation claim yet.
+Read the exact per-case test counts; an empty filtered test selection does
+not qualify as a passing security control.
+
+## Independent per-case Miri diagnostics (2026-10-20)
+
+The full pinned-generator Miri jobs in
+[run 39484968229](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39484968229)
+remained FAIL under Stacked Borrows and Tree Borrows. The isolated
+`candidate_` tests passed **2/2** and `control_` tests passed **4/4**
+under each model. This is limited model evidence, not an N-API proof.
+
+The `miri-model-cases` matrix runs
+`model_pinned_generated_shared_reentry` and
+`model_inline_borrowed_return_with_nested_generated_receiver`
+independently under both aliasing models using the exact test name.
+An early Miri abort in the full suite can otherwise leave a later
+scenario unexecuted. Every isolated job retains its actual nonzero
+failure on Undefined Behavior; no test is skipped, reclassified as
+an expected failure, or used to make the full security workflow green.
+If one case passes, report the actual PASS for that case without
+discounting the failures of other cases.
+
+**New matrix not yet verified:** await terminal hosted Miri results;
+inspect each test selection count and diagnostic. This does not enable
+production binaries, close issue #124, or resolve CodeQL alert #12.
+
+**Verified per-case results at head 9c2c9476e2d1625fc096c793929fe3de28a1c69b:**
+
+| Original model case (one selected test per isolated run) | Stacked Borrows | Tree Borrows |
+| --- | --- | --- |
+| `model_pinned_generated_shared_reentry` | **FAIL**, Miri UB on retagging | **FAIL**, Miri UB on forbidden read |
+| `model_inline_borrowed_return_with_nested_generated_receiver` | **FAIL**, Miri UB on shared read retagging | **PASS**, 1/1 |
+
+[CI run 39486845708](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/39486845708)
+also reports full-model **FAIL** in both modes and separate
+`candidate_` **2/2 PASS** and `control_` **4/4 PASS** per model.
+These experimental aliasing results do not establish undefined behavior
+in a shipping JDC handler. The inline borrowed-return scenario is
+hypothetical, unlike the actual owned `Vec<String>` return of `list_directory`.
+The actual FFI pointer provenance, guard lifetime, rooting/finalization and
+JavaScript reentrancy path remain independent blockers.
+
+**Fail-closed test selection:** Rust test harness can exit successfully
+after selecting zero tests when an exact-name filter is outdated.
+The new job uses official Miri test-listing mode and requires an exact
+`case-name: test` entry before running the unchanged failing model.
+Missing/renamed tests fail; Miri undefined behavior retains its
+nonzero failure. A local positive/negative Bash exact-match check passed.
+**Modified CI results pending**: no approval, suppression, skip, production
+binding, SCM privilege or release authorization is implied.
+
+## Table of Contents
+
+- [Install](#install)
+- [Usage](#usage)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Install
+
+No installation is required for the production app. This test-only
+crate has zero dependencies. The CI job provisions the pinned official
+Miri toolchain on a disposable GitHub-hosted Linux runner.
+
+## Usage
+
+Run ordinary checks with
+`cargo +1.91.1 test --locked --manifest-path test/security/napi-receiver-alias-miri/Cargo.toml`.
+The dedicated GitHub Actions workflow runs the Miri interpreter and
+is intentionally **RED** while the ownership diagnostic remains.
+
+## Contributing
+
+Discuss proposed proof improvements under issue #124. Preserve the
+original failed Miri case and a passing control; do not replace an
+unsafe model with a different model merely to obtain a green check.
+Any upstream or local fix requires separate architectural review.
+
+## License
+
+See the parent repository's `LICENSE` file.

@@ -19,6 +19,8 @@ test('default native artifact does not export CI-only receiver fixtures', () => 
   assert.equal(Object.hasOwn(addon, 'probeSharedAndMutable'), false);
   assert.equal(Object.hasOwn(addon, 'probeMutablePair'), false);
   assert.equal(Object.hasOwn(addon, 'acceptsMutRootArgument'), false);
+  assert.equal(Object.hasOwn(addon.RootCapability.prototype, 'probeReceiverAcrossJsCallback'), false,
+    'test-only generated receiver callback must not be exposed without the feature');
   assert.equal(Object.hasOwn(addon, 'probeBorrowAcrossJsCallback'), false,
     'reentrant callback fixture must not be exported without the test-only feature');
   assert.equal(Object.hasOwn(addon, 'probeNullNativeBorrow'), false,

@@ -55,6 +55,36 @@ test('reentrant JS and GC cannot violate an active shared native borrow', () => 
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('production native methods reject object paths without invoking user coercion', () => {
+  const probe = path.join(__dirname, 'capability-receiver-coercion-child.cjs');
+  const result = spawnSync(process.execPath, [probe, addonFile], {
+    timeout: 15_000,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined, 'bounded coercion child must finish');
+  assert.equal(result.signal, null, 'coercion must not crash the native runtime');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('listDirectory return conversion can reenter a production shared receiver', () => {
+  const child = path.join(__dirname, 'capability-return-array-reentry-child.cjs');
+  const result = spawnSync(process.execPath, ['--expose-gc', child, addonFile], {
+    timeout: 15_000,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined, 'bounded return-conversion child must finish');
+  assert.equal(result.signal, null, 'native runtime must not crash');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PRODUCTION_RECEIVER_REENTRY_OBSERVED=1/,
+    'the test must actually trigger nested JS during native return conversion');
+  assert.match(result.stdout, /RETURN_CONVERSION_EXCEPTION_GUARD_RELEASED=1/,
+    'the exceptional return-conversion path must release native borrow guards');
+});
+
 test('native type tag accepts a legitimate RootCapability argument', () => {
   const os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-napi-tag-'));

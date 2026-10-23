@@ -128,6 +128,49 @@ test('reject unsupported OS and invalid SystemRoot before any invocation', async
     assert.equal(calls, 0);
 });
 
+test('bounded parser rejects oversized outputs without processing embedded event data', () => {
+    const veryLarge = JSON.stringify({
+        ...fixture,
+        taskPath: 'PRIVATE_EVENT_DATA_'.repeat(4000),
+    });
+    assert.ok(Buffer.byteLength(veryLarge, 'utf8') > 64 * 1024);
+    assert.throws(() => parseWindowsTunnelTaskEvents(veryLarge), /size limit/);
+});
+
+test('native error messages cannot leak command lines, paths or event content', async () => {
+    const marker = 'PRIVATE_PROFILE_CREDENTIAL_VALUE';
+    const options = {
+        platform: 'win32',
+        environment: { SystemRoot: 'C:\\Windows' },
+        run: async () => { throw new Error(marker); },
+    };
+    await assert.rejects(
+        readWindowsTunnelTaskEvents('Desktop Commander Windows Tunnel', options),
+        (error) => {
+            assert.equal(error.message, 'Windows Task Scheduler event query failed.');
+            assert.doesNotMatch(error.message, new RegExp(marker));
+            return true;
+        },
+    );
+});
+
+test('unsupported XPath task names are rejected before executing PowerShell', async () => {
+    let calls = 0;
+    const options = {
+        platform: 'win32',
+        environment: { SystemRoot: 'C:\\Windows' },
+        run: async () => {
+            calls++;
+            return { stdout: JSON.stringify(fixture), stderr: '' };
+        },
+    };
+    await assert.rejects(
+        readWindowsTunnelTaskEvents(`Name's "both quotes"`, options),
+        /XPath/,
+    );
+    assert.equal(calls, 0);
+});
+
 test('CLI events works while tunnel status endpoint is unavailable; no start/stop performed', async () => {
     const result = await runWindowsTunnelCommand(['events'], {
         platform: 'win32',

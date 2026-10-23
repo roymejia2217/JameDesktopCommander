@@ -505,10 +505,16 @@ test('Linux no user systemd session must fail before writing a service', {
 }, async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'jdc-linux-no-bus-'));
   try {
+    const privateDiagnostic = 'User bus unavailable: bearer SECRET_VALUE /private/session';
     await assert.rejects(runLinuxTunnelCommand(['install'], {
       home, platform: 'linux',
-      run: async () => { throw new Error('User bus unavailable'); },
-    }), /User bus unavailable/);
+      run: async () => { throw new Error(privateDiagnostic); },
+    }), (error) => {
+      assert.equal(error.message, 'Linux tunnel user manager command failed.');
+      assert.ok(!error.message.includes('SECRET_VALUE'));
+      assert.ok(!error.message.includes('/private/session'));
+      return true;
+    });
     await assert.rejects(stat(path.join(home, '.config')), { code: 'ENOENT' });
   } finally {
     await rm(home, { recursive: true, force: true });

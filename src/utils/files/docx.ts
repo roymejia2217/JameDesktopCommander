@@ -502,6 +502,69 @@ function countOccurrences(haystack: string, needle: string): number {
 // DocxFileHandler — implements FileHandler
 // ════════════════════════════════════════════════════════════════
 
+/**
+ * Read DOCX from bytes already obtained and authorized by the caller.
+ *
+ * The function never opens a filesystem path. It is an internal processing
+ * seam, not an authorization or file-size boundary. Existing DOCX outline
+ * and raw-XML pagination semantics are kept exactly as in DocxFileHandler.
+ */
+export function readDocxBytes(source: Uint8Array, options?: ReadOptions): FileResult {
+    if (!(source instanceof Uint8Array)) {
+        throw new TypeError('DOCX source must be a Uint8Array');
+    }
+    const buf = Buffer.isBuffer(source) ? source : Buffer.from(source);
+    const { zip, documentXml } = loadDocxZip(buf);
+    const pretty = prettyPrintXml(documentXml);
+    const allLines = pretty.split('\n');
+    const totalLines = allLines.length;
+    const offset = options?.offset ?? 0;
+    const length = options?.length;
+
+    // If user explicitly requests non-zero offset, give raw XML with pagination
+    const wantsRaw = offset !== 0;
+
+    if (wantsRaw) {
+        let startLine: number;
+        let sliceLength: number;
+
+        if (offset < 0) {
+            startLine = Math.max(0, totalLines + offset);
+            sliceLength = totalLines - startLine;
+        } else {
+            startLine = offset;
+            sliceLength = length ?? totalLines;
+        }
+
+        const sliced = allLines.slice(startLine, startLine + sliceLength);
+        const remaining = totalLines - (startLine + sliced.length);
+        const status = `[DOCX XML: lines ${startLine}-${startLine + sliced.length - 1} of ${totalLines} (${remaining} remaining)]`;
+
+        return {
+            content: status + '\n' + sliced.join('\n'),
+            mimeType: 'application/xml',
+            metadata: { isDocx: true, lineCount: totalLines },
+        };
+    }
+
+    // Default: return outline
+    const outline = extractOutline(documentXml);
+    const headerFooterInfo = extractHeaderFooterOutline(zip);
+    const rawSizeKB = (documentXml.length / 1024).toFixed(1);
+
+    return {
+        content: outline + headerFooterInfo +
+            `\n\nRaw XML: ${totalLines} lines, ${rawSizeKB}KB.` +
+            `\nFor bulk changes (translation, mass find/replace): use start_process with a Python script using zipfile to edit <w:t> elements.`,
+        mimeType: 'text/plain',
+        metadata: { isDocx: true, lineCount: totalLines },
+    };
+}
+
+/**
+ * DOCX file-handler facade. The original pathname-based entry point remains
+ * for compatibility until T011 proves a fully handle-bound native route.
+ */
 export class DocxFileHandler implements FileHandler {
     private readonly extensions = ['.docx'];
 
@@ -516,52 +579,7 @@ export class DocxFileHandler implements FileHandler {
      * With offset/length: returns raw pretty-printed XML with line pagination
      */
     async read(path: string, options?: ReadOptions): Promise<FileResult> {
-        const buf = await fs.readFile(path);
-        const { zip, documentXml } = loadDocxZip(buf);
-        const pretty = prettyPrintXml(documentXml);
-        const allLines = pretty.split('\n');
-        const totalLines = allLines.length;
-        const offset = options?.offset ?? 0;
-        const length = options?.length;
-
-        // If user explicitly requests non-zero offset, give raw XML with pagination
-        const wantsRaw = offset !== 0;
-
-        if (wantsRaw) {
-            let startLine: number;
-            let sliceLength: number;
-
-            if (offset < 0) {
-                startLine = Math.max(0, totalLines + offset);
-                sliceLength = totalLines - startLine;
-            } else {
-                startLine = offset;
-                sliceLength = length ?? totalLines;
-            }
-
-            const sliced = allLines.slice(startLine, startLine + sliceLength);
-            const remaining = totalLines - (startLine + sliced.length);
-            const status = `[DOCX XML: lines ${startLine}-${startLine + sliced.length - 1} of ${totalLines} (${remaining} remaining)]`;
-
-            return {
-                content: status + '\n' + sliced.join('\n'),
-                mimeType: 'application/xml',
-                metadata: { isDocx: true, lineCount: totalLines },
-            };
-        }
-
-        // Default: return outline
-        const outline = extractOutline(documentXml);
-        const headerFooterInfo = extractHeaderFooterOutline(zip);
-        const rawSizeKB = (documentXml.length / 1024).toFixed(1);
-
-        return {
-            content: outline + headerFooterInfo +
-                `\n\nRaw XML: ${totalLines} lines, ${rawSizeKB}KB.` +
-                `\nFor bulk changes (translation, mass find/replace): use start_process with a Python script using zipfile to edit <w:t> elements.`,
-            mimeType: 'text/plain',
-            metadata: { isDocx: true, lineCount: totalLines },
-        };
+        return readDocxBytes(await fs.readFile(path), options);
     }
 
     /**

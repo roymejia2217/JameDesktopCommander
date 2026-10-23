@@ -57,9 +57,11 @@ and independently reviewed isolation for any high-trust deployment.
 
 ## Linux delivery critical path
 
-- **Dependency hygiene:** PR #146 supplies patched `markdown-it` and must
-  receive independent review and merge before further integration; this
-  PR is based on its exact commit only to keep runtime audit clean.
+- **Dependency hygiene:** protected `main` now includes the reviewed,
+  owner-authorized remediation from PR #146: `markdown-it@14.3.3` and
+  `ip-address@10.7.4`. The portable acceptance branch must retain both
+  patched dependencies through official lockfile resolution and runtime
+  auditing; never restore an older lockfile during integration.
 - **Linux minimum:** the extracted archive must pass integrity,
   initialization, discovered tools, real process launch, filesystem fixture
   contract and explicit unsupported-UI rejection on Ubuntu. A local Linux

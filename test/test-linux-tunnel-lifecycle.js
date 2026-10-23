@@ -69,6 +69,61 @@ test('Linux tunnel denies untrusted executable custody before doctor or activati
   }
 });
 
+test('Linux tunnel redacts subprocess diagnostic details from user-manager failures', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const sensitive = '/private/user-path/tunnel-client bearer SECRET_VALUE';
+  const dependencies = {
+    platform: 'linux',
+    home: '/nonexecuted/fixture/home',
+    run: async () => { throw new Error(sensitive); },
+  };
+  await assert.rejects(
+    runLinuxTunnelCommand(['status'], dependencies),
+    (error) => {
+      assert.equal(error.message, 'Linux tunnel user manager command failed.');
+      assert.ok(!error.message.includes(sensitive));
+      return true;
+    },
+  );
+});
+
+test('Linux tunnel redacts client doctor subprocess errors', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'jdc-linux-redacted-doctor-'));
+  const client = path.join(home, 'test-tunnel-client');
+  const profiles = path.join(home, 'profiles');
+  const sensitive = 'bearer SECRET_VALUE ' + client;
+  try {
+    await mkdir(profiles, { mode: 0o700 });
+    await writeFile(client, 'No execution: injected runner only.\n', { mode: 0o700 });
+    const calls = [];
+    const dependencies = {
+      platform: 'linux',
+      home,
+      run: async (executable, args) => {
+        calls.push([executable, ...args]);
+        if (executable === 'systemctl') return '';
+        throw new Error(sensitive);
+      },
+    };
+    await assert.rejects(runLinuxTunnelCommand([
+      'doctor', '--tunnel-client-bin', client,
+      '--profile-dir', profiles, '--profile', 'jdc',
+    ], dependencies), (error) => {
+      assert.equal(error.message, 'Linux tunnel client command failed.');
+      assert.ok(!error.message.includes(client));
+      assert.ok(!error.message.includes('SECRET_VALUE'));
+      return true;
+    });
+    assert.ok(calls.some(c => c[0] === client && c[1] === 'doctor'),
+      'The injected official-client doctor must have been reached');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('Linux tunnel rejects other platforms and root before external calls', async () => {
   let count = 0;
   const dep = { home: '/tmp', run: async () => { count++; return ''; } };

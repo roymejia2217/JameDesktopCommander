@@ -70,42 +70,62 @@ export function parseWindowsTunnelTaskEvents(raw: string): WindowsTunnelTaskEven
     return { kind: 'observational_only', capped: root.capped, events };
 }
 
-/** Bounded WinEvent query. No raw messages, task command lines or secrets are returned. */
+/** An XPath string literal with no executable interpolation. */
+function xpathLiteral(value: string): string {
+    if (!value.includes("'")) return "'" + value + "'";
+    if (!value.includes('"')) return '"' + value + '"';
+    return 'concat(' + value.split("'").map((part) => "'" + part + "'")
+        .join(', "\'", ') + ')';
+}
+
+/** Encode a native Event Log XPath expression as XML element text. */
+function xmlText(value: string): string {
+    return value.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+/** Bounded native-filtered query, no raw messages, task paths or secrets. */
 export function buildWindowsTunnelTaskEventsPowerShell(taskName: string): string {
     const normalized = taskName.trim();
     if (!normalized || normalized.length > 256 ||
         /[\0\r\n\u0001-\u001f]/.test(normalized)) {
         throw new Error('Unsupported Windows tunnel task name.');
     }
-    const literal = normalized.replace(/'/g, "''");
+    const canonicalName = normalized.startsWith('\\')
+        ? normalized : '\\' + normalized;
+    const channel = 'Microsoft-Windows-TaskScheduler/Operational';
+    const eventIds = [...EVENT_IDS].map((id) => 'EventID=' + id).join(' or ');
+    const xpath = '*[System[(' + eventIds +
+        ') and TimeCreated[timediff(@SystemTime) <= 259200000]]' +
+        ' and EventData[Data[@Name=\'TaskName\']=' +
+        xpathLiteral(canonicalName) + ']]';
+    const queryXml = '<QueryList><Query Id="0" Path="' + channel +
+        '"><Select Path="' + channel + '">' + xmlText(xpath) +
+        '</Select></Query></QueryList>';
+
+    // A PowerShell single-quoted string does not interpolate variables.
+    const literal = queryXml.replace(/'/g, "''");
     return [
         "$ErrorActionPreference='Stop'",
-        "$taskName='" + literal + "'",
-        "$logName='Microsoft-Windows-TaskScheduler/Operational'",
+        "$taskName='" + normalized.replace(/'/g, "''") + "'",
+        "$canonicalName=if($taskName.StartsWith('\\')){$taskName}else{'\\'+$taskName}",
+        "$logName='" + channel + "'",
         '$log=Get-WinEvent -ListLog $logName -ErrorAction Stop',
         "if(-not $log.IsEnabled){ throw 'Scheduler operational log is disabled.' }",
+        "$filterXml=[xml]'" + literal + "'",
         '$records=@()',
-        "$canonicalName=if($taskName.StartsWith('\\')){$taskName}else{'\\'+$taskName}",
         'try {',
-        '  $records=@(Get-WinEvent -FilterHashtable @{',
-        '    LogName=$logName',
-        '    StartTime=(Get-Date).AddHours(-72)',
-        '    Id=@(100,102,110,111,118,129,200,201,325)',
-        '  } -MaxEvents 5000 -ErrorAction Stop)',
+        '  $records=@(Get-WinEvent -FilterXml $filterXml -MaxEvents 51 -ErrorAction Stop)',
         '} catch {',
         "  if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){",
         "    throw 'Scheduler operational event query failed.'",
         '  }',
         '}',
         '$matched=@($records | Where-Object {',
-        '    @($_.Properties.Value) -contains $canonicalName -or',
-        '      @($_.Properties.Value) -contains $taskName',
-        '  } | Where-Object {',
         '    [xml]$eventXml=$_.ToXml()',
         '    $taskData=@($eventXml.Event.EventData.Data) |',
         "      Where-Object { $_.Name -eq 'TaskName' } | Select-Object -First 1",
-        "    $null -ne $taskData -and (([string]$taskData.'#text') -eq $canonicalName -or",
-        "      ([string]$taskData.'#text') -eq $taskName)",
+        "    $null -ne $taskData -and ([string]$taskData.'#text') -eq $canonicalName",
         '  })',
         '$rows=@($matched | Select-Object -First 50 | ForEach-Object {',
         '    $resultCode=$null',
@@ -121,7 +141,7 @@ export function buildWindowsTunnelTaskEventsPowerShell(taskName: string): string
         '      resultCode=$resultCode',
         '    }',
         '  })',
-        "[pscustomobject]@{kind='observational_only';capped=(($records.Count -ge 5000) -or ($matched.Count -gt 50));events=$rows} |",
+        "[pscustomobject]@{kind='observational_only';capped=($records.Count -gt 50);events=$rows} |",
         '  ConvertTo-Json -Depth 4 -Compress',
     ].join('\r\n');
 }

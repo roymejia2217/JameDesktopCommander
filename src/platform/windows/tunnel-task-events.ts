@@ -74,8 +74,9 @@ export function parseWindowsTunnelTaskEvents(raw: string): WindowsTunnelTaskEven
 function xpathLiteral(value: string): string {
     if (!value.includes("'")) return "'" + value + "'";
     if (!value.includes('"')) return '"' + value + '"';
-    return 'concat(' + value.split("'").map((part) => "'" + part + "'")
-        .join(', "\'", ') + ')';
+    // The native Windows Event Log XPath subset does not implement concat().
+    // No exact filter can be formed for values containing both quote kinds.
+    throw new Error('Task name cannot be represented in Windows Event Log XPath.');
 }
 
 /** Encode a native Event Log XPath expression as XML element text. */

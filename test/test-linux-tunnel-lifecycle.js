@@ -356,6 +356,51 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   }
 });
 
+test('Linux rejects mutable ancestors above HOME before install or activation', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'jdc-tunnel-parent-'));
+  const binaryHome = await mkdtemp(path.join(tmpdir(), 'jdc-tunnel-bin-'));
+  const home = path.join(parent, 'private-home');
+  const client = path.join(binaryHome, 'tunnel-client');
+  const profiles = path.join(home, 'profiles');
+  const unit = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  const calls = [];
+  const deps = { platform: 'linux', home, run: async (bin, args) => {
+    calls.push([bin, ...args]);
+    return '';
+  } };
+  try {
+    await mkdir(home, { mode: 0o700 });
+    await mkdir(profiles, { mode: 0o700 });
+    await writeFile(client, 'Not executed; run() intercepts it.\n', { mode: 0o700 });
+    const install = ['install', '--tunnel-client-bin', client,
+      '--profile-dir', profiles, '--profile', 'jdc'];
+    await chmod(parent, 0o777);
+    await assert.rejects(runLinuxTunnelCommand(install, deps), /ancestor.*writable/i);
+    await assert.rejects(stat(unit), { code: 'ENOENT' });
+    await chmod(parent, 0o700);
+    await runLinuxTunnelCommand(install, deps);
+    assert.equal((await stat(unit)).isFile(), true);
+    await chmod(parent, 0o777);
+    calls.length = 0;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps), /ancestor.*writable/i);
+    assert.ok(!calls.some(c => c[0] === 'systemctl' && c[2] === 'enable'),
+      'Unsafe ancestor must prevent activation');
+    assert.equal((await runLinuxTunnelCommand(['stop'], deps)).action, 'stop',
+      'Emergency stop must remain available for an unsafe ancestor');
+    await assert.rejects(runLinuxTunnelCommand(['uninstall'], deps), /ancestor.*writable/i);
+    assert.equal((await stat(unit)).isFile(), true, 'Unsafe parent must not be unlinked');
+    await chmod(parent, 0o700);
+    assert.equal((await runLinuxTunnelCommand(['uninstall'], deps)).action, 'uninstall');
+    await assert.rejects(stat(unit), { code: 'ENOENT' });
+  } finally {
+    await chmod(parent, 0o700).catch(() => {});
+    await rm(parent, { recursive: true, force: true });
+    await rm(binaryHome, { recursive: true, force: true });
+  }
+});
+
 test('Linux recovery disables and removes an owned altered JDC unit without running it', {
   skip: process.platform !== 'linux',
 }, async () => {

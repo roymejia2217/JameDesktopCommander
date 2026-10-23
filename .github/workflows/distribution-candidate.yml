@@ -60,6 +60,8 @@ jobs:
 
       - name: Validate original MCP tool contract
         run: npm run validate:tools:built
+        env:
+          MCP_INSPECTOR_SECRET_STORE: memory
 
       - name: Deny filesystem access when authorization config cannot be loaded
         run: node --test test/test-filesystem-policy-fail-closed.js

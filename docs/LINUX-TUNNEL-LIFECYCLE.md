@@ -105,6 +105,13 @@ executable path, credentials, or contents. The official client is responsible
 for its own diagnostic behavior. A successful result proves prerequisite
 validation only, **not remote authentication, connection or deployment**.
 
+External `systemctl --user` and official `tunnel-client` failures are reported
+with separate stable error categories, never by forwarding arbitrary command
+messages or causes. External diagnostics may contain absolute profile paths or
+bearer material; operators should use the maintained client's protected
+private diagnostics for detailed troubleshooting rather than public CLI logs.
+The command still exits nonzero and preserves fail-closed behavior on errors.
+
 ## Loaded service definition integrity
 
 Validating the JDC-managed service file alone does not validate the service

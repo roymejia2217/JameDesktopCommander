@@ -4,6 +4,7 @@
  * Never invokes tools, installs services, or uses host configuration.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

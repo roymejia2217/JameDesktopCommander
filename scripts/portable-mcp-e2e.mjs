@@ -4,6 +4,7 @@
  * Never invokes tools, installs services, or uses host configuration.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -26,6 +27,20 @@ const entrypoint = join(candidate, manifest.entrypoint);
 for (const file of [binary, entrypoint]) {
   assert.ok((await lstat(file)).isFile(), 'Missing packaged runtime file');
 }
+
+// Verify candidate integrity before launching the packaged MCP server.
+// Retain all existing real-client, OpenCode-denial, workspace and session probes.
+const doctor = spawnSync(binary, [entrypoint, 'portable', 'doctor'], {
+  cwd: candidate, encoding: 'utf8', timeout: 120000, maxBuffer: 65536,
+  env: { ...process.env, NODE_OPTIONS: '' },
+});
+assert.equal(doctor.error, undefined, 'Packaged portable doctor did not launch');
+assert.equal(doctor.status, 0, 'Packaged portable doctor rejected downloaded candidate');
+assert.equal(doctor.stderr, '', 'Portable diagnosis emitted unexpected stderr');
+assert.deepEqual(JSON.parse(doctor.stdout), {
+  result: 'PASS', target: manifest.target, fileCount: manifest.fileCount,
+  releaseEligible: false,
+});
 
 const sdk = join(candidate, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm', 'client');
 const [{ Client }, { StdioClientTransport }] = await Promise.all([

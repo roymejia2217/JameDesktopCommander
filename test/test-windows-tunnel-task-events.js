@@ -64,7 +64,7 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
     assert.match(source, /TimeCreated\[timediff\(@SystemTime\) &lt;= 259200000\]/);
     assert.match(source, /EventData\[Data\[/);
     assert.doesNotMatch(source, /-FilterHashtable|-MaxEvents 5000/);
-    assert.match(source, /Tunnel's task/);
+    assert.match(source, /Tunnel''s task/);
     assert.match(source, /ConvertTo-Json/);
     assert.match(source, /\$records\.Count -gt 50/);
     // TaskScheduler stores root task names under a leading backslash and
@@ -82,6 +82,8 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
         `Task's "fixture" <xml>&`,
     );
     assert.match(hostile, /concat\(/);
+    assert.match(hostile, /-FilterXml \$filterXml -MaxEvents 51/);
+    assert.doesNotMatch(hostile, /-FilterHashtable/);
     assert.match(hostile, /&lt;xml&gt;&amp;/);
     assert.doesNotMatch(hostile, /<xml>/);
 

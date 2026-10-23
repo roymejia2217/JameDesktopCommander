@@ -47,8 +47,10 @@ process identifiers or raw Windows logs are exported. The native PowerShell
 invocation is launched without shell expansion, a 10-second timeout and a
 64-KiB output ceiling. The parser rejects unexpected fields and malformed
 records; disabled or inaccessible logs fail rather than return a fabricated
-healthy status. XPath literal quoting and XML escaping cover task names with
-both quote kinds and XML metacharacters. This filter avoids the previously
+healthy status. XPath literal quoting and XML escaping cover task names with XML
+metacharacters or either quote kind alone. Names containing **both** quote
+kinds fail closed: native Event Log XPath does not support the `concat()`
+function that would be needed to express such a literal. This filter avoids the previously
 observed 141-second wide native event-log scan (5,000 arbitrary events); the
 same host returned 29 events in 909 ms using the narrowly filtered native
 query. This is one field observation, **not** a guaranteed latency SLA.

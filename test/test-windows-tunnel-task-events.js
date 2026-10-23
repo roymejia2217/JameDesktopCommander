@@ -81,8 +81,15 @@ test('query is bounded, read-only, safely quotes task names and excludes raw mes
     const quoted = buildWindowsTunnelTaskEventsPowerShell(`Task's <xml>&`);
     assert.match(quoted, /-FilterXml \$filterXml -MaxEvents 51/);
     assert.doesNotMatch(quoted, /-FilterHashtable/);
-    assert.match(quoted, /&lt;xml&gt;&amp;/);
-    assert.doesNotMatch(quoted, /<xml>/);
+    // A raw task name may legally appear in a PowerShell *string variable*.
+    // Require the XML filter payload itself to escape untrusted markup.
+    assert.match(quoted, /\$taskName='Task''s <xml>&'/);
+    const xmlAssignment = quoted.split('\r\n').find(
+        (line) => line.startsWith("$filterXml=[xml]'"),
+    );
+    assert.ok(xmlAssignment, 'The native Event Log query must use a typed XML filter.');
+    assert.match(xmlAssignment, /&lt;xml&gt;&amp;/);
+    assert.doesNotMatch(xmlAssignment, /<xml>/);
     assert.match(buildWindowsTunnelTaskEventsPowerShell('Task "double"'),
         /Task "double"/);
     assert.throws(() => buildWindowsTunnelTaskEventsPowerShell(

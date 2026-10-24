@@ -24,6 +24,7 @@ other_gid="$(id -g nobody)"
 sandbox="$(mktemp -d /tmp/jdc-t011-peer.XXXXXXXX)"
 [[ "$sandbox" == /tmp/jdc-t011-peer.* ]] || exit 1
 active_server_pid=''
+attacker_dir=''
 cleanup() {
   if [[ -n "$active_server_pid" ]]; then
     kill "$active_server_pid" 2>/dev/null || :
@@ -31,10 +32,25 @@ cleanup() {
   fi
   rm -f -- "$sandbox"/case-*.sock
   rmdir -- "$sandbox" || :
+  if [[ -n "${attacker_dir:-}" ]]; then
+    sudo -n -u nobody -- rmdir -- "$attacker_dir" || :
+  fi
 }
 trap cleanup EXIT
-# Attacker can traverse, not create/replace entries in the runner-owned dir.
+# Runner-owned disposable parent models protected endpoint name custody.
+# This does NOT prove the future installed service directory/ACL is safe.
+# Attacker can traverse, but cannot create/replace names in this directory.
 chmod 0711 -- "$sandbox"
+# Positive control: this exact attacker principal can create filesystem names
+# in its own directory; an unrelated sudo failure must never count as denial.
+attacker_dir="$(sudo -n -u nobody -- mktemp -d /tmp/jdc-t011-peer-attacker.XXXXXXXX)"
+[[ "$attacker_dir" == /tmp/jdc-t011-peer-attacker.* &&
+   "$(stat -c '%u' "$attacker_dir")" == "$other_uid" ]] || {
+  printf '%s\n' 'E_PEER_ATTACKER_STORAGE_UNAVAILABLE' >&2; exit 1;
+}
+sudo -n -u nobody -- ln -s "$sandbox" "$attacker_dir/positive-control"
+[[ -L "$attacker_dir/positive-control" ]] || exit 1
+sudo -n -u nobody -- rm -- "$attacker_dir/positive-control"
 
 run_case() {
   local label="$1" principal="$2" expected="$3" uid="$4" gid="$5" verdict="$6"
@@ -46,8 +62,22 @@ run_case() {
     printf '%s\n' 'E_PEER_SERVER_NOT_READY' >&2
     return 1
   fi
-  # Fixture-only socket access; authentication must reject based on SO_PEERCRED.
+  # Intentionally permissive *test socket*: connect is allowed, but peer
+  # identity must still decide matching. This is not a production ACL.
+  [[ -S "$socket" ]] || { printf '%s\n' 'E_PEER_SOCKET_MISSING' >&2; return 1; }
   chmod 0777 -- "$socket"
+  local socket_identity
+  socket_identity="$(stat -c '%d:%i' "$socket")"
+  # The attacker can traverse the parent but may neither unlink the existing
+  # listener nor replace an absent sibling with its own symlink.
+  if sudo -n -u nobody -- rm -- "$socket" >/dev/null 2>&1 ||
+     sudo -n -u nobody -- ln -s "$attacker_dir" "$socket.forged" >/dev/null 2>&1; then
+    printf '%s\n' 'E_PEER_UNTRUSTED_SOCKET_NAMESPACE_MUTATION' >&2; return 1
+  fi
+  if [[ ! -S "$socket" || "$(stat -c '%d:%i' "$socket")" != "$socket_identity" ||
+        -e "$socket.forged" || -L "$socket.forged" ]]; then
+    printf '%s\n' 'E_PEER_SOCKET_OBJECT_CHANGED' >&2; return 1
+  fi
   if [[ "$principal" == "runner" ]]; then
     "$fixture" client "$socket" 'claim:root:allow=true'
   else

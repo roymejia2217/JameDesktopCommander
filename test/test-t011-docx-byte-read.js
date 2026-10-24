@@ -20,10 +20,10 @@ function docxFixture() {
     return zip.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
-test('T011-C DOCX bytes: default outline from an in-memory Buffer', () => {
+test('T011-C DOCX bytes: default outline from an in-memory Buffer', async () => {
     const bytes = docxFixture();
     const original = Buffer.from(bytes);
-    const result = readDocxBytes(bytes);
+    const result = await readDocxBytes(bytes);
     assert.equal(result.mimeType, 'text/plain');
     assert.equal(result.metadata.isDocx, true);
     assert.match(result.content, /Hello T011 DOCX/);
@@ -31,32 +31,32 @@ test('T011-C DOCX bytes: default outline from an in-memory Buffer', () => {
     assert.deepEqual(bytes, original);
 });
 
-test('T011-C DOCX bytes: only the selected subarray is parsed', () => {
+test('T011-C DOCX bytes: only the selected subarray is parsed', async () => {
     const content = docxFixture();
     const backing = Buffer.concat([Buffer.from([0xff, 0x02]), content, Buffer.from([0xaa, 0xee])]);
     const bytes = backing.subarray(2, content.length + 2);
     assert.ok(bytes.byteOffset > 0);
-    const result = readDocxBytes(bytes);
-    assert.match(readDocxBytes(Uint8Array.from(content)).content, /Hello T011 DOCX/);
+    const result = await readDocxBytes(bytes);
+    assert.match((await readDocxBytes(Uint8Array.from(content))).content, /Hello T011 DOCX/);
     assert.match(result.content, /Hello T011 DOCX/);
     assert.deepEqual(backing.subarray(0, 2), Buffer.from([0xff, 0x02]));
     assert.deepEqual(backing.subarray(content.length + 2), Buffer.from([0xaa, 0xee]));
 });
 
-test('T011-C DOCX bytes: XML pagination retains the existing contract', () => {
+test('T011-C DOCX bytes: XML pagination retains the existing contract', async () => {
     const bytes = docxFixture();
-    const result = readDocxBytes(bytes, { offset: 1, length: 100 });
+    const result = await readDocxBytes(bytes, { offset: 1, length: 100 });
     assert.equal(result.mimeType, 'application/xml');
     assert.equal(result.metadata.isDocx, true);
     assert.match(result.content, /^\[DOCX XML: lines 1-/);
     assert.match(result.content, /Hello T011 DOCX/);
 });
 
-test('T011-C DOCX bytes: source API denies filenames and invalid ZIPs', () => {
-    assert.throws(() => readDocxBytes('private.docx'), TypeError);
-    assert.throws(() => readDocxBytes(null), TypeError);
-    assert.throws(() => readDocxBytes(Buffer.from('not-a-docx')));
-    assert.throws(() => readDocxBytes(new Uint8Array()));
+test('T011-C DOCX bytes: source API denies filenames and invalid ZIPs', async () => {
+    await assert.rejects(() => readDocxBytes('private.docx'), TypeError);
+    await assert.rejects(() => readDocxBytes(null), TypeError);
+    await assert.rejects(() => readDocxBytes(Buffer.from('not-a-docx')));
+    await assert.rejects(() => readDocxBytes(new Uint8Array()));
 });
 
 test('T011-C DOCX bytes: original path handler remains behavior-equivalent', async () => {
@@ -66,10 +66,10 @@ test('T011-C DOCX bytes: original path handler remains behavior-equivalent', asy
     try {
         await fs.writeFile(file, bytes);
         const handler = new DocxFileHandler();
-        assert.deepEqual(await handler.read(file), readDocxBytes(bytes));
+        assert.deepEqual(await handler.read(file), await readDocxBytes(bytes));
         assert.deepEqual(
             await handler.read(file, { offset: -3, length: 2 }),
-            readDocxBytes(bytes, { offset: -3, length: 2 }),
+            await readDocxBytes(bytes, { offset: -3, length: 2 }),
         );
     } finally {
         await fs.rm(directory, { recursive: true, force: true });

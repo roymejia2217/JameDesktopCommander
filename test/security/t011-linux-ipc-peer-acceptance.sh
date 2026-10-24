@@ -33,6 +33,7 @@ cleanup() {
   rm -f -- "$sandbox"/case-*.sock
   rmdir -- "$sandbox" || :
   if [[ -n "${attacker_dir:-}" ]]; then
+    sudo -n -u nobody -- rm -f -- "$attacker_dir/positive-control" || :
     sudo -n -u nobody -- rmdir -- "$attacker_dir" || :
   fi
 }
@@ -49,7 +50,9 @@ attacker_dir="$(sudo -n -u nobody -- mktemp -d /tmp/jdc-t011-peer-attacker.XXXXX
   printf '%s\n' 'E_PEER_ATTACKER_STORAGE_UNAVAILABLE' >&2; exit 1;
 }
 sudo -n -u nobody -- ln -s "$sandbox" "$attacker_dir/positive-control"
-[[ -L "$attacker_dir/positive-control" ]] || exit 1
+# The 0700 attacker-owned directory is intentionally opaque to the runner.
+# Inspect this positive control under the same unprivileged OS identity.
+sudo -n -u nobody -- test -L "$attacker_dir/positive-control"
 sudo -n -u nobody -- rm -- "$attacker_dir/positive-control"
 
 run_case() {

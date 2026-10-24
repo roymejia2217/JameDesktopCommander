@@ -335,3 +335,30 @@ test('native atomic rewrite preserves protected NTFS DACL inheritance flags',
         'replacement must preserve protected DACL inheritance configuration');
     });
   });
+
+test('native atomic rewrite preserves existing NTFS mandatory integrity label',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    const acl = (args) => {
+      const proc = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(proc.error, undefined);
+      assert.equal(proc.status, 0, (proc.stderr || proc.stdout || '').trim());
+      return proc.stdout;
+    };
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'low-integrity-target.txt');
+      const before = path.join(base, 'integrity-before.txt');
+      const after = path.join(base, 'integrity-after.txt');
+      fs.writeFileSync(target, 'ORIGINAL-LOW-INTEGRITY');
+      acl([target, '/setintegritylevel', 'L']);
+      acl([target, '/save', before]);
+      assert.match(acl([target]), /Mandatory Label|Mandatory Label\\Low Mandatory Level|Etiqueta obligatoria|S-1-16-4096|Low Mandatory Level/i,
+        'Fixture must really install a low mandatory integrity label');
+      cap.writeText('low-integrity-target.txt', 'AUTHORIZED-NEW-CONTENT');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'atomic replacement must preserve mandatory integrity level, not just DACL');
+      assert.equal(fs.readFileSync(target, 'utf8'), 'AUTHORIZED-NEW-CONTENT');
+    });
+  });

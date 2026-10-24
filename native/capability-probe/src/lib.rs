@@ -58,6 +58,9 @@ fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
     pending.as_file().sync_all().map_err(denied)?;
     #[cfg(windows)]
     if let Some(existing) = _existing_writer.as_ref() {
+        // Set the mandatory-integrity label before applying the old DACL:
+        // copying a deny ACE first could revoke WRITE_OWNER on the tempfile.
+        windows_dacl::copy_existing_integrity_label(existing, pending.as_file())?;
         windows_dacl::copy_existing_dacl(existing, pending.as_file())?;
     }
     // A failed publication drops/cleans the owned tempfile rather than

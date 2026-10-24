@@ -286,3 +286,28 @@ test('native atomic rewrite must respect explicit Windows NTFS write-data denial
       }
     });
   });
+
+test('native atomic rewrite preserves explicit target NTFS DACL protections',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function acl(args) {
+      const result = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+    }
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'explicit-dacl-target.txt');
+      const before = path.join(base, 'dacl-before.txt');
+      const after = path.join(base, 'dacl-after.txt');
+      fs.writeFileSync(target, 'BEFORE');
+      // ANONYMOUS LOGON is not this user. A denied READ_DATA ACE on the
+      // existing object must not silently disappear on authorized rewrite.
+      acl([target, '/deny', '*S-1-5-7:(RD)']);
+      acl([target, '/save', before]);
+      cap.writeText('explicit-dacl-target.txt', 'AFTER');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'atomic replacement must preserve explicit NTFS target DACL');
+    });
+  });

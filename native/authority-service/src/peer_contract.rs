@@ -25,6 +25,28 @@ pub(super) fn validate_connected_unix_stream(
     Ok(())
 }
 
+/// Compare the observed kernel credential snapshot with separately
+/// provisioned expected OS user/group identifiers. The caller must resolve
+/// the expectation from administrator-controlled account state, never from a
+/// field transmitted by the connected peer. No filesystem grant results.
+pub(super) fn validate_expected_kernel_peer(
+    pid: i32,
+    observed_uid: u32,
+    observed_gid: u32,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<(), IdentityDenied> {
+    validate_kernel_peer(pid, observed_uid, observed_gid)?;
+    if expected_uid == 0
+        || expected_gid == 0
+        || observed_uid != expected_uid
+        || observed_gid != expected_gid
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +64,35 @@ mod tests {
             assert_eq!(
                 validate_connected_unix_stream(domain, socket_type, connected),
                 Err(IdentityDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn only_exact_nonroot_expected_system_identity_may_match_a_kernel_peer() {
+        assert_eq!(
+            validate_expected_kernel_peer(502, 1101, 1201, 1101, 1201),
+            Ok(())
+        );
+        for (pid, observed_uid, observed_gid, approved_uid, approved_gid) in [
+            (0, 1101, 1201, 1101, 1201),
+            (502, 1102, 1201, 1101, 1201),
+            (502, 1101, 1202, 1101, 1201),
+            (502, 0, 1201, 0, 1201),
+            (502, 1101, 0, 1101, 0),
+            (502, 1101, 1201, 0, 1201),
+            (502, 1101, 1201, 1101, 0),
+        ] {
+            assert_eq!(
+                validate_expected_kernel_peer(
+                    pid,
+                    observed_uid,
+                    observed_gid,
+                    approved_uid,
+                    approved_gid,
+                ),
+                Err(IdentityDenied),
+                "unapproved kernel credential pair must deny",
             );
         }
     }

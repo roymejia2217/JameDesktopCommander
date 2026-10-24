@@ -6,8 +6,10 @@
 //! continuous guarantee about subsequent process privileges. A future broker
 //! must separately attest the expected client identity from protected policy
 //! and authenticate its socket endpoint before authorizing any operation.
+use std::ffi::CStr;
 use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::ptr;
 
 use crate::peer_contract::{validate_connected_unix_stream, validate_kernel_peer};
 use crate::IdentityDenied;
@@ -35,6 +37,51 @@ impl KernelPeer {
     pub fn gid(&self) -> u32 {
         self.gid
     }
+}
+
+/// Observe a connected peer and compare the kernel credentials against a
+/// separately chosen OS account name resolved through the host NSS service.
+///
+/// The expected account name MUST originate from protected service policy,
+/// NEVER from data supplied by this peer. Even a successful match is merely
+/// evidence for a future broker's authorization decision, not a grant to
+/// read/write or to use caller-selected root paths.
+pub fn inspect_peer_against_os_account(
+    fd: BorrowedFd<'_>,
+    expected_account_name: &CStr,
+) -> Result<KernelPeer, IdentityDenied> {
+    let peer = observe_connected_peer(fd)?;
+
+    // getpwnam_r is the standardized re-entrant system account lookup. Deny
+    // missing, truncated, root, NSS errors and accounts with zero primary GID.
+    const NSS_BUFFER: usize = 16_384;
+    let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = ptr::null_mut();
+    let mut buffer = [0 as libc::c_char; NSS_BUFFER];
+    // SAFETY: getpwnam_r writes into the provided passwd output and scratch
+    // buffer; only inspect the result after success and a non-null pointer.
+    let status = unsafe {
+        libc::getpwnam_r(
+            expected_account_name.as_ptr(),
+            pwd.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return Err(IdentityDenied);
+    }
+    // SAFETY: a successful getpwnam_r with a nonnull result initialized pwd.
+    let account = unsafe { pwd.assume_init() };
+    crate::peer_contract::validate_expected_kernel_peer(
+        peer.pid(),
+        peer.uid(),
+        peer.gid(),
+        account.pw_uid,
+        account.pw_gid,
+    )?;
+    Ok(peer)
 }
 
 fn read_socket_integer_option(fd: BorrowedFd<'_>, name: i32) -> Result<i32, IdentityDenied> {
@@ -153,6 +200,60 @@ mod tests {
         assert!(raw >= 0, "unconnected UNIX socket must be constructible");
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
         assert_eq!(observe_connected_peer(fd.as_fd()), Err(IdentityDenied));
+    }
+
+    #[test]
+    fn system_account_match_uses_nss_and_kernel_not_peer_payload() {
+        use std::ffi::{CStr, CString};
+        // Positive control: resolve our *independent host account record*
+        // for this test. Production must instead use protected policy for
+        // the account selection, never the untrusted peer's claimed name.
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive path requires non-root CI identity");
+        assert_ne!(gid, 0, "positive path requires non-root CI group");
+        let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
+        let mut result: *mut libc::passwd = ptr::null_mut();
+        let mut scratch = [0 as libc::c_char; 16_384];
+        let code = unsafe {
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                scratch.as_mut_ptr(),
+                scratch.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(code, 0, "test runner must have a valid NSS account");
+        assert!(
+            !result.is_null(),
+            "test runner must have a provisioned account"
+        );
+        let pwd = unsafe { pwd.assume_init() };
+        let approved_name = unsafe { CStr::from_ptr(pwd.pw_name) }.to_owned();
+        let (mut sender, receiver) = UnixStream::pair().expect("kernel stream pair");
+        sender
+            .write_all(b"uid=0;gid=0;account=root;allow=true")
+            .expect("spoofed request bytes do not alter OS credentials");
+
+        let verified = inspect_peer_against_os_account(receiver.as_fd(), &approved_name)
+            .expect("independently resolved account should match the kernel peer");
+        assert_eq!(verified.uid(), uid);
+        assert_eq!(verified.gid(), gid);
+        assert_eq!(verified.pid(), std::process::id() as i32);
+
+        let root = CString::new("root").expect("constant");
+        let missing = CString::new("jdc-nonexistent-peer-account-987654").expect("constant");
+        assert_eq!(
+            inspect_peer_against_os_account(receiver.as_fd(), root.as_c_str()),
+            Err(IdentityDenied),
+            "root must never be an authorized client identity",
+        );
+        assert_eq!(
+            inspect_peer_against_os_account(receiver.as_fd(), missing.as_c_str()),
+            Err(IdentityDenied),
+            "a missing provisioned client account must deny",
+        );
     }
 
     #[test]

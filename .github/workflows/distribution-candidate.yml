@@ -79,11 +79,17 @@ jobs:
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
 
       - name: Compile platform-specific capability addon from locked source
-        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
+        run: cargo +1.91.1 build --locked --release --features receiver-test-fixture --manifest-path native/capability-probe/Cargo.toml
 
       - name: Exercise real native confinement and create verified Node addon
         # Both suites stage/load the same .node path; Windows locks loaded DLLs.
         run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
+
+      - name: Rebuild the deny-only default native addon for packaging
+        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
+
+      - name: Verify deny-only native addon surface before staging
+        run: node --test test/security/capability-default-surface.test.cjs
 
       - name: Stage Node runtime and native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build

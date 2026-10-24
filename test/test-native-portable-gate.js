@@ -23,14 +23,21 @@ test('every Windows/Linux candidate requires a locked native addon', () => {
   const lock = findStep('Verify committed native dependency lock');
   const build = findStep('Compile platform-specific capability addon from locked source');
   const check = findStep('Exercise real native confinement and create verified Node addon');
+  const rebuild = findStep('Rebuild the deny-only default native addon for packaging');
+  const deny = findStep('Verify deny-only native addon surface before staging');
   const stage = findStep('Stage Node runtime and native capability with hashed manifest');
   const verify = findStep('Independently verify staged bytes and provenance');
   const smoke = findStep('Smoke test packaged Node and bundled ripgrep');
   const roundtrip = findStep('Verify downloaded TAR and smoke extracted native runtime');
-  assert.ok(lock < build && build < check && check < stage &&
-    stage < verify && verify < smoke && smoke < roundtrip,
+  assert.ok(lock < build && build < check && check < rebuild &&
+    rebuild < deny && deny < stage && stage < verify &&
+    verify < smoke && smoke < roundtrip,
   'Native validation and full staged/roundtrip acceptance must run in that order');
   assert.match(steps[build].run, /cargo \+1\.91\.1 build --locked --release/);
+  assert.match(steps[build].run, /--features receiver-test-fixture/);
+  assert.match(steps[rebuild].run, /cargo \+1\.91\.1 build --locked --release/);
+  assert.doesNotMatch(steps[rebuild].run, /--features/);
+  assert.match(steps[deny].run, /capability-default-surface\.test\.cjs/);
   assert.match(steps[check].run, /(?:^|\s)--test-concurrency=1(?:\s|$)/,
     'Portable candidate must serialize tests that load the same Windows native addon');
   assert.match(steps[check].run, /test\/security\/capability-namespace-swap\.test\.cjs/);

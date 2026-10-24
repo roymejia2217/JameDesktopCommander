@@ -37,9 +37,9 @@ trap cleanup EXIT
 chmod 0711 -- "$sandbox"
 
 run_case() {
-  local label="$1" principal="$2" uid="$3" gid="$4" verdict="$5"
+  local label="$1" principal="$2" expected="$3" uid="$4" gid="$5" verdict="$6"
   local socket="$sandbox/case-$label.sock" ready='' result='' fd
-  coproc JDC_PEER { "$fixture" serve "$socket" "$approved"; }
+  coproc JDC_PEER { "$fixture" serve "$socket" "$expected"; }
   active_server_pid="$JDC_PEER_PID"
   fd="${JDC_PEER[0]}"
   if ! IFS= read -r -t 8 ready <&"$fd" || [[ "$ready" != "READY" ]]; then
@@ -64,12 +64,15 @@ run_case() {
     printf '%s\n' 'E_PEER_UNEXPECTED_OBSERVATION' >&2; return 1
   fi
   if [[ "${BASH_REMATCH[1]}" != "$uid" || "${BASH_REMATCH[2]}" != "$gid" ||
-        "${BASH_REMATCH[3]}" -le 0 || "${BASH_REMATCH[4]}" != "$verdict" ]]; then
+        "${BASH_REMATCH[3]}" -le 0 || "${BASH_REMATCH[3]}" -eq "$$" ||
+        "${BASH_REMATCH[4]}" != "$verdict" ]]; then
     printf '%s\n' 'E_PEER_IDENTITY_VERDICT_MISMATCH' >&2; return 1
   fi
   rm -f -- "$socket"
 }
 
-run_case approved runner "$approved_uid" "$approved_gid" MATCH
-run_case foreign nobody "$other_uid" "$other_gid" DENIED
+run_case approved runner "$approved" "$approved_uid" "$approved_gid" MATCH
+run_case foreign nobody "$approved" "$other_uid" "$other_gid" DENIED
+run_case foreign-positive nobody nobody "$other_uid" "$other_gid" MATCH
+run_case runner-foreign runner nobody "$approved_uid" "$approved_gid" DENIED
 printf '%s\n' 'T011_CONNECTED_PEER_CROSS_PRINCIPAL_PASS'

@@ -123,6 +123,15 @@ try {
     Require-Success 'OWNER_INIT' $service.Credential $fixture @('init', $db)
     Copy-Item -LiteralPath $db -Destination $snapshot -ErrorAction Stop
     Require-Success 'ATTACKER_CANARY' $attacker.Credential $probe @('canary', $db, $canary)
+    $attackerOwnedAlias = Join-Path $public 'own-hardlink-canary.txt'
+    Require-Success 'ATTACKER_HARDLINK_OWN' $attacker.Credential $probe @('hardlink', $canary, $attackerOwnedAlias)
+    if (-not (Test-Path -LiteralPath $attackerOwnedAlias -PathType Leaf)) {
+        throw 'E_CUSTODY_POSITIVE_HARDLINK_MISSING'
+    }
+    if ((Get-FileHash -LiteralPath $attackerOwnedAlias -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $canary -Algorithm SHA256).Hash) {
+        throw 'E_CUSTODY_POSITIVE_HARDLINK_BYTES_MISMATCH'
+    }
     Require-Success 'ATTACKER_READS_OLD_SNAPSHOT' $attacker.Credential $probe @('read', $snapshot, $canary)
     if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
         throw 'E_CUSTODY_MISSING_ATTACKER_CANARY'
@@ -146,6 +155,13 @@ try {
 
     foreach ($operation in @('read', 'append', 'rename', 'unlink', 'create', 'parent-rename')) {
         Require-Denied $operation $attacker.Credential $probe @($operation, $db, $snapshot)
+    }
+    $exfiltrationAlias = Join-Path $public 'protected-object-hardlink.txt'
+    $injectedAlias = Join-Path $state 'attacker-owned-hardlink.txt'
+    Require-Denied 'HARDLINK_FROM_PROTECTED' $attacker.Credential $probe @('hardlink', $db, $exfiltrationAlias)
+    Require-Denied 'HARDLINK_INTO_PROTECTED' $attacker.Credential $probe @('hardlink', $canary, $injectedAlias)
+    if ((Test-Path -LiteralPath $exfiltrationAlias) -or (Test-Path -LiteralPath $injectedAlias)) {
+        throw 'E_CUSTODY_HARDLINK_ALIAS_CREATED'
     }
     Require-Denied 'replay' $attacker.Credential $probe @('overwrite', $db, $snapshot)
     # The same validated icacls invocation must now fail on protected state.

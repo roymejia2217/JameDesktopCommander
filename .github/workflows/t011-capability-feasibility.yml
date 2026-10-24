@@ -60,6 +60,9 @@ jobs:
       - name: Prove isolated SQLite epoch transactions and replay limitation
         run: cargo +1.91.1 test --locked --manifest-path native/authority-store/Cargo.toml
 
+      - name: Prove the unprivileged hardlink attack fixture has a working positive control
+        run: cargo +1.91.1 test --locked --example custody_attacker --manifest-path native/authority-store/Cargo.toml
+
       - name: Check SQLite epoch backend without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-store/Cargo.toml -- -D warnings
 

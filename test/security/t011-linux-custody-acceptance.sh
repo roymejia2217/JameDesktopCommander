@@ -95,6 +95,15 @@ if sudo -n -u nobody -- "$identity_probe"; then
 fi
 sudo -n -u nobody -- touch "$canary"
 sudo -n -u nobody -- test -w "$canary"
+# Positive control: the attacker identity really can create a hard link in
+# attacker-owned storage. Otherwise denial could be a broken runner/filesystem.
+attacker_link="${canary}.hardlink"
+sudo -n -u nobody -- ln "$canary" "$attacker_link"
+if [[ "$(stat -c '%d:%i' "$canary")" != "$(stat -c '%d:%i' "$attacker_link")" ]]; then
+  printf '%s\n' 'E_CUSTODY_POSITIVE_HARDLINK_WRONG_OBJECT' >&2
+  exit 1
+fi
+sudo -n -u nobody -- rm "$attacker_link"
 sudo -n -u jdc-authority -- "$store_fixture" init "$database"
 sudo -n -u jdc-authority -- chmod 0600 "$database"
 if [[ "$(sudo -n -u jdc-authority -- stat -c '%a' "$database")" != "600" ]]; then
@@ -129,6 +138,15 @@ expect_denied unlink sudo -n -u nobody -- rm "$database"
 expect_denied replay sudo -n -u nobody -- mv "$snapshot" "$database"
 expect_denied parent_rename sudo -n -u nobody -- mv "$fixture_dir" "${fixture_dir}-replaced"
 expect_denied parent_chmod sudo -n -u nobody -- chmod 0777 "$fixture_dir"
+# Both hard-link directions must be denied under independent OS principals.
+# This is a protected-domain claim, NOT a same-principal hard-link solution.
+expect_denied hardlink_source sudo -n -u nobody -- ln "$database" "${canary}.protected-alias"
+expect_denied hardlink_destination sudo -n -u nobody -- ln "$canary" "$fixture_dir/forged-hardlink"
+if [[ -e "${canary}.protected-alias" ]] ||
+    sudo -n -u jdc-authority -- test -e "$fixture_dir/forged-hardlink"; then
+  printf '%s\n' 'E_CUSTODY_HARDLINK_ALIAS_CREATED' >&2
+  exit 1
+fi
 
 actual_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 if [[ "$actual_hash" != "$expected_hash" ]]; then

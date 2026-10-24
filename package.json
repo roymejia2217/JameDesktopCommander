@@ -123,6 +123,7 @@
     "unified": "^11.0.5",
     "unpdf": "^1.4.0",
     "yaml": "2.9.1",
+    "yauzl": "3.4.0",
     "zod": "^4.6.7"
   },
   "optionalDependencies": {
@@ -136,6 +137,7 @@
     "@types/markdown-it": "^14.2.0",
     "@types/node": "22.20.5",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/yauzl": "3.4.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "commander": "^13.1.0",

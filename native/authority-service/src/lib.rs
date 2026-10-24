@@ -4,6 +4,13 @@
 
 pub mod token_policy;
 
+// Never enable an IPC listener solely because peer credentials are observable.
+// This module only reads kernel-verified Unix peer metadata; it grants nothing.
+#[cfg(target_os = "linux")]
+pub mod unix_peer;
+#[cfg(any(target_os = "linux", test))]
+mod peer_contract;
+
 #[cfg(windows)]
 pub mod windows_token;
 

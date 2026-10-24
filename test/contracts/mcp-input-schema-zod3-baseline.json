@@ -1,0 +1,374 @@
+{
+  "tunnel_probe": {
+    "properties": [
+      "challenge"
+    ],
+    "required": [
+      "challenge"
+    ],
+    "additionalProperties": false
+  },
+  "get_config": {
+    "properties": [
+      "origin"
+    ],
+    "required": [],
+    "additionalProperties": false
+  },
+  "render_config_editor": {
+    "properties": [
+      "origin"
+    ],
+    "required": [],
+    "additionalProperties": false
+  },
+  "set_config_value": {
+    "properties": [
+      "key",
+      "origin",
+      "value"
+    ],
+    "required": [
+      "key",
+      "value"
+    ],
+    "additionalProperties": false
+  },
+  "read_file": {
+    "properties": [
+      "isUrl",
+      "length",
+      "offset",
+      "options",
+      "origin",
+      "path",
+      "range",
+      "sheet"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "render_workspace": {
+    "properties": [
+      "depth",
+      "isUrl",
+      "length",
+      "offset",
+      "options",
+      "origin",
+      "path",
+      "range",
+      "sheet"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "preview_file": {
+    "properties": [
+      "isUrl",
+      "length",
+      "offset",
+      "options",
+      "origin",
+      "path",
+      "range",
+      "sheet"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "read_multiple_files": {
+    "properties": [
+      "paths"
+    ],
+    "required": [
+      "paths"
+    ],
+    "additionalProperties": false
+  },
+  "write_file": {
+    "properties": [
+      "content",
+      "mode",
+      "origin",
+      "path"
+    ],
+    "required": [
+      "content",
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "write_pdf": {
+    "properties": [
+      "content",
+      "options",
+      "outputPath",
+      "path"
+    ],
+    "required": [
+      "content",
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "create_directory": {
+    "properties": [
+      "path"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "list_directory": {
+    "properties": [
+      "depth",
+      "origin",
+      "path"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "render_directory": {
+    "properties": [
+      "depth",
+      "origin",
+      "path"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "move_file": {
+    "properties": [
+      "destination",
+      "source"
+    ],
+    "required": [
+      "destination",
+      "source"
+    ],
+    "additionalProperties": false
+  },
+  "start_search": {
+    "properties": [
+      "contextLines",
+      "earlyTermination",
+      "filePattern",
+      "ignoreCase",
+      "includeHidden",
+      "literalSearch",
+      "maxResults",
+      "origin",
+      "path",
+      "pattern",
+      "searchType",
+      "timeout_ms"
+    ],
+    "required": [
+      "path",
+      "pattern"
+    ],
+    "additionalProperties": false
+  },
+  "get_more_search_results": {
+    "properties": [
+      "length",
+      "offset",
+      "sessionId"
+    ],
+    "required": [
+      "sessionId"
+    ],
+    "additionalProperties": false
+  },
+  "stop_search": {
+    "properties": [
+      "sessionId"
+    ],
+    "required": [
+      "sessionId"
+    ],
+    "additionalProperties": false
+  },
+  "list_searches": {
+    "properties": [],
+    "required": [],
+    "additionalProperties": false
+  },
+  "get_file_info": {
+    "properties": [
+      "path"
+    ],
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "edit_block": {
+    "properties": [
+      "content",
+      "expected_replacements",
+      "file_path",
+      "new_string",
+      "old_string",
+      "options",
+      "origin",
+      "range"
+    ],
+    "required": [
+      "file_path"
+    ],
+    "additionalProperties": false
+  },
+  "opencode_read": {
+    "properties": [
+      "action",
+      "offset",
+      "project",
+      "sessionId"
+    ],
+    "required": [
+      "action"
+    ],
+    "additionalProperties": false
+  },
+  "opencode_task": {
+    "properties": [
+      "action",
+      "agent",
+      "project",
+      "prompt",
+      "sessionId",
+      "timeout_ms"
+    ],
+    "required": [
+      "action",
+      "project"
+    ],
+    "additionalProperties": false
+  },
+  "computer_inspect": {
+    "properties": [
+      "action",
+      "includeScreenshot",
+      "maxDepth",
+      "maxElements",
+      "screenshotMaxWidth"
+    ],
+    "required": [
+      "action"
+    ],
+    "additionalProperties": false
+  },
+  "start_process": {
+    "properties": [
+      "command",
+      "origin",
+      "shell",
+      "timeout_ms",
+      "verbose_timing"
+    ],
+    "required": [
+      "command",
+      "timeout_ms"
+    ],
+    "additionalProperties": false
+  },
+  "read_process_output": {
+    "properties": [
+      "length",
+      "offset",
+      "pid",
+      "timeout_ms",
+      "verbose_timing",
+      "wait_for"
+    ],
+    "required": [
+      "pid"
+    ],
+    "additionalProperties": false
+  },
+  "interact_with_process": {
+    "properties": [
+      "input",
+      "pid",
+      "timeout_ms",
+      "verbose_timing",
+      "wait_for_prompt"
+    ],
+    "required": [
+      "input",
+      "pid"
+    ],
+    "additionalProperties": false
+  },
+  "force_terminate": {
+    "properties": [
+      "pid"
+    ],
+    "required": [
+      "pid"
+    ],
+    "additionalProperties": false
+  },
+  "list_sessions": {
+    "properties": [],
+    "required": [],
+    "additionalProperties": false
+  },
+  "list_processes": {
+    "properties": [],
+    "required": [],
+    "additionalProperties": false
+  },
+  "kill_process": {
+    "properties": [
+      "pid"
+    ],
+    "required": [
+      "pid"
+    ],
+    "additionalProperties": false
+  },
+  "get_usage_stats": {
+    "properties": [],
+    "required": [],
+    "additionalProperties": false
+  },
+  "get_recent_tool_calls": {
+    "properties": [
+      "maxResults",
+      "since",
+      "toolName"
+    ],
+    "required": [],
+    "additionalProperties": false
+  },
+  "give_feedback_to_desktop_commander": {
+    "properties": [],
+    "required": [],
+    "additionalProperties": false
+  },
+  "get_prompts": {
+    "properties": [
+      "action",
+      "promptId"
+    ],
+    "required": [
+      "action",
+      "promptId"
+    ],
+    "additionalProperties": false
+  }
+}

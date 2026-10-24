@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { toMcpInputSchema } from '../dist/tools/mcp-json-schema.js';
 import {
   EditBlockArgsSchema,
   ReadFileArgsSchema,
@@ -36,7 +36,7 @@ const contracts = {
 
 const emptyNodes = [];
 for (const [name, schema] of Object.entries(contracts)) {
-  const jsonSchema = zodToJsonSchema(schema);
+  const jsonSchema = toMcpInputSchema(schema);
   for (const path of findEmptySchemaNodes(jsonSchema)) {
     emptyNodes.push(`${name}:${path}`);
   }

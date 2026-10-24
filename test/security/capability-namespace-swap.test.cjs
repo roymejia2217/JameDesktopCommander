@@ -311,3 +311,27 @@ test('native atomic rewrite preserves explicit target NTFS DACL protections',
         'atomic replacement must preserve explicit NTFS target DACL');
     });
   });
+
+test('native atomic rewrite preserves protected NTFS DACL inheritance flags',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function acl(args) {
+      const result = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+    }
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'protected-inheritance.txt');
+      const before = path.join(base, 'protected-acl-before.txt');
+      const after = path.join(base, 'protected-acl-after.txt');
+      fs.writeFileSync(target, 'BEFORE');
+      // Convert inherited ACEs to explicit and protect the resulting DACL.
+      acl([target, '/inheritance:d']);
+      acl([target, '/save', before]);
+      cap.writeText('protected-inheritance.txt', 'AFTER');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'replacement must preserve protected DACL inheritance configuration');
+    });
+  });

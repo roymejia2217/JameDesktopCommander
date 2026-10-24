@@ -3,6 +3,8 @@ use cap_std::fs::{Dir, OpenOptions};
 use cap_tempfile::TempFile;
 use std::path::Path;
 mod secure_root;
+#[cfg(windows)]
+mod windows_dacl;
 use napi::{bindgen_prelude::Buffer, Error, Result};
 #[cfg(feature = "receiver-test-fixture")]
 use napi::{bindgen_prelude::{Function, JsObjectValue, Object}, Env};
@@ -54,6 +56,10 @@ fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
     pending.write_all(bytes).map_err(denied)?;
     pending.flush().map_err(denied)?;
     pending.as_file().sync_all().map_err(denied)?;
+    #[cfg(windows)]
+    if let Some(existing) = _existing_writer.as_ref() {
+        windows_dacl::copy_existing_dacl(existing, pending.as_file())?;
+    }
     // A failed publication drops/cleans the owned tempfile rather than
     // deleting the original destination or attempting a path-based fallback.
     pending.replace(name).map_err(denied)

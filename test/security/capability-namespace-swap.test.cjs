@@ -195,3 +195,46 @@ test('closed handle fails for all added directory operations', () => {
     assert.throws(() => cap.removeEmptyDirectoryRelative('nope'), /closed/i);
   });
 });
+
+test('atomic rewrite by byte API replaces only in-root hardlink name without touching exterior object', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    const authorizedName = path.join(allowed, relative);
+    const replacement = Buffer.from([0x61, 0x62, 0x63]);
+    cap.writeBytes(relative, replacement, 'rewrite');
+    assert.deepEqual(fs.readFileSync(sentinel), original, 'outside object must retain original bytes');
+    assert.deepEqual(fs.readFileSync(authorizedName), replacement, 'in-root replacement must be visible');
+    assert.notEqual(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino,
+      'replacement must be a distinct file object from the exterior hardlink');
+  });
+});
+
+test('atomic text rewrite replaces only in-root hardlink name without touching exterior object', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    const authorizedName = path.join(allowed, relative);
+    cap.writeText(relative, 'ALLOWED-REPLACEMENT');
+    assert.deepEqual(fs.readFileSync(sentinel), original, 'outside object must retain original bytes');
+    assert.equal(fs.readFileSync(authorizedName, 'utf8'), 'ALLOWED-REPLACEMENT');
+    assert.notEqual(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino,
+      'replacement must break hardlink object identity');
+  });
+});
+
+test('atomic rewrite is repeatable and failed publication leaves no temporary file', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    cap.createDirectory('nested');
+    cap.writeText('nested/repeat.txt', 'first');
+    cap.writeText('nested/repeat.txt', 'second');
+    cap.writeBytes('nested/repeat.txt', Buffer.from([0x00, 0xfe]), 'rewrite');
+    assert.deepEqual(fs.readFileSync(path.join(allowed, 'nested', 'repeat.txt')),
+      Buffer.from([0x00, 0xfe]));
+    assert.deepEqual(fs.readdirSync(path.join(allowed, 'nested')), ['repeat.txt']);
+
+    cap.createDirectory('nested/target-directory');
+    assert.throws(() => cap.writeText('nested/target-directory', 'should fail'));
+    assert.deepEqual(fs.readdirSync(path.join(allowed, 'nested')).sort(),
+      ['repeat.txt', 'target-directory']);
+    assert.ok(fs.statSync(path.join(allowed, 'nested', 'target-directory')).isDirectory());
+  });
+});

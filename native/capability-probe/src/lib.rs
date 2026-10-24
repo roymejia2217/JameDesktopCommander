@@ -1,5 +1,7 @@
 //! Isolated T011-B feasibility spike. Never expose ambient constructor to MCP callers.
 use cap_std::fs::{Dir, OpenOptions};
+use cap_tempfile::TempFile;
+use std::path::Path;
 mod secure_root;
 use napi::{bindgen_prelude::Buffer, Error, Result};
 #[cfg(feature = "receiver-test-fixture")]
@@ -20,6 +22,27 @@ fn require_bounded_size(byte_len: usize) -> Result<()> {
         return Err(Error::from_reason("Capability byte limit exceeded"));
     }
     Ok(())
+}
+
+// Replacement publishes a distinct file object within the already opened
+// directory capability. This avoids truncating a potentially shared hardlink.
+// It does NOT establish custody for reads or append, and must remain nonrelease
+// until the stronger T011 object/principal policy is independently validated.
+fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
+    require_bounded_size(bytes.len())?;
+    let path = Path::new(relative);
+    let name = path.file_name()
+        .ok_or_else(|| Error::from_reason("Invalid relative capability file name"))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+    let target_parent = dir.open_dir(parent).map_err(denied)?;
+    let mut pending = TempFile::new(&target_parent).map_err(denied)?;
+    pending.write_all(bytes).map_err(denied)?;
+    pending.flush().map_err(denied)?;
+    pending.as_file().sync_all().map_err(denied)?;
+    // A failed publication drops/cleans the owned tempfile rather than
+    // deleting the original destination or attempting a path-based fallback.
+    pending.replace(name).map_err(denied)
 }
 
 fn read_bounded(file: impl Read) -> Result<Vec<u8>> {
@@ -154,12 +177,10 @@ impl RootCapability {
         require_bounded_size(content.len())?;
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        let mut file = dir.open_with(relative, &options).map_err(denied)?;
-        file.write_all(content.as_bytes()).map_err(denied)?;
-        file.flush().map_err(denied)?;
-        Ok(())
+        // Replacement must publish a fresh object, not truncate the inode
+        // potentially shared by a hard link outside the authorized namespace.
+        // cap-std-ext uses a capability-relative tempfile and atomic rename.
+        replace_bounded(dir, &relative, content.as_bytes())
     }
 
     #[napi]
@@ -194,12 +215,13 @@ impl RootCapability {
         }
         let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
-        let mut options = OpenOptions::new();
-        if mode == "append" {
-            options.append(true).create(true);
-        } else {
-            options.write(true).create(true).truncate(true);
+        if mode == "rewrite" {
+            // Object replacement is independent from any pre-existing hard
+            // link alias. Append still requires separate custody policy.
+            return replace_bounded(dir, &relative, content.as_ref());
         }
+        let mut options = OpenOptions::new();
+        options.append(true).create(true);
         let mut file = dir.open_with(relative, &options).map_err(denied)?;
         file.write_all(content.as_ref()).map_err(denied)?;
         file.flush().map_err(denied)?;

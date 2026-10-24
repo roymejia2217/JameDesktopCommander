@@ -14,6 +14,7 @@ receiver-test-fixture = []
 
 [dependencies]
 cap-std = "=4.0.3"
+cap-tempfile = "=4.0.3"
 napi = { version = "=3.14.2", default-features = false, features = ["napi8"] }
 napi-derive = "=3.6.12"
 

@@ -100,3 +100,19 @@ test('strict OpenCode task constraints and conditional requirements remain enfor
     action: 'run', project: 'jamefirewall', prompt: 'Inspect', timeout_ms: 1800001,
   }).success, false);
 });
+
+test('MCP schema normalization never changes literal default or example payloads', () => {
+  const literal = {
+    type: 'object',
+    properties: { nested: { type: 'object' } },
+    anyOf: [{ type: ['string', 'number'] }],
+  };
+  const schema = z.object({
+    payload: z.any().default(literal).meta({ examples: [literal] }),
+  });
+  const raw = z.toJSONSchema(schema, { io: 'input', target: 'draft-7' });
+  const converted = toMcpInputSchema(schema);
+  assert.deepEqual(converted.properties.payload.default, raw.properties.payload.default);
+  assert.deepEqual(converted.properties.payload.examples, raw.properties.payload.examples);
+  assert.equal(converted.additionalProperties, false);
+});

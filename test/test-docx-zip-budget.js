@@ -97,3 +97,33 @@ test('DOCX budget: pathname reader refuses oversized source and closes its handl
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function corruptBinaryDeflateMember(source, memberName) {
+  // ZIP local-file header, PK 03 04; compressed length at +18,
+  // filename length at +26, extra length at +28, payload starts at +30.
+  // Use an invalid DEFLATE block type (0b11) without changing ZIP metadata.
+  const bytes = Buffer.from(source);
+  const filename = Buffer.from(memberName, 'utf8');
+  const nameAt = bytes.indexOf(filename);
+  assert.ok(nameAt >= 30, 'fixture must contain target member name');
+  const header = nameAt - 30;
+  assert.equal(bytes.readUInt32LE(header), 0x04034b50, 'local ZIP header must be present');
+  assert.equal(bytes.readUInt16LE(header + 8), 8, 'fixture must use ZIP DEFLATE');
+  const compressedSize = bytes.readUInt32LE(header + 18);
+  const dataAt = header + 30 + bytes.readUInt16LE(header + 26) +
+    bytes.readUInt16LE(header + 28);
+  assert.ok(compressedSize > 16, 'fixture must contain a deflate stream');
+  bytes[dataAt] = 0x06; // DEFLATE BTYPE=3 (reserved/invalid).
+  return bytes;
+}
+
+test('DOCX budget: malformed embedded binary is rejected before PizZip processing', async () => {
+  const source = fixture({
+    'word/media/image1.bin': Buffer.from('VALID-EMBEDDED-BINARY-'.repeat(5000)),
+  });
+  const altered = corruptBinaryDeflateMember(source, 'word/media/image1.bin');
+  assert.notDeepEqual(altered, source);
+  await assert.rejects(() => readDocxBytes(altered),
+    /invalid|inflation|inflate|deflate|zip|data|error/i,
+    'a malformed non-XML ZIP entry must not pass an XML-only preflight');
+});

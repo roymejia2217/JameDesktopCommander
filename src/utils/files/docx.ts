@@ -73,7 +73,7 @@ interface DocxZipContents {
 }
 
 // Processing limits apply to untrusted DOCX bytes, not solely their ZIP size.
-// Reject before PizZip inflates XML; yauzl checks the actual inflation length.
+// Reject before PizZip processes any entry; yauzl verifies actual inflation.
 const MAX_DOCX_ARCHIVE_BYTES = 10 * 1024 * 1024;
 const MAX_DOCX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 const MAX_DOCX_XML_PART_BYTES = 8 * 1024 * 1024;
@@ -89,7 +89,8 @@ async function validateDocxZipBudget(buf: Buffer): Promise<void> {
         validateEntrySizes: true,
     });
     const names = new Set<string>();
-    let totalBytes = 0;
+    let declaredTotalBytes = 0;
+    let actualTotalBytes = 0;
     let entryCount = 0;
     try {
         for await (const entry of archive.eachEntry()) {
@@ -104,8 +105,9 @@ async function validateDocxZipBudget(buf: Buffer): Promise<void> {
             if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0) {
                 throw new Error('DOCX invalid uncompressed size');
             }
-            totalBytes += entry.uncompressedSize;
-            if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
+            declaredTotalBytes += entry.uncompressedSize;
+            if (!Number.isSafeInteger(declaredTotalBytes) ||
+                declaredTotalBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
                 throw new Error('DOCX aggregate uncompressed size limit exceeded');
             }
 
@@ -114,22 +116,32 @@ async function validateDocxZipBudget(buf: Buffer): Promise<void> {
                 throw new Error('DOCX XML part size limit exceeded');
             }
 
-            // Stream validation is required: an attacker may forge sizes in
-            // the central directory. Never trust only ZIP metadata.
-            if (isXml) {
-                const stream = await archive.openReadStreamPromise(entry);
-                let actualBytes = 0;
-                for await (const chunk of stream) {
-                    actualBytes += (chunk as Buffer).length;
-                    if (actualBytes > MAX_DOCX_XML_PART_BYTES ||
-                        actualBytes > entry.uncompressedSize) {
-                        stream.destroy();
-                        throw new Error('DOCX inflated XML size limit exceeded');
-                    }
+            // Directories must not carry payloads.
+            if (entry.fileName.endsWith('/')) {
+                if (entry.uncompressedSize !== 0 || entry.compressedSize !== 0) {
+                    throw new Error('DOCX ZIP directory payload rejected');
                 }
-                if (actualBytes !== entry.uncompressedSize) {
-                    throw new Error('DOCX ZIP entry size mismatch');
+                continue;
+            }
+
+            // Every entry, including images and embedded binary objects, must
+            // actually inflate under budget. Central-directory sizes alone
+            // cannot validate a forged stream or its resource consumption.
+            const stream = await archive.openReadStreamPromise(entry);
+            let actualBytes = 0;
+            for await (const chunk of stream) {
+                const chunkBytes = (chunk as Buffer).byteLength;
+                actualBytes += chunkBytes;
+                actualTotalBytes += chunkBytes;
+                if (actualBytes > entry.uncompressedSize ||
+                    actualTotalBytes > MAX_DOCX_UNCOMPRESSED_BYTES ||
+                    (isXml && actualBytes > MAX_DOCX_XML_PART_BYTES)) {
+                    stream.destroy();
+                    throw new Error('DOCX inflated entry size limit exceeded');
                 }
+            }
+            if (actualBytes !== entry.uncompressedSize) {
+                throw new Error('DOCX ZIP entry size mismatch');
             }
         }
         if (!names.has('word/document.xml')) {

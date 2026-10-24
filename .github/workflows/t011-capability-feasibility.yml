@@ -110,6 +110,10 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
 
+      - name: Test IPC example identity rejection on actual Linux kernel
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 test --locked --examples --manifest-path native/authority-service/Cargo.toml
+
       - name: Build test-only transactional store fixture on Linux
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml

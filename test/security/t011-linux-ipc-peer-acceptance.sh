@@ -58,7 +58,9 @@ sudo -n -u nobody -- rm -- "$attacker_dir/positive-control"
 run_case() {
   local label="$1" principal="$2" expected="$3" uid="$4" gid="$5" verdict="$6"
   local socket="$sandbox/case-$label.sock" ready='' result='' fd
-  coproc JDC_PEER { "$fixture" serve "$socket" "$expected"; }
+  # Test runner independently supplies the expected kernel UID/GID. The Rust
+  # server compares these internally and never emits raw identities into logs.
+  coproc JDC_PEER { "$fixture" serve "$socket" "$expected" "$uid" "$gid"; }
   active_server_pid="$JDC_PEER_PID"
   fd="${JDC_PEER[0]}"
   if ! IFS= read -r -t 8 ready <&"$fd" || [[ "$ready" != "READY" ]]; then
@@ -93,12 +95,10 @@ run_case() {
   printf 'K' >&"${JDC_PEER[1]}"
   wait "$active_server_pid"
   active_server_pid=''
-  if [[ ! "$result" =~ ^OBSERVED\ uid=([0-9]+)\ gid=([0-9]+)\ pid=([0-9]+)\ verdict=(MATCH|DENIED)$ ]]; then
+  if [[ ! "$result" =~ ^OBSERVED_VERIFIED\ verdict=(MATCH|DENIED)$ ]]; then
     printf '%s\n' 'E_PEER_UNEXPECTED_OBSERVATION' >&2; return 1
   fi
-  if [[ "${BASH_REMATCH[1]}" != "$uid" || "${BASH_REMATCH[2]}" != "$gid" ||
-        "${BASH_REMATCH[3]}" -le 0 || "${BASH_REMATCH[3]}" -eq "$$" ||
-        "${BASH_REMATCH[4]}" != "$verdict" ]]; then
+  if [[ "${BASH_REMATCH[1]}" != "$verdict" ]]; then
     printf '%s\n' 'E_PEER_IDENTITY_VERDICT_MISMATCH' >&2; return 1
   fi
   rm -f -- "$socket"

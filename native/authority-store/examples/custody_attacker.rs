@@ -17,6 +17,7 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
             .open(protected)?
             .write_all(b"unauthorized"),
         "overwrite" => fs::copy(auxiliary, protected).map(|_| ()),
+        "hardlink" => fs::hard_link(protected, auxiliary),
         "rename" => fs::rename(protected, protected.with_extension("renamed")),
         "unlink" => fs::remove_file(protected),
         "create" => fs::write(
@@ -31,6 +32,31 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
             io::ErrorKind::InvalidInput,
             "unknown operation",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attempt;
+    use std::fs;
+
+    #[test]
+    fn hardlink_probe_proves_positive_identity_and_denies_missing_source() {
+        let dir = tempfile::tempdir().expect("disposable private fixture");
+        let source = dir.path().join("own-source.bin");
+        let link = dir.path().join("own-hardlink.bin");
+        fs::write(&source, b"UNCHANGED").expect("create source");
+        attempt("hardlink", &source, &link).expect("own hardlink must work");
+        let source_meta = fs::metadata(&source).expect("source metadata");
+        let alias_meta = fs::metadata(&link).expect("alias metadata");
+        assert_eq!(source_meta.len(), alias_meta.len());
+        assert_eq!(fs::read(&link).expect("alias content"), b"UNCHANGED");
+        assert!(attempt(
+            "hardlink",
+            &dir.path().join("absent"),
+            &dir.path().join("new")
+        )
+        .is_err());
     }
 }
 

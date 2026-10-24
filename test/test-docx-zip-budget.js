@@ -127,3 +127,62 @@ test('DOCX budget: malformed embedded binary is rejected before PizZip processin
     /invalid|inflation|inflate|deflate|zip|data|error/i,
     'a malformed non-XML ZIP entry must not pass an XML-only preflight');
 });
+
+test('DOCX budget: getInfo never loads an oversized archive with unbounded readFile', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'jdc-docx-info-budget-'));
+  const path = join(root, 'oversize.docx');
+  const size = 10 * 1024 * 1024 + 1;
+  const fsPromises = (await import('node:fs/promises')).default;
+  const original = fsPromises.readFile;
+  let unboundedReads = 0;
+  try {
+    await writeFile(path, Buffer.alloc(size, 0x61));
+    t.mock.method(fsPromises, 'readFile', async (...args) => {
+      unboundedReads++;
+      return original(...args);
+    });
+    const info = await new DocxFileHandler().getInfo(path);
+    assert.equal(info.size, size);
+    assert.equal(info.fileType, 'docx');
+    assert.deepEqual(info.metadata, { isDocx: true });
+    assert.equal(unboundedReads, 0, 'metadata inspection must not read unbounded file bytes');
+  } finally {
+    t.mock.restoreAll();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('DOCX budget: getInfo rejects an overinflated entry without exposing document metadata', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'jdc-docx-info-budget-'));
+  const path = join(root, 'overinflated.docx');
+  const source = fixture({ 'word/header1.xml': '<w:hdr>' + 'A'.repeat(9 * 1024 * 1024) + '</w:hdr>' });
+  try {
+    await writeFile(path, source);
+    const info = await new DocxFileHandler().getInfo(path);
+    assert.equal(info.size, source.length);
+    assert.deepEqual(info.metadata, { isDocx: true },
+      'invalid inflated DOCX must not be parsed for detailed metadata');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('DOCX budget: getInfo retains detailed metadata for an ordinary validated archive', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'jdc-docx-info-budget-'));
+  const path = join(root, 'valid.docx');
+  const source = fixture();
+  try {
+    await writeFile(path, source);
+    const info = await new DocxFileHandler().getInfo(path);
+    assert.equal(info.size, source.length);
+    assert.deepEqual(info.metadata, {
+      isDocx: true,
+      paragraphCount: 1,
+      tableCount: 0,
+      imageCount: 0,
+      wordCount: 2,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

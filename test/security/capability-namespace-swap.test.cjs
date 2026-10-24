@@ -238,3 +238,51 @@ test('atomic rewrite is repeatable and failed publication leaves no temporary fi
     assert.ok(fs.statSync(path.join(allowed, 'nested', 'target-directory')).isDirectory());
   });
 });
+
+test('native atomic rewrite must not bypass a protected read-only existing target', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    const existing = path.join(allowed, 'read-only-target.bin');
+    const original = Buffer.from('PRESERVE-PROTECTED-BYTES');
+    fs.writeFileSync(existing, original);
+    fs.chmodSync(existing, 0o444);
+    try {
+      assert.throws(() => cap.writeBytes('read-only-target.bin',
+        Buffer.from('FORBIDDEN-REPLACE'), 'rewrite'),
+      'A protected existing target must not be silently replaced');
+      assert.deepEqual(fs.readFileSync(existing), original);
+    } finally {
+      fs.chmodSync(existing, 0o666);
+    }
+  });
+});
+
+test('native atomic rewrite must respect explicit Windows NTFS write-data denial',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function command(executable, args) {
+      const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 8000,
+        windowsHide: true });
+      assert.equal(result.error, undefined,
+        'Windows ACL command failed to start: ' + executable);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+      return result.stdout.trim();
+    }
+    const sid = command('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value']);
+    assert.match(sid, /^S-1-5-\d+(?:-\d+)+$/, 'Fixture requires current Windows SID');
+    withIsolatedRoot(({ cap, allowed }) => {
+      const target = path.join(allowed, 'deny-write-data.txt');
+      fs.writeFileSync(target, Buffer.from('RETAIN-NTFS-PROTECTED-CONTENT'));
+      try {
+        command('icacls.exe', [target, '/deny', '*' + sid + ':(WD)']);
+        assert.throws(() => fs.openSync(target, 'r+'), /EACCES|EPERM/,
+          'Fixture must independently prove write-data denial at the OS boundary');
+        assert.throws(() => cap.writeText('deny-write-data.txt', 'NOT-AUTHORIZED'),
+          'Capability rewrite must not bypass an explicit target write-data denial');
+        assert.equal(fs.readFileSync(target, 'utf8'), 'RETAIN-NTFS-PROTECTED-CONTENT');
+      } finally {
+        // Only remove an ACL added to our disposable fixture, never a user file.
+        command('icacls.exe', [target, '/remove:d', '*' + sid]);
+      }
+    });
+  });

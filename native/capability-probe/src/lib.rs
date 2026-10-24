@@ -36,6 +36,20 @@ fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
     let target_parent = dir.open_dir(parent).map_err(denied)?;
+
+    // Publishing a new inode must not silently bypass an existing target's
+    // OS WRITE_DATA denial by relying only on DELETE/DELETE_CHILD rights.
+    // Require the kernel to authorize a nontruncating write handle first.
+    // This is permission parity, NOT an object-origin or TOCTOU proof:
+    // concurrent final-component replacement remains a P0 blocker.
+    let mut permission_options = OpenOptions::new();
+    permission_options.write(true);
+    let _existing_writer = match target_parent.open_with(name, &permission_options) {
+        Ok(handle) => Some(handle),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(denied(error)),
+    };
+
     let mut pending = TempFile::new(&target_parent).map_err(denied)?;
     pending.write_all(bytes).map_err(denied)?;
     pending.flush().map_err(denied)?;

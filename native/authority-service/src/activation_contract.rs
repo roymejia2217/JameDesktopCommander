@@ -86,3 +86,55 @@ mod activation_set_tests {
         }
     }
 }
+
+/** Pure Linux socket-path syntax policy; NOT proof of endpoint provenance. */
+pub(crate) fn validate_absolute_socket_path(bytes: &[u8]) -> Result<(), IdentityDenied> {
+    if bytes.len() < 2
+        || bytes.first() != Some(&b'/')
+        || bytes.last() == Some(&b'/')
+        || bytes.contains(&0)
+        || bytes[1..]
+            .split(|&byte| byte == b'/')
+            .any(|component| component.is_empty() || component == b"." || component == b"..")
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod canonical_socket_path_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_unambiguous_absolute_linux_socket_paths() {
+        for valid in [
+            b"/run/jdc-authority-ipc/authority.sock".as_slice(),
+            b"/tmp/sock".as_slice(),
+            b"/r".as_slice(),
+        ] {
+            assert_eq!(
+                validate_absolute_socket_path(valid),
+                Ok(()),
+                "canonical Linux path must be observable",
+            );
+        }
+        for invalid in [
+            b"".as_slice(),
+            b"/".as_slice(),
+            b"relative/sock".as_slice(),
+            b"//run/sock".as_slice(),
+            b"/run//sock".as_slice(),
+            b"/run/./sock".as_slice(),
+            b"/run/../sock".as_slice(),
+            b"/run/sock/".as_slice(),
+            b"/run/sock\0spoof".as_slice(),
+        ] {
+            assert_eq!(
+                validate_absolute_socket_path(invalid),
+                Err(IdentityDenied),
+                "ambiguous Linux path must be rejected",
+            );
+        }
+    }
+}

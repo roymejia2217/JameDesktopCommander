@@ -1,7 +1,9 @@
 //! Non-authorizing Linux kernel descriptor inspection for a future systemd
 //! socket-activated broker. Environment variables and paths alone are NOT
 //! proof that a descriptor came from systemd or remains under OS custody.
-use crate::activation_contract::{validate_activation_descriptor_set, validate_listener_shape};
+use crate::activation_contract::{
+    validate_absolute_socket_path, validate_activation_descriptor_set, validate_listener_shape,
+};
 use crate::IdentityDenied;
 use std::mem::{offset_of, size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -17,11 +19,8 @@ pub fn inspect_named_listener(
 ) -> Result<(), IdentityDenied> {
     let expected = expected_path.as_os_str().as_bytes();
     // An exact absolute named socket, not an abstract or relative namespace.
-    if !expected.starts_with(b"/")
-        || expected.contains(&0)
-        || expected.len()
-            >= size_of::<libc::sockaddr_un>() - offset_of!(libc::sockaddr_un, sun_path)
-    {
+    validate_absolute_socket_path(expected)?;
+    if expected.len() >= size_of::<libc::sockaddr_un>() - offset_of!(libc::sockaddr_un, sun_path) {
         return Err(IdentityDenied);
     }
 

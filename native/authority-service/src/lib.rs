@@ -16,6 +16,9 @@ pub mod canonical_request;
 mod peer_contract;
 #[cfg(target_os = "linux")]
 pub mod unix_peer;
+// Linux only: bounded data-only observation. Never a service authority grant.
+#[cfg(target_os = "linux")]
+pub mod unix_session;
 
 #[cfg(windows)]
 pub mod windows_token;

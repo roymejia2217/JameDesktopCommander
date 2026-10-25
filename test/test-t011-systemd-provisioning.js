@@ -16,6 +16,7 @@ test('Linux authority uses standard systemd account and deny-only service config
   const service = fs.readFileSync(path.join(repo, unit), 'utf8');
   for (const entry of [
     'Type=exec', 'User=jdc-authority', 'Group=jdc-authority',
+    'ConditionFileIsExecutable=/usr/libexec/jdc/jdc-authority-service',
     'ExecStart=/usr/libexec/jdc/jdc-authority-service',
     'StateDirectory=jdc-authority', 'StateDirectoryMode=0700',
     'RuntimeDirectory=jdc-authority', 'RuntimeDirectoryMode=0700',
@@ -25,6 +26,7 @@ test('Linux authority uses standard systemd account and deny-only service config
     'StandardOutput=journal', 'StandardError=journal',
     'Restart=no',
   ]) assert.ok(service.split(/\r?\n/).includes(entry), `Missing explicit hardening directive: ${entry}`);
+  assert.doesNotMatch(service, /^ConditionPathIsExecutable=/m, 'unsupported systemd condition must never be reintroduced');
   assert.doesNotMatch(service, /^\[Install\]$/m, 'experimental service must not be enabled on boot');
   assert.doesNotMatch(service, /^\s*(?:ExecStartPre|ExecStartPost|ExecStopPost|ReadWritePaths)=/m);
 });

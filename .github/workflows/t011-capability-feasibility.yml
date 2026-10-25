@@ -142,6 +142,14 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-systemd-lifecycle-acceptance.sh
 
+      - name: Lint managed Linux socket custody acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-systemd-socket-custody-acceptance.sh && bash -n test/security/t011-systemd-socket-custody-acceptance.sh
+
+      - name: Prove root-managed systemd AF_UNIX socket access and removal
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-systemd-socket-custody-acceptance.sh
+
       - name: Parse Windows SCM deny-only acceptance script
         if: matrix.target == 'win32-x64'
         shell: pwsh
@@ -179,6 +187,9 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22.19.0
+
+      - name: Enforce experimental systemd socket declaration on Node 22
+        run: node --test test/security/t011-systemd-socket-contract.test.mjs
 
       - name: Build test-only native C4d parity probe
         run: cargo +1.91.1 build --locked --example c4d_probe --manifest-path native/authority-service/Cargo.toml

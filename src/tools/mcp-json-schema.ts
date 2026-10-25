@@ -33,7 +33,37 @@ function preserveMcpObjectContract(node: unknown): void {
       object.additionalProperties = true;
     }
   }
-  Object.values(object).forEach(preserveMcpObjectContract);
+  // Traverse only JSON Schema locations that contain child schemas.
+  // Metadata such as default, examples, enum and const are literal JSON data:
+  // their "type", "items" or "properties" keys MUST NOT be normalized.
+  for (const key of ['properties', 'patternProperties', 'definitions', '$defs']) {
+    const mapping = object[key];
+    if (mapping && typeof mapping === 'object' && !Array.isArray(mapping)) {
+      Object.values(mapping).forEach(preserveMcpObjectContract);
+    }
+  }
+  for (const key of [
+    'additionalProperties', 'additionalItems', 'items', 'contains',
+    'propertyNames', 'not', 'if', 'then', 'else', 'unevaluatedProperties',
+    'unevaluatedItems',
+  ]) {
+    const child = object[key];
+    if (Array.isArray(child)) child.forEach(preserveMcpObjectContract);
+    else preserveMcpObjectContract(child);
+  }
+  for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) {
+    const children = object[key];
+    if (Array.isArray(children)) children.forEach(preserveMcpObjectContract);
+  }
+  for (const key of ['dependencies', 'dependentSchemas']) {
+    const mapping = object[key];
+    if (mapping && typeof mapping === 'object' && !Array.isArray(mapping)) {
+      // Draft-07 dependencies may also be string arrays, not schemas.
+      Object.values(mapping).forEach(value => {
+        if (!Array.isArray(value)) preserveMcpObjectContract(value);
+      });
+    }
+  }
 }
 
 /** JSON Schema draft-07 input contract advertised by the current MCP v1 server. */

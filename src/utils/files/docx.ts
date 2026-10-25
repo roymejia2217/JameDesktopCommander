@@ -865,7 +865,8 @@ export class DocxFileHandler implements FileHandler {
 
         let metadata: any = { isDocx: true };
         try {
-            const buf = await fs.readFile(path);
+            const buf = await readBoundedDocxFile(path);
+            await validateDocxZipBudget(buf);
             const { documentXml } = loadDocxZip(buf);
             const text = extractAllText(documentXml);
             const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;

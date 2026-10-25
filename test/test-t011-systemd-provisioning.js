@@ -46,3 +46,21 @@ test('official systemd validators run within the existing Linux native CI gate',
     'systemd-analyze verify "$unit_file"',
   ]) assert.ok(workflow.includes(marker), `Missing official CI validation: ${marker}`);
 });
+
+
+test('real admitted MCP socket client must demonstrate systemd activation still denies C4d', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /SEPARATE_MCP_CLIENT_CONNECT_POSITIVE_NOT_AUTHORIZATION/,
+    'retain positive independently provisioned client principal');
+  assert.match(acceptance, /client\.sendall\(frame\)/,
+    'admitted client must transmit a complete canonical C4d frame');
+  assert.match(acceptance, /_SYSTEMD_INVOCATION_ID/,
+    'journal evidence must be scoped to the actual activated service invocation');
+  assert.match(acceptance, /E_POLICY_UNAVAILABLE/,
+    'an admitted C4d client must not produce an authorized broker action');
+  assert.match(acceptance, /ExecMainStatus/,
+    'the kernel-activated service must exit with the expected failure');
+  assert.match(acceptance, /NRestarts/,
+    'failing startup must not cause an automatic privileged restart');
+});

@@ -135,13 +135,25 @@ if [[ ! -d "$state_dir" ]] ||
   exit 1
 fi
 
+# Record the previous service invocation. The next accepted client connection
+# must provoke a NEW systemd activation; an old deny log is insufficient proof.
+before_invocation="$(sudo -n systemctl show -P InvocationID "$service_name")"
+
 sudo -n -u jdc-mcp-client python3 -c '
 import socket
+import struct
 import sys
+
+# Canonical C4d request bytes; admitted transport alone never authorizes mkdir.
+payload = b"""{"version":1,"kind":"create-directory","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"must-not-create"}"""
+frame = struct.pack("!I", len(payload)) + payload
+
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.settimeout(2)
 try:
     client.connect(sys.argv[1])
+    client.sendall(frame)
+    client.shutdown(socket.SHUT_WR)
     print("SEPARATE_MCP_CLIENT_CONNECT_POSITIVE_NOT_AUTHORIZATION")
 finally:
     client.close()
@@ -177,6 +189,34 @@ sudo -n systemctl stop "$socket_name"
 if [[ "$(sudo -n systemctl show -P ActiveState "$socket_name")" != 'inactive' ||
       -e "$socket_path" || -L "$socket_path" ]]; then
   printf '%s\n' 'E_SOCKET_STOP_DID_NOT_REMOVE_ENDPOINT' >&2
+  exit 1
+fi
+
+# The separate MCP principal transmitted one canonical C4d operation. Prove
+# systemd actually invoked the service and that its policy gate denied it.
+# Compare invocation IDs to reject a false PASS from earlier lifecycle logs.
+after_invocation="$(sudo -n systemctl show -P InvocationID "$service_name")"
+if [[ ! "$after_invocation" =~ ^[[:xdigit:]]{32}$ ||
+      "$after_invocation" == "$before_invocation" ||
+      "$(sudo -n systemctl show -P Result "$service_name")" != 'exit-code' ||
+      "$(sudo -n systemctl show -P ExecMainStatus "$service_name")" != '1' ||
+      "$(sudo -n systemctl show -P User "$service_name")" != 'jdc-authority' ||
+      "$(sudo -n systemctl show -P Group "$service_name")" != 'jdc-authority' ||
+      "$(sudo -n systemctl show -P Restart "$service_name")" != 'no' ||
+      "$(sudo -n systemctl show -P NRestarts "$service_name")" != '0' ]]; then
+  printf '%s\n' 'E_SOCKET_ACTIVATED_SERVICE_MUST_DENY' >&2
+  exit 1
+fi
+sudo -n journalctl --sync
+invocation_journal="$(sudo -n journalctl -b -u "$service_name" \
+  "_SYSTEMD_INVOCATION_ID=$after_invocation" --no-pager --output=cat)"
+if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"$invocation_journal" ||
+   grep -Fq 'E_IDENTITY_REQUIRED' <<<"$invocation_journal"; then
+  printf '%s\n' 'E_SOCKET_ACTIVATED_SERVICE_IDENTITY_OR_POLICY_FAILURE' >&2
+  exit 1
+fi
+if [[ -e "$state_dir/must-not-create" || -L "$state_dir/must-not-create" ]]; then
+  printf '%s\n' 'E_SOCKET_UNAUTHORIZED_C4D_FILESYSTEM_EFFECT' >&2
   exit 1
 fi
 printf '%s\n' 'T011_SYSTEMD_SOCKET_DAC_AND_CUSTODY_PASS_NONRELEASE'

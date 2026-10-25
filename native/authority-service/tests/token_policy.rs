@@ -60,6 +60,45 @@ fn privilege_inventory_is_not_preapproved_without_real_scm_baseline() {
 }
 
 #[test]
+fn security_sensitive_privilege_names_are_case_insensitive_without_prefix_matching() {
+    use jdc_authority_service::token_policy::scm_terminal_denial_code;
+
+    for name in [
+        "SeDebugPrivilege",
+        "sedebugprivilege",
+        "SEDEBUGPRIVILEGE",
+        "sEtCbPrIvIlEgE",
+        "secreatetokenprivilege",
+        "SELOADDRIVERPRIVILEGE",
+    ] {
+        let finding = classify_token(&minimal(&[name]));
+        assert_eq!(
+            finding,
+            TokenFinding::BoundaryViolation,
+            "sensitive privilege {name} must be a policy boundary violation",
+        );
+        assert_eq!(
+            scm_terminal_denial_code(Some(finding)),
+            4,
+            "critical privilege evidence must produce boundary-violation SCM code",
+        );
+    }
+    for name in [
+        "SeDebugPrivilegeExtra",
+        "NotSeDebugPrivilege",
+        "SeDebugPrivilege ",
+        "SeDebugPrivilegeé",
+        "SeChangeNotifyPrivilege",
+    ] {
+        assert_eq!(
+            classify_token(&minimal(&[name])),
+            TokenFinding::PrivilegeBaselineUnreviewed,
+            "no substring, whitespace, or Unicode normalization may authorize or reclassify",
+        );
+    }
+}
+
+#[test]
 fn native_integrity_sid_requires_exact_single_rid_structure() {
     use jdc_authority_service::token_policy::integrity_sid_rid;
     // Windows mandatory-integrity authority S-1-16, one subauthority.

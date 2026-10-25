@@ -66,14 +66,19 @@ pub fn classify_token(snapshot: &TokenEvidence<'_>) -> TokenFinding {
     if !matches!(snapshot.integrity_rid, Some(rid) if rid != 0) {
         return TokenFinding::Unverifiable;
     }
+    // Conservatively reject ASCII case variants of critical privilege names
+    // instead of downgrading their classification to a generic observation.
+    // Match complete identifiers only, never substrings or normalized text.
+    const CRITICAL_PRIVILEGES: [&str; 4] = [
+        "SeDebugPrivilege",
+        "SeTcbPrivilege",
+        "SeCreateTokenPrivilege",
+        "SeLoadDriverPrivilege",
+    ];
     if snapshot.enabled_privileges.iter().any(|name| {
-        matches!(
-            *name,
-            "SeDebugPrivilege"
-                | "SeTcbPrivilege"
-                | "SeCreateTokenPrivilege"
-                | "SeLoadDriverPrivilege"
-        )
+        CRITICAL_PRIVILEGES
+            .iter()
+            .any(|critical| name.eq_ignore_ascii_case(critical))
     }) {
         return TokenFinding::BoundaryViolation;
     }

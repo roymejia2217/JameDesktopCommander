@@ -7,6 +7,9 @@ pub mod token_policy;
 // C4d native transport framing only, not an authenticated listener or authority.
 pub mod frame_reader;
 
+// C4d request data validator only; no trusted IPC client or operation grant.
+pub mod canonical_request;
+
 // Never enable an IPC listener solely because peer credentials are observable.
 // This module only reads kernel-verified Unix peer metadata; it grants nothing.
 #[cfg(any(target_os = "linux", test))]

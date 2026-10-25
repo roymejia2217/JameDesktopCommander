@@ -180,6 +180,18 @@ jobs:
         with:
           node-version: 22.19.0
 
+      - name: Build test-only native C4d parity probe
+        run: cargo +1.91.1 build --locked --example c4d_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Install locked Node dependencies for C4d parity
+        run: npm ci --fund=false
+
+      - name: Compile the original TypeScript C4d validator
+        run: npm run build
+
+      - name: Compare exact C4d request admission between Node 22 and native Rust
+        run: node --test test/security/c4d-native-parity.test.mjs
+
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 22
         run: node --test test/security/capability-lock-consistency.test.cjs
 
@@ -200,6 +212,9 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
+
+      - name: Compare exact C4d request admission between Node 24 and native Rust
+        run: node --test test/security/c4d-native-parity.test.mjs
 
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 24
         run: node --test test/security/capability-lock-consistency.test.cjs

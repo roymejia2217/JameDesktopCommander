@@ -57,10 +57,17 @@ sudo -n -u nobody -- rm -- "$attacker_dir/positive-control"
 
 run_case() {
   local label="$1" principal="$2" expected="$3" uid="$4" gid="$5" verdict="$6"
+  local protocol="${7:-peer}" server_mode='serve' client_mode='client'
+  case "$protocol" in
+    peer) ;;
+    c4d) server_mode='serve-c4d'; client_mode='client-c4d' ;;
+    c4d-invalid) server_mode='serve-c4d'; client_mode='client-c4d-invalid' ;;
+    *) printf '%s\n' 'E_PEER_UNKNOWN_FIXTURE_PROTOCOL' >&2; return 1 ;;
+  esac
   local socket="$sandbox/case-$label.sock" ready='' result='' fd
   # Test runner independently supplies the expected kernel UID/GID. The Rust
   # server compares these internally and never emits raw identities into logs.
-  coproc JDC_PEER { "$fixture" serve "$socket" "$expected" "$uid" "$gid"; }
+  coproc JDC_PEER { "$fixture" "$server_mode" "$socket" "$expected" "$uid" "$gid"; }
   active_server_pid="$JDC_PEER_PID"
   fd="${JDC_PEER[0]}"
   if ! IFS= read -r -t 8 ready <&"$fd" || [[ "$ready" != "READY" ]]; then
@@ -84,9 +91,9 @@ run_case() {
     printf '%s\n' 'E_PEER_SOCKET_OBJECT_CHANGED' >&2; return 1
   fi
   if [[ "$principal" == "runner" ]]; then
-    "$fixture" client "$socket" 'claim:root:allow=true'
+    "$fixture" "$client_mode" "$socket" 'claim:root:allow=true'
   else
-    sudo -n -u nobody -- "$fixture" client "$socket" "claim:$approved:allow=true"
+    sudo -n -u nobody -- "$fixture" "$client_mode" "$socket" "claim:$approved:allow=true"
   fi
   if ! IFS= read -r -t 8 result <&"$fd"; then
     printf '%s\n' 'E_PEER_SERVER_NO_VERDICT' >&2
@@ -95,10 +102,18 @@ run_case() {
   printf 'K' >&"${JDC_PEER[1]}"
   wait "$active_server_pid"
   active_server_pid=''
-  if [[ ! "$result" =~ ^OBSERVED_VERIFIED\ verdict=(MATCH|DENIED)$ ]]; then
-    printf '%s\n' 'E_PEER_UNEXPECTED_OBSERVATION' >&2; return 1
+  local observed=''
+  if [[ "$protocol" == peer ]]; then
+    if [[ ! "$result" =~ ^OBSERVED_VERIFIED\ verdict=(MATCH|DENIED)$ ]]; then
+      printf '%s\n' 'E_PEER_UNEXPECTED_OBSERVATION' >&2; return 1
+    fi
+  else
+    if [[ ! "$result" =~ ^OBSERVED_C4D\ verdict=(ACCEPT|DENIED)$ ]]; then
+      printf '%s\n' 'E_C4D_UNEXPECTED_OBSERVATION' >&2; return 1
+    fi
   fi
-  if [[ "${BASH_REMATCH[1]}" != "$verdict" ]]; then
+  observed="${BASH_REMATCH[1]}"
+  if [[ "$observed" != "$verdict" ]]; then
     printf '%s\n' 'E_PEER_IDENTITY_VERDICT_MISMATCH' >&2; return 1
   fi
   rm -f -- "$socket"
@@ -108,4 +123,12 @@ run_case approved runner "$approved" "$approved_uid" "$approved_gid" MATCH
 run_case foreign nobody "$approved" "$other_uid" "$other_gid" DENIED
 run_case foreign-positive nobody nobody "$other_uid" "$other_gid" MATCH
 run_case runner-foreign runner nobody "$approved_uid" "$approved_gid" DENIED
-printf '%s\n' 'T011_CONNECTED_PEER_CROSS_PRINCIPAL_PASS'
+
+# Run the identical true kernel-principal matrix with one canonical C4d frame.
+# No claimed client name is used to choose the expected UID/GID.
+run_case c4d-approved runner "$approved" "$approved_uid" "$approved_gid" ACCEPT c4d
+run_case c4d-foreign foreign "$approved" "$approved_uid" "$approved_gid" DENIED c4d
+run_case c4d-foreign-positive foreign nobody "$other_uid" "$other_gid" ACCEPT c4d
+run_case c4d-runner-foreign runner nobody "$other_uid" "$other_gid" DENIED c4d
+run_case c4d-malformed runner "$approved" "$approved_uid" "$approved_gid" DENIED c4d-invalid
+printf '%s\n' 'T011_CONNECTED_PEER_AND_C4D_CROSS_PRINCIPAL_PASS'

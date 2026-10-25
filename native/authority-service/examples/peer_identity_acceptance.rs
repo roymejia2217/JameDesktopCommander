@@ -3,12 +3,14 @@
 //! Never interpret client bytes as authorization or a filesystem root.
 #[cfg(target_os = "linux")]
 mod linux {
+    use jdc_authority_service::unix_accept::inspect_one_named_session;
     use jdc_authority_service::unix_peer::{
         inspect_peer_against_os_account, observe_connected_peer, KernelPeer,
     };
     use std::error::Error;
     use std::ffi::CString;
     use std::io::{self, Read, Write};
+    use std::net::Shutdown;
     use std::os::fd::AsFd;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::time::Duration;
@@ -113,6 +115,52 @@ mod linux {
                 let mut stream = UnixStream::connect(&endpoint)?;
                 // This is deliberately forged input. The server never parses it.
                 stream.write_all(account_or_claim.as_bytes())?;
+                println!("CONNECTED");
+            }
+            "serve-c4d" => {
+                let expected_uid: u32 = expected_uid_arg.ok_or("missing expected UID")?.parse()?;
+                let expected_gid: u32 = expected_gid_arg.ok_or("missing expected GID")?.parse()?;
+                // The account_or_claim field is deliberately ignored: the
+                // accepted principal comes only from this trusted invocation.
+                let listener = UnixListener::bind(&endpoint)?;
+                listener.set_nonblocking(true)?;
+                println!("READY");
+                io::stdout().flush()?;
+                let verdict = if inspect_one_named_session(
+                    &listener,
+                    expected_uid,
+                    expected_gid,
+                    Duration::from_secs(4),
+                )
+                .is_ok()
+                {
+                    "ACCEPT"
+                } else {
+                    "DENIED"
+                };
+                println!("OBSERVED_C4D verdict={verdict}");
+                io::stdout().flush()?;
+                let mut ack = [0u8; 1];
+                io::stdin().read_exact(&mut ack)?;
+                if ack != *b"K" {
+                    return Err("invalid C4d test acknowledgement".into());
+                }
+            }
+            "client-c4d" | "client-c4d-invalid" => {
+                if expected_uid_arg.is_some() || expected_gid_arg.is_some() {
+                    return Err("unexpected C4d client argument".into());
+                }
+                // The caller-supplied 'claim:*' is not used as identity,
+                // authorization, or part of the canonical request.
+                let payload = br#"{"version":1,"kind":"create-directory","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"safe"}"#;
+                let mut stream = UnixStream::connect(&endpoint)?;
+                if operation == "client-c4d-invalid" {
+                    stream.write_all(b"\x00\x00\x00\x02[]")?;
+                } else {
+                    stream.write_all(&(payload.len() as u32).to_be_bytes())?;
+                    stream.write_all(payload)?;
+                }
+                stream.shutdown(Shutdown::Write)?;
                 println!("CONNECTED");
             }
             _ => return Err("invalid operation".into()),

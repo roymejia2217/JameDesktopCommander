@@ -21,6 +21,7 @@ test('experimental socket manager owns a non-public AF_UNIX pathname', () => {
   }
   const expected = {
     ListenStream: '/run/jdc-authority-ipc/authority.sock',
+    FileDescriptorName: 'jdc-authority-ipc',
     SocketUser: 'jdc-authority',
     SocketGroup: 'jdc-mcp-client',
     SocketMode: '0660',

@@ -1,7 +1,7 @@
 //! Non-authorizing Linux kernel descriptor inspection for a future systemd
 //! socket-activated broker. Environment variables and paths alone are NOT
 //! proof that a descriptor came from systemd or remains under OS custody.
-use crate::activation_contract::validate_listener_shape;
+use crate::activation_contract::{validate_activation_descriptor_set, validate_listener_shape};
 use crate::IdentityDenied;
 use std::mem::{offset_of, size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -120,4 +120,22 @@ mod tests {
             Err(IdentityDenied)
         );
     }
+}
+
+/// Examine systemd-compatible startup descriptors using the established
+/// `sd-notify` crate, then verify their kernel shape. This is an observation
+/// only: LISTEN_PID/FDS/FDNAMES can be forged by the launching process and
+/// cannot authenticate systemd or authorize filesystem operations.
+/// Call once during single-threaded service bootstrap, before other threads
+/// could close or repurpose inherited file descriptors.
+pub fn inspect_inherited_systemd_listener(expected_path: &Path) -> Result<(), IdentityDenied> {
+    let mut received = sd_notify::listen_fds_with_names().map_err(|_| IdentityDenied)?;
+    let count = received.len();
+    let (number, name) = received.next().ok_or(IdentityDenied)?;
+    validate_activation_descriptor_set(count, number, &name)?;
+    // SAFETY: the standard systemd activation parser checks descriptor 3 and
+    // sets close-on-exec; this single-threaded observer borrows it only for
+    // kernel socket inspection and never closes it or transfers ownership.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(number) };
+    inspect_named_listener(borrowed, expected_path)
 }

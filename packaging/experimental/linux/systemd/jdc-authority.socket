@@ -10,6 +10,7 @@ After=local-fs.target
 
 [Socket]
 ListenStream=/run/jdc-authority-ipc/authority.sock
+FileDescriptorName=jdc-authority-ipc
 SocketUser=jdc-authority
 SocketGroup=jdc-mcp-client
 SocketMode=0660

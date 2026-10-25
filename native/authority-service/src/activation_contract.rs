@@ -42,3 +42,47 @@ mod tests {
         }
     }
 }
+
+pub(crate) const EXPECTED_FD_NAME: &str = "jdc-authority-ipc";
+
+/// Pure admission-shape check. Name/count values may originate from
+/// untrusted process environment; they are NEVER a provenance or grant.
+pub(crate) fn validate_activation_descriptor_set(
+    count: usize,
+    fd: i32,
+    name: &str,
+) -> Result<(), IdentityDenied> {
+    if count != 1 || fd != 3 || name != EXPECTED_FD_NAME {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod activation_set_tests {
+    use super::*;
+
+    #[test]
+    fn exactly_one_named_fd3_is_the_only_structurally_valid_set() {
+        assert_eq!(
+            validate_activation_descriptor_set(1, 3, EXPECTED_FD_NAME),
+            Ok(())
+        );
+        for (count, fd, name) in [
+            (0, 3, EXPECTED_FD_NAME),
+            (2, 3, EXPECTED_FD_NAME),
+            (1, 4, EXPECTED_FD_NAME),
+            (1, 0, EXPECTED_FD_NAME),
+            (1, 3, "connection"),
+            (1, 3, "stored"),
+            (1, 3, ""),
+            (1, 3, "jdc-authority-ipc:extra"),
+        ] {
+            assert_eq!(
+                validate_activation_descriptor_set(count, fd, name),
+                Err(IdentityDenied),
+                "ambiguous or unexpected activation inventory is denied"
+            );
+        }
+    }
+}

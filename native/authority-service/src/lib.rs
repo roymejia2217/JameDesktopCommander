@@ -19,6 +19,9 @@ pub mod unix_peer;
 // Linux only: bounded data-only observation. Never a service authority grant.
 #[cfg(target_os = "linux")]
 pub mod unix_session;
+// Experimental named AF_UNIX acceptance: data observation, never a grant.
+#[cfg(target_os = "linux")]
+pub mod unix_accept;
 
 #[cfg(windows)]
 pub mod windows_token;

@@ -18,6 +18,18 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
             .write_all(b"unauthorized"),
         "overwrite" => fs::copy(auxiliary, protected).map(|_| ()),
         "hardlink" => fs::hard_link(protected, auxiliary),
+        // CI-only identity proof; equal byte content is not evidence that two
+        // Windows/Unix paths share the same OS file object.
+        "same-object" => {
+            if same_file::is_same_file(protected, auxiliary)? {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "different file objects",
+                ))
+            }
+        }
         "rename" => fs::rename(protected, protected.with_extension("renamed")),
         "unlink" => fs::remove_file(protected),
         "create" => fs::write(
@@ -39,6 +51,25 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
 mod tests {
     use super::attempt;
     use std::fs;
+
+    #[test]
+    fn identical_bytes_do_not_prove_identical_file_objects() {
+        let dir = tempfile::tempdir().expect("disposable isolated fixture");
+        let source = dir.path().join("source.bin");
+        let copied = dir.path().join("copied.bin");
+        let hardlink = dir.path().join("alias.bin");
+        fs::write(&source, b"EXACT SAME BYTES").expect("create original");
+        fs::copy(&source, &copied).expect("make independent copy");
+        attempt("hardlink", &source, &hardlink).expect("make real alias");
+        assert!(
+            attempt("same-object", &source, &hardlink).is_ok(),
+            "real hard links must identify the same filesystem object"
+        );
+        assert!(
+            attempt("same-object", &source, &copied).is_err(),
+            "equal bytes from independent objects must not establish identity"
+        );
+    }
 
     #[test]
     fn hardlink_probe_proves_positive_identity_and_denies_missing_source() {

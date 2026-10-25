@@ -132,6 +132,16 @@ try {
         (Get-FileHash -LiteralPath $canary -Algorithm SHA256).Hash) {
         throw 'E_CUSTODY_POSITIVE_HARDLINK_BYTES_MISMATCH'
     }
+    # Byte equality is insufficient: positively prove identity from OS file handles.
+    Require-Success 'ATTACKER_HARDLINK_SAME_OBJECT' $attacker.Credential $probe @('same-object', $canary, $attackerOwnedAlias)
+    $equalBytesCopy = Join-Path $public 'identical-bytes-independent-file.txt'
+    Copy-Item -LiteralPath $canary -Destination $equalBytesCopy -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $equalBytesCopy -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $canary -Algorithm SHA256).Hash) {
+        throw 'E_CUSTODY_IDENTITY_NEGATIVE_CONTROL_BYTES_DIFFER'
+    }
+    Require-Success 'ATTACKER_CAN_READ_COPIED_FILE' $attacker.Credential $probe @('read', $equalBytesCopy, $canary)
+    Require-Denied 'ATTACKER_IDENTICAL_BYTES_NOT_SAME_OBJECT' $attacker.Credential $probe @('same-object', $canary, $equalBytesCopy)
     Require-Success 'ATTACKER_READS_OLD_SNAPSHOT' $attacker.Credential $probe @('read', $snapshot, $canary)
     if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
         throw 'E_CUSTODY_MISSING_ATTACKER_CANARY'

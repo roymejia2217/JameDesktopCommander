@@ -14,6 +14,9 @@ pub mod canonical_request;
 // This module only reads kernel-verified Unix peer metadata; it grants nothing.
 #[cfg(any(target_os = "linux", test))]
 mod peer_contract;
+// Pure structural gate; no authority or listener ownership granted.
+#[cfg(any(target_os = "linux", test))]
+mod activation_contract;
 #[cfg(target_os = "linux")]
 pub mod unix_peer;
 // Linux only: bounded data-only observation. Never a service authority grant.
@@ -22,6 +25,9 @@ pub mod unix_session;
 // Experimental named AF_UNIX acceptance: data observation, never a grant.
 #[cfg(target_os = "linux")]
 pub mod unix_accept;
+// Inspect borrowed Linux listener descriptor shape, no systemd identity grant.
+#[cfg(target_os = "linux")]
+pub mod unix_activation;
 
 #[cfg(windows)]
 pub mod windows_token;

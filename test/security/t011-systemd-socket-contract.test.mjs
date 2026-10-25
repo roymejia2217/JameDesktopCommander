@@ -72,3 +72,15 @@ test('Linux kernel socket custody assertion matches declared SocketUser and Sock
   assert.equal(expected, `${user}:${group}`,
     'test acceptance must compare actual native SocketUser/SocketGroup, not a stale account');
 });
+
+test('native systemd FD3 exercise rejects a different descriptor name before accepting reviewed one', () => {
+  const source = readFileSync(join(import.meta.dirname, 't011-systemd-fd3-acceptance.sh'), 'utf8');
+  assert.ok(source.includes('--fdname=untrusted-fd3'),
+    'official systemd-socket-activate must exercise an admitted but misnamed FD3');
+  assert.ok(source.includes('E_FD3_WRONG_NAME_ACCEPTED'),
+    'CI must fail if the Linux observer accepts the misnamed descriptor');
+  assert.ok(source.includes('E_ACTIVATION_UNVERIFIED'),
+    'misnamed FD3 must produce the fail-closed native response');
+  assert.ok(source.includes('--fdname=jdc-authority-ipc'),
+    'the original correct-name positive control must be preserved');
+});

@@ -44,13 +44,9 @@ if "$probe" "$socket" > "$log" 2>&1 ||
   exit 1
 fi
 
-: > "$log"
-systemd-socket-activate --listen="$socket" --fdname=jdc-authority-ipc \
-  "$probe" "$socket" > "$log" 2>&1 &
-manager=$!
-
 # The official tool creates the socket and passes descriptor 3 on connect.
 # Bounded readiness logic is needed only on disposable CI, not in production.
+trigger_activation() {
 python3 - "$socket" <<'PY'
 import socket
 import sys
@@ -73,6 +69,37 @@ while True:
         client.close()
 client.close()
 PY
+}
+
+# Negative control: official systemd tool passes a real listening FD3 but an
+# unexpected name. The same kernel endpoint shape MUST be denied.
+: > "$log"
+systemd-socket-activate --listen="$socket" --fdname=untrusted-fd3 \
+  "$probe" "$socket" > "$log" 2>&1 &
+manager=$!
+trigger_activation
+if ! timeout 8s sh -c 'tail -n +1 -f "$1" | grep -m 1 -Fx "$2"' sh \
+  "$log" 'E_ACTIVATION_UNVERIFIED' >/dev/null ||
+   grep -Fq 'T011_SYSTEMD_FD3_NAMED_KERNEL_SHAPE_OBSERVED_NO_AUTHORITY' "$log"; then
+  cat "$log" >&2
+  printf '%s\n' 'E_FD3_WRONG_NAME_ACCEPTED' >&2
+  exit 1
+fi
+kill -TERM "$manager" 2>/dev/null || :
+wait "$manager" 2>/dev/null || :
+manager=''
+if [[ ! -S "$socket" ]]; then
+  printf '%s\n' 'E_FD3_WRONG_NAME_MANAGER_SOCKET_MISSING' >&2
+  exit 1
+fi
+rm -- "$socket"
+
+# Positive control: the reviewed FD3 name must still be accepted.
+: > "$log"
+systemd-socket-activate --listen="$socket" --fdname=jdc-authority-ipc \
+  "$probe" "$socket" > "$log" 2>&1 &
+manager=$!
+trigger_activation
 
 # Tail the official test utility's output with a bounded deadline. Require
 # success from the actual child, never from a fabricated environment string.

@@ -77,7 +77,7 @@ if [[ "$(sudo -n systemctl show -P ActiveState "$socket_name")" != 'active' ||
   printf '%s\n' 'E_SOCKET_MANAGER_NOT_LISTENING' >&2
   exit 1
 fi
-if [[ "$(stat -c '%U:%G' "$socket_path")" != 'jdc-authority:jdc-authority-clients' ||
+if [[ "$(stat -c '%U:%G' "$socket_path")" != 'jdc-authority:jdc-mcp-client' ||
       "$(stat -c '%a' "$socket_path")" != '660' ||
       "$(stat -c '%U:%G' "$socket_dir")" != 'root:root' ||
       "$(stat -c '%a' "$socket_dir")" != '755' ]]; then

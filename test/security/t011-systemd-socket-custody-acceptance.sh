@@ -13,7 +13,19 @@ if [[ "${GITHUB_ACTIONS:-}" != 'true' ||
 fi
 sudo -n true
 getent passwd jdc-authority >/dev/null
+getent passwd jdc-mcp-client >/dev/null
+getent group jdc-mcp-client >/dev/null
 getent passwd nobody >/dev/null
+
+service_uid="$(id -u jdc-authority)"
+client_uid="$(id -u jdc-mcp-client)"
+client_gid="$(id -g jdc-mcp-client)"
+if [[ "$client_uid" -eq "$service_uid" || "$client_uid" -eq 0 ||
+      "$client_gid" -eq "$(id -g jdc-authority)" ||
+      "$(id -gn jdc-mcp-client)" != 'jdc-mcp-client' ]]; then
+  printf '%s\n' 'E_SOCKET_CLIENT_PRINCIPAL_SEPARATION_MISSING' >&2
+  exit 1
+fi
 
 socket_name='jdc-authority.socket'
 service_name='jdc-authority.service'
@@ -65,8 +77,8 @@ if [[ "$(sudo -n systemctl show -P ActiveState "$socket_name")" != 'active' ||
   printf '%s\n' 'E_SOCKET_MANAGER_NOT_LISTENING' >&2
   exit 1
 fi
-if [[ "$(stat -c '%U:%G' "$socket_path")" != 'jdc-authority:jdc-authority' ||
-      "$(stat -c '%a' "$socket_path")" != '600' ||
+if [[ "$(stat -c '%U:%G' "$socket_path")" != 'jdc-authority:jdc-authority-clients' ||
+      "$(stat -c '%a' "$socket_path")" != '660' ||
       "$(stat -c '%U:%G' "$socket_dir")" != 'root:root' ||
       "$(stat -c '%a' "$socket_dir")" != '755' ]]; then
   printf '%s\n' 'E_SOCKET_MANAGER_CUSTODY_INCORRECT' >&2
@@ -113,8 +125,40 @@ if sudo -n -u nobody -- rm -- "$socket_path" >/dev/null 2>&1 ||
   printf '%s\n' 'E_SOCKET_UNTRUSTED_NAMESPACE_MUTATION' >&2
   exit 1
 fi
-# Real account permitted by the socket DAC can connect. This proves access
-# restriction works but NEVER proves the service grants a filesystem action.
+# Distinct authenticated *connect admission* via OS group is deliberately NOT
+# filesystem permission. The client cannot access service-private state.
+state_dir='/var/lib/jdc-authority'
+if [[ ! -d "$state_dir" ]] ||
+   sudo -n -u jdc-mcp-client -- test -r "$state_dir" ||
+   sudo -n -u jdc-mcp-client -- test -w "$state_dir"; then
+  printf '%s\n' 'E_SOCKET_CLIENT_INHERITED_SERVICE_STORAGE_AUTHORITY' >&2
+  exit 1
+fi
+
+sudo -n -u jdc-mcp-client python3 -c '
+import socket
+import sys
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(2)
+try:
+    client.connect(sys.argv[1])
+    print("SEPARATE_MCP_CLIENT_CONNECT_POSITIVE_NOT_AUTHORIZATION")
+finally:
+    client.close()
+' "$socket_path"
+
+# Group membership grants only connect(), not mutation of the protected
+# root-owned socket pathname or its enclosing directory.
+if sudo -n -u jdc-mcp-client -- rm -- "$socket_path" >/dev/null 2>&1 ||
+   sudo -n -u jdc-mcp-client -- ln -s /tmp "$socket_dir/client-forged.sock" >/dev/null 2>&1 ||
+   [[ -e "$socket_dir/client-forged.sock" || -L "$socket_dir/client-forged.sock" ]] ||
+   [[ "$(stat -c '%d:%i' "$socket_path")" != "$socket_identity" ]]; then
+  printf '%s\n' 'E_SOCKET_CLIENT_NAMESPACE_MUTATION' >&2
+  exit 1
+fi
+
+# Owner and separate client can connect; other principal cannot. This proves
+# the kernel admission ACL, NEVER authorization for a broker operation.
 sudo -n -u jdc-authority python3 -c '
 import socket
 import sys

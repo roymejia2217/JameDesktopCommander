@@ -100,9 +100,14 @@ jobs:
           systemd-sysusers --dry-run "$sysusers_file"
           test -z "$(getent passwd jdc-authority || :)"
           test -z "$(getent group jdc-authority || :)"
+          test -z "$(getent passwd jdc-mcp-client || :)"
+          test -z "$(getent group jdc-mcp-client || :)"
           sudo systemd-sysusers "$sysusers_file"
           test "$(id -u jdc-authority)" -gt 0
           test "$(id -g jdc-authority)" -gt 0
+          test "$(id -u jdc-mcp-client)" -gt 0
+          test "$(id -u jdc-mcp-client)" != "$(id -u jdc-authority)"
+          test "$(id -gn jdc-mcp-client)" = jdc-mcp-client
           sudo install -D -m 0755 native/authority-service/target/debug/jdc-authority-service /usr/libexec/jdc/jdc-authority-service
           systemd-analyze verify "$unit_file"
 

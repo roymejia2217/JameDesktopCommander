@@ -22,8 +22,8 @@ test('experimental socket manager owns a non-public AF_UNIX pathname', () => {
   const expected = {
     ListenStream: '/run/jdc-authority-ipc/authority.sock',
     SocketUser: 'jdc-authority',
-    SocketGroup: 'jdc-authority',
-    SocketMode: '0600',
+    SocketGroup: 'jdc-mcp-client',
+    SocketMode: '0660',
     DirectoryMode: '0755',
     Accept: 'no',
     Service: 'jdc-authority.service',
@@ -36,4 +36,19 @@ test('experimental socket manager owns a non-public AF_UNIX pathname', () => {
   assert.ok(!/^\[Install\]$/m.test(unit), 'must not be user-installable');
   assert.ok(!/(?:ListenDatagram|ListenSequentialPacket|ListenNetlink|ListenMessageQueue|BindIPv6Only)=/m.test(unit),
     'no additional transports may be introduced');
+});
+
+test('experimental IPC clients use a separate provisioned Unix account and group', () => {
+  const sysusers = readFileSync(join(import.meta.dirname, '..', '..',
+    'packaging', 'experimental', 'linux', 'sysusers.d', 'jdc-authority.conf'), 'utf8');
+  const declared = sysusers.split(/\r?\n/).map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+  assert.equal(declared.length, 2,
+    'exactly two independent system identities required');
+  assert.ok(declared.includes('u jdc-mcp-client - "JDC experimental MCP IPC client" - /usr/sbin/nologin'),
+    'separate locked non-login account must exist');
+  assert.ok(!declared.some(line => /^[gm] /.test(line)),
+    'no new service group memberships or separately managed groups');
+  assert.ok(!declared.some(line => line.startsWith('m jdc-authority ')),
+    'service account must never be added to a client group');
 });

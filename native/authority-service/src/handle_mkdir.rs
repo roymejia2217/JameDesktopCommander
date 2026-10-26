@@ -60,6 +60,39 @@ impl RootedDirectory {
         validate_single_child(name)?;
         self.root.open_dir(name).map(Self::from_preopened)
     }
+
+    /// Create a nested directory strictly relative to the supplied root handle.
+    /// This has NO IPC or policy authorization and cannot be a release operation.
+    /// Validate the whole input before mutation, then retain an opened handle at
+    /// each level instead of rebuilding a pathname or following an ambient path.
+    pub fn create_descendant(&self, relative: &str) -> io::Result<()> {
+        const MAX_PATH_BYTES: usize = 4096;
+        const MAX_COMPONENTS: usize = 64;
+        let components: Vec<&str> = relative.split('/').collect();
+        if relative.is_empty()
+            || relative.len() > MAX_PATH_BYTES
+            || components.len() > MAX_COMPONENTS
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_PATH_DENIED",
+            ));
+        }
+        for component in &components {
+            validate_single_child(component)?;
+        }
+        let mut child: Option<Dir> = None;
+        for component in components {
+            let parent = child.as_ref().unwrap_or(&self.root);
+            match parent.create_dir(component) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+            child = Some(parent.open_dir(component)?);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -196,5 +229,122 @@ mod tests {
         assert!(root.join("moved/safe").is_dir());
         assert!(!outside.join("safe").exists());
         assert_eq!(std::fs::read(&marker).unwrap(), b"ORIGINAL_OUTSIDE");
+    }
+
+    #[test]
+    fn creates_nested_directories_from_preopened_root_and_is_idempotent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        assert!(dir.create_descendant("alpha/beta/gamma").is_ok());
+        assert!(dir.create_descendant("alpha/beta/gamma").is_ok());
+        assert!(inside.join("alpha/beta/gamma").is_dir());
+        assert!(!outside.join("alpha").exists());
+    }
+
+    #[test]
+    fn existing_nondirectory_component_is_denied_without_file_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        std::fs::create_dir(&inside).unwrap();
+        let sentinel = inside.join("existing_file");
+        std::fs::write(&sentinel, b"PRESERVE_THIS_FILE").unwrap();
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        assert!(dir.create_descendant("existing_file/child").is_err());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"PRESERVE_THIS_FILE");
+    }
+
+    #[test]
+    fn invalid_later_component_denies_without_partial_creation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        std::fs::create_dir(&inside).unwrap();
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        for bad in [
+            "fresh/../outside",
+            "fresh//child",
+            "fresh/NUL.txt",
+            "fresh/a.",
+            "fresh/COM1",
+            "fresh/with space",
+            "fresh/child\\outside",
+            "fresh/",
+        ] {
+            assert!(dir.create_descendant(bad).is_err(), "accepted {bad:?}");
+            assert!(
+                !inside.join("fresh").exists(),
+                "partial mutation for {bad:?}"
+            );
+        }
+        let deep = "a/".repeat(65) + "z";
+        assert!(dir.create_descendant(&deep).is_err());
+        assert!(!inside.join("a").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_mkdir_denies_outside_symlink_without_outside_mutation() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"OUTSIDE_ORIGINAL").unwrap();
+        symlink(&outside, inside.join("alias")).unwrap();
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        assert!(dir.create_descendant("alias/forbidden").is_err());
+        assert!(!outside.join("forbidden").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"OUTSIDE_ORIGINAL"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nested_mkdir_denies_ntfs_junction_escape_with_real_os_fixture() {
+        use std::process::Command;
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"OUTSIDE_ORIGINAL").unwrap();
+        let link = inside.join("alias");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .expect("official Windows cmd.exe junction fixture");
+        assert!(
+            output.status.success(),
+            "junction setup failed: status={:?}, stdout={:?}, stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(link.is_dir(), "junction fixture must resolve");
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        assert!(dir.create_descendant("alias/forbidden").is_err());
+        assert!(!outside.join("forbidden").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"OUTSIDE_ORIGINAL"
+        );
     }
 }

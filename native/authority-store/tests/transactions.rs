@@ -17,6 +17,24 @@ fn digest(value: u8) -> [u8; 32] {
 }
 
 #[test]
+fn sqlite_readwrite_fallback_must_not_admit_readonly_store() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("readonly.sqlite3");
+    fixture(&db);
+    let original = std::fs::metadata(&db).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&db, readonly).unwrap();
+    // Always restore before asserting, including when the contract is RED.
+    let admitted = EpochStore::open_existing(&db).is_ok();
+    std::fs::set_permissions(&db, original).unwrap();
+    assert!(
+        !admitted,
+        "SQLite's READWRITE flag can fall back to readonly"
+    );
+}
+
+#[test]
 fn store_fails_closed_if_unprovisioned_or_malformed() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.sqlite3");

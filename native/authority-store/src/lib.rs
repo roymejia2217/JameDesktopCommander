@@ -5,7 +5,7 @@
 //! Path-based opening is for offline feasibility testing ONLY; any production
 //! broker MUST obtain and protect an OS-anchored storage handle and policy owner.
 
-use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior, MAIN_DB};
 use std::{path::Path, time::Duration};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -59,6 +59,11 @@ impl EpochStore {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|_| StoreDenied)?;
+        // SQLite may silently fall back from READWRITE to read-only when the OS
+        // rejects write access. Require the effective main DB mode, not flags.
+        if connection.is_readonly(MAIN_DB).map_err(|_| StoreDenied)? {
+            return Err(StoreDenied);
+        }
         connection
             .busy_timeout(Duration::from_secs(3))
             .map_err(|_| StoreDenied)?;

@@ -56,7 +56,7 @@ function Set-ExactAdminControlledKey([bool] $foreign) {
             [System.Security.AccessControl.AccessControlType]::Allow)
         $security.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $registryKey -AclObject $security -ErrorAction Stop
+    Set-Acl -Path $registryKey -AclObject $security -ErrorAction Stop
     $actual = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
     if (-not $actual.AreAccessRulesProtected -or
         $actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $ba.Value -or

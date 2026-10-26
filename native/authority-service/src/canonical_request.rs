@@ -85,9 +85,42 @@ fn safe_relative_path(path: &str) -> bool {
         })
 }
 
-/// Strictly validate a complete v1 C4d request frame, returning no authority.
-/// The OS-authenticated broker and handle-based dispatcher do not exist yet.
+/// Canonical protocol data only, NOT proof of caller or filesystem authority.
+/// All fields are immutable after decoding; they must still be compared against
+/// an independently OS-protected, revocable policy by the future broker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalCreateDirectory {
+    request_id: String,
+    expected_epoch: u64,
+    root_ref: String,
+    relative_path: String,
+}
+
+impl CanonicalCreateDirectory {
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn expected_epoch(&self) -> u64 {
+        self.expected_epoch
+    }
+    pub fn root_ref(&self) -> &str {
+        &self.root_ref
+    }
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+}
+
+/// Compatibility contract: syntax acceptance alone never grants authority.
 pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
+    decode_create_directory_frame(frame).map(|_| ())
+}
+
+/// Decode one canonical v1 frame into immutable protocol data, not a grant.
+/// The OS-authenticated broker and handle-based dispatcher do not exist yet.
+pub fn decode_create_directory_frame(
+    frame: &[u8],
+) -> Result<CanonicalCreateDirectory, FrameDenied> {
     if frame.len() < 6 || frame.len() > MAX_BYTES + 4 {
         return Err(FrameDenied);
     }
@@ -111,7 +144,12 @@ pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
     {
         return Err(FrameDenied);
     }
-    Ok(())
+    Ok(CanonicalCreateDirectory {
+        request_id: req.request_id,
+        expected_epoch: req.expected_epoch.parse::<u64>().map_err(|_| FrameDenied)?,
+        root_ref: req.root_ref,
+        relative_path: req.relative_path,
+    })
 }
 
 #[cfg(test)]
@@ -129,6 +167,35 @@ mod tests {
         out.extend_from_slice(body);
         out
     }
+    #[test]
+    fn decoded_request_preserves_all_canonical_fields_without_policy_grant() {
+        let wire = frame(payload("project/nuevo").as_bytes());
+        let parsed = decode_create_directory_frame(&wire).expect("valid canonical request");
+        assert_eq!(parsed.request_id(), ID);
+        assert_eq!(parsed.expected_epoch(), u64::MAX);
+        assert_eq!(parsed.root_ref(), ROOT);
+        assert_eq!(parsed.relative_path(), "project/nuevo");
+        assert_eq!(validate_request_frame(&wire), Ok(()));
+    }
+
+    #[test]
+    fn typed_decoder_rejects_uncanonical_or_unauthorized_request_shapes() {
+        let original = payload("safe");
+        for raw in [
+            original.replace("create-directory", "read"),
+            original.replace("18446744073709551615", "0"),
+            payload("../outside"),
+            payload("NUL.txt"),
+            format!("{original} "),
+        ] {
+            assert_eq!(
+                decode_create_directory_frame(&frame(raw.as_bytes())),
+                Err(FrameDenied),
+                "accepted malformed request: {raw}"
+            );
+        }
+    }
+
     #[test]
     fn accepts_exact_c4d_canonical_request_without_granting_authority() {
         let valid = frame(payload("project/nuevo").as_bytes());

@@ -46,6 +46,9 @@ jobs:
       - name: Prove OS service identity preflight and fail-closed startup
         run: cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml
 
+      - name: Install official Rustfmt for pinned Rust toolchain
+        run: rustup component add --toolchain 1.91.1 rustfmt
+
       - name: Verify native authority service Rustfmt (pinned toolchain)
         run: cargo +1.91.1 fmt --manifest-path native/authority-service/Cargo.toml --all -- --check
 

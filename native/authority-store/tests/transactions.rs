@@ -117,6 +117,56 @@ fn database_replay_and_same_epoch_digest_change_do_not_match_separate_witness() 
 }
 
 #[test]
+fn corrupted_previous_policy_must_not_be_laundered_by_epoch_advance() {
+    for (previous_epoch, corrupt_digest) in [(0_u64, [7_u8; 32]), (1_u64, [0_u8; 32])] {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("state.sqlite3");
+        fixture(&db);
+        if previous_epoch == 1 {
+            EpochStore::open_existing(&db)
+                .unwrap()
+                .commit_after(0, 1, [1_u8; 32])
+                .unwrap();
+        }
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE protected_policy SET digest=?1 WHERE slot=1",
+            [corrupt_digest.as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        assert!(
+            store
+                .commit_after(previous_epoch, previous_epoch + 1, [2_u8; 32])
+                .is_err(),
+            "updater must never overwrite an invalid prior row"
+        );
+        assert_eq!(store.read_epoch().unwrap(), previous_epoch);
+    }
+}
+
+#[test]
+fn schema_change_after_open_must_deny_before_writing() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    let attacker = Connection::open(&db).unwrap();
+    attacker
+        .execute_batch(
+            "CREATE TRIGGER unexpected AFTER UPDATE ON protected_policy BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    drop(attacker);
+    assert!(
+        store.commit_after(0, 1, [2_u8; 32]).is_err(),
+        "after-open trigger change must be rejected, never used as an update side effect"
+    );
+    assert_eq!(store.read_epoch().unwrap(), 0);
+}
+
+#[test]
 fn store_refuses_to_commit_all_zero_policy_digest() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("state.sqlite3");

@@ -47,6 +47,47 @@ fn current(connection: &Connection) -> Result<(u64, [u8; 32]), StoreDenied> {
     Ok((u64::from_be_bytes(epoch), digest))
 }
 
+// Strict schema match is required both on open and inside each transaction.
+// The IMMEDIATE write transaction keeps another writer from changing the schema
+// between the validation and the actual mutation.
+const SCHEMA_V1: &str =
+    "CREATE TABLE protected_policy (slot INTEGER PRIMARY KEY CHECK(slot=1), epoch BLOB NOT NULL CHECK(length(epoch)=8), digest BLOB NOT NULL CHECK(length(digest)=32))";
+
+fn exact_schema(connection: &Connection) -> Result<(), StoreDenied> {
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|_| StoreDenied)?;
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| StoreDenied)?;
+    if application_id != 0x4A444331 || schema_version != 1 {
+        return Err(StoreDenied);
+    }
+    let unexpected: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type <> 'table' OR name <> 'protected_policy'",
+        [], |row| row.get(0),
+    ).map_err(|_| StoreDenied)?;
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM protected_policy", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| StoreDenied)?;
+    if unexpected != 0 || rows != 1 {
+        return Err(StoreDenied);
+    }
+    let actual: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'protected_policy'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| StoreDenied)?;
+    if actual != SCHEMA_V1 {
+        return Err(StoreDenied);
+    }
+    Ok(())
+}
+
 impl EpochStore {
     /// Opens only an existing fixture. Missing, unreadable and corrupt stores
     /// deny; never creates or restores a policy database implicitly.
@@ -84,44 +125,8 @@ impl EpochStore {
         if sync != 3 {
             return Err(StoreDenied);
         }
-        // Format markers and a single expected table reject accidental reuse
-        // of an unrelated or silently migrated database. These fields are
-        // NOT authentication: an attacker able to replace the DB can forge them.
-        let application_id: i64 = connection
-            .pragma_query_value(None, "application_id", |row| row.get(0))
-            .map_err(|_| StoreDenied)?;
-        let schema_version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|_| StoreDenied)?;
-        if application_id != 0x4A444331 || schema_version != 1 {
-            return Err(StoreDenied);
-        }
-        let unexpected: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE type <> 'table' OR name <> 'protected_policy'",
-            [], |row| row.get(0),
-        ).map_err(|_| StoreDenied)?;
-        let rows: i64 = connection
-            .query_row("SELECT COUNT(*) FROM protected_policy", [], |row| {
-                row.get(0)
-            })
-            .map_err(|_| StoreDenied)?;
-        if unexpected != 0 || rows != 1 {
-            return Err(StoreDenied);
-        }
-        // Exact v1 constraints, not merely matching column names.
-        // Intentional schema changes require an independently audited upgrade.
-        const SCHEMA_V1: &str =
-            "CREATE TABLE protected_policy (slot INTEGER PRIMARY KEY CHECK(slot=1), epoch BLOB NOT NULL CHECK(length(epoch)=8), digest BLOB NOT NULL CHECK(length(digest)=32))";
-        let actual_schema: String = connection
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'protected_policy'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|_| StoreDenied)?;
-        if actual_schema != SCHEMA_V1 {
-            return Err(StoreDenied);
-        }
+        // These markers are a format guard, not OS custody or authentication.
+        exact_schema(&connection)?;
         current(&connection)?;
         Ok(Self { connection })
     }
@@ -157,8 +162,18 @@ impl EpochStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreDenied)?;
-        let (current_epoch, _) = current(&tx)?;
+        exact_schema(&tx)?;
+        let (current_epoch, current_digest) = current(&tx)?;
         if current_epoch != expected_previous {
+            return Err(StoreDenied);
+        }
+        // Never silently replace an unprovisioned or corrupt predecessor.
+        // A valid v1 fixture begins with epoch=0 and an all-zero digest.
+        // Any committed epoch must have a nonzero digest; this still does
+        // NOT authenticate its origin or prevent replay of the whole DB.
+        if (current_epoch == 0 && current_digest != [0; 32])
+            || (current_epoch > 0 && current_digest == [0; 32])
+        {
             return Err(StoreDenied);
         }
         let updated = tx

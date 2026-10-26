@@ -62,19 +62,38 @@ Desktop Commander is free, open-source software released under the MIT License. 
 
 ## Reporting a Vulnerability
 
-We welcome responsible disclosure and review all reported security issues.
+JameDesktopCommander accepts coordinated disclosure of suspected security
+vulnerabilities. **Do not publish exploit instructions, proof-of-concept code,
+credentials, tokens, private host details, or sensitive files in a public issue,
+pull request, discussion, CI log, or artifact.**
 
-1. **Open a GitHub issue** with technical details and, if possible, a proof of concept.
-2. **Label it security-related** for visibility.
-3. **Request attribution** if you'd like to be credited.
+1. In this repository, open **Security → Advisories** and use **Report a
+   vulnerability** if GitHub private vulnerability reporting is enabled.
+   Repository settings control whether this option is available; this document
+   does not claim that it is currently enabled.
+2. If that private reporting option is unavailable, open a
+   [JDC issue](https://github.com/roymejia2217/JameDesktopCommander/issues/new) containing
+   **only a non-sensitive request** to establish a private disclosure channel.
+   Do not attach the exploit or include enough technical detail to reproduce it.
+   Share sensitive details only after an appropriate private channel is agreed.
+3. For ordinary, non-security defects, use the
+   [JDC issue tracker](https://github.com/roymejia2217/JameDesktopCommander/issues) with sanitized
+   reproduction steps and diagnostic information.
 
-If you'd prefer not to disclose publicly, reach out via Discord to arrange private disclosure. We acknowledge reports, assess severity and impact, and prioritize fixes accordingly.
+Maintainers should assess the report, coordinate a mitigation and appropriate
+disclosure, and discuss attribution with the reporter. No response-time SLA,
+private reporting feature state, or release-readiness promise is implied.
+
+For vulnerabilities that affect the independent upstream Desktop Commander
+project as well, follow that project's own security reporting policy separately.
+The upstream issue tracker and community Discord are **not** designated
+security-disclosure channels for this JDC fork.
 
 ## Contact
 
-- **GitHub Issues**: https://github.com/wonderwhy-er/DesktopCommanderMCP/issues
-- **Discord Community**: https://discord.gg/kQ27sNnZr7
+- **JDC public issue tracker (non-sensitive reports only):** https://github.com/roymejia2217/JameDesktopCommander/issues
+- **Private reporting (when enabled):** JDC repository → Security → Advisories → Report a vulnerability
 
 ---
 
-*Last updated: July 2026*
+*Reporting policy updated: 2026-10-22*

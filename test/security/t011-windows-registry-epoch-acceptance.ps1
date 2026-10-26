@@ -26,8 +26,8 @@ $createdService = $false
 $createdRegistry = $false
 $ba = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-$all = [Microsoft.Win32.RegistryRights]::FullControl
-$read = [Microsoft.Win32.RegistryRights]::ReadKey
+$all = [System.Security.AccessControl.RegistryRights]::FullControl
+$read = [System.Security.AccessControl.RegistryRights]::ReadKey
 
 function Set-ExactAdminControlledKey([bool] $foreign) {
     $security = [System.Security.AccessControl.RegistrySecurity]::new()

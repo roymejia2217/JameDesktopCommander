@@ -52,6 +52,14 @@ impl RootedDirectory {
         validate_single_child(name)?;
         self.root.create_dir(name)
     }
+
+    /// Open only a validated, single-component child directory via cap-std.
+    /// The returned child remains anchored to its opened directory handle.
+    /// Neither this function nor its parent constructor grants policy authority.
+    pub fn open_child(&self, name: &str) -> io::Result<Self> {
+        validate_single_child(name)?;
+        self.root.open_dir(name).map(Self::from_preopened)
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +129,72 @@ mod tests {
         let capability = RootedDirectory::from_preopened(preopened);
         assert!(capability.create_child("only_once").is_ok());
         assert!(capability.create_child("only_once").is_err());
+    }
+
+    #[test]
+    fn nested_directory_open_must_preserve_handle_relative_authority() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(root.join("sibling")).unwrap();
+        let preopened = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+        let parent = RootedDirectory::from_preopened(preopened);
+        let nested = parent.open_child("nested").unwrap();
+        nested.create_child("grandchild").unwrap();
+        assert!(root.join("nested/grandchild").is_dir());
+        assert!(!root.join("sibling/grandchild").exists());
+        for rejected in [
+            "",
+            ".",
+            "..",
+            "../sibling",
+            "nested/grandchild",
+            r"C:\escape",
+            "NUL.txt",
+        ] {
+            assert!(parent.open_child(rejected).is_err(), "opened {rejected:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_open_must_reject_symlink_escape_and_preserve_outside_bytes() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"UNTOUCHED_OUTSIDE").unwrap();
+        symlink(&outside, root.join("outside_alias")).unwrap();
+        let preopened = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+        let parent = RootedDirectory::from_preopened(preopened);
+        assert!(parent.open_child("outside_alias").is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"UNTOUCHED_OUTSIDE");
+        assert!(!outside.join("grandchild").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opened_child_remains_anchored_after_name_replacement_by_outside_symlink() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let marker = outside.join("sentinel");
+        std::fs::write(&marker, b"ORIGINAL_OUTSIDE").unwrap();
+        let parent = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        let opened_child = parent.open_child("nested").unwrap();
+        std::fs::rename(root.join("nested"), root.join("moved")).unwrap();
+        symlink(&outside, root.join("nested")).unwrap();
+        opened_child.create_child("safe").unwrap();
+        assert!(root.join("moved/safe").is_dir());
+        assert!(!outside.join("safe").exists());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"ORIGINAL_OUTSIDE");
     }
 }

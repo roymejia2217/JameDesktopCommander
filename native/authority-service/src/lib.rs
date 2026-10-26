@@ -11,6 +11,10 @@ pub mod handle_mkdir;
 #[cfg(any(windows, target_os = "linux"))]
 pub mod sealed_dispatch;
 
+// Experimental anchored Linux policy directory observer. No policy grant.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_root;
+
 // C4d native transport framing only, not an authenticated listener or authority.
 pub mod frame_reader;
 

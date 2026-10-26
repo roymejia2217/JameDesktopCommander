@@ -35,16 +35,28 @@ impl PolicySnapshot {
 }
 
 fn current(connection: &Connection) -> Result<(u64, [u8; 32]), StoreDenied> {
-    let (epoch, digest): (Vec<u8>, Vec<u8>) = connection
+    // SQLite's CHECK(length(...)) can be bypassed by a writer holding the DB.
+    // Never allocate a caller-sized BLOB before validating its exact shape.
+    // Both bounded prefixes and their original lengths are from one SELECT.
+    let (epoch_kind, epoch_len, epoch, digest_kind, digest_len, digest):
+        (String, i64, Vec<u8>, String, i64, Vec<u8>) = connection
         .query_row(
-            "SELECT epoch, digest FROM protected_policy WHERE slot = 1",
+            "SELECT typeof(epoch), length(epoch), substr(epoch,1,9), typeof(digest), length(digest), substr(digest,1,33) FROM protected_policy WHERE slot=1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| StoreDenied)?;
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        ).map_err(|_| StoreDenied)?;
+    if epoch_kind != "blob" || digest_kind != "blob" || epoch_len != 8 || digest_len != 32 {
+        return Err(StoreDenied);
+    }
     let epoch: [u8; 8] = epoch.try_into().map_err(|_| StoreDenied)?;
     let digest: [u8; 32] = digest.try_into().map_err(|_| StoreDenied)?;
-    Ok((u64::from_be_bytes(epoch), digest))
+    let epoch = u64::from_be_bytes(epoch);
+    // Unprovisioned = exactly (0, all-zero); provisioned = positive epoch and
+    // nonzero digest. Neither proves publisher authenticity or local rollback.
+    if (epoch == 0 && digest != [0; 32]) || (epoch > 0 && digest == [0; 32]) {
+        return Err(StoreDenied);
+    }
+    Ok((epoch, digest))
 }
 
 // Strict schema match is required both on open and inside each transaction.

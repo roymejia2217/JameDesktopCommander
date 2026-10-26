@@ -128,6 +128,7 @@ fn corrupted_previous_policy_must_not_be_laundered_by_epoch_advance() {
                 .commit_after(0, 1, [1_u8; 32])
                 .unwrap();
         }
+        let mut store = EpochStore::open_existing(&db).unwrap();
         let conn = Connection::open(&db).unwrap();
         conn.execute(
             "UPDATE protected_policy SET digest=?1 WHERE slot=1",
@@ -135,14 +136,27 @@ fn corrupted_previous_policy_must_not_be_laundered_by_epoch_advance() {
         )
         .unwrap();
         drop(conn);
-        let mut store = EpochStore::open_existing(&db).unwrap();
         assert!(
             store
                 .commit_after(previous_epoch, previous_epoch + 1, [2_u8; 32])
                 .is_err(),
             "updater must never overwrite an invalid prior row"
         );
-        assert_eq!(store.read_epoch().unwrap(), previous_epoch);
+        assert!(
+            store.read_epoch().is_err(),
+            "corrupt predecessor cannot be read"
+        );
+        let raw: Vec<u8> = Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT epoch FROM protected_policy WHERE slot=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            raw,
+            previous_epoch.to_be_bytes(),
+            "denied write must preserve epoch"
+        );
     }
 }
 
@@ -199,6 +213,63 @@ fn opened_reader_must_refuse_post_open_schema_mutation() {
         store.read_snapshot().is_err(),
         "read_snapshot must reject drift"
     );
+}
+
+#[test]
+fn malformed_epoch_digest_relationship_denies_open_read_and_update() {
+    for (epoch, digest) in [(0_u64, [0xA5_u8; 32]), (1_u64, [0_u8; 32])] {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("state.sqlite3");
+        fixture(&db);
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        let attacker = Connection::open(&db).unwrap();
+        attacker
+            .execute(
+                "UPDATE protected_policy SET epoch=?1, digest=?2 WHERE slot=1",
+                rusqlite::params![epoch.to_be_bytes().as_slice(), digest.as_slice()],
+            )
+            .unwrap();
+        drop(attacker);
+        assert!(
+            store.read_epoch().is_err(),
+            "invalid relationship was read as valid epoch"
+        );
+        assert!(store.read_snapshot().is_err());
+        assert!(store.commit_after(epoch, epoch + 1, [3_u8; 32]).is_err());
+        drop(store);
+        assert!(
+            EpochStore::open_existing(&db).is_err(),
+            "reopened invalid state accepted"
+        );
+    }
+}
+
+#[test]
+fn malformed_oversized_blob_and_nonblob_epoch_must_fail_closed() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    conn.execute(
+        "UPDATE protected_policy SET digest=zeroblob(1048576) WHERE slot=1",
+        [],
+    )
+    .unwrap();
+    assert!(EpochStore::open_existing(&db).is_err());
+    conn.execute(
+        "UPDATE protected_policy SET digest=zeroblob(32), epoch=?1 WHERE slot=1",
+        [b"00000000".as_slice()],
+    )
+    .unwrap();
+    // BLOB bit patterns can be valid bytes; a TEXT SQLite value cannot.
+    conn.execute(
+        "UPDATE protected_policy SET epoch=CAST(?1 AS TEXT) WHERE slot=1",
+        [b"00000000".as_slice()],
+    )
+    .unwrap();
+    assert!(EpochStore::open_existing(&db).is_err());
 }
 
 #[test]

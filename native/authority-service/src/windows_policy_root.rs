@@ -1,16 +1,22 @@
 //! Windows state-directory DACL observation through an already opened OS handle.
 //! NON-RELEASE: no pathname bootstrap, authenticated client, policy loader or grant.
 use crate::{verify_service_identity, IdentityDenied};
-use std::{ffi::c_void, fs::File, mem, os::windows::{fs::MetadataExt, io::AsRawHandle}, ptr};
+use std::{
+    ffi::c_void,
+    fs::File,
+    mem,
+    os::windows::{fs::MetadataExt, io::AsRawHandle},
+    ptr,
+};
 use windows_sys::Win32::{
     Foundation::LocalFree,
     Security::{
+        AclSizeInformation,
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
-        AclSizeInformation, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
-        GetSecurityDescriptorControl, IsValidAcl, IsValidSid, IsWellKnownSid,
-        OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, WinBuiltinAdministratorsSid,
-        WinLocalSystemSid,
+        EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsValidSid,
+        IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+        ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     },
     Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
 };
@@ -51,7 +57,9 @@ struct AceSummary {
 }
 
 fn validate_ace_set(aces: &[AceSummary]) -> Result<(), IdentityDenied> {
-    if aces.len() != 3 { return Err(IdentityDenied); }
+    if aces.len() != 3 {
+        return Err(IdentityDenied);
+    }
     let (mut system, mut admins, mut service) = (false, false, false);
     for ace in aces {
         if ace.flags & !ALLOWED_ACE_FLAGS != 0 || ace.mask == 0 {
@@ -60,12 +68,19 @@ fn validate_ace_set(aces: &[AceSummary]) -> Result<(), IdentityDenied> {
         match ace.principal {
             Principal::LocalSystem if !system => system = true,
             Principal::Administrators if !admins => admins = true,
-            Principal::Service if !service &&
-                ace.mask & (WRITE_DAC | WRITE_OWNER | GENERIC_ALL) == 0 => service = true,
+            Principal::Service
+                if !service && ace.mask & (WRITE_DAC | WRITE_OWNER | GENERIC_ALL) == 0 =>
+            {
+                service = true
+            }
             _ => return Err(IdentityDenied),
         }
     }
-    if system && admins && service { Ok(()) } else { Err(IdentityDenied) }
+    if system && admins && service {
+        Ok(())
+    } else {
+        Err(IdentityDenied)
+    }
 }
 
 /// Allocate/free only the descriptor returned by the official Win32 API.
@@ -75,7 +90,9 @@ impl Drop for OwnedSecurityDescriptor {
     fn drop(&mut self) {
         if !self.0.is_null() {
             // SAFETY: GetSecurityInfo allocates this descriptor with LocalAlloc.
-            unsafe { LocalFree(self.0); }
+            unsafe {
+                LocalFree(self.0);
+            }
         }
     }
 }
@@ -103,9 +120,14 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
     // and the returned security descriptor is freed by OwnedSecurityDescriptor.
     let code = unsafe {
         GetSecurityInfo(
-            file.as_raw_handle().cast(), SE_FILE_OBJECT,
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner, ptr::null_mut(), &mut dacl, ptr::null_mut(), &mut sd,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut sd,
         )
     };
     let _owned = OwnedSecurityDescriptor(sd);
@@ -118,12 +140,16 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
     }
     // A service-owned state directory could modify its own DACL regardless of
     // granted rights. Require independent SYSTEM/Administrators ownership.
-    if !matches!(classify_sid(owner, service_sid), Principal::LocalSystem | Principal::Administrators) {
+    if !matches!(
+        classify_sid(owner, service_sid),
+        Principal::LocalSystem | Principal::Administrators
+    ) {
         return Err(IdentityDenied);
     }
     let (mut control, mut revision) = (0u16, 0u32);
     if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0
-        || control & SE_DACL_PROTECTED == 0 {
+        || control & SE_DACL_PROTECTED == 0
+    {
         return Err(IdentityDenied);
     }
     let mut acl_info: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
@@ -134,7 +160,9 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
             mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
             AclSizeInformation,
         )
-    } == 0 || acl_info.AceCount != 3 {
+    } == 0
+        || acl_info.AceCount != 3
+    {
         return Err(IdentityDenied);
     }
     let mut summaries = Vec::with_capacity(3);
@@ -147,8 +175,10 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
         let header = unsafe { &*raw.cast::<ACE_HEADER>() };
         let sid_offset = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
         let ace_size = header.AceSize as usize;
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE || ace_size < sid_offset + 8
-            || ace_size > acl_info.AclBytesInUse as usize {
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+            || ace_size < sid_offset + 8
+            || ace_size > acl_info.AclBytesInUse as usize
+        {
             return Err(IdentityDenied);
         }
         // For a standard allowed ACE, SID begins at SidStart. Bound its length
@@ -158,7 +188,9 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
         if sub_count > 15 || 8 + 4 * sub_count > ace_size - sid_offset {
             return Err(IdentityDenied);
         }
-        if unsafe { IsValidSid(sid.cast()) } == 0 { return Err(IdentityDenied); }
+        if unsafe { IsValidSid(sid.cast()) } == 0 {
+            return Err(IdentityDenied);
+        }
         let allowed = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
         summaries.push(AceSummary {
             principal: classify_sid(sid.cast(), service_sid),
@@ -173,14 +205,15 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
 /// the dedicated SCM service identity before looking at any supplied handle.
 /// Its caller must independently acquire the state directory via protected,
 /// component-pinned bootstrap. This function cannot perform that bootstrap.
-pub fn observe_preopened_service_state(file: File) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
+pub fn observe_preopened_service_state(
+    file: File,
+) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
     verify_service_identity()?;
     let attrs = file.metadata().map_err(|_| IdentityDenied)?;
     if !attrs.is_dir() || attrs.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(IdentityDenied);
     }
-    let service_sid = crate::windows_token::service_sid_bytes()
-        .map_err(|_| IdentityDenied)?;
+    let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     inspect_acl(&file, &service_sid)?;
     Ok(ObservedWindowsStateDirectory { file })
 }
@@ -189,7 +222,11 @@ pub fn observe_preopened_service_state(file: File) -> Result<ObservedWindowsStat
 mod tests {
     use super::*;
     fn ace(principal: Principal, mask: u32) -> AceSummary {
-        AceSummary { principal, mask, flags: 0 }
+        AceSummary {
+            principal,
+            mask,
+            flags: 0,
+        }
     }
     fn legitimate() -> Vec<AceSummary> {
         vec![
@@ -201,7 +238,11 @@ mod tests {
     #[test]
     fn exact_three_principals_accept_and_unexpected_principals_deny() {
         assert_eq!(validate_ace_set(&legitimate()), Ok(()));
-        for principal in [Principal::Foreign, Principal::LocalSystem, Principal::Administrators] {
+        for principal in [
+            Principal::Foreign,
+            Principal::LocalSystem,
+            Principal::Administrators,
+        ] {
             let mut entries = legitimate();
             entries[2].principal = principal;
             assert_eq!(validate_ace_set(&entries), Err(IdentityDenied));
@@ -225,15 +266,17 @@ mod tests {
     fn unprovisioned_process_never_issues_a_policy_state_observation() {
         let temp = tempfile::tempdir().unwrap();
         assert_eq!(
-            observe_preopened_service_state(
-                {
-                    use std::os::windows::fs::OpenOptionsExt;
-                    std::fs::OpenOptions::new()
-                        .read(true)
-                        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
-                        .open(temp.path()).unwrap()
-                }
-            ).err(),
+            observe_preopened_service_state({
+                use std::os::windows::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(
+                        windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
+                    )
+                    .open(temp.path())
+                    .unwrap()
+            })
+            .err(),
             Some(IdentityDenied),
         );
     }

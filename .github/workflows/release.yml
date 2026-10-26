@@ -25,13 +25,44 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      issues: read
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
 
     steps:
+      - name: Verify production release readiness
+        id: readiness
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          JDC_PRODUCTION_RELEASE_APPROVED: ${{ vars.JDC_PRODUCTION_RELEASE_APPROVED }}
+        with:
+          script: |
+            // Opt-in from the repository owner; issue closure alone is not approval.
+            if (process.env.JDC_PRODUCTION_RELEASE_APPROVED !== 'true') {
+              core.notice('Release Please deferred: production approval variable is not true.');
+              core.setOutput('eligible', 'false');
+              return;
+            }
+            // Read the live source of truth. API errors must fail the job closed.
+            const blockers = [124, 139, 148];
+            const outstanding = [];
+            for (const issue_number of blockers) {
+              const { data } = await github.rest.issues.get({ ...context.repo, issue_number });
+              if (!data || data.pull_request || data.state !== 'closed') {
+                outstanding.push(issue_number);
+              }
+            }
+            const eligible = outstanding.length === 0;
+            core.setOutput('eligible', eligible ? 'true' : 'false');
+            if (!eligible) {
+              core.notice('Release Please deferred: P0 issues remain unresolved: ' +
+                outstanding.map(number => '#' + number).join(', '));
+            }
+
       - name: Create scoped release GitHub App token
+        if: steps.readiness.outputs.eligible == 'true'
         id: release-app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -42,6 +73,7 @@ jobs:
           permission-issues: write
 
       - name: Run Release Please
+        if: steps.readiness.outputs.eligible == 'true'
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:

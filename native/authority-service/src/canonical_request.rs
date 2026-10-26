@@ -45,7 +45,11 @@ fn epoch(value: &str) -> bool {
 fn reserved_device(component: &str) -> bool {
     let stem = component.split('.').next().unwrap_or(component);
     let upper = stem.to_ascii_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+    // CONIN$ and CONOUT$ are special Win32 console device handles too.
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
         return true;
     }
     let mut chars = upper.chars();
@@ -64,7 +68,9 @@ fn reserved_device(component: &str) -> bool {
     }
 }
 
-fn safe_relative_path(path: &str) -> bool {
+/// Shared path grammar for both C4d decoding and OS-rooted operations.
+/// A decoded path must never be rejected solely by a second, divergent parser.
+pub(crate) fn safe_relative_path(path: &str) -> bool {
     if path.is_empty() || path.len() > MAX_PATH_BYTES {
         return false;
     }
@@ -261,6 +267,8 @@ mod tests {
             String::from("a/./b"),
             String::from("com1.log"),
             String::from("LPT².doc"),
+            String::from("CONIN$"),
+            String::from("CONOUT$.txt"),
             String::from("a/"),
         ] {
             let raw = payload(&path);

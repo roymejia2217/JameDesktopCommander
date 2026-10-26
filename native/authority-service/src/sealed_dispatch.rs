@@ -82,6 +82,25 @@ mod tests {
         }
     }
     #[test]
+    fn canonical_unicode_and_internal_spaces_execute_inside_pinned_root() {
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("allowed");
+        let outside = f.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"NEVER_CHANGED").unwrap();
+        let mut grant = fixture(&inside);
+        let frame = wire(ROOT, 7, ID, "科研/mi carpeta");
+        // The strict C4d parser already accepts this exact Unicode spelling.
+        assert!(decode_create_directory_frame(&frame).is_ok());
+        assert_eq!(grant.execute_c4d(&frame), Ok(()));
+        assert!(inside.join("科研/mi carpeta").is_dir());
+        assert!(!outside.join("科研").exists());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"NEVER_CHANGED");
+    }
+
+    #[test]
     fn matching_root_epoch_creates_only_inside_then_replay_denies() {
         let f = tempfile::tempdir().unwrap();
         let inside = f.path().join("inside");

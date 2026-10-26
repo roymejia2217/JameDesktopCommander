@@ -4,6 +4,8 @@
 use cap_std::fs::Dir;
 use std::io;
 
+use crate::canonical_request::safe_relative_path;
+
 /// Holds only a supplied directory capability, never an ambient root path.
 /// Construction is not policy authentication. Do not expose this type to IPC
 /// until the OS-protected policy owner and peer have been verified.
@@ -12,25 +14,9 @@ pub struct RootedDirectory {
 }
 
 fn validate_single_child(name: &str) -> io::Result<()> {
-    // Portable and intentionally narrow: one path component, ASCII only,
-    // no Windows device aliases or names with trailing dot/space.
-    let valid = !name.is_empty()
-        && name.len() <= 100
-        && name
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.'
-        })
-        && !name.ends_with('.');
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit()
-            && stem.as_bytes()[3] != b'0');
-    if !valid || reserved {
+    // Never use a second character policy. The protocol grammar is the only
+    // source of truth; explicitly require exactly one component here.
+    if !safe_relative_path(name) || name.contains('/') {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "E_CHILD_NAME_DENIED",
@@ -66,23 +52,16 @@ impl RootedDirectory {
     /// Validate the whole input before mutation, then retain an opened handle at
     /// each level instead of rebuilding a pathname or following an ambient path.
     pub fn create_descendant(&self, relative: &str) -> io::Result<()> {
-        const MAX_PATH_BYTES: usize = 4096;
-        const MAX_COMPONENTS: usize = 64;
-        let components: Vec<&str> = relative.split('/').collect();
-        if relative.is_empty()
-            || relative.len() > MAX_PATH_BYTES
-            || components.len() > MAX_COMPONENTS
-        {
+        // Validate the *complete* path before any mutation. This is exactly
+        // the same bound, segment grammar and reserved-name set as C4d.
+        if !safe_relative_path(relative) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "E_PATH_DENIED",
             ));
         }
-        for component in &components {
-            validate_single_child(component)?;
-        }
         let mut child: Option<Dir> = None;
-        for component in components {
+        for component in relative.split('/') {
             let parent = child.as_ref().unwrap_or(&self.root);
             match parent.create_dir(component) {
                 Ok(()) => {}
@@ -118,6 +97,30 @@ mod tests {
     }
 
     #[test]
+    fn unicode_single_child_and_nested_child_share_canonical_protocol_grammar() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"UNCHANGED").unwrap();
+        let dir = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        dir.create_child("résumé").unwrap();
+        dir.open_child("résumé")
+            .unwrap()
+            .create_child("资料")
+            .unwrap();
+        dir.create_descendant("科研/mi carpeta").unwrap();
+        assert!(root.join("résumé/资料").is_dir());
+        assert!(root.join("科研/mi carpeta").is_dir());
+        assert!(!outside.join("科研").exists());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"UNCHANGED");
+    }
+
+    #[test]
     fn malformed_and_traversing_names_must_never_create_outside() {
         let fixture = tempfile::tempdir().unwrap();
         let root_path = fixture.path().join("allowed");
@@ -139,6 +142,8 @@ mod tests {
             r"C:\temp",
             "NUL",
             "NUL.txt",
+            "CONIN$",
+            "CONOUT$.log",
             "CON",
             "LPT1",
             "COM1",
@@ -273,9 +278,11 @@ mod tests {
             "fresh/../outside",
             "fresh//child",
             "fresh/NUL.txt",
+            "fresh/CONIN$",
+            "fresh/CONOUT$.txt",
             "fresh/a.",
             "fresh/COM1",
-            "fresh/with space",
+            "fresh/LPT².log",
             "fresh/child\\outside",
             "fresh/",
         ] {

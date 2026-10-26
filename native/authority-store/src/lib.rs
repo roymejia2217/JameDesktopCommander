@@ -17,6 +17,23 @@ pub struct EpochStore {
     connection: Connection,
 }
 
+/// Immutable data-only policy-row identity. This is NOT an authenticated
+/// policy, a protected OS directory, an antirollback witness or an I/O grant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PolicySnapshot {
+    epoch: u64,
+    digest: [u8; 32],
+}
+
+impl PolicySnapshot {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
 fn current(connection: &Connection) -> Result<(u64, [u8; 32]), StoreDenied> {
     let (epoch, digest): (Vec<u8>, Vec<u8>) = connection
         .query_row(
@@ -109,6 +126,17 @@ impl EpochStore {
         current(&self.connection).map(|(epoch, _)| epoch)
     }
 
+    /// Read epoch and digest together using one SQLite SELECT statement.
+    /// Require a provisioned, nonzero policy identity; there is no authority
+    /// until an independent trusted OS watermark and owned root are verified.
+    pub fn read_snapshot(&self) -> Result<PolicySnapshot, StoreDenied> {
+        let (epoch, digest) = current(&self.connection)?;
+        if epoch == 0 || digest.iter().all(|byte| *byte == 0) {
+            return Err(StoreDenied);
+        }
+        Ok(PolicySnapshot { epoch, digest })
+    }
+
     /// Persist a strictly increasing epoch and policy digest in one SQLite
     /// IMMEDIATE transaction. No caller authorization is performed.
     pub fn commit_after(
@@ -117,7 +145,7 @@ impl EpochStore {
         next: u64,
         digest: [u8; 32],
     ) -> Result<(), StoreDenied> {
-        if next == 0 || next <= expected_previous {
+        if next == 0 || next <= expected_previous || digest.iter().all(|byte| *byte == 0) {
             return Err(StoreDenied);
         }
         let tx = self

@@ -45,6 +45,70 @@ fn reopening_retains_epoch_and_rejects_old_or_equal_commit() {
 }
 
 #[test]
+fn snapshot_preserves_exact_epoch_and_digest_without_granting_authority() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    assert!(
+        store.read_snapshot().is_err(),
+        "unprovisioned all-zero fixture must deny"
+    );
+    assert!(store.commit_after(0, 7, [0xA5; 32]).is_ok());
+    let snapshot = store.read_snapshot().unwrap();
+    assert_eq!(snapshot.epoch(), 7);
+    assert_eq!(snapshot.digest(), &[0xA5; 32]);
+    // Matching a synthetic witness is data comparison only. No OS evidence.
+    assert_eq!((snapshot.epoch(), snapshot.digest()), (7, &[0xA5; 32]));
+}
+
+#[test]
+fn database_replay_and_same_epoch_digest_change_do_not_match_separate_witness() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    let saved = dir.path().join("saved.sqlite3");
+    fixture(&db);
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(0, 1, [1; 32]).unwrap();
+    }
+    std::fs::copy(&db, &saved).unwrap();
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(1, 2, [2; 32]).unwrap();
+        let current = store.read_snapshot().unwrap();
+        assert_eq!((current.epoch(), current.digest()), (2, &[2; 32]));
+    }
+    std::fs::copy(&saved, &db).unwrap();
+    let rollback = EpochStore::open_existing(&db)
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    assert_ne!((rollback.epoch(), rollback.digest()), (2, &[2; 32]));
+    // A digest-only substitution at the same epoch must not be accepted.
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(1, 2, [0xA6; 32]).unwrap();
+    }
+    let forged = EpochStore::open_existing(&db)
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    assert_eq!(forged.epoch(), 2);
+    assert_ne!(forged.digest(), &[2; 32]);
+}
+
+#[test]
+fn store_refuses_to_commit_all_zero_policy_digest() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    assert!(store.commit_after(0, 1, [0; 32]).is_err());
+    assert_eq!(store.read_epoch().unwrap(), 0);
+}
+
+#[test]
 fn concurrent_transactions_have_exactly_one_winner() {
     use std::sync::{Arc, Barrier};
     let dir = tempdir().unwrap();

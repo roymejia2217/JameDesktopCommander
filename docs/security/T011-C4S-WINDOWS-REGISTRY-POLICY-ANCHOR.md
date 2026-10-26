@@ -42,6 +42,23 @@ All resources must be removed even on test failure; no user host is touched.
 The test uses synthetic policy digest bytes solely to prove register admission;
 it does not authenticate policy content or exercise a real SQLite transaction.
 
+## SQLite snapshot identity — independently tested, not trusted custody
+
+The experimental `EpochStore::read_snapshot()` returns a private, immutable
+`PolicySnapshot` with epoch and digest from **one SQLite SELECT row read**.
+It denies uninitialized epoch zero and all-zero digest, while `commit_after`
+refuses to persist an all-zero policy digest. The original SQLite transaction
+and whole-database-replay tests remain intact.
+
+Real data tests save an old SQLite database, advance its epoch and digest,
+restore the old database and demonstrate that the restored row does not
+match the separately retained newer witness. Another case advances to the
+same epoch with a *different* digest and demonstrates non-equivalence.
+These are **data-level negative proofs only**: the witness is a test fixture,
+not the admin-owned Windows Registry observation, and the SQLite file is
+still acquired by an untrusted pathname. No broker uses either observation
+to authorize a client.
+
 ## Remaining production blockers
 
 - The checked-in SQLite store still opens by pathname; no actual protected

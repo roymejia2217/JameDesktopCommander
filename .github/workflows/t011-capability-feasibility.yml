@@ -182,6 +182,27 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
 
+      - name: Verify SCM probe verdict separation under Rust unit tests
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --example windows_state_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Build disposable debug-only SCM policy-state observation probe
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --example windows_state_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Parse disposable Windows SCM policy-state acceptance
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-state-scm-positive.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove true SCM-restricted token admits only protected state DACL
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-state-scm-positive.ps1
+
       - name: Build test-only Windows custody fixtures
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml

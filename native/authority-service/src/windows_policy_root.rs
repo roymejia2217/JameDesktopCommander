@@ -6,7 +6,7 @@ use windows_sys::Win32::{
     Foundation::LocalFree,
     Security::{
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
         AclSizeInformation, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
         GetSecurityDescriptorControl, IsValidAcl, IsValidSid, IsWellKnownSid,
         OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED, WinBuiltinAdministratorsSid,
@@ -15,6 +15,8 @@ use windows_sys::Win32::{
     Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
+// Win32 ACCESS_ALLOWED_ACE_TYPE is the documented ACE_HEADER.AceType value 0.
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
 const GENERIC_ALL: u32 = 0x1000_0000;
@@ -145,7 +147,7 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
         let header = unsafe { &*raw.cast::<ACE_HEADER>() };
         let sid_offset = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
         let ace_size = header.AceSize as usize;
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 || ace_size < sid_offset + 8
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE || ace_size < sid_offset + 8
             || ace_size > acl_info.AclBytesInUse as usize {
             return Err(IdentityDenied);
         }

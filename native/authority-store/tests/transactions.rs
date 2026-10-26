@@ -163,7 +163,42 @@ fn schema_change_after_open_must_deny_before_writing() {
         store.commit_after(0, 1, [2_u8; 32]).is_err(),
         "after-open trigger change must be rejected, never used as an update side effect"
     );
-    assert_eq!(store.read_epoch().unwrap(), 0);
+    assert!(
+        store.read_epoch().is_err(),
+        "schema drift must deny all store readers"
+    );
+    let raw_epoch: Vec<u8> = Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT epoch FROM protected_policy WHERE slot=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        raw_epoch, [0_u8; 8],
+        "rejected write must preserve original epoch"
+    );
+}
+
+#[test]
+fn opened_reader_must_refuse_post_open_schema_mutation() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    store.commit_after(0, 1, [5_u8; 32]).unwrap();
+    assert_eq!(store.read_snapshot().unwrap().epoch(), 1);
+    let other = Connection::open(&db).unwrap();
+    other
+        .execute_batch(
+            "CREATE TRIGGER unexpected AFTER UPDATE ON protected_policy BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    drop(other);
+    assert!(store.read_epoch().is_err(), "read_epoch must reject drift");
+    assert!(
+        store.read_snapshot().is_err(),
+        "read_snapshot must reject drift"
+    );
 }
 
 #[test]

@@ -131,16 +131,29 @@ impl EpochStore {
         Ok(Self { connection })
     }
 
+    // Schema and row must be observed in one SQLite read transaction.
+    // This does not authenticate the database file or external policy owner.
+    fn read_consistent(&self) -> Result<(u64, [u8; 32]), StoreDenied> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| StoreDenied)?;
+        exact_schema(&tx)?;
+        let snapshot = current(&tx)?;
+        tx.commit().map_err(|_| StoreDenied)?;
+        Ok(snapshot)
+    }
+
     /// Read an existing provisioned epoch without granting any capability.
     pub fn read_epoch(&self) -> Result<u64, StoreDenied> {
-        current(&self.connection).map(|(epoch, _)| epoch)
+        self.read_consistent().map(|(epoch, _)| epoch)
     }
 
     /// Read epoch and digest together using one SQLite SELECT statement.
     /// Require a provisioned, nonzero policy identity; there is no authority
     /// until an independent trusted OS watermark and owned root are verified.
     pub fn read_snapshot(&self) -> Result<PolicySnapshot, StoreDenied> {
-        let (epoch, digest) = current(&self.connection)?;
+        let (epoch, digest) = self.read_consistent()?;
         if epoch == 0 || digest.iter().all(|byte| *byte == 0) {
             return Err(StoreDenied);
         }

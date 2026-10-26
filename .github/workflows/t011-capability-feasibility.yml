@@ -203,6 +203,27 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-state-scm-positive.ps1
 
+      - name: Verify read-only Windows Registry epoch contract under Rust tests
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml windows_epoch_anchor::tests
+
+      - name: Build disposable debug-only SCM Registry epoch probe
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --example windows_epoch_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Parse disposable Windows Registry epoch acceptance
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-registry-epoch-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove actual SCM read-only Registry watermark and snapshot rejection
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-registry-epoch-acceptance.ps1
+
       - name: Build test-only Windows custody fixtures
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml

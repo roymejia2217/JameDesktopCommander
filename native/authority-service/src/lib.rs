@@ -47,6 +47,10 @@ pub mod windows_token;
 #[cfg(windows)]
 pub mod windows_policy_root;
 
+// Independently administered Windows registry epoch watermark (observation only).
+#[cfg(windows)]
+pub mod windows_epoch_anchor;
+
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityDenied;

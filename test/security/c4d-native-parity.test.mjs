@@ -40,6 +40,7 @@ test('native Rust matches canonical TypeScript C4d request admission exactly', (
   }
   for (const path of ['', '..', '.', 'a/../b', 'a//b', 'a\\b', 'C:/root',
     'CON', 'con.txt', 'PRN', 'AUX', 'NUL', 'COM1', 'COM¹.log',
+    'CONIN$', 'CONOUT$.txt', 'a/CONIN$',
     'LPT²', 'LPT³.txt', 'a:', 'a?', 'a*', 'a|b', 'trailing.',
     'trailing ', 'a/'.repeat(65) + 'z', 'a'.repeat(256), 'a'.repeat(4097)]) {
     add('invalid path ' + path.slice(0, 25), frame(JSON.stringify({ ...base(), relativePath: path })));

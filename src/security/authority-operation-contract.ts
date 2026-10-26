@@ -11,7 +11,7 @@ const requestIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3
 const rootReferencePattern = /^[0-9a-f]{32}$/;
 const epochPattern = /^[1-9][0-9]{0,19}$/;
 const invalidPathCharacter = /[\\\\:*?"<>|\u0000-\u001f\u007f]/u;
-const reservedDevice = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/i;
+const reservedDevice = /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/i;
 
 export type AuthorityRejectionCode =
   | 'E_POLICY_STALE' | 'E_POLICY_UNAVAILABLE' | 'E_AUTH_REQUIRED'

@@ -116,6 +116,8 @@ fi
 # permissions, even if the contents of the old snapshot are known.
 sudo -n install -m 0600 -o nobody -g "$attacker_group" "$database" "$snapshot"
 sudo -n -u jdc-authority -- "$store_fixture" advance "$database"
+# SQLite itself must create and remove a DELETE-mode rollback journal.
+sudo -n -u jdc-authority -- "$store_fixture" prove-rollback-journal "$database"
 sudo -n -u jdc-authority -- "$store_fixture" verify-2 "$database"
 expected_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 
@@ -136,6 +138,21 @@ expect_denied overwrite sudo -n -u nobody -- cp "$snapshot" "$database"
 expect_denied rename sudo -n -u nobody -- mv "$database" "$fixture_dir/renamed.sqlite3"
 expect_denied unlink sudo -n -u nobody -- rm "$database"
 expect_denied replay sudo -n -u nobody -- mv "$snapshot" "$database"
+# Verify the actual protected directory's ownership of all SQLite auxiliary
+# namespaces. WAL/SHM cases are namespace probes, not active WAL tests.
+for suffix in -journal -wal -shm; do
+  sidecar="${database}${suffix}"
+  sudo -n -u jdc-authority -- touch "$sidecar"
+  sudo -n -u jdc-authority -- test -f "$sidecar"
+  expect_denied sidecar_read sudo -n -u nobody -- cat "$sidecar"
+  expect_denied sidecar_write sudo -n -u nobody -- touch "$sidecar"
+  sudo -n -u jdc-authority -- rm "$sidecar"
+  expect_denied sidecar_create sudo -n -u nobody -- touch "$sidecar"
+  if [[ -e "$sidecar" ]]; then
+    printf '%s\n' 'E_CUSTODY_UNAUTHORIZED_SIDECAR_CREATED' >&2
+    exit 1
+  fi
+done
 expect_denied parent_rename sudo -n -u nobody -- mv "$fixture_dir" "${fixture_dir}-replaced"
 expect_denied parent_chmod sudo -n -u nobody -- chmod 0777 "$fixture_dir"
 # Both hard-link directions must be denied under independent OS principals.

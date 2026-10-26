@@ -3,6 +3,44 @@ use jdc_authority_store::EpochStore;
 use rusqlite::Connection;
 use std::{env, path::Path, process::ExitCode};
 
+// CI-only proof of a genuine SQLite rollback journal, not a manufactured sidecar.
+fn prove_rollback_journal(path: &Path) -> Result<(), String> {
+    let mut journal_name = path.as_os_str().to_os_string();
+    journal_name.push("-journal");
+    let journal = std::path::PathBuf::from(journal_name);
+    if journal.exists() {
+        return Err("preexisting rollback journal".into());
+    }
+    let mut conn = Connection::open(path).map_err(|e| e.to_string())?;
+    if conn
+        .is_readonly(rusqlite::MAIN_DB)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("read-only database".into());
+    }
+    let mode: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err("unexpected SQLite journal mode".into());
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let modified = tx
+        .execute(
+            "UPDATE protected_policy SET digest = ?1 WHERE slot = 1",
+            rusqlite::params![[0x5Au8; 32].as_slice()],
+        )
+        .map_err(|e| e.to_string())?;
+    if modified != 1 || !journal.is_file() {
+        return Err("SQLite did not create its rollback journal".into());
+    }
+    tx.rollback().map_err(|e| e.to_string())?;
+    if journal.exists() {
+        return Err("rollback journal remained after rollback".into());
+    }
+    Ok(())
+}
+
 fn execute(command: &str, path: &Path) -> Result<(), String> {
     match command {
         "init" => {
@@ -28,6 +66,7 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
                 .commit_after(1, 2, [2; 32])
                 .map_err(|_| "commit failed".to_string())
         }
+        "prove-rollback-journal" => prove_rollback_journal(path),
         "verify-2" => {
             let store = EpochStore::open_existing(path).map_err(|_| "store unavailable")?;
             if store.read_epoch().map_err(|_| "read denied")? == 2 {
@@ -37,6 +76,27 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
             }
         }
         _ => Err("unsupported offline fixture command".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::execute;
+    use tempfile::tempdir;
+
+    #[test]
+    fn actual_sqlite_rollback_journal_is_created_and_removed_without_epoch_change() {
+        let directory = tempdir().unwrap();
+        let db = directory.path().join("policy.sqlite3");
+        execute("init", &db).unwrap();
+        execute("advance", &db).unwrap();
+        execute("prove-rollback-journal", &db).unwrap();
+        execute("verify-2", &db).unwrap();
+        let snapshot = jdc_authority_store::EpochStore::open_existing(&db)
+            .unwrap()
+            .read_snapshot()
+            .unwrap();
+        assert_eq!(snapshot.digest(), &[2; 32], "rollback changed policy bytes");
     }
 }
 

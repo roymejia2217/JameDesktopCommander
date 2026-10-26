@@ -66,6 +66,9 @@ jobs:
       - name: Prove isolated SQLite epoch transactions and replay limitation
         run: cargo +1.91.1 test --locked --manifest-path native/authority-store/Cargo.toml
 
+      - name: Prove real SQLite rollback journal lifecycle on Windows and Linux
+        run: cargo +1.91.1 test --locked --example custody_fixture --manifest-path native/authority-store/Cargo.toml
+
       - name: Prove the unprivileged hardlink attack fixture has a working positive control
         run: cargo +1.91.1 test --locked --example custody_attacker --manifest-path native/authority-store/Cargo.toml
 

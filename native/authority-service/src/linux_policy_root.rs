@@ -174,6 +174,11 @@ mod tests {
         let private = tempfile::tempdir_in(home).unwrap();
         let protected = private.path().join("state");
         std::fs::create_dir(&protected).unwrap();
+        // CI umask is not the declared service StateDirectoryMode=0700.
+        // Establish the positive control independently of runner defaults.
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mode = std::fs::metadata(&protected).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "valid policy-directory fixture required");
         assert!(
             open_verified_existing_directory(protected.to_str().unwrap(), uid, gid).is_ok(),
             "positive control must prove valid state was openable"

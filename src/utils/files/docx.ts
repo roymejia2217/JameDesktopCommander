@@ -18,6 +18,7 @@
 
 import fs from 'fs/promises';
 import PizZip from 'pizzip';
+import * as yauzl from 'yauzl';
 import { FileHandler, FileResult, FileInfo, ReadOptions, EditResult } from './base.js';
 
 // ════════════════════════════════════════════════════════════════
@@ -69,6 +70,111 @@ interface DocxZipContents {
     documentXml: string;
     /** All XML parts keyed by path (e.g. "word/header1.xml") */
     xmlParts: Map<string, string>;
+}
+
+// Processing limits apply to untrusted DOCX bytes, not solely their ZIP size.
+// Reject before PizZip processes any entry; yauzl verifies actual inflation.
+const MAX_DOCX_ARCHIVE_BYTES = 10 * 1024 * 1024;
+const MAX_DOCX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_DOCX_XML_PART_BYTES = 8 * 1024 * 1024;
+const MAX_DOCX_ENTRIES = 1024;
+
+async function validateDocxZipBudget(buf: Buffer): Promise<void> {
+    if (buf.length > MAX_DOCX_ARCHIVE_BYTES) {
+        throw new Error('DOCX compressed input limit exceeded');
+    }
+
+    const archive = await yauzl.fromBufferPromise(buf, {
+        strictFileNames: true,
+        validateEntrySizes: true,
+    });
+    const names = new Set<string>();
+    let declaredTotalBytes = 0;
+    let actualTotalBytes = 0;
+    let entryCount = 0;
+    try {
+        for await (const entry of archive.eachEntry()) {
+            if (++entryCount > MAX_DOCX_ENTRIES) {
+                throw new Error('DOCX entry count limit exceeded');
+            }
+            if (names.has(entry.fileName)) {
+                throw new Error('DOCX duplicate ZIP entry rejected');
+            }
+            names.add(entry.fileName);
+
+            if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0) {
+                throw new Error('DOCX invalid uncompressed size');
+            }
+            declaredTotalBytes += entry.uncompressedSize;
+            if (!Number.isSafeInteger(declaredTotalBytes) ||
+                declaredTotalBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
+                throw new Error('DOCX aggregate uncompressed size limit exceeded');
+            }
+
+            const isXml = /\.(xml|rels)$/i.test(entry.fileName);
+            if (isXml && entry.uncompressedSize > MAX_DOCX_XML_PART_BYTES) {
+                throw new Error('DOCX XML part size limit exceeded');
+            }
+
+            // Directories must not carry payloads.
+            if (entry.fileName.endsWith('/')) {
+                if (entry.uncompressedSize !== 0 || entry.compressedSize !== 0) {
+                    throw new Error('DOCX ZIP directory payload rejected');
+                }
+                continue;
+            }
+
+            // Every entry, including images and embedded binary objects, must
+            // actually inflate under budget. Central-directory sizes alone
+            // cannot validate a forged stream or its resource consumption.
+            const stream = await archive.openReadStreamPromise(entry);
+            let actualBytes = 0;
+            for await (const chunk of stream) {
+                const chunkBytes = (chunk as Buffer).byteLength;
+                actualBytes += chunkBytes;
+                actualTotalBytes += chunkBytes;
+                if (actualBytes > entry.uncompressedSize ||
+                    actualTotalBytes > MAX_DOCX_UNCOMPRESSED_BYTES ||
+                    (isXml && actualBytes > MAX_DOCX_XML_PART_BYTES)) {
+                    stream.destroy();
+                    throw new Error('DOCX inflated entry size limit exceeded');
+                }
+            }
+            if (actualBytes !== entry.uncompressedSize) {
+                throw new Error('DOCX ZIP entry size mismatch');
+            }
+        }
+        if (!names.has('word/document.xml')) {
+            throw new Error('Invalid DOCX: missing word/document.xml');
+        }
+    } finally {
+        archive.close();
+    }
+}
+
+async function readBoundedDocxFile(filePath: string): Promise<Buffer> {
+    // The same opened file handle is used for stat and the bounded read.
+    // This is a memory budget, NOT an allowedDirectories authorization grant.
+    const handle = await fs.open(filePath, 'r');
+    try {
+        const stat = await handle.stat();
+        if (stat.size > MAX_DOCX_ARCHIVE_BYTES) {
+            throw new Error('DOCX compressed input limit exceeded');
+        }
+        const bytes = Buffer.alloc(MAX_DOCX_ARCHIVE_BYTES + 1);
+        let read = 0;
+        while (read < bytes.length) {
+            const part = await handle.read(bytes, read, bytes.length - read, read);
+            if (part.bytesRead === 0) break;
+            read += part.bytesRead;
+        }
+        if (read > MAX_DOCX_ARCHIVE_BYTES) {
+            throw new Error('DOCX compressed input limit exceeded');
+        }
+        return bytes.subarray(0, read);
+    } finally {
+        await handle.close();
+    }
 }
 
 function loadDocxZip(buf: Buffer): DocxZipContents {
@@ -502,6 +608,76 @@ function countOccurrences(haystack: string, needle: string): number {
 // DocxFileHandler — implements FileHandler
 // ════════════════════════════════════════════════════════════════
 
+/**
+ * Read DOCX from bytes already obtained and authorized by the caller.
+ *
+ * The function never opens a filesystem path. It is an internal processing
+ * seam, not a filesystem authorization boundary. Its ZIP size and inflation
+ * budgets are enforced before parsing; existing DOCX outline and pagination
+ * semantics are retained.
+ */
+export async function readDocxBytes(source: Uint8Array, options?: ReadOptions): Promise<FileResult> {
+    if (!(source instanceof Uint8Array)) {
+        throw new TypeError('DOCX source must be a Uint8Array');
+    }
+    if (source.byteLength > MAX_DOCX_ARCHIVE_BYTES) {
+        throw new Error('DOCX compressed input limit exceeded');
+    }
+    // Own a stable snapshot across asynchronous validation and synchronous
+    // PizZip parsing; callers may otherwise mutate a shared Uint8Array.
+    const buf = Buffer.from(source);
+    await validateDocxZipBudget(buf);
+    const { zip, documentXml } = loadDocxZip(buf);
+    const pretty = prettyPrintXml(documentXml);
+    const allLines = pretty.split('\n');
+    const totalLines = allLines.length;
+    const offset = options?.offset ?? 0;
+    const length = options?.length;
+
+    // If user explicitly requests non-zero offset, give raw XML with pagination
+    const wantsRaw = offset !== 0;
+
+    if (wantsRaw) {
+        let startLine: number;
+        let sliceLength: number;
+
+        if (offset < 0) {
+            startLine = Math.max(0, totalLines + offset);
+            sliceLength = totalLines - startLine;
+        } else {
+            startLine = offset;
+            sliceLength = length ?? totalLines;
+        }
+
+        const sliced = allLines.slice(startLine, startLine + sliceLength);
+        const remaining = totalLines - (startLine + sliced.length);
+        const status = `[DOCX XML: lines ${startLine}-${startLine + sliced.length - 1} of ${totalLines} (${remaining} remaining)]`;
+
+        return {
+            content: status + '\n' + sliced.join('\n'),
+            mimeType: 'application/xml',
+            metadata: { isDocx: true, lineCount: totalLines },
+        };
+    }
+
+    // Default: return outline
+    const outline = extractOutline(documentXml);
+    const headerFooterInfo = extractHeaderFooterOutline(zip);
+    const rawSizeKB = (documentXml.length / 1024).toFixed(1);
+
+    return {
+        content: outline + headerFooterInfo +
+            `\n\nRaw XML: ${totalLines} lines, ${rawSizeKB}KB.` +
+            `\nFor bulk changes (translation, mass find/replace): use start_process with a Python script using zipfile to edit <w:t> elements.`,
+        mimeType: 'text/plain',
+        metadata: { isDocx: true, lineCount: totalLines },
+    };
+}
+
+/**
+ * DOCX file-handler facade. The original pathname-based entry point remains
+ * for compatibility until T011 proves a fully handle-bound native route.
+ */
 export class DocxFileHandler implements FileHandler {
     private readonly extensions = ['.docx'];
 
@@ -516,52 +692,7 @@ export class DocxFileHandler implements FileHandler {
      * With offset/length: returns raw pretty-printed XML with line pagination
      */
     async read(path: string, options?: ReadOptions): Promise<FileResult> {
-        const buf = await fs.readFile(path);
-        const { zip, documentXml } = loadDocxZip(buf);
-        const pretty = prettyPrintXml(documentXml);
-        const allLines = pretty.split('\n');
-        const totalLines = allLines.length;
-        const offset = options?.offset ?? 0;
-        const length = options?.length;
-
-        // If user explicitly requests non-zero offset, give raw XML with pagination
-        const wantsRaw = offset !== 0;
-
-        if (wantsRaw) {
-            let startLine: number;
-            let sliceLength: number;
-
-            if (offset < 0) {
-                startLine = Math.max(0, totalLines + offset);
-                sliceLength = totalLines - startLine;
-            } else {
-                startLine = offset;
-                sliceLength = length ?? totalLines;
-            }
-
-            const sliced = allLines.slice(startLine, startLine + sliceLength);
-            const remaining = totalLines - (startLine + sliced.length);
-            const status = `[DOCX XML: lines ${startLine}-${startLine + sliced.length - 1} of ${totalLines} (${remaining} remaining)]`;
-
-            return {
-                content: status + '\n' + sliced.join('\n'),
-                mimeType: 'application/xml',
-                metadata: { isDocx: true, lineCount: totalLines },
-            };
-        }
-
-        // Default: return outline
-        const outline = extractOutline(documentXml);
-        const headerFooterInfo = extractHeaderFooterOutline(zip);
-        const rawSizeKB = (documentXml.length / 1024).toFixed(1);
-
-        return {
-            content: outline + headerFooterInfo +
-                `\n\nRaw XML: ${totalLines} lines, ${rawSizeKB}KB.` +
-                `\nFor bulk changes (translation, mass find/replace): use start_process with a Python script using zipfile to edit <w:t> elements.`,
-            mimeType: 'text/plain',
-            metadata: { isDocx: true, lineCount: totalLines },
-        };
+        return readDocxBytes(await readBoundedDocxFile(path), options);
     }
 
     /**
@@ -645,7 +776,8 @@ export class DocxFileHandler implements FileHandler {
             }
 
             // Load and pretty-print
-            const buf = await fs.readFile(path);
+            const buf = await readBoundedDocxFile(path);
+            await validateDocxZipBudget(buf);
             const zip = new PizZip(buf);
             const docFile = zip.file('word/document.xml');
             if (!docFile) throw new Error('Invalid DOCX: missing word/document.xml');
@@ -733,7 +865,8 @@ export class DocxFileHandler implements FileHandler {
 
         let metadata: any = { isDocx: true };
         try {
-            const buf = await fs.readFile(path);
+            const buf = await readBoundedDocxFile(path);
+            await validateDocxZipBudget(buf);
             const { documentXml } = loadDocxZip(buf);
             const text = extractAllText(documentXml);
             const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;

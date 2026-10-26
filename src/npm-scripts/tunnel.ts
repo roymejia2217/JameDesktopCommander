@@ -30,6 +30,10 @@ import {
     readTunnelFunctionalDiagnostics,
     type TunnelFunctionalDiagnostics,
 } from '../platform/windows/tunnel-functional-diagnostics.js';
+import {
+    readWindowsTunnelTaskEvents,
+    type WindowsTunnelTaskEvents,
+} from '../platform/windows/tunnel-task-events.js';
 
 export const DEFAULT_WINDOWS_TUNNEL_TASK_NAME = 'Desktop Commander Windows Tunnel';
 
@@ -55,6 +59,7 @@ export interface WindowsTunnelCommandDependencies {
     uninstallTask?: (taskName: string) => Promise<RunExecutableResult>;
     statusTunnel?: (taskName: string) => Promise<WindowsTunnelStatus>;
     diagnoseLocal?: (baseUrl: string) => Promise<TunnelFunctionalDiagnostics>;
+    taskEvents?: (taskName: string) => Promise<WindowsTunnelTaskEvents>;
     nodeExecutable?: () => string;
     restartWorkerScript?: () => string;
     installRestartSupervisorTask?: InstallRestartSupervisorTask;
@@ -85,6 +90,11 @@ export type WindowsTunnelCommandResult =
         action: 'diagnose';
         taskName: string;
         diagnostics: TunnelFunctionalDiagnostics;
+    }
+    | {
+        action: 'events';
+        taskName: string;
+        history: WindowsTunnelTaskEvents;
     };
 
 interface InstallArguments {
@@ -280,6 +290,9 @@ function resolveDependencies(
         diagnoseLocal:
             dependencies.diagnoseLocal ??
             ((baseUrl) => readTunnelFunctionalDiagnostics(baseUrl)),
+        taskEvents:
+            dependencies.taskEvents ??
+            ((taskName) => readWindowsTunnelTaskEvents(taskName)),
         nodeExecutable:
             dependencies.nodeExecutable ??
             (() => process.execPath),
@@ -310,7 +323,7 @@ export async function runWindowsTunnelCommand(
 
     const [action, ...actionArgs] = args;
     if (!action) {
-        throw new Error('Tunnel action is required: install, start, stop, restart, status, diagnose, or uninstall.');
+        throw new Error('Tunnel action is required: install, start, stop, restart, status, diagnose, events, or uninstall.');
     }
 
     const taskName = DEFAULT_WINDOWS_TUNNEL_TASK_NAME;
@@ -399,6 +412,13 @@ export async function runWindowsTunnelCommand(
             return { action, taskName,
                 diagnostics: await deps.diagnoseLocal(state.health.baseUrl) };
         }
+        case 'events': {
+            if (actionArgs.length > 0) {
+                throw new Error('Tunnel events does not accept additional arguments.');
+            }
+            // Does not depend on tunnel health, nor authorize any lifecycle action.
+            return { action, taskName, history: await deps.taskEvents(taskName) };
+        }
         case 'start':
         case 'stop':
         case 'uninstall': {
@@ -442,6 +462,8 @@ export function formatWindowsTunnelCommandResult(
             return JSON.stringify(result.status, null, 2);
         case 'diagnose':
             return JSON.stringify(result.diagnostics, null, 2);
+        case 'events':
+            return JSON.stringify(result.history, null, 2);
     }
 }
 
@@ -455,6 +477,7 @@ Usage:
   desktop-commander tunnel restart
   desktop-commander tunnel status
   desktop-commander tunnel diagnose
+  desktop-commander tunnel events
   desktop-commander tunnel uninstall
 
 Notes:
@@ -462,6 +485,7 @@ Notes:
   --recover-on-exit opts in to native Task Scheduler five-minute repetitions on unexpected process exit, including exit code 0.
   stop first disables the task to preserve intentional operator STOP; start re-enables it.
   restart re-registers and launches an external Windows Task Scheduler supervisor so it survives the tunnel process tree.
+  events reads only bounded, sanitized Task Scheduler metadata, even when the tunnel is offline; it never authorizes a restart.
   Existing tunnel tasks are not replaced unless --force is supplied.
   Secrets remain owned by tunnel-client profiles via env: or file: references.`);
 }
@@ -470,6 +494,29 @@ export async function runTunnel(
     args: readonly string[] = process.argv.slice(3),
     dependencies: WindowsTunnelCommandDependencies = {},
 ): Promise<void> {
+    const platform = dependencies.platform ?? process.platform;
+    if (platform === 'linux') {
+        if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | uninstall');
+            return;
+        }
+        try {
+            // Import only on Linux: Windows lifecycle and existing tests remain untouched.
+            const { runLinuxTunnelCommand } = await import('../platform/linux/tunnel-lifecycle.js');
+            const result = await runLinuxTunnelCommand(args, { platform });
+            console.log(JSON.stringify(result, null, 2));
+            if (result.action === 'status' &&
+                (!result.status?.active || !result.status.enabled || !result.status.healthy ||
+                 !result.status.controlPlanePoll)) {
+                process.exitCode = 1;
+            }
+        } catch (error) {
+            console.error('Linux tunnel command failed: ' +
+                (error instanceof Error ? error.message : 'Unknown error'));
+            process.exitCode = 1;
+        }
+        return;
+    }
     if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
         printTunnelHelp();
         return;

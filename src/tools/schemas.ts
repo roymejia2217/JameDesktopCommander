@@ -14,7 +14,7 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.boolean(),
   z.null(),
   z.array(JsonValueSchema),
-  z.record(JsonValueSchema),
+  z.record(z.string(), JsonValueSchema),
 ]));
 
 // Config tools schemas
@@ -91,7 +91,7 @@ export const ReadFileArgsSchema = z.object({
   length: z.number().optional().default(1000),
   sheet: z.string().optional(),  // String only for MCP client compatibility (Cursor doesn't support union types in JSON Schema)
   range: z.string().optional(),
-  options: z.record(JsonValueSchema).optional(),
+  options: z.record(z.string(), JsonValueSchema).optional(),
   // Whether the call came from the file-preview UI (refresh/navigation) or the
   // LLM. 'ui' calls are excluded from tool-call telemetry; see isUiOriginCall
   // in server.ts.
@@ -189,7 +189,7 @@ export const EditBlockArgsSchema = z.object({
   // Structured file range rewrite (Excel, etc.)
   range: z.string().optional(),
   content: JsonValueSchema.optional(),
-  options: z.record(JsonValueSchema).optional(),
+  options: z.record(z.string(), JsonValueSchema).optional(),
   // 'ui' when fired by the file-preview UI, else 'llm'. 'ui' calls are
   // excluded from tool-call telemetry; see isUiOriginCall in server.ts.
   origin: z.enum(['ui', 'llm']).optional(),
@@ -270,7 +270,7 @@ export const GetRecentToolCallsArgsSchema = z.object({
   since: z.string().datetime().optional(),
 });
 
-const UiEventParamsSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
+const UiEventParamsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
 
 export const UiEventEnvelopeSchema = z.object({
   event: z.string().min(1).max(80),
@@ -341,7 +341,7 @@ export const OpenCodeTaskArgsSchema = z.object({
  * about parameters a caller sent that the tool does not support. Keep in sync
  * with the tool definitions in server.ts.
  */
-export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
+export const toolArgSchemas: Record<string, z.ZodType> = {
   get_config: GetConfigArgsSchema,
   tunnel_probe: TunnelProbeArgsSchema,
   render_config_editor: GetConfigArgsSchema,

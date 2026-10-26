@@ -52,6 +52,12 @@ async function runServer() {
       return;
     }
 
+    if (process.argv[2] === 'portable') {
+      const { runPortableDoctor } = await import('./npm-scripts/portable-doctor.js');
+      await runPortableDoctor(process.argv.slice(3));
+      return;
+    }
+
     if (process.argv[2] === 'ui-bridge') {
       const { runUiBridge } = await import('./npm-scripts/ui-bridge.js');
       await runUiBridge(process.argv.slice(3));

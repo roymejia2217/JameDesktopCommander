@@ -4,6 +4,10 @@
 
 pub mod token_policy;
 
+// Internal handle-bound directory operation. No IPC or policy grant yet.
+#[cfg(any(windows, target_os = "linux"))]
+pub mod handle_mkdir;
+
 // C4d native transport framing only, not an authenticated listener or authority.
 pub mod frame_reader;
 

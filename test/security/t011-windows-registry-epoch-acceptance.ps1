@@ -30,9 +30,16 @@ $all = [System.Security.AccessControl.RegistryRights]::FullControl
 $read = [System.Security.AccessControl.RegistryRights]::ReadKey
 
 function Set-ExactAdminControlledKey([bool] $foreign) {
-    $security = [System.Security.AccessControl.RegistrySecurity]::new()
-    $security.SetOwner($ba)
+    if (-not (Test-Path -LiteralPath $registryKey -PathType Container)) {
+        throw 'E_EPOCH_REGISTRY_KEY_NOT_CREATED'
+    }
+    # Set-Acl expects descriptor metadata bound to an existing RegistryKey.
+    $security = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
     $security.SetAccessRuleProtection($true, $false)
+    foreach ($oldRule in @($security.Access)) {
+        $security.RemoveAccessRuleSpecific($oldRule)
+    }
+    $security.SetOwner($ba)
     $rules = @(
         @{ Sid = $system; Rights = $all },
         @{ Sid = $ba; Rights = $all },
@@ -121,6 +128,9 @@ try {
     $createdRegistry = $true
     New-Item -Path (Join-Path $registryParent 'Authority') -ItemType Key -ErrorAction Stop | Out-Null
     New-Item -Path $registryKey -ItemType Key -ErrorAction Stop | Out-Null
+    if (-not (Test-Path -LiteralPath $registryKey -PathType Container)) {
+        throw 'E_EPOCH_REGISTRY_KEY_NOT_CREATED'
+    }
     # V1 is ONE atomic REG_BINARY value: 8-byte BE epoch + 32-byte digest.
     $anchor = [byte[]]::new(40)
     $anchor[7] = 7

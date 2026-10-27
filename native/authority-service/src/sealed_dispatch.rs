@@ -24,7 +24,8 @@ pub struct SealedDirectoryGrant {
     root_ref: String,
     expected_epoch: u64,
     rooted: RootedDirectory,
-    used_requests: HashSet<String>,
+    // Same canonical 16-byte UUID identity consumed by durable replay storage.
+    used_requests: HashSet<[u8; 16]>,
     active: bool,
 }
 
@@ -57,7 +58,7 @@ impl SealedDirectoryGrant {
         if request.root_ref() != self.root_ref
             || request.expected_epoch() != self.expected_epoch
             || self.used_requests.len() >= MAX_REQUESTS_PER_EPOCH
-            || !self.used_requests.insert(request.request_id().to_owned())
+            || !self.used_requests.insert(request.request_id_bytes())
         {
             return Err(DispatchDenied);
         }

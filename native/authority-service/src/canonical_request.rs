@@ -34,6 +34,32 @@ fn uuid_v4(id: &str) -> bool {
         })
 }
 
+// Strict UUIDv4 grammar remains the only accepted wire representation. Convert
+// it to the exact 16-byte replay identity without a second parser or aliases.
+fn uuid_v4_bytes(value: &str) -> Option<[u8; 16]> {
+    if !uuid_v4(value) {
+        return None;
+    }
+    let mut result = [0u8; 16];
+    let mut index = 0usize;
+    for ch in value.bytes().filter(|&ch| ch != b'-') {
+        let nibble = if ch.is_ascii_digit() {
+            ch - b'0'
+        } else {
+            ch - b'a' + 10
+        };
+        let slot = &mut result[index / 2];
+        *slot |= if index.is_multiple_of(2) {
+            nibble << 4
+        } else {
+            nibble
+        };
+        index += 1;
+    }
+    debug_assert_eq!(index, 32);
+    Some(result)
+}
+
 fn epoch(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 20
@@ -97,6 +123,7 @@ pub(crate) fn safe_relative_path(path: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalCreateDirectory {
     request_id: String,
+    request_id_bytes: [u8; 16],
     expected_epoch: u64,
     root_ref: String,
     relative_path: String,
@@ -105,6 +132,11 @@ pub struct CanonicalCreateDirectory {
 impl CanonicalCreateDirectory {
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+    /// Wire-validated UUIDv4 in the exact 16-byte representation of the
+    /// durable replay ledger. This is syntax data, NOT proof of authority.
+    pub fn request_id_bytes(&self) -> [u8; 16] {
+        self.request_id_bytes
     }
     pub fn expected_epoch(&self) -> u64 {
         self.expected_epoch
@@ -136,13 +168,13 @@ pub fn decode_create_directory_frame(
     }
     let json = &frame[4..];
     let req: Request = serde_json::from_slice(json).map_err(|_| FrameDenied)?;
+    let request_id_bytes = uuid_v4_bytes(&req.request_id).ok_or(FrameDenied)?;
     if serde_json::to_vec(&req)
         .map_err(|_| FrameDenied)?
         .as_slice()
         != json
         || req.version != 1
         || req.kind != "create-directory"
-        || !uuid_v4(&req.request_id)
         || !epoch(&req.expected_epoch)
         || req.root_ref.len() != 32
         || !req.root_ref.bytes().all(lower_hex)
@@ -152,6 +184,7 @@ pub fn decode_create_directory_frame(
     }
     Ok(CanonicalCreateDirectory {
         request_id: req.request_id,
+        request_id_bytes,
         expected_epoch: req.expected_epoch.parse::<u64>().map_err(|_| FrameDenied)?,
         root_ref: req.root_ref,
         relative_path: req.relative_path,
@@ -178,12 +211,45 @@ mod tests {
         let wire = frame(payload("project/nuevo").as_bytes());
         let parsed = decode_create_directory_frame(&wire).expect("valid canonical request");
         assert_eq!(parsed.request_id(), ID);
+        assert_eq!(
+            parsed.request_id_bytes(),
+            [
+                0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x41, 0x11, 0x81, 0x11, 0x11, 0x11, 0x11, 0x11,
+                0x11, 0x11
+            ]
+        );
         assert_eq!(parsed.expected_epoch(), u64::MAX);
         assert_eq!(parsed.root_ref(), ROOT);
         assert_eq!(parsed.relative_path(), "project/nuevo");
         assert_eq!(validate_request_frame(&wire), Ok(()));
     }
 
+    #[test]
+    fn canonical_uuid_bytes_have_no_hyphen_or_hex_case_aliases() {
+        let id = "00112233-4455-4677-8899-aabbccddeeff";
+        let original = payload("replay/strict");
+        let distinct = original.replace(ID, id);
+        let canonical = decode_create_directory_frame(&frame(distinct.as_bytes())).unwrap();
+        assert_eq!(canonical.request_id(), id);
+        assert_eq!(
+            canonical.request_id_bytes(),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]
+        );
+        for rejected in [
+            id.to_uppercase(),
+            id.replace("-", ""),
+            id.replace("-4677-", "-5677-"),
+            id.replace("-8899-", "-7899-"),
+        ] {
+            assert!(decode_create_directory_frame(&frame(
+                original.replace(ID, &rejected).as_bytes()
+            ))
+            .is_err());
+        }
+    }
     #[test]
     fn typed_decoder_rejects_uncanonical_or_unauthorized_request_shapes() {
         let original = payload("safe");

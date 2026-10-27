@@ -95,10 +95,22 @@ fn matches_linux_filesystem_identity(fsuid: u32, fsgid: u32, expected: (u32, u32
     expected.0 != 0 && expected.1 != 0 && fsuid == expected.0 && fsgid == expected.1
 }
 
+// The service may not hold latent permitted or inheritable capabilities that
+// could be activated later, even when none are currently effective.
+#[cfg(any(target_os = "linux", test))]
+fn linux_service_has_no_extra_capabilities(
+    effective: u64,
+    permitted: u64,
+    inheritable: u64,
+) -> bool {
+    effective == 0 && permitted == 0 && inheritable == 0
+}
+
 #[cfg(target_os = "linux")]
 mod linux_identity {
     use super::{
-        matches_linux_filesystem_identity, only_dedicated_supplementary_groups, IdentityDenied,
+        linux_service_has_no_extra_capabilities, matches_linux_filesystem_identity,
+        only_dedicated_supplementary_groups, IdentityDenied,
     };
     use std::{mem::MaybeUninit, ptr};
     // Provisioning MUST be performed by a distinct system administrator.
@@ -153,6 +165,16 @@ mod linux_identity {
         if !matches_linux_filesystem_identity(fsuid, fsgid, (pwd.pw_uid, pwd.pw_gid)) {
             return Err(IdentityDenied);
         }
+        // capget(2) is read-only; deny any latent permitted, inheritable or
+        // currently effective privilege before using a filesystem handle.
+        let caps = rustix::thread::capabilities(None).map_err(|_| IdentityDenied)?;
+        if !linux_service_has_no_extra_capabilities(
+            caps.effective.bits(),
+            caps.permitted.bits(),
+            caps.inheritable.bits(),
+        ) {
+            return Err(IdentityDenied);
+        }
 
         // getresgid(2) does not report supplementary groups. Retaining a
         // foreign group can silently expand access despite matching UIDs.
@@ -190,6 +212,17 @@ mod linux_identity {
             assert_eq!(gid_before, unsafe { libc::setfsgid(!0) } as libc::gid_t);
             assert_eq!(uid_before, unsafe { libc::geteuid() });
             assert_eq!(gid_before, unsafe { libc::getegid() });
+        }
+        #[test]
+        fn kernel_capability_observer_reports_current_thread_without_mutation() {
+            let before = rustix::thread::capabilities(None).unwrap();
+            let after = rustix::thread::capabilities(None).unwrap();
+            assert_eq!(before, after);
+            assert!(linux_service_has_no_extra_capabilities(
+                before.effective.bits(),
+                before.permitted.bits(),
+                before.inheritable.bits(),
+            ));
         }
         #[test]
         fn dedicated_uid_gid_required_in_all_real_effective_saved_slots() {
@@ -256,5 +289,20 @@ mod filesystem_identity_tests {
         assert!(!matches_linux_filesystem_identity(2001, 2003, (2001, 2002)));
         assert!(!matches_linux_filesystem_identity(2001, 2002, (0, 2002)));
         assert!(!matches_linux_filesystem_identity(2001, 2002, (2001, 0)));
+    }
+}
+
+#[cfg(test)]
+mod linux_capability_contract_tests {
+    use super::linux_service_has_no_extra_capabilities;
+
+    #[test]
+    fn any_effective_permitted_or_inheritable_linux_capability_denies() {
+        assert!(linux_service_has_no_extra_capabilities(0, 0, 0));
+        assert!(!linux_service_has_no_extra_capabilities(1 << 1, 0, 0));
+        assert!(!linux_service_has_no_extra_capabilities(0, 1 << 7, 0));
+        assert!(!linux_service_has_no_extra_capabilities(0, 0, 1 << 21));
+        assert!(!linux_service_has_no_extra_capabilities(0, 0, 1 << 40));
+        assert!(!linux_service_has_no_extra_capabilities(1 << 63, 0, 0));
     }
 }

@@ -230,6 +230,7 @@ dependencies = [
  "cap-std",
  "jdc-authority-store",
  "libc",
+ "rustix",
  "sd-notify",
  "serde",
  "serde_json",

@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn root_owned_sqlite_candidate_file_rejects_aliases_and_wrong_principals() {
         let file = tempfile::tempfile().unwrap();
-        let mut st = metadata(&file.into()).unwrap();
+        let mut st = metadata(&file).unwrap();
         st.st_mode = libc::S_IFREG | 0o640;
         st.st_uid = 0;
         st.st_gid = 1234;
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn synthetic_metadata_contract_has_exact_admin_owner_group_and_mode() {
         let file = tempfile::tempfile().unwrap();
-        let mut st = metadata(&file.into()).unwrap();
+        let mut st = metadata(&file).unwrap();
         st.st_mode = libc::S_IFREG | 0o640;
         st.st_uid = 0;
         st.st_gid = 1234;

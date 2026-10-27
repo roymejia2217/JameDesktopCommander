@@ -258,25 +258,16 @@ export async function smokeCandidate(destination, manifest) {
   const executable = join(destination, manifest.runtimeExecutable);
   if (manifest.nativeCapabilityAddon !== undefined) {
     assert.equal(manifest.nativeCapabilityAddon, nativeAddonName);
+    // The packaged default addon is intentionally deny-only. Exercise the
+    // experimental capability API in its separate CI-only feature build.
     const nativeSmoke = [
-      "const fs = require('node:fs');",
-      "const os = require('node:os');",
-      "const path = require('node:path');",
-      "const { RootCapability } = require(process.argv[1]);",
-      "const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jdc-packaged-cap-'));",
-      "let cap;",
-      "try {",
-      "  cap = new RootCapability(root);",
-      "  cap.createDirectory('confined');",
-      "  cap.writeBytes('confined/probe.bin', Buffer.from([0, 255]), 'rewrite');",
-      "  if (!cap.readBytes('confined/probe.bin').equals(Buffer.from([0, 255]))) throw Error('Native byte mismatch');",
-      "  if (!cap.listDirectory('confined').includes('probe.bin')) throw Error('Native listing mismatch');",
-      "  if (!cap || !fs.existsSync(path.join(root, 'confined', 'probe.bin'))) throw Error('Native confinement failed');",
-      "  cap.moveRelative('confined/probe.bin', 'confined/renamed.bin');",
-      "  if (!fs.existsSync(path.join(root, 'confined', 'renamed.bin'))) throw Error('Native move failed');",
-      "  if (!cap) throw Error('Capability absent');",
-      "  try { cap.createDirectory('../escaped'); throw Error('Traversal was allowed'); } catch (e) { if (e.message === 'Traversal was allowed') throw e; }",
-      "} finally { try { cap?.close(); } finally { fs.rmSync(root, {recursive:true,force:true}); } }",
+      "const addon = require(process.argv[1]);",
+      "const keys = Object.keys(addon).sort();",
+      "if (keys.length !== 1 || keys[0] !== 'restrictedCapabilityUnavailable') throw Error('Unexpected native addon exports');",
+      "if (typeof addon.restrictedCapabilityUnavailable !== 'function') throw Error('Missing native denial entrypoint');",
+      "let denied = false;",
+      "try { addon.restrictedCapabilityUnavailable(); } catch (e) { denied = /E_CAPABILITY_UNAVAILABLE/.test(String(e)); }",
+      "if (!denied) throw Error('Native filesystem capability was not denied');",
     ].join('\n');
     runTool(executable, ['-e', nativeSmoke, join(destination, nativeAddonName)], destination);
   }

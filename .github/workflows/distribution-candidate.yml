@@ -78,12 +78,14 @@ jobs:
       - name: Verify committed native dependency lock
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
 
-      - name: Compile platform-specific capability addon from locked source
+      # The FFI class and its adversarial probes are retained in research PRs
+      # #131/#147 only. Candidate packaging may build the deny-only addon,
+      # but cannot claim that restricted filesystem capabilities are ready.
+      - name: Compile deny-only native addon from locked source
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 
-      - name: Exercise real native confinement and create verified Node addon
-        # Both suites stage/load the same .node path; Windows locks loaded DLLs.
-        run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
+      - name: Verify deny-only native addon surface before staging
+        run: node --test test/security/capability-default-surface.test.cjs
 
       - name: Stage Node runtime and native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build

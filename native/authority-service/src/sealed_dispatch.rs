@@ -10,7 +10,10 @@ pub struct DispatchDenied;
 // A production binary must never silently use process-local replay state.
 // The durable, OS-witnessed issuer has not been implemented yet. Keep the
 // only usable positive fixture behind cfg(test) until that boundary exists.
+#[derive(Default)]
 enum ReplayAdmission {
+    // Normal compilation has no durable issuer; default is always deny.
+    #[default]
     Unavailable,
     #[cfg(test)]
     SyntheticTestOnly(HashSet<[u8; 16]>),
@@ -321,7 +324,7 @@ mod tests {
         let inside = f.path().join("inside");
         std::fs::create_dir(&inside).unwrap();
         let mut grant = fixture(&inside);
-        grant.replay = ReplayAdmission::Unavailable;
+        grant.replay = ReplayAdmission::default();
         assert_eq!(
             grant.execute_c4d(&wire(ROOT, 7, ID, "forbidden")),
             Err(DispatchDenied)

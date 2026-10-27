@@ -25,7 +25,7 @@ test('portable runner rejects an environment override that requests a native add
   assert.match(candidate, /assert\.equal\(manifest\.nativeCapabilityAddon,\s*undefined/);
 });
 
-test('portable CLI denies a real environment reenable attempt before staging files', () => {
+test('portable CLI denies a real environment re-enable attempt before staging files', () => {
   const command = spawnSync(process.execPath, [
     path.join(root, 'scripts/distribution-candidate.mjs'), 'build',
   ], {

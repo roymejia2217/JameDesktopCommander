@@ -1,13 +1,8 @@
-//! T011 native capability probe. No filesystem authority is exported by a
-//! default build until receiver lifetime and OS-backed custody are accepted.
-//! The full research implementation is only built with an explicit CI feature.
+//! Non-authorizing, deny-only native addon for candidate packaging.
+//! Unsafe native class research is retained only on the separate #131
+//! investigation branch and is not built or shipped from this crate.
+//! Filesystem operations require an independently reviewed broker (#139).
 
-#[cfg(feature = "receiver-test-fixture")]
-pub mod research_impl;
-
-// A loadable, typed fail-closed default helps packaging prove that the native
-// artifact cannot accidentally expose an unreviewed RootCapability receiver.
-#[cfg(not(feature = "receiver-test-fixture"))]
 #[napi_derive::napi]
 pub fn restricted_capability_unavailable() -> napi::Result<()> {
     Err(napi::Error::from_reason(

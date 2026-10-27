@@ -13,6 +13,23 @@ pub struct RootedDirectory {
     root: Dir,
 }
 
+/// Separate, service-owned staging directory capability. Only a protected
+/// bootstrap may construct this value: there is intentionally no public
+/// path-based constructor or way to fabricate it from untrusted MCP input.
+/// Tests construct private fixtures to exercise the OS rename primitive.
+///
+/// External callers cannot turn an arbitrary ambient path into staging:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::ProtectedStagingDirectory;
+/// use cap_std::{ambient_authority, fs::Dir};
+/// let stage = ProtectedStagingDirectory {
+///     root: Dir::open_ambient_dir(".", ambient_authority()).unwrap(),
+/// };
+/// ```
+pub struct ProtectedStagingDirectory {
+    root: Dir,
+}
+
 fn validate_single_child(name: &str) -> io::Result<()> {
     // Never use a second character policy. The protocol grammar is the only
     // source of truth; explicitly require exactly one component here.
@@ -67,6 +84,68 @@ impl RootedDirectory {
             }
         }
         Ok(())
+    }
+
+    /// Experimental **replace-by-new-inode** semantics. Never opens the old
+    /// final inode for writing, which matters for cross-root hardlink aliases.
+    /// A future broker must prove separate-principal staging custody, same-volume
+    /// rename, destination state under races and crash recovery. In particular,
+    /// the destination might disappear between metadata and rename; this is NOT
+    /// yet an atomic compare-and-replace contract. There is no MCP grant here.
+    pub fn replace_existing_file_staged(
+        &self,
+        staging: &ProtectedStagingDirectory,
+        relative: &str,
+        stage_nonce: &str,
+        bytes: &[u8],
+    ) -> io::Result<()> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        let valid_nonce = stage_nonce.len() == 32
+            && stage_nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !safe_relative_path(relative) || !valid_nonce || bytes.len() > MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_REPLACE_DENIED",
+            ));
+        }
+        let mut pieces = relative.split('/').peekable();
+        let mut opened: Option<Dir> = None;
+        while pieces.peek().is_some() {
+            let component = pieces.next().expect("nonempty canonical path");
+            let parent = opened.as_ref().unwrap_or(&self.root);
+            if pieces.peek().is_none() {
+                // Require a previously existing regular file. A final hardlink
+                // is an entry, not permission to mutate its shared inode.
+                if !parent.symlink_metadata(component)?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_NONREGULAR",
+                    ));
+                }
+                let stage = format!(".jdc-stage-{stage_nonce}");
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                let mut fresh = staging.root.open_with(&stage, &options)?;
+                if let Err(err) = fresh.write_all(bytes).and_then(|_| fresh.sync_all()) {
+                    drop(fresh);
+                    let _ = staging.root.remove_file(&stage);
+                    return Err(err);
+                }
+                drop(fresh);
+                let replaced = staging.root.rename(&stage, parent, component);
+                if replaced.is_err() {
+                    let _ = staging.root.remove_file(&stage);
+                }
+                return replaced;
+            }
+            opened = Some(parent.open_dir(component)?);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_REPLACE_DENIED",
+        ))
     }
 
     /// Open only a validated, single-component child directory via cap-std.
@@ -148,6 +227,205 @@ mod tests {
         assert!(root.join("科研/mi carpeta").is_dir());
         assert!(!outside.join("科研").exists());
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"UNCHANGED");
+    }
+
+    #[test]
+    fn replace_existing_hardlink_alias_must_preserve_outside_inode_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("victim.bin");
+        let previous = b"EXTERNAL_BYTES_MUST_REMAIN_UNTOUCHED";
+        std::fs::write(&victim, previous).unwrap();
+        std::fs::hard_link(&victim, allowed.join("alias.bin"))
+            .expect("genuine same-volume hardlink, not a mock");
+        let stage_dir = fixture.path().join("protected-staging");
+        std::fs::create_dir(&stage_dir).unwrap();
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        rooted
+            .replace_existing_file_staged(
+                &staging,
+                "alias.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"AUTHORIZED_NEW_CONTENT",
+            )
+            .expect("protected handle-relative replacement must work on both supported OSes");
+        assert_eq!(std::fs::read(&victim).unwrap(), previous);
+        assert_eq!(
+            std::fs::read(allowed.join("alias.bin")).unwrap(),
+            b"AUTHORIZED_NEW_CONTENT"
+        );
+    }
+
+    #[test]
+    fn staged_replacement_must_not_use_attacker_writable_destination_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let private_stage = fixture.path().join("protected-staging");
+        let outside = fixture.path().join("outside");
+        for folder in [&allowed, &private_stage, &outside] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let victim = outside.join("victim.bin");
+        let protected_bytes = b"ORIGINAL_EXTERNAL_CONTENT";
+        std::fs::write(&victim, protected_bytes).unwrap();
+        std::fs::hard_link(&victim, allowed.join("target.bin")).unwrap();
+        // A hostile client occupies the same predictable temporary basename in
+        // the *untrusted allowed tree*. A correct implementation never opens it.
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let hostile_stage = allowed.join(format!(".jdc-stage-{nonce}"));
+        std::fs::hard_link(&victim, &hostile_stage).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        rooted
+            .replace_existing_file_staged(&staging, "target.bin", nonce, b"NEW_IN_ROOT")
+            .expect("private stage must be independent of destination namespace");
+        assert_eq!(std::fs::read(&victim).unwrap(), protected_bytes);
+        assert_eq!(std::fs::read(&hostile_stage).unwrap(), protected_bytes);
+        assert_eq!(
+            std::fs::read(allowed.join("target.bin")).unwrap(),
+            b"NEW_IN_ROOT"
+        );
+        assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_replacement_refuses_occupied_protected_nonce_without_side_effects() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage_dir = fixture.path().join("protected-stage");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+        std::fs::write(allowed.join("file.bin"), b"ORIGINAL").unwrap();
+        let nonce = "abcdef0123456789abcdef0123456789";
+        let temp_name = stage_dir.join(format!(".jdc-stage-{nonce}"));
+        std::fs::write(&temp_name, b"KEEP_STAGING").unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        assert!(rooted
+            .replace_existing_file_staged(&staging, "file.bin", nonce, b"WRONG",)
+            .is_err());
+        assert_eq!(
+            std::fs::read(allowed.join("file.bin")).unwrap(),
+            b"ORIGINAL"
+        );
+        assert_eq!(std::fs::read(&temp_name).unwrap(), b"KEEP_STAGING");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staged_replacement_denies_intermediate_ntfs_junction_to_outside() {
+        use std::process::Command;
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage_dir = fixture.path().join("protected-stage");
+        let outside = fixture.path().join("outside");
+        for folder in [&allowed, &stage_dir, &outside] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let victim = outside.join("file.bin");
+        std::fs::write(&victim, b"NEVER_MODIFY").unwrap();
+        let alias = allowed.join("junction");
+        let status = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "fixture must create real junction: {status:?}"
+        );
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        assert!(rooted
+            .replace_existing_file_staged(
+                &staging,
+                "junction/file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"ATTEMPT"
+            )
+            .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"NEVER_MODIFY");
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn staged_replacement_denies_intermediate_symlink_to_outside() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage_dir = fixture.path().join("protected-stage");
+        let outside = fixture.path().join("outside");
+        for folder in [&allowed, &stage_dir, &outside] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let victim = outside.join("file.bin");
+        std::fs::write(&victim, b"NEVER_MODIFY").unwrap();
+        symlink(&outside, allowed.join("alias")).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        assert!(rooted
+            .replace_existing_file_staged(
+                &staging,
+                "alias/file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"ATTEMPT"
+            )
+            .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"NEVER_MODIFY");
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn replace_existing_hardlink_alias_rejects_invalid_staging_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::write(allowed.join("file.bin"), b"SAFE").unwrap();
+        let stage_dir = fixture.path().join("protected-staging");
+        std::fs::create_dir(&stage_dir).unwrap();
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        for invalid in [
+            "",
+            "../outside",
+            "UPPERCASE0123456789abcdef01234567",
+            "0000",
+        ] {
+            assert!(rooted
+                .replace_existing_file_staged(&staging, "file.bin", invalid, b"CHANGE")
+                .is_err());
+            assert_eq!(std::fs::read(allowed.join("file.bin")).unwrap(), b"SAFE");
+        }
     }
 
     #[test]

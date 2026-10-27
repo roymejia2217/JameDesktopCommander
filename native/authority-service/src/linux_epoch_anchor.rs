@@ -14,6 +14,11 @@ const FILE_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// A root-owned witness is NOT authorization of a filesystem request.
+/// A pathname-based SQLite matcher is not an externally usable broker API:
+/// ```compile_fail
+/// use jdc_authority_service::linux_epoch_anchor::verify_existing_policy_against_root_anchor;
+/// let _unsafe_path_reader = verify_existing_policy_against_root_anchor;
+/// ```
 pub struct ObservedEpochFloor {
     epoch: u64,
     digest: [u8; 32],
@@ -97,7 +102,9 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
 
 /// Offline equality proof only: SQLite is STILL opened by a pathname and
 /// cannot confer authority. The witness must be opened independently first.
-pub fn verify_existing_policy_against_root_anchor(
+/// Compile into Rust unit tests only: no external pathname-based verifier.
+#[cfg(test)]
+pub(crate) fn verify_existing_policy_against_root_anchor(
     database: &std::path::Path,
 ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
     let floor = observe_fixed_epoch_floor()?;

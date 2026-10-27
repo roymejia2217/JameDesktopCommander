@@ -73,6 +73,12 @@ fn admissible_anchor(value_type: u32, data: &[u8]) -> Result<(u64, [u8; 32]), Id
 }
 
 /// Data-only observation. The key is never created or modified by this crate.
+/// Offline pathname-based policy matching must not exist for an external
+/// production consumer, even if the independently protected witness exists.
+/// ```compile_fail
+/// use jdc_authority_service::windows_epoch_anchor::verify_existing_policy_against_protected_registry;
+/// let _unsafe_path_reader = verify_existing_policy_against_protected_registry;
+/// ```
 pub struct ObservedEpochFloor {
     epoch: u64,
     digest: [u8; 32],
@@ -252,7 +258,9 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
 /// NON-RELEASE: this offline SQLite pathname is not yet an OS-pinned database
 /// handle; the protected updater, crash reconciliation and privileged broker
 /// have not been implemented. The returned bytes convey no filesystem grant.
-pub fn verify_existing_policy_against_protected_registry(
+/// Compile into Rust unit tests only: never publish a pathname-based verifier.
+#[cfg(test)]
+pub(crate) fn verify_existing_policy_against_protected_registry(
     database: &std::path::Path,
 ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
     // Never touch a caller-supplied path until identity and the independent

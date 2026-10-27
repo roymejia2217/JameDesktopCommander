@@ -94,6 +94,11 @@ impl ReplayClaimLedger {
     /// The ID must come from the independently validated canonical wire frame.
     /// A future issuer must bind this immutable epoch to the trusted witness.
     pub fn claim_once(&mut self, request_id: [u8; 16]) -> Result<(), StoreDenied> {
+        // Enforce the C4d UUIDv4 version/variant at the last persistence boundary.
+        // Raw bytes from untrusted callers must not consume durable replay slots.
+        if request_id[6] >> 4 != 4 || request_id[8] & 0b1100_0000 != 0b1000_0000 {
+            return Err(StoreDenied);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -134,6 +139,12 @@ mod tests {
     use tempfile::tempdir;
 
     const SCHEMA_FIXTURE: &str = "CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), PRIMARY KEY(epoch,request)) WITHOUT ROWID";
+    fn canonical_id(marker: u8) -> [u8; 16] {
+        let mut id = [marker; 16];
+        id[6] = 0x40;
+        id[8] = 0x80;
+        id
+    }
     fn setup(path: &Path) {
         let db = Connection::open(path).unwrap();
         db.execute_batch("PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;")
@@ -149,7 +160,7 @@ mod tests {
         let f = tempdir().unwrap();
         let path = f.path().join("claims.sqlite3");
         setup(&path);
-        let id = [0x42; 16];
+        let id = canonical_id(0x42);
         open(&path, 7).claim_once(id).unwrap();
         assert!(open(&path, 7).claim_once(id).is_err());
         open(&path, 8).claim_once(id).unwrap();
@@ -162,9 +173,9 @@ mod tests {
         let path = f.path().join("claims.sqlite3");
         setup(&path);
         let mut epoch_seven = open(&path, 7);
-        epoch_seven.claim_once([0x33; 16]).unwrap();
-        epoch_seven.claim_once([0x44; 16]).unwrap();
-        assert!(open(&path, 7).claim_once([0x33; 16]).is_err());
+        epoch_seven.claim_once(canonical_id(0x33)).unwrap();
+        epoch_seven.claim_once(canonical_id(0x44)).unwrap();
+        assert!(open(&path, 7).claim_once(canonical_id(0x33)).is_err());
         let db = Connection::open(&path).unwrap();
         let stored_epoch: Vec<u8> = db
             .query_row("SELECT DISTINCT epoch FROM replay_claims", [], |row| {
@@ -173,8 +184,30 @@ mod tests {
             .unwrap();
         assert_eq!(stored_epoch, 7u64.to_be_bytes());
         // A future trusted updater must explicitly issue a new pinned ledger.
-        open(&path, 8).claim_once([0x33; 16]).unwrap();
-        assert!(epoch_seven.claim_once([0x33; 16]).is_err());
+        open(&path, 8).claim_once(canonical_id(0x33)).unwrap();
+        assert!(epoch_seven.claim_once(canonical_id(0x33)).is_err());
+    }
+    #[test]
+    fn rejects_non_uuidv4_ids_before_persistent_replay_claims() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let mut ledger = open(&path, 7);
+        let mut bad_version = canonical_id(0x25);
+        bad_version[6] = 0x50; // valid variant, invalid version 5
+        let mut bad_variant = canonical_id(0x26);
+        bad_variant[8] = 0xc0; // valid version 4, invalid RFC variant
+        for invalid in [[0; 16], [0xff; 16], bad_version, bad_variant] {
+            assert!(
+                ledger.claim_once(invalid).is_err(),
+                "non UUIDv4 replay ID must DENY"
+            );
+        }
+        let db = Connection::open(&path).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "denied IDs must not consume the ledger");
     }
     #[test]
     fn two_independent_connections_cannot_both_claim_same_request() {
@@ -190,7 +223,7 @@ mod tests {
                     s.spawn(move || {
                         let mut ledger = open(&file, 7);
                         gate.wait();
-                        ledger.claim_once([0x12; 16]).is_ok()
+                        ledger.claim_once(canonical_id(0x12)).is_ok()
                     })
                 })
                 .collect();
@@ -200,7 +233,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(results.iter().filter(|&&won| won).count(), 1);
-        assert!(open(&path, 7).claim_once([0x12; 16]).is_err());
+        assert!(open(&path, 7).claim_once(canonical_id(0x12)).is_err());
     }
     #[test]
     fn schema_tampering_and_unprovisioned_files_fail_closed() {
@@ -220,12 +253,12 @@ mod tests {
         let path = f.path().join("claims.sqlite3");
         setup(&path);
         let mut ledger = open(&path, 3);
-        ledger.claim_once([0x11; 16]).unwrap();
+        ledger.claim_once(canonical_id(0x11)).unwrap();
         Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE injected (id INTEGER);")
             .unwrap();
-        assert!(ledger.claim_once([0x22; 16]).is_err());
+        assert!(ledger.claim_once(canonical_id(0x22)).is_err());
         let db = Connection::open(&path).unwrap();
         let count: i64 = db
             .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
@@ -238,12 +271,12 @@ mod tests {
         let path = f.path().join("claims.sqlite3");
         let old = f.path().join("old.sqlite3");
         setup(&path);
-        open(&path, 3).claim_once([0x11; 16]).unwrap();
+        open(&path, 3).claim_once(canonical_id(0x11)).unwrap();
         std::fs::copy(&path, &old).unwrap();
-        open(&path, 3).claim_once([0x22; 16]).unwrap();
+        open(&path, 3).claim_once(canonical_id(0x22)).unwrap();
         std::fs::copy(&old, &path).unwrap();
         assert!(
-            open(&path, 3).claim_once([0x22; 16]).is_ok(),
+            open(&path, 3).claim_once(canonical_id(0x22)).is_ok(),
             "NEGATIVE PROOF: untrusted whole-file SQLite rollback revives an ID"
         );
     }
@@ -256,10 +289,12 @@ mod tests {
         for n in 0..1024u32 {
             let mut id = [0u8; 16];
             id[..4].copy_from_slice(&n.to_be_bytes());
+            id[6] = 0x40;
+            id[8] = 0x80;
             ledger.claim_once(id).unwrap();
         }
-        assert!(ledger.claim_once([0xff; 16]).is_err());
+        assert!(ledger.claim_once(canonical_id(0xff)).is_err());
         drop(ledger);
-        assert!(open(&path, 12).claim_once([0; 16]).is_err());
+        assert!(open(&path, 12).claim_once(canonical_id(0)).is_err());
     }
 }

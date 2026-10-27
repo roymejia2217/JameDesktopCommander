@@ -43,6 +43,38 @@ fn prove_rollback_journal(path: &Path) -> Result<(), String> {
 
 fn execute(command: &str, path: &Path) -> Result<(), String> {
     match command {
+        "write-policy-anchor-mismatch" => {
+            let mut bytes = Vec::with_capacity(40);
+            bytes.extend_from_slice(&1u64.to_be_bytes());
+            bytes.extend_from_slice(&[0x33u8; 32]);
+            std::fs::write(path, bytes).map_err(|e| e.to_string())
+        }
+        "write-policy-anchor" => {
+            let mut bytes = Vec::with_capacity(40);
+            bytes.extend_from_slice(&1u64.to_be_bytes());
+            bytes.extend_from_slice(
+                &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
+                    b"approved-policy-fixture",
+                ),
+            );
+            std::fs::write(path, bytes).map_err(|e| e.to_string())
+        }
+        "init-policy-bytes" => {
+            use jdc_authority_store::policy_bytes::PolicyBytesStore;
+            let conn = Connection::open(path).map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "PRAGMA application_id=0x4A444332;
+                 PRAGMA user_version=2;
+                 CREATE TABLE protected_policy (slot INTEGER PRIMARY KEY CHECK(slot=1), epoch BLOB NOT NULL CHECK(length(epoch)=8), digest BLOB NOT NULL CHECK(length(digest)=32), policy_bytes BLOB NOT NULL CHECK(typeof(policy_bytes)='blob' AND length(policy_bytes)<=65536));
+                 INSERT INTO protected_policy(slot,epoch,digest,policy_bytes) VALUES (1,zeroblob(8),zeroblob(32),x'');",
+            ).map_err(|e| e.to_string())?;
+            drop(conn);
+            let mut store =
+                PolicyBytesStore::open_existing(path).map_err(|_| "store unavailable")?;
+            store
+                .commit_after(0, 1, b"approved-policy-fixture")
+                .map_err(|_| "policy fixture commit unavailable".into())
+        }
         "init" => {
             // Create a uniquely provisioned synthetic DB under a CI-owned
             // directory. Do not accept SQL or policy data from the caller.
@@ -84,6 +116,33 @@ mod tests {
     use super::execute;
     use tempfile::tempdir;
 
+    #[test]
+    fn independent_admin_witness_fixture_matches_exact_policy_bytes() {
+        let d = tempdir().unwrap();
+        let file = d.path().join("root-anchor");
+        execute("write-policy-anchor", &file).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(&bytes[..8], &1u64.to_be_bytes());
+        assert_eq!(
+            &bytes[8..],
+            &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
+                b"approved-policy-fixture"
+            )
+        );
+    }
+    #[test]
+    fn v2_fixture_produces_actual_immutable_policy_image() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("approved.sqlite3");
+        execute("init-policy-bytes", &p).unwrap();
+        let data = std::fs::read(&p).unwrap();
+        let observed =
+            jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&data)
+                .unwrap();
+        assert_eq!(observed.epoch(), 1);
+        assert_eq!(observed.bytes(), b"approved-policy-fixture");
+    }
     #[test]
     fn actual_sqlite_rollback_journal_is_created_and_removed_without_epoch_change() {
         let directory = tempdir().unwrap();

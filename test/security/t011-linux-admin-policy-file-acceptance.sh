@@ -21,21 +21,27 @@ probe="native/authority-service/target/debug/examples/linux_epoch_anchor_probe"
 [[ -x "$fixture" && -x "$probe" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_MISSING' >&2; exit 1; }
 directory='/etc/jdc-authority'
 policy="${directory}/policy.sqlite3"
+anchor="${directory}/policy-anchor"
 alias="${directory}/policy-hardlink"
 [[ ! -e "$directory" && ! -L "$directory" ]] || {
   printf '%s\n' 'E_POLICY_PREEXISTING_STATE' >&2
   exit 1
 }
 source_file="$(mktemp /tmp/jdc-policy-fixture.XXXXXXXX)"
+source_anchor="$(mktemp /tmp/jdc-policy-anchor.XXXXXXXX)"
+mismatch_anchor="$(mktemp /tmp/jdc-policy-mismatch.XXXXXXXX)"
 cleanup() {
   local code=$?
-  sudo -n rm -f -- "$alias" "$policy" || code=1
+  sudo -n rm -f -- "$alias" "$policy" "$anchor" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" || code=1
   exit "$code"
 }
 trap cleanup EXIT
-"$fixture" init "$source_file"
+"$fixture" init-policy-bytes "$source_file"
+"$fixture" write-policy-anchor "$source_anchor"
+"$fixture" write-policy-anchor-mismatch "$mismatch_anchor"
+[[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 ]] || exit 1
 [[ "$(stat -c '%s' -- "$source_file")" -ge 512 ]] || exit 1
 sudo -n install -d -o root -g root -m 0755 -- "$directory"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
@@ -49,8 +55,15 @@ verdict() {
   [[ "$actual" == "$expected" ]] || { printf '%s\n' 'E_POLICY_WRONG_VERDICT' >&2; exit 1; }
 }
 verdict CANDIDATE sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-candidate
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor" "$anchor"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 verdict DENIED sudo -n -u jdc-mcp-client -- setpriv --no-new-privs -- "$probe" policy-deny
 verdict DENIED sudo -n -- setpriv --no-new-privs -- "$probe" policy-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$mismatch_anchor" "$anchor"
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor" "$anchor"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 sudo -n chmod 0660 -- "$policy"
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-deny
 sudo -n chmod 0640 -- "$policy"
@@ -73,6 +86,7 @@ verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" po
 sudo -n rm -- "$policy"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
 verdict CANDIDATE sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-candidate
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 after="$(sudo -n sha256sum -- "$policy" | cut -d' ' -f1)"
 [[ "$after" == "$before" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_BYTES_CHANGED' >&2; exit 1; }
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

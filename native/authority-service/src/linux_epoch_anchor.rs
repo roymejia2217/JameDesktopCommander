@@ -3,7 +3,7 @@
 use crate::{epoch_anchor_wire::parse_epoch_digest_wire, verify_service_identity, IdentityDenied};
 use std::{
     fs::File,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
@@ -29,7 +29,7 @@ impl ObservedEpochFloor {
     }
 }
 
-fn metadata(fd: &OwnedFd) -> Result<libc::stat, IdentityDenied> {
+fn metadata(fd: &impl AsRawFd) -> Result<libc::stat, IdentityDenied> {
     let mut output = MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd.as_raw_fd(), output.as_mut_ptr()) } != 0 {
         return Err(IdentityDenied);
@@ -56,7 +56,7 @@ fn trusted_policy_file(st: &libc::stat, expected_group: libc::gid_t) -> bool {
         && st.st_gid == expected_group
         && (st.st_mode & 0o7777) == 0o640
         && st.st_nlink == 1
-        && (512..=16 * 1024 * 1024).contains(&st.st_size)
+        && (512..=4 * 1024 * 1024).contains(&st.st_size)
 }
 fn open_component(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, IdentityDenied> {
     let raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), DIRECTORY_FLAGS) };
@@ -91,12 +91,42 @@ fn open_fixed_admin_directory() -> Result<OwnedFd, IdentityDenied> {
 /// only; it deliberately does NOT parse policy, attest an updater, open a
 /// SQLite VFS connection, authorize a request or grant an OS capability.
 pub struct ObservedAdminPolicyFile {
+    file: File,
     device: u64,
     inode: u64,
 }
 impl ObservedAdminPolicyFile {
     pub fn file_identity(&self) -> (u64, u64) {
         (self.device, self.inode)
+    }
+
+    /// Consume the same verified kernel-opened file, never its original path.
+    /// Serialized read-only SQLite parsing is standard rusqlite and never
+    /// reopens a main database or sidecar via the process namespace.
+    /// The result is DATA ONLY: caller MUST independently verify the
+    /// administrator-owned monotonic witness and approved policy semantics.
+    pub fn read_verified_snapshot(
+        mut self,
+    ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
+        const MAX_IMAGE: usize = 4 * 1024 * 1024;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| IdentityDenied)?;
+        let mut bytes = Vec::new();
+        (&mut self.file)
+            .take((MAX_IMAGE + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| IdentityDenied)?;
+        let after = metadata(&self.file)?;
+        if !trusted_policy_file(&after, unsafe { libc::getegid() })
+            || self.device != after.st_dev
+            || self.inode != after.st_ino
+            || bytes.len() != after.st_size as usize
+        {
+            return Err(IdentityDenied);
+        }
+        jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&bytes)
+            .map_err(|_| IdentityDenied)
     }
 }
 /// Refuse any preexisting candidate that a less-privileged service can
@@ -128,7 +158,7 @@ pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, Identi
     if signature != *b"SQLite format 3\0" {
         return Err(IdentityDenied);
     }
-    let after = metadata(&file.into())?;
+    let after = metadata(&file)?;
     if !trusted_policy_file(&after, expected_group)
         || before.st_dev != after.st_dev
         || before.st_ino != after.st_ino
@@ -137,9 +167,30 @@ pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, Identi
         return Err(IdentityDenied);
     }
     Ok(ObservedAdminPolicyFile {
+        file,
         device: after.st_dev,
         inode: after.st_ino,
     })
+}
+
+/// Independently observe the root-owned witness before and after consuming
+/// the actual bounded bytes from an OS-pinned policy SQLite file. All
+/// comparisons use the *effective actual policy bytes* SHA-256, not the
+/// witness or a client-provided digest as the source of truth.
+/// NOT an issuer: trusted updater lifecycle, semantic policy authorization,
+/// replay ledger, root binding, and sidecar/publisher provenance are absent.
+pub fn observe_matching_admin_policy_snapshot(
+) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
+    let before = observe_fixed_epoch_floor()?;
+    let candidate = observe_fixed_policy_database()?;
+    let policy = candidate.read_verified_snapshot()?;
+    let after = observe_fixed_epoch_floor()?;
+    if !before.matches_snapshot(policy.epoch(), policy.digest())
+        || !after.matches_snapshot(policy.epoch(), policy.digest())
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(policy)
 }
 
 /// Fixed /etc/jdc-authority/policy-anchor. The dedicated service can READ
@@ -164,7 +215,7 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
     if file.read(&mut extra).map_err(|_| IdentityDenied)? != 0 {
         return Err(IdentityDenied);
     }
-    if !trusted_file(&metadata(&file.into())?, group) {
+    if !trusted_file(&metadata(&file)?, group) {
         return Err(IdentityDenied);
     }
     let (epoch, digest) = parse_epoch_digest_wire(&bytes)?;

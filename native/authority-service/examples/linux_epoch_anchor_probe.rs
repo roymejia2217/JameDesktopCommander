@@ -4,12 +4,39 @@
 fn main() {
     use jdc_authority_service::linux_epoch_anchor::{
         observe_fixed_epoch_floor, observe_fixed_policy_database,
+        observe_matching_admin_policy_snapshot,
     };
     let mut args = std::env::args().skip(1);
     let action = args.next().unwrap_or_default();
     if args.next().is_some() {
         eprintln!("E_ANCHOR_INVALID_PROBE_ARGUMENTS");
         std::process::exit(2);
+    }
+    if action == "policy-snapshot-deny" {
+        if observe_matching_admin_policy_snapshot().is_err() {
+            println!("DENIED");
+        } else {
+            eprintln!("E_ADMIN_POLICY_WITNESS_NOT_ENFORCED");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if action == "policy-snapshot" {
+        let result = observe_matching_admin_policy_snapshot();
+        if result.is_ok_and(|policy| {
+            policy.epoch() == 1
+                && policy.bytes() == b"approved-policy-fixture"
+                && policy.digest()
+                    == &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
+                        b"approved-policy-fixture",
+                    )
+        }) {
+            println!("VERIFIED_BYTES");
+        } else {
+            eprintln!("E_ADMIN_POLICY_SNAPSHOT_MISMATCH");
+            std::process::exit(1);
+        }
+        return;
     }
     if action == "policy-candidate" || action == "policy-deny" {
         let observed = observe_fixed_policy_database();

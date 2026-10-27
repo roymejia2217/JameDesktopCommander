@@ -72,6 +72,9 @@ test('root-admin policy SQLite-file candidate requires real OS-anchored principa
     /sudo -n ln -- "\$policy" "\$alias"/, /sudo -n ln -s -- "\$source_file" "\$policy"/,
     /verdict DENIED sudo -n -u jdc-mcp-client/,
     /verdict CANDIDATE sudo -n -u jdc-authority/,
+    /verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "\$probe" policy-snapshot/,
+    /init-policy-bytes/, /write-policy-anchor/, /write-policy-anchor-mismatch/,
+    /policy-snapshot-deny/, /policy-snapshot/,
     /LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS/,
   ]) assert.match(script, expression);
 });

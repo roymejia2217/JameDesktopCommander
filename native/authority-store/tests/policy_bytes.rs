@@ -12,6 +12,75 @@ fn fixture(path: &Path) {
     db.execute("INSERT INTO protected_policy(slot,epoch,digest,policy_bytes) VALUES(1,zeroblob(8),zeroblob(32),?1)", [b"".as_slice()]).unwrap();
 }
 #[test]
+fn immutable_sqlite_image_recovers_exact_policy_without_reopening_its_path() {
+    let f = tempdir().unwrap();
+    let path = f.path().join("policy.db");
+    fixture(&path);
+    let policy = b"approved exact policy bytes";
+    PolicyBytesStore::open_existing(&path)
+        .unwrap()
+        .commit_after(0, 7, policy)
+        .unwrap();
+    let image = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let mut memory = Connection::open_in_memory().unwrap();
+    memory
+        .deserialize_read_exact(
+            rusqlite::MAIN_DB,
+            std::io::Cursor::new(image.as_slice()),
+            image.len(),
+            true,
+        )
+        .unwrap();
+    assert!(
+        memory
+            .execute(
+                "UPDATE protected_policy SET policy_bytes=x'00' WHERE slot=1",
+                []
+            )
+            .is_err(),
+        "deserialized policy image must be physically immutable"
+    );
+    let app: i64 = memory
+        .pragma_query_value(None, "application_id", |r| r.get(0))
+        .unwrap();
+    let version: i64 = memory
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!((app, version), (0x4A444332, 2));
+    let observed = PolicyBytesStore::read_verified_serialized(&image).unwrap();
+    assert_eq!(observed.epoch(), 7);
+    assert_eq!(observed.digest(), &PolicyBytesStore::digest_exact(policy));
+    assert_eq!(observed.bytes(), policy);
+}
+#[test]
+fn immutable_sqlite_image_rejects_corruption_truncation_and_oversized_buffers() {
+    let f = tempdir().unwrap();
+    let path = f.path().join("policy.db");
+    fixture(&path);
+    PolicyBytesStore::open_existing(&path)
+        .unwrap()
+        .commit_after(0, 7, b"unique-policy-marker")
+        .unwrap();
+    let image = std::fs::read(&path).unwrap();
+    for invalid in [
+        Vec::new(),
+        b"SQLite format 3\0".to_vec(),
+        image[..image.len() - 1].to_vec(),
+        vec![0u8; 4 * 1024 * 1024 + 1],
+    ] {
+        assert!(PolicyBytesStore::read_verified_serialized(&invalid).is_err());
+    }
+    let mut altered = image.clone();
+    let marker = b"unique-policy-marker";
+    let offset = altered
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("actual policy bytes must exist in SQLite fixture");
+    altered[offset] ^= 0x01;
+    assert!(PolicyBytesStore::read_verified_serialized(&altered).is_err());
+}
+#[test]
 fn policy_bytes_roundtrip_and_nist_sha256_known_answer() {
     let f = tempdir().unwrap();
     let db = f.path().join("policy.db");

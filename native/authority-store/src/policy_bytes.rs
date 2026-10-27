@@ -113,6 +113,49 @@ impl PolicyBytesStore {
         Sha256::digest(bytes).into()
     }
 
+    /// Parse a bounded *already-read immutable* SQLite file image without
+    /// reopening any caller pathname, host database or SQLite journal sidecar.
+    /// Only returns data whose exact policy bytes match their stored SHA-256;
+    /// OS file custody, publisher authority, witness and revocation are NOT
+    /// authenticated here. Supplying bytes alone cannot mint a grant.
+    pub fn read_verified_serialized(raw: &[u8]) -> Result<VerifiedPolicy, StoreDenied> {
+        const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+        if raw.len() < 512
+            || raw.len() > MAX_IMAGE_BYTES
+            || !raw.len().is_multiple_of(512)
+            || raw.get(..16) != Some(b"SQLite format 3\0")
+        {
+            return Err(StoreDenied);
+        }
+        // Cursor over an already complete bounded slice cannot short-read.
+        // This avoids the SQLite allocation-leak risk on failed reads in
+        // rusqlite::deserialize_read_exact, while retaining standard SQLite
+        // owned buffer transfer with SQLITE_DESERIALIZE_READONLY.
+        let mut db = Connection::open_in_memory().map_err(|_| StoreDenied)?;
+        db.deserialize_read_exact(MAIN_DB, std::io::Cursor::new(raw), raw.len(), true)
+            .map_err(|_| StoreDenied)?;
+        // sqlite3_db_readonly can report false for an in-memory connection
+        // even when SQLITE_DESERIALIZE_READONLY rejects actual writes.
+        // Add SQLite's explicit query-only defense instead of relying on
+        // a misleading connection flag.
+        db.pragma_update(None, "query_only", 1)
+            .map_err(|_| StoreDenied)?;
+        let only: i64 = db
+            .pragma_query_value(None, "query_only", |r| r.get(0))
+            .map_err(|_| StoreDenied)?;
+        if only != 1 {
+            return Err(StoreDenied);
+        }
+        let tx = db.unchecked_transaction().map_err(|_| StoreDenied)?;
+        check_schema(&tx)?;
+        let snapshot = current(&tx)?;
+        tx.commit().map_err(|_| StoreDenied)?;
+        if snapshot.epoch == 0 {
+            return Err(StoreDenied);
+        }
+        Ok(snapshot)
+    }
+
     /// No schema auto-create/migration and no implicit rollback recovery.
     /// This pathname method is for isolated feasibility tests, not production custody.
     pub fn open_existing(path: &Path) -> Result<Self, StoreDenied> {

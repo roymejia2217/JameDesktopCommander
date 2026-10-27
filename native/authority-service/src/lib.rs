@@ -82,9 +82,18 @@ fn only_dedicated_supplementary_groups(groups: &[u32], expected_gid: u32) -> boo
     expected_gid != 0 && groups.len() <= 32 && groups.iter().all(|&gid| gid == expected_gid)
 }
 
+// Linux filesystem permission checks use FSUID/FSGID, which can differ from
+// the real/effective/saved triples even when those triples appear dedicated.
+#[cfg(any(target_os = "linux", test))]
+fn matches_linux_filesystem_identity(fsuid: u32, fsgid: u32, expected: (u32, u32)) -> bool {
+    expected.0 != 0 && expected.1 != 0 && fsuid == expected.0 && fsgid == expected.1
+}
+
 #[cfg(target_os = "linux")]
 mod linux_identity {
-    use super::{only_dedicated_supplementary_groups, IdentityDenied};
+    use super::{
+        matches_linux_filesystem_identity, only_dedicated_supplementary_groups, IdentityDenied,
+    };
     use std::{mem::MaybeUninit, ptr};
     // Provisioning MUST be performed by a distinct system administrator.
     const SERVICE_NAME: &[u8] = b"jdc-authority\0";
@@ -131,6 +140,13 @@ mod linux_identity {
         if !matches_dedicated_ids([ru, eu, su], [rg, eg, sg], (pwd.pw_uid, pwd.pw_gid)) {
             return Err(IdentityDenied);
         }
+        // Linux setfsuid(-1)/setfsgid(-1) are documented non-mutating
+        // credential queries. A divergent filesystem identity must deny.
+        let fsuid = unsafe { libc::setfsuid(!0) } as libc::uid_t;
+        let fsgid = unsafe { libc::setfsgid(!0) } as libc::gid_t;
+        if !matches_linux_filesystem_identity(fsuid, fsgid, (pwd.pw_uid, pwd.pw_gid)) {
+            return Err(IdentityDenied);
+        }
 
         // getresgid(2) does not report supplementary groups. Retaining a
         // foreign group can silently expand access despite matching UIDs.
@@ -160,6 +176,15 @@ mod linux_identity {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn querying_kernel_filesystem_ids_preserves_current_thread_credentials() {
+            let uid_before = unsafe { libc::setfsuid(!0) } as libc::uid_t;
+            let gid_before = unsafe { libc::setfsgid(!0) } as libc::gid_t;
+            assert_eq!(uid_before, unsafe { libc::setfsuid(!0) } as libc::uid_t);
+            assert_eq!(gid_before, unsafe { libc::setfsgid(!0) } as libc::gid_t);
+            assert_eq!(uid_before, unsafe { libc::geteuid() });
+            assert_eq!(gid_before, unsafe { libc::getegid() });
+        }
         #[test]
         fn dedicated_uid_gid_required_in_all_real_effective_saved_slots() {
             assert!(matches_dedicated_ids(
@@ -209,5 +234,21 @@ mod supplemental_group_tests {
         assert!(!only_dedicated_supplementary_groups(&[0], 2002));
         assert!(!only_dedicated_supplementary_groups(&[2002], 0));
         assert!(!only_dedicated_supplementary_groups(&[2002; 33], 2002));
+    }
+}
+
+#[cfg(test)]
+mod filesystem_identity_tests {
+    use super::matches_linux_filesystem_identity;
+
+    #[test]
+    fn filesystem_ids_must_match_the_dedicated_nonroot_account() {
+        assert!(matches_linux_filesystem_identity(2001, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(0, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 0, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2003, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2003, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2002, (0, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2002, (2001, 0)));
     }
 }

@@ -9,6 +9,13 @@ use crate::canonical_request::safe_relative_path;
 /// Holds only a supplied directory capability, never an ambient root path.
 /// Construction is not policy authentication. Do not expose this type to IPC
 /// until the OS-protected policy owner and peer have been verified.
+/// An external consumer must not mint this wrapper from an ambient directory:
+/// ```compile_fail
+/// use cap_std::{ambient_authority, fs::Dir};
+/// use jdc_authority_service::handle_mkdir::RootedDirectory;
+/// let unapproved = Dir::open_ambient_dir(".", ambient_authority()).unwrap();
+/// let _forged = RootedDirectory::from_preopened(unapproved);
+/// ```
 pub struct RootedDirectory {
     root: Dir,
 }
@@ -90,7 +97,7 @@ fn validate_single_child(name: &str) -> io::Result<()> {
 impl RootedDirectory {
     /// Only a trusted bootstrap may supply the already-open and policy-pinned
     /// directory. This constructor does no filesystem name lookup.
-    pub fn from_preopened(root: Dir) -> Self {
+    pub(crate) fn from_preopened(root: Dir) -> Self {
         Self { root }
     }
 

@@ -1,8 +1,8 @@
 //! Internal C4d handle-only directory creation slice, **not a broker**.
 //! There is no pathname bootstrap, IPC exposure or authorization in this module.
 //! The caller must supply an OS-attested, already-open directory capability.
-use cap_std::fs::Dir;
-use std::io;
+use cap_std::fs::{Dir, OpenOptions};
+use std::io::{self, Write};
 
 use crate::canonical_request::safe_relative_path;
 
@@ -37,6 +37,36 @@ impl RootedDirectory {
     pub fn create_child(&self, name: &str) -> io::Result<()> {
         validate_single_child(name)?;
         self.root.create_dir(name)
+    }
+
+    /// Strict create-only, bounded data write under an already-open root.
+    /// Never opens or truncates existing files, including external hardlink
+    /// aliases; no ambient paths or symlink-following path revalidation.
+    /// Not atomic visibility and not an authenticated/published broker API.
+    pub fn create_new_file(&self, relative: &str, bytes: &[u8]) -> io::Result<()> {
+        const MAX_CREATE_BYTES: usize = 1024 * 1024;
+        if !safe_relative_path(relative) || bytes.len() > MAX_CREATE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_NEW_FILE_DENIED",
+            ));
+        }
+        let mut components = relative.split('/').peekable();
+        let mut opened: Option<Dir> = None;
+        while let Some(component) = components.next() {
+            let parent = opened.as_ref().unwrap_or(&self.root);
+            if components.peek().is_some() {
+                let child = parent.open_dir(component)?;
+                opened = Some(child);
+            } else {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                let mut file = parent.open_with(component, &options)?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+            }
+        }
+        Ok(())
     }
 
     /// Open only a validated, single-component child directory via cap-std.
@@ -118,6 +148,82 @@ mod tests {
         assert!(root.join("科研/mi carpeta").is_dir());
         assert!(!outside.join("科研").exists());
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"UNCHANGED");
+    }
+
+    #[test]
+    fn create_only_file_denies_external_hardlink_alias_without_changing_outside_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let original = outside.join("victim.bin");
+        std::fs::write(&original, b"NEVER_MUTATE_PREEXISTING_BYTES").unwrap();
+        let alias = root.join("alias.bin");
+        std::fs::hard_link(&original, &alias).expect("real cross-root OS hardlink fixture");
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        assert!(cap
+            .create_new_file("alias.bin", b"MALICIOUS_OVERWRITE")
+            .is_err());
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"NEVER_MUTATE_PREEXISTING_BYTES"
+        );
+        assert_eq!(
+            std::fs::read(&alias).unwrap(),
+            b"NEVER_MUTATE_PREEXISTING_BYTES"
+        );
+
+        std::fs::create_dir(root.join("nested")).unwrap();
+        cap.create_new_file("nested/genuine.bin", &[0, 1, 2, 255])
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("nested/genuine.bin")).unwrap(),
+            [0, 1, 2, 255]
+        );
+        assert!(cap
+            .create_new_file("nested/genuine.bin", b"REWRITE")
+            .is_err());
+        assert_eq!(
+            std::fs::read(root.join("nested/genuine.bin")).unwrap(),
+            [0, 1, 2, 255]
+        );
+        assert_eq!(
+            std::fs::read(&original).unwrap(),
+            b"NEVER_MUTATE_PREEXISTING_BYTES"
+        );
+    }
+
+    #[test]
+    fn create_only_file_rejects_unsafe_names_before_any_directory_mutation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        std::fs::create_dir(&root).unwrap();
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        for path in [
+            "fresh/../outside",
+            "fresh/NUL",
+            "fresh/CONOUT$.txt",
+            "../escape",
+            "C:/absolute",
+            "new//file",
+            "a\\b",
+            "missing/child",
+        ] {
+            assert!(
+                cap.create_new_file(path, b"data").is_err(),
+                "unexpected creation for {path}"
+            );
+        }
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        assert!(cap
+            .create_new_file("too-large.bin", &vec![1; 1_048_577])
+            .is_err());
+        assert!(!root.join("too-large.bin").exists());
     }
 
     #[test]

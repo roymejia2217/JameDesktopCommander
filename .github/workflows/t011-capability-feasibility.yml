@@ -244,8 +244,8 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-custody-acceptance.ps1
 
-      - name: Build native Rust Node-API addon
-        run: cargo +1.91.1 build --locked --release --features receiver-test-fixture --manifest-path native/capability-probe/Cargo.toml
+      - name: Build deny-only native Rust Node-API addon
+        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 
       - name: Use official Node 22.19
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -270,18 +270,8 @@ jobs:
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 22
         run: node --test test/security/capability-lock-consistency.test.cjs
 
-      - name: Native addon and capability security tests on Node 22
-        run: node --test test/security/capability-probe.test.cjs
-
-      - name: Reject cross-class native references on Node 22
-        run: node --test test/security/capability-native-class-tag.test.cjs
-
-      - name: Verify restricted capability policy lifecycle on Node 22
-        run: node --test --test-concurrency=1 test/security/restricted-capability-policy.test.cjs test/security/restricted-capability-policy-native.test.cjs
-
-      - name: Prove post-authorization directory swap confinement on Node 22
-        # Both suites stage/load the same native .node path; Windows locks loaded DLLs.
-        run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
+      - name: Verify deny-only native exports on Node 22.19
+        run: node --test test/security/capability-default-surface.test.cjs
 
       - name: Use official Node 24
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -294,26 +284,16 @@ jobs:
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 24
         run: node --test test/security/capability-lock-consistency.test.cjs
 
-      - name: Native addon and capability security tests on Node 24
-        run: node --test test/security/capability-probe.test.cjs
+      - name: Verify deny-only native exports on Node 24
+        run: node --test test/security/capability-default-surface.test.cjs
 
-      - name: Reject cross-class native references on Node 24
-        run: node --test test/security/capability-native-class-tag.test.cjs
+      # The historical N-API receiver and hardlink RED probes are retained on
+      # research PRs #131/#147. This production-candidate job no longer builds
+      # their unsafe class. Do not count those security acceptance gates as passed.
+      - name: Require warning-free deny-only native module
+        run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/capability-probe/Cargo.toml -- -D warnings
 
-      - name: Verify restricted capability policy lifecycle on Node 24
-        run: node --test --test-concurrency=1 test/security/restricted-capability-policy.test.cjs test/security/restricted-capability-policy-native.test.cjs
-
-      - name: Prove post-authorization directory swap confinement on Node 24
-        # Both suites stage/load the same native .node path; Windows locks loaded DLLs.
-        run: node --test --test-concurrency=1 test/security/capability-namespace-swap.test.cjs test/security/capability-root-acquisition.test.cjs
-
-      - name: Rebuild native proof without the test-only foreign class
-        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
-
-      - name: Restage and retest the default-feature native artifact
-        run: node --test test/security/capability-probe.test.cjs
-
-      - name: Prove test-only exports are absent from the unpublished artifact
+      - name: Prove default native artifact denies and exposes no class receivers
         run: node --test test/security/capability-default-surface.test.cjs
 
       - name: Preserve unpublished proof and immutable dependency lock

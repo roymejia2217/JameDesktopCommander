@@ -29,6 +29,8 @@ path = "src/windows_scm.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.190"
+# Official, version-pinned capget(2) wrapper for Linux thread credentials.
+rustix = { version = "=1.1.5", features = ["thread"] }
 # Established Rust implementation of the systemd LISTEN_FDS/FNAMES contract.
 sd-notify = { version = "=0.5.0", default-features = false }
 

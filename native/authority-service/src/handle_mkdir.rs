@@ -197,6 +197,108 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_create_only_writer_and_external_hardlink_racer_never_mutate_outside_bytes() {
+        use std::sync::{Arc, Barrier};
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("victim.bin");
+        let preserved = b"EXTERNAL_BYTES_MUST_NEVER_CHANGE";
+        std::fs::write(&victim, preserved).unwrap();
+        let capability = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        for iteration in 0..16 {
+            let alias_name = format!("raced_{iteration}.bin");
+            let alias = root.join(&alias_name);
+            let barrier = Arc::new(Barrier::new(2));
+            let writer_gate = Arc::clone(&barrier);
+            let attacker_gate = Arc::clone(&barrier);
+            let writer_bytes = b"SAFE_NEW_FILE";
+            let (writer, attacker) = std::thread::scope(|threads| {
+                let writer = threads.spawn(|| {
+                    writer_gate.wait();
+                    capability
+                        .create_new_file(&alias_name, writer_bytes)
+                        .is_ok()
+                });
+                let attacker = threads.spawn(|| {
+                    attacker_gate.wait();
+                    std::fs::hard_link(&victim, &alias).is_ok()
+                });
+                (writer.join().unwrap(), attacker.join().unwrap())
+            });
+            assert_ne!(writer, attacker, "only one exclusive create may win");
+            assert_eq!(std::fs::read(&victim).unwrap(), preserved);
+            assert_eq!(
+                std::fs::read(&alias).unwrap(),
+                if writer {
+                    writer_bytes.as_slice()
+                } else {
+                    preserved.as_slice()
+                },
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn create_only_file_rejects_intermediate_symlink_to_external_directory() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"PRESERVED").unwrap();
+        symlink(&outside, root.join("alias")).unwrap();
+        let capability = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        assert!(capability
+            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .is_err());
+        assert!(!outside.join("forbidden.bin").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"PRESERVED"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn create_only_file_rejects_intermediate_ntfs_junction_to_external_directory() {
+        use std::process::Command;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"PRESERVED").unwrap();
+        let link = root.join("alias");
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .expect("Windows native junction fixture");
+        assert!(output.status.success(), "junction setup failed: {output:?}");
+        let capability = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
+        );
+        assert!(capability
+            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .is_err());
+        assert!(!outside.join("forbidden.bin").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"PRESERVED"
+        );
+    }
+
+    #[test]
     fn create_only_file_rejects_unsafe_names_before_any_directory_mutation() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().join("allowed");

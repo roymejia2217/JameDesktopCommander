@@ -126,7 +126,7 @@ mod tests {
             client.shutdown(Shutdown::Write).unwrap();
             service
         }
-        let valid = wire(ROOT, 7, ID, "科研/cliente");
+        let valid = wire(ROOT, 7, ID, "科研/client-folder");
         let connection = send(&valid);
         let verified = crate::unix_session::read_authenticated_frame(
             &connection,
@@ -136,7 +136,7 @@ mod tests {
         )
         .expect("kernel-authenticated complete C4d frame");
         assert_eq!(grant.execute_c4d(&verified), Ok(()));
-        assert!(inside.join("科研/cliente").is_dir());
+        assert!(inside.join("科研/client-folder").is_dir());
 
         // A different connection cannot replay a request against this grant.
         let replay = send(&valid);

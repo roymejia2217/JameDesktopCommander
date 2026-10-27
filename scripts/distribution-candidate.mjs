@@ -346,6 +346,10 @@ async function main() {
   const action = process.argv[2];
   assert.ok(['build', 'verify', 'smoke', 'archive', 'roundtrip'].includes(action),
     'Expected build, verify, smoke, archive or roundtrip');
+  // Fail closed: the unpublished portable candidate is Node-only. The
+  // research N-API binary is tested independently but never staged by CLI.
+  assert.notEqual(process.env.JDC_CANDIDATE_INCLUDE_NATIVE, '1',
+    'Unapproved native capability addon cannot enter portable distribution');
   const target = process.platform + '-' + process.arch;
   validTarget(target);
   assert.equal(process.env.JDC_CANDIDATE_TARGET, target, 'GitHub runner does not match candidate target');
@@ -361,9 +365,6 @@ async function main() {
     sourceCommit: process.env.JDC_CANDIDATE_SOURCE_SHA,
     runId: process.env.GITHUB_RUN_ID,
     attempt: process.env.GITHUB_RUN_ATTEMPT,
-    ...(process.env.JDC_CANDIDATE_INCLUDE_NATIVE === '1'
-      ? { nativeAddon: join(projectRoot, 'native/capability-probe/target/release/jdc-capability-probe.node') }
-      : {}),
   };
   const archiveName = 'UNPUBLISHED-jdc-portable-' + target + '.tar';
   const archivePath = join(await realpath(temp), archiveName);

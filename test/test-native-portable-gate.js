@@ -20,9 +20,9 @@ function assertNoResearchBuild(steps) {
       'A released native binary may not compile research-only FFI');
   }
 }
-test('both native candidates build only deny-by-default and verify the unpacked bytes', () => {
+test('portable candidates exclude N-API while native denial remains an independent security gate', () => {
   const job = workflow('distribution-candidate.yml').jobs['portable-candidate'];
-  assert.equal(workflow('distribution-candidate.yml').env?.JDC_CANDIDATE_INCLUDE_NATIVE, '1');
+  assert.equal(workflow('distribution-candidate.yml').env?.JDC_CANDIDATE_INCLUDE_NATIVE, '0');
   assert.deepEqual(job.strategy.matrix.include.map(p => p.target).sort(),
     ['linux-x64', 'win32-x64']);
   const steps = job.steps;
@@ -30,7 +30,7 @@ test('both native candidates build only deny-by-default and verify the unpacked 
     'Verify committed native dependency lock',
     'Compile deny-only native addon from locked source',
     'Verify deny-only native addon surface before staging',
-    'Stage Node runtime and native capability with hashed manifest',
+    'Stage Node runtime without native capability with hashed manifest',
     'Independently verify staged bytes and provenance',
     'Smoke test packaged Node and bundled ripgrep',
     'Verify downloaded TAR and smoke extracted native runtime',

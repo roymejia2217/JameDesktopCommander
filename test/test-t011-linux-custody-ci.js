@@ -76,6 +76,11 @@ test('root-admin epoch witness is exercised under actual NNP service and foreign
   assert.match(script, /sudo -n chown jdc-authority:jdc-authority -- "\$anchor"/);
   assert.match(script, /sudo -n truncate -s 39 -- "\$anchor"/);
   assert.match(script, /sudo -n ln -s -- "\$source_file" "\$anchor"/);
+  assert.match(script, /sudo -n ln -- "\$anchor" "\$hardlink_alias"/);
+  assert.match(script, /E_ANCHOR_HARDLINK_OBJECT_NOT_PROVEN/);
+  assert.match(script, /sudo -n stat -c '%h' -- "\$anchor"/);
+  assert.match(script, /expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "\$probe" deny/);
+  assert.match(script, /sudo -n rm -- "\$hardlink_alias"/);
   assert.match(script, /E_ANCHOR_CANONICAL_BYTES_CHANGED/);
   assert.doesNotMatch(script, /expect_verdict MATCH sudo -n -u jdc-authority -- "\$probe"/);
 });

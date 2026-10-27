@@ -28,6 +28,7 @@ probe="native/authority-service/target/debug/examples/linux_epoch_anchor_probe"
 [[ -x "$probe" ]] || { printf '%s\n' 'E_ANCHOR_PROBE_MISSING' >&2; exit 1; }
 directory="/etc/jdc-authority"
 anchor="${directory}/policy-anchor"
+hardlink_alias="${directory}/policy-anchor-hardlink"
 [[ ! -e "$directory" && ! -L "$directory" ]] || {
   printf '%s\n' 'E_ANCHOR_PREEXISTING_STATE' >&2
   exit 1
@@ -35,6 +36,7 @@ anchor="${directory}/policy-anchor"
 source_file="$(mktemp /tmp/jdc-anchor-fixture.XXXXXXXX)"
 cleanup() {
   local result=$?
+  sudo -n rm -f -- "$hardlink_alias" || result=1
   sudo -n rm -f -- "$anchor" || result=1
   sudo -n rmdir -- "$directory" || result=1
   rm -f -- "$source_file" || result=1
@@ -83,6 +85,22 @@ sudo -n ln -s -- "$source_file" "$anchor"
 expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
 sudo -n rm -- "$anchor"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$anchor"
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
+
+# Reject a real same-inode alias even when root legitimately created it.
+# A file-name-only check could falsely accept this witness; kernel nlink must deny.
+sudo -n ln -- "$anchor" "$hardlink_alias"
+if [[ "$(sudo -n stat -c '%h' -- "$anchor")" != '2' ||
+      "$(sudo -n stat -c '%d:%i' -- "$anchor")" != "$(sudo -n stat -c '%d:%i' -- "$hardlink_alias")" ]]; then
+  printf '%s\n' 'E_ANCHOR_HARDLINK_OBJECT_NOT_PROVEN' >&2
+  exit 1
+fi
+expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
+sudo -n rm -- "$hardlink_alias"
+[[ "$(sudo -n stat -c '%h' -- "$anchor")" == '1' ]] || {
+  printf '%s\n' 'E_ANCHOR_HARDLINK_OBJECT_NOT_RESTORED' >&2
+  exit 1
+}
 expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
 after="$(sudo -n sha256sum -- "$anchor" | cut -d' ' -f1)"
 [[ "$after" == "$before" ]] || {

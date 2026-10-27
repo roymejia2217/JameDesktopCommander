@@ -12,6 +12,17 @@ getent passwd jdc-mcp-client >/dev/null
 service_gid="$(id -g jdc-authority)"
 [[ "$service_gid" -gt 0 && "$(id -u jdc-authority)" -gt 0 ]] || exit 1
 [[ "$(id -u jdc-authority)" != "$(id -u jdc-mcp-client)" ]] || exit 1
+if ! command -v setpriv >/dev/null; then
+  printf '%s\n' 'E_ANCHOR_SETPRIV_UNAVAILABLE' >&2
+  exit 1
+fi
+# POSITIVE control must prove the real Linux thread attribute required by
+# verify_service_identity; a direct sudo -u launch would be a false negative.
+service_nnp="$(sudo -n -u jdc-authority -- setpriv --no-new-privs -- awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
+if [[ "$service_nnp" != '1' ]]; then
+  printf '%s\n' 'E_ANCHOR_NO_NEW_PRIVS_NOT_PROVEN' >&2
+  exit 1
+fi
 
 probe="native/authority-service/target/debug/examples/linux_epoch_anchor_probe"
 [[ -x "$probe" ]] || { printf '%s\n' 'E_ANCHOR_PROBE_MISSING' >&2; exit 1; }
@@ -48,31 +59,31 @@ expect_verdict() {
     exit 1
   }
 }
-expect_verdict MATCH sudo -n -u jdc-authority -- "$probe" match
-expect_verdict DENIED sudo -n -u jdc-mcp-client -- "$probe" deny
-expect_verdict DENIED sudo -n -- "$probe" deny
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
+expect_verdict DENIED sudo -n -u jdc-mcp-client -- setpriv --no-new-privs -- "$probe" deny
+expect_verdict DENIED sudo -n -- setpriv --no-new-privs -- "$probe" deny
 
 sudo -n chmod 0660 -- "$anchor"
-expect_verdict DENIED sudo -n -u jdc-authority -- "$probe" deny
+expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
 sudo -n chmod 0640 -- "$anchor"
-expect_verdict MATCH sudo -n -u jdc-authority -- "$probe" match
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
 
 sudo -n chown jdc-authority:jdc-authority -- "$anchor"
-expect_verdict DENIED sudo -n -u jdc-authority -- "$probe" deny
+expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
 sudo -n chown root:jdc-authority -- "$anchor"
-expect_verdict MATCH sudo -n -u jdc-authority -- "$probe" match
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
 
 sudo -n truncate -s 39 -- "$anchor"
-expect_verdict DENIED sudo -n -u jdc-authority -- "$probe" deny
+expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$anchor"
-expect_verdict MATCH sudo -n -u jdc-authority -- "$probe" match
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
 
 sudo -n rm -- "$anchor"
 sudo -n ln -s -- "$source_file" "$anchor"
-expect_verdict DENIED sudo -n -u jdc-authority -- "$probe" deny
+expect_verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" deny
 sudo -n rm -- "$anchor"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$anchor"
-expect_verdict MATCH sudo -n -u jdc-authority -- "$probe" match
+expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" match
 after="$(sudo -n sha256sum -- "$anchor" | cut -d' ' -f1)"
 [[ "$after" == "$before" ]] || {
   printf '%s\n' 'E_ANCHOR_CANONICAL_BYTES_CHANGED' >&2

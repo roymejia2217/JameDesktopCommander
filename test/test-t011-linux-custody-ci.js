@@ -53,3 +53,29 @@ test('Linux custody positive and adversarial identities run under verified kerne
   assert.match(script, /expect_denied identity sudo -n -u nobody -- setpriv --no-new-privs -- "\$identity_probe"/);
   assert.doesNotMatch(script, /^sudo -n -u jdc-authority -- "\$identity_probe"$/m);
 });
+
+test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
+  for (const [name, command] of [
+    ['Lint Linux protected epoch witness acceptance',
+      'shellcheck --severity=warning test/security/t011-linux-epoch-anchor-acceptance.sh && bash -n test/security/t011-linux-epoch-anchor-acceptance.sh'],
+    ['Prove root-admin epoch witness under actual Linux service credentials',
+      'bash test/security/t011-linux-epoch-anchor-acceptance.sh'],
+  ]) {
+    assert.ok(workflow.includes(`      - name: ${name}\n        if: matrix.target == 'linux-x64'\n        run: ${command}`));
+  }
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-epoch-anchor-acceptance.sh'), 'utf8',
+  );
+  assert.match(script, /RUNNER_ENVIRONMENT/);
+  assert.match(script, /E_ANCHOR_NO_NEW_PRIVS_NOT_PROVEN/);
+  assert.match(script, /NoNewPrivs:/);
+  assert.match(script, /expect_verdict MATCH sudo -n -u jdc-authority -- setpriv --no-new-privs -- "\$probe" match/);
+  assert.match(script, /expect_verdict DENIED sudo -n -u jdc-mcp-client -- setpriv --no-new-privs -- "\$probe" deny/);
+  assert.match(script, /expect_verdict DENIED sudo -n -- setpriv --no-new-privs -- "\$probe" deny/);
+  assert.match(script, /sudo -n chmod 0660 -- "\$anchor"/);
+  assert.match(script, /sudo -n chown jdc-authority:jdc-authority -- "\$anchor"/);
+  assert.match(script, /sudo -n truncate -s 39 -- "\$anchor"/);
+  assert.match(script, /sudo -n ln -s -- "\$source_file" "\$anchor"/);
+  assert.match(script, /E_ANCHOR_CANONICAL_BYTES_CHANGED/);
+  assert.doesNotMatch(script, /expect_verdict MATCH sudo -n -u jdc-authority -- "\$probe"/);
+});

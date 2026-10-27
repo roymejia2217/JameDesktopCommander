@@ -152,6 +152,49 @@ fn v1_and_v2_formats_do_not_auto_migrate_into_each_other() {
 }
 
 #[test]
+fn independently_held_snapshot_identity_denies_rollback_and_same_epoch_forgery() {
+    let f = tempdir().unwrap();
+    let db = f.path().join("policy.db");
+    let old = f.path().join("old.db");
+    fixture(&db);
+    {
+        let mut store = PolicyBytesStore::open_existing(&db).unwrap();
+        store.commit_after(0, 1, b"old").unwrap();
+    }
+    std::fs::copy(&db, &old).unwrap();
+    let approved = b"current approved bytes";
+    let trusted_epoch = 2;
+    let trusted_digest = PolicyBytesStore::digest_exact(approved);
+    {
+        let mut store = PolicyBytesStore::open_existing(&db).unwrap();
+        store.commit_after(1, trusted_epoch, approved).unwrap();
+        assert_eq!(
+            store
+                .read_matching_witness(trusted_epoch, &trusted_digest)
+                .unwrap()
+                .bytes(),
+            approved
+        );
+        assert!(store
+            .read_matching_witness(trusted_epoch, &[0xA5; 32])
+            .is_err());
+    }
+    std::fs::copy(&old, &db).unwrap();
+    let mut rolled = PolicyBytesStore::open_existing(&db).unwrap();
+    assert!(rolled
+        .read_matching_witness(trusted_epoch, &trusted_digest)
+        .is_err());
+    rolled
+        .commit_after(1, trusted_epoch, b"forged at same epoch")
+        .unwrap();
+    assert!(rolled
+        .read_matching_witness(trusted_epoch, &trusted_digest)
+        .is_err());
+    // The witness MUST be obtained from an independent trusted updater.
+    // Supplying a caller-chosen matching pair is NOT authenticity.
+}
+
+#[test]
 fn valid_whole_database_rollback_is_undetectable_without_independent_witness() {
     let f = tempdir().unwrap();
     let db = f.path().join("policy.db");

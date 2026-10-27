@@ -159,6 +159,25 @@ impl PolicyBytesStore {
         Ok(record)
     }
 
+    /// Compare with a separately trusted epoch+digest witness. This is
+    /// only a byte-for-byte matching primitive: the caller MUST acquire its
+    /// witness independently through a protected OS policy authority, NEVER
+    /// from MCP request data or from this same SQLite database.
+    pub fn read_matching_witness(
+        &self,
+        expected_epoch: u64,
+        expected_digest: &[u8; 32],
+    ) -> Result<VerifiedPolicy, StoreDenied> {
+        if expected_epoch == 0 || *expected_digest == [0; 32] {
+            return Err(StoreDenied);
+        }
+        let policy = self.read_verified()?;
+        if policy.epoch != expected_epoch || policy.digest != *expected_digest {
+            return Err(StoreDenied);
+        }
+        Ok(policy)
+    }
+
     /// A transaction only, NOT writer authorization or trusted policy approval.
     pub fn commit_after(
         &mut self,

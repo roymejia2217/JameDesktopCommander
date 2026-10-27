@@ -7,6 +7,9 @@
 
 pub mod policy_bytes;
 pub mod replay_ledger;
+// Test-only: single-database policy/replay atomicity feasibility, not issuer.
+#[cfg(test)]
+mod coherent_transaction_proof;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior, MAIN_DB};
 use std::{path::Path, time::Duration};

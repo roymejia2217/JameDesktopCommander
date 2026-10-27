@@ -54,6 +54,28 @@ test('Linux custody positive and adversarial identities run under verified kerne
   assert.doesNotMatch(script, /^sudo -n -u jdc-authority -- "\$identity_probe"$/m);
 });
 
+test('root-admin policy SQLite-file candidate requires real OS-anchored principal custody', () => {
+  for (const [name, cmd] of [
+    ['Lint Linux admin-owned policy-file custody acceptance',
+      'shellcheck --severity=warning test/security/t011-linux-admin-policy-file-acceptance.sh && bash -n test/security/t011-linux-admin-policy-file-acceptance.sh'],
+    ['Prove admin-owned policy-file inode custody under Linux service identity',
+      'bash test/security/t011-linux-admin-policy-file-acceptance.sh'],
+  ]) {
+    assert.ok(workflow.includes(`      - name: ${name}\n        if: matrix.target == 'linux-x64'\n        run: ${cmd}`));
+  }
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const expression of [
+    /RUNNER_ENVIRONMENT/, /custody_fixture/, /NoNewPrivs/, /setpriv --no-new-privs/,
+    /sudo -n chown jdc-authority:jdc-authority/, /sudo -n chmod 0660/,
+    /sudo -n ln -- "\$policy" "\$alias"/, /sudo -n ln -s -- "\$source_file" "\$policy"/,
+    /verdict DENIED sudo -n -u jdc-mcp-client/,
+    /verdict CANDIDATE sudo -n -u jdc-authority/,
+    /LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS/,
+  ]) assert.match(script, expression);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

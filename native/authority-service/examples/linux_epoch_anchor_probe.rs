@@ -2,12 +2,26 @@
 //! This example never provisions state, grants authority or accepts a path.
 #[cfg(target_os = "linux")]
 fn main() {
-    use jdc_authority_service::linux_epoch_anchor::observe_fixed_epoch_floor;
+    use jdc_authority_service::linux_epoch_anchor::{
+        observe_fixed_epoch_floor, observe_fixed_policy_database,
+    };
     let mut args = std::env::args().skip(1);
     let action = args.next().unwrap_or_default();
     if args.next().is_some() {
         eprintln!("E_ANCHOR_INVALID_PROBE_ARGUMENTS");
         std::process::exit(2);
+    }
+    if action == "policy-candidate" || action == "policy-deny" {
+        let observed = observe_fixed_policy_database();
+        match action.as_str() {
+            "policy-candidate" if observed.is_ok() => println!("CANDIDATE"),
+            "policy-deny" if observed.is_err() => println!("DENIED"),
+            _ => {
+                eprintln!("E_POLICY_CUSTODY_REJECTED");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     let observed = observe_fixed_epoch_floor();
     match action.as_str() {

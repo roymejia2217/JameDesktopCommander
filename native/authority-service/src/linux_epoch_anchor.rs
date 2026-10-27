@@ -49,6 +49,15 @@ fn trusted_file(st: &libc::stat, expected_group: libc::gid_t) -> bool {
         && st.st_nlink == 1
         && st.st_size == 40
 }
+fn trusted_policy_file(st: &libc::stat, expected_group: libc::gid_t) -> bool {
+    (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+        && st.st_uid == 0
+        && expected_group != 0
+        && st.st_gid == expected_group
+        && (st.st_mode & 0o7777) == 0o640
+        && st.st_nlink == 1
+        && (512..=16 * 1024 * 1024).contains(&st.st_size)
+}
 fn open_component(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, IdentityDenied> {
     let raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), DIRECTORY_FLAGS) };
     if raw < 0 {
@@ -61,13 +70,10 @@ fn open_component(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, Id
     Ok(owned)
 }
 
-/// Fixed /etc/jdc-authority/policy-anchor. The dedicated service can READ
-/// root:service 0640, but cannot create, replace, rename or chmod it.
-/// No path or expected witness can be provided by the MCP client.
-/// The updater must use independently administered atomic replacement.
-pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
+// Open exactly the root-owned admin directory via anchored O_PATH/O_NOFOLLOW
+// kernel descriptors. The service never accepts a caller-supplied pathname.
+fn open_fixed_admin_directory() -> Result<OwnedFd, IdentityDenied> {
     verify_service_identity()?;
-    let group = unsafe { libc::getegid() };
     let raw = unsafe { libc::open(c"/".as_ptr(), DIRECTORY_FLAGS) };
     if raw < 0 {
         return Err(IdentityDenied);
@@ -77,7 +83,72 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
         return Err(IdentityDenied);
     }
     let etc = open_component(&root, c"etc")?;
-    let authority = open_component(&etc, c"jdc-authority")?;
+    open_component(&etc, c"jdc-authority")
+}
+
+/// Read-only, root-admin-owned SQLite-file *candidate* pinned to a kernel
+/// opened file object. This checks inode custody and SQLite file signature
+/// only; it deliberately does NOT parse policy, attest an updater, open a
+/// SQLite VFS connection, authorize a request or grant an OS capability.
+pub struct ObservedAdminPolicyFile {
+    device: u64,
+    inode: u64,
+}
+impl ObservedAdminPolicyFile {
+    pub fn file_identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+/// Refuse any preexisting candidate that a less-privileged service can
+/// replace, chmod, hardlink or reach through a symlink. No implicit creation.
+pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, IdentityDenied> {
+    let directory = open_fixed_admin_directory()?;
+    let expected_group = unsafe { libc::getegid() };
+    let raw = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c"policy.sqlite3".as_ptr(),
+            FILE_FLAGS,
+        )
+    };
+    if raw < 0 {
+        return Err(IdentityDenied);
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+    let before = metadata(&owned)?;
+    if !trusted_policy_file(&before, expected_group) {
+        return Err(IdentityDenied);
+    }
+    // Standard SQLite 16-byte header marker, not a proof of schema,
+    // publisher authorization or tamper-resistant storage.
+    let mut file = File::from(owned);
+    let mut signature = [0u8; 16];
+    file.read_exact(&mut signature)
+        .map_err(|_| IdentityDenied)?;
+    if signature != *b"SQLite format 3\0" {
+        return Err(IdentityDenied);
+    }
+    let after = metadata(&file.into())?;
+    if !trusted_policy_file(&after, expected_group)
+        || before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_size != after.st_size
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(ObservedAdminPolicyFile {
+        device: after.st_dev,
+        inode: after.st_ino,
+    })
+}
+
+/// Fixed /etc/jdc-authority/policy-anchor. The dedicated service can READ
+/// root:service 0640, but cannot create, replace, rename or chmod it.
+/// No path or expected witness can be provided by the MCP client.
+/// The updater must use independently administered atomic replacement.
+pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
+    let authority = open_fixed_admin_directory()?;
+    let group = unsafe { libc::getegid() };
     let raw = unsafe { libc::openat(authority.as_raw_fd(), c"policy-anchor".as_ptr(), FILE_FLAGS) };
     if raw < 0 {
         return Err(IdentityDenied);
@@ -120,6 +191,30 @@ pub(crate) fn verify_existing_policy_against_root_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn root_owned_sqlite_candidate_file_rejects_aliases_and_wrong_principals() {
+        let file = tempfile::tempfile().unwrap();
+        let mut st = metadata(&file.into()).unwrap();
+        st.st_mode = libc::S_IFREG | 0o640;
+        st.st_uid = 0;
+        st.st_gid = 1234;
+        st.st_nlink = 1;
+        st.st_size = 4096;
+        assert!(trusted_policy_file(&st, 1234));
+        st.st_uid = 1234;
+        assert!(!trusted_policy_file(&st, 1234));
+        st.st_uid = 0;
+        st.st_mode = libc::S_IFREG | 0o660;
+        assert!(!trusted_policy_file(&st, 1234));
+        st.st_mode = libc::S_IFREG | 0o640;
+        st.st_nlink = 2;
+        assert!(!trusted_policy_file(&st, 1234));
+        st.st_nlink = 1;
+        st.st_size = 40;
+        assert!(!trusted_policy_file(&st, 1234));
+        st.st_size = 4096;
+        assert!(!trusted_policy_file(&st, 0));
+    }
     #[test]
     fn synthetic_metadata_contract_has_exact_admin_owner_group_and_mode() {
         let file = tempfile::tempfile().unwrap();

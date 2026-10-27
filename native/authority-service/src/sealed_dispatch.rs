@@ -100,6 +100,89 @@ mod tests {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"NEVER_CHANGED");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connected_kernel_peer_can_dispatch_once_only_with_sealed_root_and_matching_epoch() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        let outside = f.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"KEEP_EXTERNAL_BYTES").unwrap();
+        let mut grant = fixture(&inside);
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive kernel-identity fixture must be nonroot");
+        assert_ne!(gid, 0);
+
+        fn send(wire: &[u8]) -> UnixStream {
+            let (mut client, service) = UnixStream::pair().unwrap();
+            client.write_all(wire).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            service
+        }
+        let valid = wire(ROOT, 7, ID, "科研/cliente");
+        let connection = send(&valid);
+        let verified = crate::unix_session::read_authenticated_frame(
+            &connection,
+            uid,
+            gid,
+            Duration::from_secs(1),
+        )
+        .expect("kernel-authenticated complete C4d frame");
+        assert_eq!(grant.execute_c4d(&verified), Ok(()));
+        assert!(inside.join("科研/cliente").is_dir());
+
+        // A different connection cannot replay a request against this grant.
+        let replay = send(&valid);
+        let verified = crate::unix_session::read_authenticated_frame(
+            &replay,
+            uid,
+            gid,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(grant.execute_c4d(&verified), Err(DispatchDenied));
+        // Forging expected service identity is denied before dispatch.
+        let foreign = send(&wire(
+            ROOT,
+            7,
+            "22222222-2222-4222-8222-222222222222",
+            "foreign",
+        ));
+        assert!(crate::unix_session::read_authenticated_frame(
+            &foreign,
+            uid.wrapping_add(1),
+            gid,
+            Duration::from_millis(100),
+        )
+        .is_err());
+        assert!(!inside.join("foreign").exists());
+
+        let stale = send(&wire(
+            ROOT,
+            8,
+            "33333333-3333-4333-8333-333333333333",
+            "stale",
+        ));
+        let verified =
+            crate::unix_session::read_authenticated_frame(&stale, uid, gid, Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(grant.execute_c4d(&verified), Err(DispatchDenied));
+        assert!(!inside.join("stale").exists());
+
+        assert!(!outside.join("科研").exists());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"KEEP_EXTERNAL_BYTES"
+        );
+    }
+
     #[test]
     fn matching_root_epoch_creates_only_inside_then_replay_denies() {
         let f = tempfile::tempdir().unwrap();

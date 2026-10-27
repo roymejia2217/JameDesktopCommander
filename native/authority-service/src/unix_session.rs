@@ -84,14 +84,15 @@ impl Read for DeadlineReader<'_> {
     }
 }
 
-/// Inspect one connected socket's OS identity and complete C4d data only.
-/// An accepted syntax/identity observation is NEVER a filesystem grant.
-pub fn inspect_one_session(
+/// Return only a single canonical frame read from a kernel-authenticated peer.
+/// This is crate-private data, NOT a filesystem grant or trusted policy. Its
+/// caller must still validate an independently protected epoch and root handle.
+pub(crate) fn read_authenticated_frame(
     stream: &UnixStream,
     expected_uid: u32,
     expected_gid: u32,
     deadline: Duration,
-) -> Result<(), IdentityDenied> {
+) -> Result<Vec<u8>, IdentityDenied> {
     if deadline.is_zero() || deadline > MAX_SESSION_DEADLINE {
         return Err(IdentityDenied);
     }
@@ -110,9 +111,18 @@ pub fn inspect_one_session(
     let mut reader = DeadlineReader { stream, expires };
     let wire = read_one_frame(&mut reader).map_err(|_| IdentityDenied)?;
     validate_request_frame(&wire).map_err(|_| IdentityDenied)?;
-    // Data shape and peer observation only. No capability, broker operation,
-    // filesystem handle or protocol response can be emitted from this module.
-    Ok(())
+    // Identity and data only; no root authority follows from this result.
+    Ok(wire)
+}
+
+/// Backward-compatible observation-only API. Do not authorize from Ok(()).
+pub fn inspect_one_session(
+    stream: &UnixStream,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<(), IdentityDenied> {
+    read_authenticated_frame(stream, expected_uid, expected_gid, deadline).map(|_| ())
 }
 
 #[cfg(test)]

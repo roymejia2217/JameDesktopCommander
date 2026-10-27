@@ -79,6 +79,20 @@ test('root-admin policy SQLite-file candidate requires real OS-anchored principa
   ]) assert.match(script, expression);
 });
 
+test('policy/witness forward publication mismatches deny; consistent whole rollback is explicitly unprotected', () => {
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const marker of [
+    /init-policy-bytes-v2/, /write-policy-anchor-v2/,
+    /E_POLICY_FORWARD_POLICY_WITH_STALE_WITNESS/,
+    /E_POLICY_FORWARD_WITNESS_WITH_STALE_POLICY/,
+    /E_POLICY_ROLLBACK_DB_ONLY/,
+    /E_POLICY_FULL_STATE_ROLLBACK_IS_UNDETECTABLE/,
+    /policy-snapshot-v2/, /policy-snapshot-deny/,
+  ]) assert.match(script, marker);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

@@ -30,18 +30,22 @@ alias="${directory}/policy-hardlink"
 source_file="$(mktemp /tmp/jdc-policy-fixture.XXXXXXXX)"
 source_anchor="$(mktemp /tmp/jdc-policy-anchor.XXXXXXXX)"
 mismatch_anchor="$(mktemp /tmp/jdc-policy-mismatch.XXXXXXXX)"
+source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
+source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" || code=1
   exit "$code"
 }
 trap cleanup EXIT
 "$fixture" init-policy-bytes "$source_file"
 "$fixture" write-policy-anchor "$source_anchor"
 "$fixture" write-policy-anchor-mismatch "$mismatch_anchor"
-[[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 ]] || exit 1
+"$fixture" init-policy-bytes-v2 "$source_file_v2"
+"$fixture" write-policy-anchor-v2 "$source_anchor_v2"
+[[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 && "$(wc -c < "$source_anchor_v2")" -eq 40 ]] || exit 1
 [[ "$(stat -c '%s' -- "$source_file")" -ge 512 ]] || exit 1
 sudo -n install -d -o root -g root -m 0755 -- "$directory"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
@@ -89,4 +93,29 @@ verdict CANDIDATE sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 after="$(sudo -n sha256sum -- "$policy" | cut -d' ' -f1)"
 [[ "$after" == "$before" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_BYTES_CHANGED' >&2; exit 1; }
+
+# Adversarial policy-publish ordering matrix. These are deliberate
+# administrator simulations on an ephemeral test runner, NOT a publisher:
+# install(1) is not an atomic durable update or a service implementation.
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v2" "$policy"
+printf '%s\n' 'E_POLICY_FORWARD_POLICY_WITH_STALE_WITNESS'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v2" "$anchor"
+printf '%s\n' 'E_POLICY_FORWARD_WITNESS_WITH_STALE_POLICY'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v2" "$policy"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
+
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
+printf '%s\n' 'E_POLICY_ROLLBACK_DB_ONLY'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor" "$anchor"
+# NEGATIVE security proof: an administrator able to restore BOTH sources
+# defeats an entirely local epoch/digest equality check. Never claim a
+# hardware-backed or external monotonic authority from this acceptance.
+printf '%s\n' 'E_POLICY_FULL_STATE_ROLLBACK_IS_UNDETECTABLE'
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

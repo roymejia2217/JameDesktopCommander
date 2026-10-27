@@ -10,6 +10,25 @@ The dedicated service identity must first pass the actual OS kernel checks, incl
 
 T011's existing governed Linux native job provisions two distinct nonroot principals on a disposable GitHub-hosted Ubuntu runner and uses the existing `custody_fixture` Rust example to generate a genuine SQLite file. A new mandatory acceptance test confirms the service account with kernel `NoNewPrivs: 1` can observe the root-admin-owned file, while the foreign MCP identity and root identity are denied. The Rust fixture creates a real v2 policy SQLite DB **and a separate exact 40-byte administrator witness**. The service can parse the in-memory policy bytes and match that independently read witness; missing or same-length wrong-digest witnesses deny. It then tests group-writable permissions, transfer of owner to the service, a physical same-inode hardlink, truncated length and final-name symlink replacement. Each attack must return a typed denial and the restored fixture must retain its original SHA-256 bytes. The script refuses non-ephemeral, root-runner or preexisting host state and cleans up its temporary privileged files.
 
+## Real-host policy/witness publication-order acceptance (research only)
+
+The existing ephemeral Linux T011 job now creates two genuine, independently
+checked SQLite v2 policy images and two fixed-format root-admin 40-byte
+witnesses, at epoch 1 and epoch 2. Only root can install either image or
+witness; the service reads both under its independently checked kernel identity.
+The experiment tests forward-updated DB with stale witness, forward-updated
+witness with stale DB, and an older DB with the new witness: all MUST DENY,
+with a valid epoch-2 snapshot succeeding only once both match. It also
+documents an **explicit NEGATIVE proof**: restoring both an older policy DB
+and its matching old local witness admits the old snapshot again; a locally
+matching pair has no independent monotonic property.
+
+The disposable runner uses standard `install` to simulate administrative
+state replacements. **These are sequential consistency observations, NOT
+crash-consistent publishing operations:** `install` does not demonstrate
+atomic updates, durable fsync ordering, concurrent readers, authenticated
+policy origin or safe recovery. No production updater or service is installed.
+
 ## Limits preventing release
 
 The now-implemented in-memory SQLite parse does not reopen a pathname and does not require filesystem journal sidecars. However, it is only a bounded **snapshot read**, not an authenticated publisher protocol, policy semantics or a live SQLite write transaction. No protected updater, independently approved effective policy semantics, crash-consistent atomic replacement of an immutable SQLite generation, root-admin witness write/recovery state machine, service replay ledger linkage, session revocation or MCP operation grant has been implemented. An administrator restoring both DB and witness remains undetectable under the selected local-only assurance tier. Existing `E_POLICY_UNAVAILABLE` startup denial remains unchanged. Whole-machine administrator rollback is outside the selected local identity-separation assurance tier.

@@ -49,18 +49,26 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
             bytes.extend_from_slice(&[0x33u8; 32]);
             std::fs::write(path, bytes).map_err(|e| e.to_string())
         }
-        "write-policy-anchor" => {
+        "write-policy-anchor" | "write-policy-anchor-v2" => {
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v2") {
+                (2, b"approved-policy-fixture-v2")
+            } else {
+                (1, b"approved-policy-fixture")
+            };
             let mut bytes = Vec::with_capacity(40);
-            bytes.extend_from_slice(&1u64.to_be_bytes());
+            bytes.extend_from_slice(&epoch.to_be_bytes());
             bytes.extend_from_slice(
-                &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
-                    b"approved-policy-fixture",
-                ),
+                &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(policy),
             );
             std::fs::write(path, bytes).map_err(|e| e.to_string())
         }
-        "init-policy-bytes" => {
+        "init-policy-bytes" | "init-policy-bytes-v2" => {
             use jdc_authority_store::policy_bytes::PolicyBytesStore;
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v2") {
+                (2, b"approved-policy-fixture-v2")
+            } else {
+                (1, b"approved-policy-fixture")
+            };
             let conn = Connection::open(path).map_err(|e| e.to_string())?;
             conn.execute_batch(
                 "PRAGMA application_id=0x4A444332;
@@ -72,7 +80,7 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
             let mut store =
                 PolicyBytesStore::open_existing(path).map_err(|_| "store unavailable")?;
             store
-                .commit_after(0, 1, b"approved-policy-fixture")
+                .commit_after(0, epoch, policy)
                 .map_err(|_| "policy fixture commit unavailable".into())
         }
         "init" => {
@@ -131,6 +139,31 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn independent_admin_epoch_two_fixture_differs_from_epoch_one() {
+        use jdc_authority_store::policy_bytes::PolicyBytesStore;
+        let d = tempdir().unwrap();
+        let old = d.path().join("old-policy.sqlite3");
+        let new = d.path().join("new-policy.sqlite3");
+        let witness = d.path().join("new-witness");
+        execute("init-policy-bytes", &old).unwrap();
+        execute("init-policy-bytes-v2", &new).unwrap();
+        execute("write-policy-anchor-v2", &witness).unwrap();
+        let old_snapshot =
+            PolicyBytesStore::read_verified_serialized(&std::fs::read(old).unwrap()).unwrap();
+        let new_snapshot =
+            PolicyBytesStore::read_verified_serialized(&std::fs::read(new).unwrap()).unwrap();
+        assert_eq!(old_snapshot.epoch(), 1);
+        assert_eq!(new_snapshot.epoch(), 2);
+        assert_ne!(old_snapshot.digest(), new_snapshot.digest());
+        assert_eq!(new_snapshot.bytes(), b"approved-policy-fixture-v2");
+        let bytes = std::fs::read(witness).unwrap();
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(&bytes[..8], &2u64.to_be_bytes());
+        assert_eq!(&bytes[8..], new_snapshot.digest());
+        assert_ne!(&bytes[8..], old_snapshot.digest());
+    }
+
     #[test]
     fn v2_fixture_produces_actual_immutable_policy_image() {
         let d = tempdir().unwrap();

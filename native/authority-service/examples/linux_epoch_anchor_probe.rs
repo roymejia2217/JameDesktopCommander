@@ -21,14 +21,19 @@ fn main() {
         }
         return;
     }
-    if action == "policy-snapshot" {
+    if action == "policy-snapshot" || action == "policy-snapshot-v2" {
+        let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v2" {
+            (2, b"approved-policy-fixture-v2")
+        } else {
+            (1, b"approved-policy-fixture")
+        };
         let result = observe_matching_admin_policy_snapshot();
         if result.is_ok_and(|policy| {
-            policy.epoch() == 1
-                && policy.bytes() == b"approved-policy-fixture"
+            policy.epoch() == expected_epoch
+                && policy.bytes() == expected_bytes
                 && policy.digest()
                     == &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
-                        b"approved-policy-fixture",
+                        expected_bytes,
                     )
         }) {
             println!("VERIFIED_BYTES");

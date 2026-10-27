@@ -7,8 +7,10 @@ pub mod token_policy;
 // Internal handle-bound directory operation. No IPC or policy grant yet.
 #[cfg(any(windows, target_os = "linux"))]
 pub mod handle_mkdir;
-// Only a sealed preopened-root dispatch model; no production bootstrap or IPC grant.
-#[cfg(any(windows, target_os = "linux"))]
+// No Windows production dispatch surface: tests retain the synthetic
+// model, while Linux can only dispatch typed kernel-authenticated frames.
+// Still no independently approved bootstrap or production IPC grant.
+#[cfg(any(target_os = "linux", test))]
 pub mod sealed_dispatch;
 
 // Experimental anchored Linux policy directory observer. No policy grant.

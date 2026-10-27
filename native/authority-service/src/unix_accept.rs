@@ -6,20 +6,21 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
-use crate::unix_session::inspect_one_session;
+use crate::sealed_dispatch::{DispatchDenied, SealedDirectoryGrant};
+use crate::unix_session::{read_authenticated_frame, AuthenticatedFrame};
 
 const MAX_DEADLINE: Duration = Duration::from_secs(5);
 
 use crate::IdentityDenied;
 
-/// Observe at most one connection; returns no authority or filesystem handle.
-/// Refuse blocking listener FDs. The deadline includes accept and frame read.
-pub fn inspect_one_named_session(
+/// Obtain a kernel-authenticated frame from exactly one prebound named
+/// nonblocking listener. This only establishes principal+syntax, not policy.
+fn read_one_named_authenticated(
     listener: &UnixListener,
     expected_uid: u32,
     expected_gid: u32,
     deadline: Duration,
-) -> Result<(), IdentityDenied> {
+) -> Result<AuthenticatedFrame, IdentityDenied> {
     if deadline.is_zero() || deadline > MAX_DEADLINE {
         return Err(IdentityDenied);
     }
@@ -95,8 +96,33 @@ pub fn inspect_one_named_session(
         }
         // This call only verifies kernel identity and request *syntax*.
         // It does not return or operate on a privileged filesystem handle.
-        return inspect_one_session(&stream, expected_uid, expected_gid, budget);
+        return read_authenticated_frame(&stream, expected_uid, expected_gid, budget);
     }
+}
+
+/// Observation-only compatibility interface; cannot create a sealed grant.
+pub fn inspect_one_named_session(
+    listener: &UnixListener,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<(), IdentityDenied> {
+    read_one_named_authenticated(listener, expected_uid, expected_gid, deadline).map(|_| ())
+}
+
+/// End-to-end authenticated Linux C4d dispatch proof. The caller cannot
+/// fabricate SealedDirectoryGrant or AuthenticatedFrame from an MCP request.
+/// Still not a service: there is no approved root bootstrap or policy owner.
+pub fn dispatch_one_named_c4d(
+    listener: &UnixListener,
+    grant: &mut SealedDirectoryGrant,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<(), DispatchDenied> {
+    let frame = read_one_named_authenticated(listener, expected_uid, expected_gid, deadline)
+        .map_err(|_| DispatchDenied)?;
+    grant.execute_authenticated_c4d(frame)
 }
 
 #[cfg(test)]

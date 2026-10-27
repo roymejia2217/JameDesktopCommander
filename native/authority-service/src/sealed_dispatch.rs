@@ -29,9 +29,26 @@ pub struct SealedDirectoryGrant {
 }
 
 impl SealedDirectoryGrant {
-    /// Enforce C4d canonical data, rootRef, epoch and one-shot request identity.
-    /// This is a synchronous internal model, not an OS-authenticated authority.
-    pub fn execute_c4d(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
+    /// The only Linux production-compiled dispatch entry takes a frame made
+    /// by a checked kernel peer, never raw untrusted caller bytes.
+    /// This remains non-authorizing without a protected root/epoch bootstrap.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn execute_authenticated_c4d(
+        &mut self,
+        frame: crate::unix_session::AuthenticatedFrame,
+    ) -> Result<(), DispatchDenied> {
+        self.execute_c4d_impl(&frame.into_wire())
+    }
+
+    /// Raw-input dispatch exists strictly for isolated adversarial unit tests.
+    #[cfg(test)]
+    fn execute_c4d(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
+        self.execute_c4d_impl(wire)
+    }
+
+    /// Validate C4d data, rootRef, epoch and one-shot request identity.
+    #[cfg(any(target_os = "linux", test))]
+    fn execute_c4d_impl(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
         const MAX_REQUESTS_PER_EPOCH: usize = 1024;
         if !self.active || self.expected_epoch == 0 {
             return Err(DispatchDenied);
@@ -102,6 +119,82 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn named_socket_dispatch_requires_kernel_identity_and_sealed_grant_without_raw_wire_bypass() {
+        use std::{
+            fs,
+            io::Write,
+            net::Shutdown,
+            os::unix::net::{UnixListener, UnixStream},
+            time::Duration,
+        };
+        let base = tempfile::tempdir().unwrap();
+        let allowed = base.path().join("allowed");
+        let outside = base.path().join("outside");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"UNMODIFIED").unwrap();
+        let socket = base.path().join("authority.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        assert_ne!(gid, 0);
+        let mut grant = fixture(&allowed);
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client
+            .write_all(&wire(ROOT, 7, ID, "authenticated"))
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(
+            crate::unix_accept::dispatch_one_named_c4d(
+                &listener,
+                &mut grant,
+                uid.wrapping_add(1),
+                gid,
+                Duration::from_secs(1)
+            ),
+            Err(DispatchDenied),
+            "foreign identity must deny before mutation"
+        );
+        assert!(!allowed.join("authenticated").exists());
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client
+            .write_all(&wire(ROOT, 7, ID, "authenticated"))
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(
+            crate::unix_accept::dispatch_one_named_c4d(
+                &listener,
+                &mut grant,
+                uid,
+                gid,
+                Duration::from_secs(1)
+            ),
+            Ok(()),
+            "kernel-authenticated named request must dispatch"
+        );
+        assert!(allowed.join("authenticated").is_dir());
+        let mut replay = UnixStream::connect(&socket).unwrap();
+        replay.write_all(&wire(ROOT, 7, ID, "changed")).unwrap();
+        replay.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(
+            crate::unix_accept::dispatch_one_named_c4d(
+                &listener,
+                &mut grant,
+                uid,
+                gid,
+                Duration::from_secs(1)
+            ),
+            Err(DispatchDenied),
+            "consumed request identity must reject replay"
+        );
+        assert!(!allowed.join("changed").exists());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"UNMODIFIED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn connected_kernel_peer_can_dispatch_once_only_with_sealed_root_and_matching_epoch() {
         use std::io::Write;
         use std::net::Shutdown;
@@ -135,7 +228,7 @@ mod tests {
             Duration::from_secs(1),
         )
         .expect("kernel-authenticated complete C4d frame");
-        assert_eq!(grant.execute_c4d(&verified), Ok(()));
+        assert_eq!(grant.execute_authenticated_c4d(verified), Ok(()));
         assert!(inside.join("科研/client-folder").is_dir());
 
         // A different connection cannot replay a request against this grant.
@@ -147,7 +240,10 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap();
-        assert_eq!(grant.execute_c4d(&verified), Err(DispatchDenied));
+        assert_eq!(
+            grant.execute_authenticated_c4d(verified),
+            Err(DispatchDenied)
+        );
         // Forging expected service identity is denied before dispatch.
         let foreign = send(&wire(
             ROOT,
@@ -173,7 +269,10 @@ mod tests {
         let verified =
             crate::unix_session::read_authenticated_frame(&stale, uid, gid, Duration::from_secs(1))
                 .unwrap();
-        assert_eq!(grant.execute_c4d(&verified), Err(DispatchDenied));
+        assert_eq!(
+            grant.execute_authenticated_c4d(verified),
+            Err(DispatchDenied)
+        );
         assert!(!inside.join("stale").exists());
 
         assert!(!outside.join("科研").exists());

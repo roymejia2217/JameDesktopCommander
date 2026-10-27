@@ -14,6 +14,19 @@ use crate::IdentityDenied;
 
 const MAX_SESSION_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Unforgeable within the crate: constructed only after a real kernel
+/// SO_PEERCRED check, a complete canonical frame and the absolute deadline.
+/// This is identity evidence, NOT an independent policy or filesystem grant.
+pub(crate) struct AuthenticatedFrame {
+    wire: Vec<u8>,
+}
+
+impl AuthenticatedFrame {
+    pub(crate) fn into_wire(self) -> Vec<u8> {
+        self.wire
+    }
+}
+
 struct DeadlineReader<'a> {
     stream: &'a UnixStream,
     expires: Instant,
@@ -84,15 +97,14 @@ impl Read for DeadlineReader<'_> {
     }
 }
 
-/// Return only a single canonical frame read from a kernel-authenticated peer.
-/// This is crate-private data, NOT a filesystem grant or trusted policy. Its
-/// caller must still validate an independently protected epoch and root handle.
+/// Return a single, typed frame only after kernel peer authentication.
+/// Caller must separately supply a protected epoch and a sealed root handle.
 pub(crate) fn read_authenticated_frame(
     stream: &UnixStream,
     expected_uid: u32,
     expected_gid: u32,
     deadline: Duration,
-) -> Result<Vec<u8>, IdentityDenied> {
+) -> Result<AuthenticatedFrame, IdentityDenied> {
     if deadline.is_zero() || deadline > MAX_SESSION_DEADLINE {
         return Err(IdentityDenied);
     }
@@ -111,8 +123,8 @@ pub(crate) fn read_authenticated_frame(
     let mut reader = DeadlineReader { stream, expires };
     let wire = read_one_frame(&mut reader).map_err(|_| IdentityDenied)?;
     validate_request_frame(&wire).map_err(|_| IdentityDenied)?;
-    // Identity and data only; no root authority follows from this result.
-    Ok(wire)
+    // Identity and syntax evidence only; no root authority follows.
+    Ok(AuthenticatedFrame { wire })
 }
 
 /// Backward-compatible observation-only API. Do not authorize from Ok(()).

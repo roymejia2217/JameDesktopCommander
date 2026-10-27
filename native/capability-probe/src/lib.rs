@@ -7,9 +7,15 @@ mod secure_root;
 mod windows_dacl;
 use napi::{bindgen_prelude::Buffer, Error, Result};
 #[cfg(feature = "receiver-test-fixture")]
-use napi::{bindgen_prelude::{Function, JsObjectValue, Object}, Env};
+use napi::{
+    bindgen_prelude::{Function, JsObjectValue, Object},
+    Env,
+};
 use napi_derive::napi;
-use std::{io::{Read, Write}, sync::Mutex};
+use std::{
+    io::{Read, Write},
+    sync::Mutex,
+};
 
 // Initial bounded allocation limit for the experimental, synchronous API.
 // Larger files require a separately tested, cancellable streaming interface.
@@ -26,6 +32,42 @@ fn require_bounded_size(byte_len: usize) -> Result<()> {
     Ok(())
 }
 
+// Reject a currently observable multi-link object *after* acquiring its handle.
+// This is defense in depth, not a proof of object origin or of protection
+// against links introduced later by a same-principal adversary.
+fn reject_multiply_linked_handle(file: &cap_std::fs::File) -> Result<()> {
+    use cap_fs_ext::MetadataExt;
+    let meta = file.metadata().map_err(denied)?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(Error::from_reason(
+            "Capability operation rejected: shared or nonregular object",
+        ));
+    }
+    Ok(())
+}
+
+// Never combine append + create + an initial link check against a pathname.
+// Open without creating first; if genuinely absent, create a new object
+// exclusively. A later link introduced by another principal remains a risk.
+fn open_checked_append(dir: &Dir, relative: &str) -> Result<cap_std::fs::File> {
+    let mut existing = OpenOptions::new();
+    existing.append(true);
+    match dir.open_with(relative, &existing) {
+        Ok(file) => {
+            reject_multiply_linked_handle(&file)?;
+            Ok(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut new_file = OpenOptions::new();
+            new_file.append(true).create_new(true);
+            let file = dir.open_with(relative, &new_file).map_err(denied)?;
+            reject_multiply_linked_handle(&file)?;
+            Ok(file)
+        }
+        Err(error) => Err(denied(error)),
+    }
+}
+
 // Replacement publishes a distinct file object within the already opened
 // directory capability. This avoids truncating a potentially shared hardlink.
 // It does NOT establish custody for reads or append, and must remain nonrelease
@@ -33,10 +75,15 @@ fn require_bounded_size(byte_len: usize) -> Result<()> {
 fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
     require_bounded_size(bytes.len())?;
     let path = Path::new(relative);
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .ok_or_else(|| Error::from_reason("Invalid relative capability file name"))?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     let target_parent = dir.open_dir(parent).map_err(denied)?;
 
     // Publishing a new inode must not silently bypass an existing target's
@@ -47,7 +94,10 @@ fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
     let mut permission_options = OpenOptions::new();
     permission_options.write(true);
     let _existing_writer = match target_parent.open_with(name, &permission_options) {
-        Ok(handle) => Some(handle),
+        Ok(handle) => {
+            reject_multiply_linked_handle(&handle)?;
+            Some(handle)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(denied(error)),
     };
@@ -71,7 +121,8 @@ fn replace_bounded(dir: &Dir, relative: &str, bytes: &[u8]) -> Result<()> {
 fn read_bounded(file: impl Read) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(MAX_CAPABILITY_BYTES as u64 + 1)
-        .read_to_end(&mut bytes).map_err(denied)?;
+        .read_to_end(&mut bytes)
+        .map_err(denied)?;
     require_bounded_size(bytes.len())?;
     Ok(bytes)
 }
@@ -81,21 +132,27 @@ fn read_bounded(file: impl Read) -> Result<Vec<u8>> {
 // cap-std's cross-platform file-type classification; deny conservatively.
 fn reject_special_entry(metadata: &cap_std::fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
-        return Err(Error::from_reason("Capability operation rejected: nonregular entry"));
+        return Err(Error::from_reason(
+            "Capability operation rejected: nonregular entry",
+        ));
     }
     #[cfg(windows)]
     {
         use cap_std::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(Error::from_reason("Capability operation rejected: reparse point"));
+            return Err(Error::from_reason(
+                "Capability operation rejected: reparse point",
+            ));
         }
     }
     Ok(())
 }
 
 #[napi]
-pub struct RootCapability { root: Mutex<Option<Dir>> }
+pub struct RootCapability {
+    root: Mutex<Option<Dir>>,
+}
 
 // Exact byte count is represented as a decimal string to avoid precision
 // loss when JavaScript consumers handle files larger than Number.MAX_SAFE_INTEGER.
@@ -142,7 +199,9 @@ pub fn probe_borrow_across_js_callback(
     callback: Function<'_, (), ()>,
 ) -> Result<bool> {
     callback.call(())?;
-    let guard = capability.root.lock()
+    let guard = capability
+        .root
+        .lock()
         .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
     Ok(guard.is_some())
 }
@@ -172,7 +231,8 @@ pub fn probe_mutable_pair(_left: &mut RootCapability, _right: &mut RootCapabilit
 #[napi]
 pub fn probe_null_native_borrow(mutable: bool) -> Result<()> {
     let borrow = napi::bindgen_prelude::acquire_native_borrow(
-        std::ptr::null_mut::<RootCapability>(), mutable,
+        std::ptr::null_mut::<RootCapability>(),
+        mutable,
     )?;
     drop(borrow);
     Ok(())
@@ -183,14 +243,22 @@ impl RootCapability {
     #[napi(constructor)]
     pub fn new(root: String) -> Result<Self> {
         let dir = secure_root::open_root_dir(&root).map_err(denied)?;
-        Ok(Self { root: Mutex::new(Some(dir)) })
+        Ok(Self {
+            root: Mutex::new(Some(dir)),
+        })
     }
 
     #[napi]
     pub fn read_text(&self, relative: String) -> Result<String> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let file = dir.open(relative).map_err(denied)?;
+        reject_multiply_linked_handle(&file)?;
         String::from_utf8(read_bounded(file)?)
             .map_err(|_| Error::from_reason("Capability operation rejected: InvalidData"))
     }
@@ -198,8 +266,13 @@ impl RootCapability {
     #[napi]
     pub fn write_text(&self, relative: String, content: String) -> Result<()> {
         require_bounded_size(content.len())?;
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         // Replacement must publish a fresh object, not truncate the inode
         // potentially shared by a hard link outside the authorized namespace.
         // cap-std-ext uses a capability-relative tempfile and atomic rename.
@@ -209,11 +282,14 @@ impl RootCapability {
     #[napi]
     pub fn append_text(&self, relative: String, content: String) -> Result<()> {
         require_bounded_size(content.len())?;
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
-        let mut options = OpenOptions::new();
-        options.append(true).create(true);
-        let mut file = dir.open_with(relative, &options).map_err(denied)?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let mut file = open_checked_append(dir, &relative)?;
         file.write_all(content.as_bytes()).map_err(denied)?;
         file.flush().map_err(denied)?;
         Ok(())
@@ -221,9 +297,15 @@ impl RootCapability {
 
     #[napi]
     pub fn read_bytes(&self, relative: String) -> Result<Buffer> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let file = dir.open(relative).map_err(denied)?;
+        reject_multiply_linked_handle(&file)?;
         // Text and binary operations share the same bounded synchronous read.
         Ok(read_bounded(file)?.into())
     }
@@ -236,16 +318,19 @@ impl RootCapability {
         if mode != "rewrite" && mode != "append" {
             return Err(Error::from_reason("Invalid capability write mode"));
         }
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         if mode == "rewrite" {
             // Object replacement is independent from any pre-existing hard
             // link alias. Append still requires separate custody policy.
             return replace_bounded(dir, &relative, content.as_ref());
         }
-        let mut options = OpenOptions::new();
-        options.append(true).create(true);
-        let mut file = dir.open_with(relative, &options).map_err(denied)?;
+        let mut file = open_checked_append(dir, &relative)?;
         file.write_all(content.as_ref()).map_err(denied)?;
         file.flush().map_err(denied)?;
         Ok(())
@@ -255,15 +340,25 @@ impl RootCapability {
     // never return validated absolute names for JavaScript to reopen.
     #[napi]
     pub fn create_directory(&self, relative: String) -> Result<()> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         dir.create_dir_all(relative).map_err(denied)
     }
 
     #[napi]
     pub fn move_relative(&self, from: String, to: String) -> Result<()> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         // cap-std resolves both names relative to the same opened directory.
         dir.rename(from, dir, to).map_err(denied)
     }
@@ -271,17 +366,26 @@ impl RootCapability {
     #[napi]
     pub fn list_directory(&self, relative: String) -> Result<Vec<String>> {
         const MAX_DIRECTORY_ENTRIES: usize = 4096;
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let entries = dir.read_dir(relative).map_err(denied)?;
         let mut names = Vec::new();
         for entry in entries {
             // Never silently return a truncated listing.
             if names.len() >= MAX_DIRECTORY_ENTRIES {
-                return Err(Error::from_reason("Capability directory entry limit exceeded"));
+                return Err(Error::from_reason(
+                    "Capability directory entry limit exceeded",
+                ));
             }
             let entry = entry.map_err(denied)?;
-            let name = entry.file_name().into_string()
+            let name = entry
+                .file_name()
+                .into_string()
                 .map_err(|_| Error::from_reason("Capability directory contains a non-UTF8 name"))?;
             names.push(name);
         }
@@ -292,8 +396,13 @@ impl RootCapability {
     // validating an absolute path and reopening it under a mutable namespace.
     #[napi]
     pub fn stat_relative(&self, relative: String) -> Result<CapabilityEntryMetadata> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let metadata = dir.symlink_metadata(relative).map_err(denied)?;
         reject_special_entry(&metadata)?;
         let kind = if metadata.is_file() {
@@ -301,7 +410,9 @@ impl RootCapability {
         } else if metadata.is_dir() {
             "directory"
         } else {
-            return Err(Error::from_reason("Capability operation rejected: nonregular entry"));
+            return Err(Error::from_reason(
+                "Capability operation rejected: nonregular entry",
+            ));
         };
         Ok(CapabilityEntryMetadata {
             kind: kind.to_owned(),
@@ -313,12 +424,19 @@ impl RootCapability {
     // The final unlinked name is resolved by cap-std relative to the held root.
     #[napi]
     pub fn remove_file_relative(&self, relative: String) -> Result<()> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let metadata = dir.symlink_metadata(&relative).map_err(denied)?;
         reject_special_entry(&metadata)?;
         if !metadata.is_file() {
-            return Err(Error::from_reason("Capability operation rejected: not a regular file"));
+            return Err(Error::from_reason(
+                "Capability operation rejected: not a regular file",
+            ));
         }
         dir.remove_file(relative).map_err(denied)
     }
@@ -327,19 +445,29 @@ impl RootCapability {
     // without unlinking its children, including under concurrent renames.
     #[napi]
     pub fn remove_empty_directory_relative(&self, relative: String) -> Result<()> {
-        let guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
-        let dir = guard.as_ref().ok_or_else(|| Error::from_reason("Capability is closed"))?;
+        let guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let dir = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Capability is closed"))?;
         let metadata = dir.symlink_metadata(&relative).map_err(denied)?;
         reject_special_entry(&metadata)?;
         if !metadata.is_dir() {
-            return Err(Error::from_reason("Capability operation rejected: not a regular directory"));
+            return Err(Error::from_reason(
+                "Capability operation rejected: not a regular directory",
+            ));
         }
         dir.remove_dir(relative).map_err(denied)
     }
 
     #[napi]
     pub fn close(&self) -> Result<()> {
-        let mut guard = self.root.lock().map_err(|_| Error::from_reason("Capability lock unavailable"))?;
+        let mut guard = self
+            .root
+            .lock()
+            .map_err(|_| Error::from_reason("Capability lock unavailable"))?;
         *guard = None;
         Ok(())
     }

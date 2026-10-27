@@ -66,15 +66,10 @@ fn admit_acl(aces: &[KeyAce]) -> Result<(), IdentityDenied> {
 /// Version 1: single atomic REG_BINARY = epoch in network byte order (8 bytes)
 /// followed by the 32-byte SHA-256 policy digest. Never read split values.
 fn admissible_anchor(value_type: u32, data: &[u8]) -> Result<(u64, [u8; 32]), IdentityDenied> {
-    if value_type != REG_BINARY || data.len() != 40 {
+    if value_type != REG_BINARY {
         return Err(IdentityDenied);
     }
-    let epoch = u64::from_be_bytes(data[..8].try_into().map_err(|_| IdentityDenied)?);
-    let digest: [u8; 32] = data[8..].try_into().map_err(|_| IdentityDenied)?;
-    if epoch == 0 || digest.iter().all(|b| *b == 0) {
-        return Err(IdentityDenied);
-    }
-    Ok((epoch, digest))
+    crate::epoch_anchor_wire::parse_epoch_digest_wire(data)
 }
 
 /// Data-only observation. The key is never created or modified by this crate.

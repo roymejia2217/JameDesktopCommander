@@ -3,6 +3,8 @@
 //! grant filesystem operations, or start a service.
 
 pub mod token_policy;
+// Shared canonical epoch/digest data decoder; not an authorization grant.
+mod epoch_anchor_wire;
 
 // Internal handle-bound directory operation. No IPC or policy grant yet.
 #[cfg(any(windows, target_os = "linux"))]
@@ -16,6 +18,10 @@ pub mod sealed_dispatch;
 // Experimental anchored Linux policy directory observer. No policy grant.
 #[cfg(target_os = "linux")]
 pub mod linux_policy_root;
+
+// Independent root-admin-owned Linux epoch witness, observation only.
+#[cfg(target_os = "linux")]
+pub mod linux_epoch_anchor;
 
 // C4d native transport framing only, not an authenticated listener or authority.
 pub mod frame_reader;

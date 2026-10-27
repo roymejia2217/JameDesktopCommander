@@ -40,3 +40,16 @@ test('cross-principal proof is inside the existing governed Linux native job', (
     assert.match(script, expression);
   }
 });
+
+test('Linux custody positive and adversarial identities run under verified kernel NNP', () => {
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-custody-acceptance.sh'), 'utf8',
+  );
+  assert.match(script, /sudo -n -u jdc-authority -- setpriv --no-new-privs -- "\$identity_probe"/);
+  assert.match(script, /sudo -n -u jdc-authority -- setpriv --no-new-privs -- awk/);
+  assert.match(script, /E_CUSTODY_NO_NEW_PRIVS_NOT_PROVEN/);
+  assert.match(script, /setpriv --reuid "\$service_uid" --regid "\$service_gid" --groups "\$service_gid,\$attacker_gid" --no-new-privs -- "\$identity_probe"/);
+  assert.match(script, /if sudo -n -u nobody -- setpriv --no-new-privs -- "\$identity_probe"; then/);
+  assert.match(script, /expect_denied identity sudo -n -u nobody -- setpriv --no-new-privs -- "\$identity_probe"/);
+  assert.doesNotMatch(script, /^sudo -n -u jdc-authority -- "\$identity_probe"$/m);
+});

@@ -55,9 +55,21 @@ sudo -n chown jdc-authority:jdc-authority "$fixture_dir"
 sudo -n chmod 0700 "$fixture_dir"
 sudo -n chown nobody:"$attacker_group" "$canary"
 
-# PROVE both identities can actually execute commands; do not misinterpret
-# a broken sudo invocation as protection.
-sudo -n -u jdc-authority -- "$identity_probe"
+# Positive identity MUST run with the exact NNP kernel requirement used by
+# the protected systemd service. Never weaken the Rust identity preflight.
+if ! command -v setpriv >/dev/null; then
+  printf '%s\n' 'E_CUSTODY_SETPRIV_UNAVAILABLE' >&2
+  exit 1
+fi
+service_nnp="$(sudo -n -u jdc-authority -- setpriv --no-new-privs -- awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
+if [[ "$service_nnp" != '1' ]]; then
+  printf '%s\n' 'E_CUSTODY_NO_NEW_PRIVS_NOT_PROVEN' >&2
+  exit 1
+fi
+if ! sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$identity_probe"; then
+  printf '%s\n' 'E_CUSTODY_DEDICATED_IDENTITY_POSITIVE_FAILED' >&2
+  exit 1
+fi
 
 # Adversarial REAL token: same service UID and primary GID, but a foreign
 # supplementary group injected by the disposable runner administrator.
@@ -69,27 +81,25 @@ if [[ "$service_gid" -eq "$attacker_gid" || "$attacker_gid" -eq 0 ]]; then
   printf '%s\n' 'E_CUSTODY_GROUPS_NOT_DISTINCT' >&2
   exit 1
 fi
-if ! command -v setpriv >/dev/null; then
-  printf '%s\n' 'E_CUSTODY_SETPRIV_UNAVAILABLE' >&2
-  exit 1
-fi
-identity_uid="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -u)"
-identity_groups="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -G)"
+identity_uid="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- id -u)"
+identity_groups="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- id -G)"
 # Verify real/effective/saved credentials independently via Linux procfs.
 # Otherwise an unrelated UID mismatch could masquerade as group rejection.
-uid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Uid:/ {print $2, $3, $4}' /proc/self/status)"
-gid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Gid:/ {print $2, $3, $4}' /proc/self/status)"
+uid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^Uid:/ {print $2, $3, $4}' /proc/self/status)"
+gid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^Gid:/ {print $2, $3, $4}' /proc/self/status)"
+identity_nnp="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
 if [[ "$identity_uid" != "$service_uid" || " $identity_groups " != *" $attacker_gid "* ||
       "$uid_triplet" != "$service_uid $service_uid $service_uid" ||
-      "$gid_triplet" != "$service_gid $service_gid $service_gid" ]]; then
+      "$gid_triplet" != "$service_gid $service_gid $service_gid" ||
+      "$identity_nnp" != '1' ]]; then
   printf '%s\n' 'E_CUSTODY_GROUP_INJECTION_NOT_PROVEN' >&2
   exit 1
 fi
-if sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- "$identity_probe"; then
+if sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- "$identity_probe"; then
   printf '%s\n' 'E_CUSTODY_SUPPLEMENTARY_GROUP_ACCEPTED' >&2
   exit 1
 fi
-if sudo -n -u nobody -- "$identity_probe"; then
+if sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"; then
   printf '%s\n' 'E_CUSTODY_IDENTITY_SPOOF' >&2
   exit 1
 fi
@@ -129,7 +139,7 @@ expect_denied() {
     exit 1
   fi
 }
-expect_denied identity sudo -n -u nobody -- "$identity_probe"
+expect_denied identity sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"
 expect_denied browse sudo -n -u nobody -- ls -la "$fixture_dir"
 expect_denied read sudo -n -u nobody -- cat "$database"
 expect_denied write sudo -n -u nobody -- touch "$database"

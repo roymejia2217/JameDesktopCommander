@@ -165,6 +165,24 @@ test('native restricted append must not change outside bytes via a hard-link ali
   });
 });
 
+test('text read, text append and text rewrite reject a real cross-root alias', () => {
+  withIsolatedRoot(({ cap, allowed, outside }) => {
+    const outsideText = path.join(outside, 'outside-note.txt');
+    fs.writeFileSync(outsideText, 'OUTSIDE-TEXT-ORIGINAL');
+    const insideAlias = path.join(allowed, 'alias-note.txt');
+    fs.linkSync(outsideText, insideAlias);
+    assert.equal(fs.statSync(insideAlias).ino, fs.statSync(outsideText).ino);
+    assert.ok(fs.statSync(outsideText).nlink >= 2);
+    assert.throws(() => cap.readText('alias-note.txt'), /shared or nonregular object/i);
+    assert.throws(() => cap.appendText('alias-note.txt', '-APPENDED'),
+      /shared or nonregular object/i);
+    assert.throws(() => cap.writeText('alias-note.txt', 'REWRITTEN'),
+      /shared or nonregular object/i);
+    assert.equal(fs.readFileSync(outsideText, 'utf8'), 'OUTSIDE-TEXT-ORIGINAL');
+    assert.equal(fs.readFileSync(insideAlias, 'utf8'), 'OUTSIDE-TEXT-ORIGINAL');
+  });
+});
+
 test('final-component replacement with a hard link after an in-root checkpoint is denied', () => {
   withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
     const name = 'linked-outside-sentinel.bin';
@@ -196,28 +214,49 @@ test('closed handle fails for all added directory operations', () => {
   });
 });
 
-test('atomic rewrite by byte API replaces only in-root hardlink name without touching exterior object', () => {
+test('native atomic byte rewrite denies a known multi-link object, preserving both names', () => {
   withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
     const relative = installCrossRootHardLink(allowed, sentinel, original);
     const authorizedName = path.join(allowed, relative);
-    const replacement = Buffer.from([0x61, 0x62, 0x63]);
-    cap.writeBytes(relative, replacement, 'rewrite');
-    assert.deepEqual(fs.readFileSync(sentinel), original, 'outside object must retain original bytes');
-    assert.deepEqual(fs.readFileSync(authorizedName), replacement, 'in-root replacement must be visible');
-    assert.notEqual(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino,
-      'replacement must be a distinct file object from the exterior hardlink');
+    // Cross-root aliases are never approved for restricted operations.
+    // Independent inode replacement is insufficient to prove their origin.
+    assert.throws(() => cap.writeBytes(relative, Buffer.from([0x61, 0x62, 0x63]), 'rewrite'),
+      /shared or nonregular object/i);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+    assert.deepEqual(fs.readFileSync(authorizedName), original);
+    assert.equal(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino);
   });
 });
 
-test('atomic text rewrite replaces only in-root hardlink name without touching exterior object', () => {
+test('native atomic text rewrite also denies a known multi-link object', () => {
   withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
     const relative = installCrossRootHardLink(allowed, sentinel, original);
     const authorizedName = path.join(allowed, relative);
-    cap.writeText(relative, 'ALLOWED-REPLACEMENT');
-    assert.deepEqual(fs.readFileSync(sentinel), original, 'outside object must retain original bytes');
-    assert.equal(fs.readFileSync(authorizedName, 'utf8'), 'ALLOWED-REPLACEMENT');
-    assert.notEqual(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino,
-      'replacement must break hardlink object identity');
+    assert.throws(() => cap.writeText(relative, 'ALLOWED-REPLACEMENT'),
+      /shared or nonregular object/i);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+    assert.deepEqual(fs.readFileSync(authorizedName), original);
+    assert.equal(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino);
+  });
+});
+
+test('single-link reads, appends and atomic rewrites remain usable', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    const name = 'sole-owner.txt';
+    fs.writeFileSync(path.join(allowed, name), 'initial');
+    assert.equal(fs.statSync(path.join(allowed, name)).nlink, 1);
+    assert.equal(cap.readText(name), 'initial');
+    cap.appendText(name, '-append');
+    assert.equal(cap.readText(name), 'initial-append');
+    cap.writeText(name, 'fresh');
+    assert.equal(cap.readText(name), 'fresh');
+    cap.writeBytes(name, Buffer.from([0x01, 0x02]), 'append');
+    assert.deepEqual(cap.readBytes(name), Buffer.from([0x66, 0x72, 0x65, 0x73, 0x68, 0x01, 0x02]));
+    cap.writeBytes(name, Buffer.from([0x00, 0xff]), 'rewrite');
+    assert.deepEqual(fs.readFileSync(path.join(allowed, name)), Buffer.from([0x00, 0xff]));
+    cap.appendText('new-sole-owner.txt', 'created');
+    assert.equal(cap.readText('new-sole-owner.txt'), 'created');
+    assert.equal(fs.statSync(path.join(allowed, 'new-sole-owner.txt')).nlink, 1);
   });
 });
 

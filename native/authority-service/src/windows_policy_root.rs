@@ -43,7 +43,8 @@ impl ObservedWindowsStateDirectory {
     }
 
     /// Consume the already DACL-checked kernel directory handle.
-    /// This handle cannot be issued before dedicated SCM identity verification.
+    /// Test-only until a reviewed production issuer binds this exact root identity.
+    #[cfg(test)]
     pub(crate) fn into_verified_file(self) -> File {
         self.file
     }

@@ -16,7 +16,8 @@ pub struct ObservedPolicyDirectory {
 
 impl ObservedPolicyDirectory {
     /// Consume the owner/mode-checked pinned kernel descriptor exactly once.
-    /// The caller must still bind it to an independently attested policy.
+    /// Test-only until a reviewed production issuer binds this exact root identity.
+    #[cfg(test)]
     pub(crate) fn into_verified_fd(self) -> OwnedFd {
         self.fd
     }

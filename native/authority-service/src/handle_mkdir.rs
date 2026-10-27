@@ -33,6 +33,16 @@ pub struct RootedDirectory {
 ///     root: Dir::open_ambient_dir(".", ambient_authority()).unwrap(),
 /// };
 /// ```
+/// Neither platform's preapproved service bootstrap is a downstream API:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::ProtectedStagingDirectory;
+/// let file = std::fs::File::open(".").unwrap();
+/// let _stage = ProtectedStagingDirectory::from_preopened_service_state(file);
+/// ```
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::ProtectedStagingDirectory;
+/// let _stage = ProtectedStagingDirectory::from_provisioned_linux_state();
+/// ```
 pub struct ProtectedStagingDirectory {
     root: Dir,
 }
@@ -41,8 +51,9 @@ impl ProtectedStagingDirectory {
     /// Windows bootstrap consumes a preopened directory handle; the OS token,
     /// protected DACL and service SID are checked before accepting it.
     /// Caller must independently pin the expected state-root object identity.
-    #[cfg(windows)]
-    pub fn from_preopened_service_state(
+    /// Research-only bootstrap: never compiled into a normal service binary.
+    #[cfg(all(windows, test))]
+    pub(crate) fn from_preopened_service_state(
         preopened: std::fs::File,
     ) -> Result<Self, crate::IdentityDenied> {
         let observed = crate::windows_policy_root::observe_preopened_service_state(preopened)?;
@@ -52,8 +63,9 @@ impl ProtectedStagingDirectory {
     /// Linux bootstrap accepts only the independently provisioned absolute
     /// systemd state directory, observed as pinned, non-symlink OS handles.
     /// Still NO validated policy bytes, grants or complete service lifecycle.
-    #[cfg(target_os = "linux")]
-    pub fn from_provisioned_linux_state() -> Result<Self, crate::IdentityDenied> {
+    /// Research-only bootstrap: never compiled into a normal service binary.
+    #[cfg(all(target_os = "linux", test))]
+    pub(crate) fn from_provisioned_linux_state() -> Result<Self, crate::IdentityDenied> {
         let observed = crate::linux_policy_root::observe_provisioned_directory()?;
         Ok(Self::from_verified_linux_state(observed))
     }
@@ -61,7 +73,7 @@ impl ProtectedStagingDirectory {
     /// Conversion only, NOT authorization: OS owner/DACL and service identity
     /// must already have been checked by the state observer on this same handle.
     /// No caller-controlled pathname is reopened.
-    #[cfg(windows)]
+    #[cfg(all(windows, test))]
     pub(crate) fn from_verified_windows_state(
         observed: crate::windows_policy_root::ObservedWindowsStateDirectory,
     ) -> Self {
@@ -72,7 +84,7 @@ impl ProtectedStagingDirectory {
 
     /// Linux uses the already verified O_PATH directory fd as an openat root.
     /// No path traversal, symlink resolution or ambient reopen is performed.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", test))]
     pub(crate) fn from_verified_linux_state(
         observed: crate::linux_policy_root::ObservedPolicyDirectory,
     ) -> Self {

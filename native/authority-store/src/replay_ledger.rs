@@ -17,10 +17,18 @@ const REPLAY_SCHEMA: &str = "CREATE TABLE replay_claims (epoch BLOB NOT NULL CHE
 /// use jdc_authority_store::replay_ledger::ReplayClaimLedger;
 /// use rusqlite::Connection;
 /// let forged = Connection::open_in_memory().unwrap();
-/// let _ledger = ReplayClaimLedger::from_existing_connection(forged);
+/// let _ledger = ReplayClaimLedger::from_existing_connection(forged, 7);
+/// ```
+/// The client also cannot change the epoch on an individual claim:
+/// ```compile_fail
+/// use jdc_authority_store::replay_ledger::ReplayClaimLedger;
+/// fn bypass(mut ledger: ReplayClaimLedger) {
+///     ledger.claim_once(99, [0x11; 16]);
+/// }
 /// ```
 pub struct ReplayClaimLedger {
     connection: Connection,
+    expected_epoch: u64,
 }
 fn verify_schema(db: &Connection) -> Result<(), StoreDenied> {
     let app: i64 = db
@@ -51,7 +59,10 @@ impl ReplayClaimLedger {
     // Only usable inside this crate's isolated offline fixture. Future service
     // construction requires an independently reviewed OS-descriptor-bound VFS.
     #[cfg(test)]
-    fn from_existing_connection(db: Connection) -> Result<Self, StoreDenied> {
+    fn from_existing_connection(db: Connection, expected_epoch: u64) -> Result<Self, StoreDenied> {
+        if expected_epoch == 0 {
+            return Err(StoreDenied);
+        }
         if db.is_readonly(MAIN_DB).map_err(|_| StoreDenied)? {
             return Err(StoreDenied);
         }
@@ -72,22 +83,23 @@ impl ReplayClaimLedger {
             return Err(StoreDenied);
         }
         verify_schema(&db)?;
-        Ok(Self { connection: db })
+        Ok(Self {
+            connection: db,
+            expected_epoch,
+        })
     }
 
-    /// Claims exactly one request within one epoch, atomically. Failures are
-    /// DENIALS, including after-commit uncertainty; do not retry automatically.
+    /// Claims exactly one request in the epoch pinned at construction.
+    /// Failures are DENIALS, including after-commit uncertainty; do not retry.
     /// The ID must come from the independently validated canonical wire frame.
-    pub fn claim_once(&mut self, epoch: u64, request_id: [u8; 16]) -> Result<(), StoreDenied> {
-        if epoch == 0 {
-            return Err(StoreDenied);
-        }
+    /// A future issuer must bind this immutable epoch to the trusted witness.
+    pub fn claim_once(&mut self, request_id: [u8; 16]) -> Result<(), StoreDenied> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreDenied)?;
         verify_schema(&tx)?;
-        let epoch = epoch.to_be_bytes();
+        let epoch = self.expected_epoch.to_be_bytes();
         let existing: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM replay_claims WHERE epoch=?1",
@@ -128,9 +140,9 @@ mod tests {
             .unwrap();
         db.execute_batch(SCHEMA_FIXTURE).unwrap();
     }
-    fn open(path: &Path) -> ReplayClaimLedger {
+    fn open(path: &Path, expected_epoch: u64) -> ReplayClaimLedger {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-        ReplayClaimLedger::from_existing_connection(db).unwrap()
+        ReplayClaimLedger::from_existing_connection(db, expected_epoch).unwrap()
     }
     #[test]
     fn committed_claim_survives_close_and_denies_replay_after_restart() {
@@ -138,10 +150,31 @@ mod tests {
         let path = f.path().join("claims.sqlite3");
         setup(&path);
         let id = [0x42; 16];
-        open(&path).claim_once(7, id).unwrap();
-        assert!(open(&path).claim_once(7, id).is_err());
-        open(&path).claim_once(8, id).unwrap();
-        assert!(open(&path).claim_once(0, [0x43; 16]).is_err());
+        open(&path, 7).claim_once(id).unwrap();
+        assert!(open(&path, 7).claim_once(id).is_err());
+        open(&path, 8).claim_once(id).unwrap();
+        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        assert!(ReplayClaimLedger::from_existing_connection(db, 0).is_err());
+    }
+    #[test]
+    fn each_claim_uses_the_constructor_bound_epoch_not_an_input_epoch() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let mut epoch_seven = open(&path, 7);
+        epoch_seven.claim_once([0x33; 16]).unwrap();
+        epoch_seven.claim_once([0x44; 16]).unwrap();
+        assert!(open(&path, 7).claim_once([0x33; 16]).is_err());
+        let db = Connection::open(&path).unwrap();
+        let stored_epoch: Vec<u8> = db
+            .query_row("SELECT DISTINCT epoch FROM replay_claims", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_epoch, 7u64.to_be_bytes());
+        // A future trusted updater must explicitly issue a new pinned ledger.
+        open(&path, 8).claim_once([0x33; 16]).unwrap();
+        assert!(epoch_seven.claim_once([0x33; 16]).is_err());
     }
     #[test]
     fn two_independent_connections_cannot_both_claim_same_request() {
@@ -155,9 +188,9 @@ mod tests {
                     let gate = Arc::clone(&barrier);
                     let file = path.clone();
                     s.spawn(move || {
-                        let mut ledger = open(&file);
+                        let mut ledger = open(&file, 7);
                         gate.wait();
-                        ledger.claim_once(7, [0x12; 16]).is_ok()
+                        ledger.claim_once([0x12; 16]).is_ok()
                     })
                 })
                 .collect();
@@ -167,7 +200,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(results.iter().filter(|&&won| won).count(), 1);
-        assert!(open(&path).claim_once(7, [0x12; 16]).is_err());
+        assert!(open(&path, 7).claim_once([0x12; 16]).is_err());
     }
     #[test]
     fn schema_tampering_and_unprovisioned_files_fail_closed() {
@@ -179,20 +212,20 @@ mod tests {
         let db = Connection::open(&path).unwrap();
         db.execute_batch("CREATE TABLE foreign_table (value TEXT);")
             .unwrap();
-        assert!(ReplayClaimLedger::from_existing_connection(db).is_err());
+        assert!(ReplayClaimLedger::from_existing_connection(db, 7).is_err());
     }
     #[test]
     fn schema_mutation_between_claims_denies_before_mutation() {
         let f = tempdir().unwrap();
         let path = f.path().join("claims.sqlite3");
         setup(&path);
-        let mut ledger = open(&path);
-        ledger.claim_once(3, [0x11; 16]).unwrap();
+        let mut ledger = open(&path, 3);
+        ledger.claim_once([0x11; 16]).unwrap();
         Connection::open(&path)
             .unwrap()
             .execute_batch("CREATE TABLE injected (id INTEGER);")
             .unwrap();
-        assert!(ledger.claim_once(3, [0x22; 16]).is_err());
+        assert!(ledger.claim_once([0x22; 16]).is_err());
         let db = Connection::open(&path).unwrap();
         let count: i64 = db
             .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
@@ -205,12 +238,12 @@ mod tests {
         let path = f.path().join("claims.sqlite3");
         let old = f.path().join("old.sqlite3");
         setup(&path);
-        open(&path).claim_once(3, [0x11; 16]).unwrap();
+        open(&path, 3).claim_once([0x11; 16]).unwrap();
         std::fs::copy(&path, &old).unwrap();
-        open(&path).claim_once(3, [0x22; 16]).unwrap();
+        open(&path, 3).claim_once([0x22; 16]).unwrap();
         std::fs::copy(&old, &path).unwrap();
         assert!(
-            open(&path).claim_once(3, [0x22; 16]).is_ok(),
+            open(&path, 3).claim_once([0x22; 16]).is_ok(),
             "NEGATIVE PROOF: untrusted whole-file SQLite rollback revives an ID"
         );
     }
@@ -219,14 +252,14 @@ mod tests {
         let f = tempdir().unwrap();
         let path = f.path().join("claims.sqlite3");
         setup(&path);
-        let mut ledger = open(&path);
+        let mut ledger = open(&path, 12);
         for n in 0..1024u32 {
             let mut id = [0u8; 16];
             id[..4].copy_from_slice(&n.to_be_bytes());
-            ledger.claim_once(12, id).unwrap();
+            ledger.claim_once(id).unwrap();
         }
-        assert!(ledger.claim_once(12, [0xff; 16]).is_err());
+        assert!(ledger.claim_once([0xff; 16]).is_err());
         drop(ledger);
-        assert!(open(&path).claim_once(12, [0; 16]).is_err());
+        assert!(open(&path, 12).claim_once([0; 16]).is_err());
     }
 }

@@ -1,10 +1,43 @@
 //! C4d dispatch contract against a sealed, preopened root; non-release.
 //! No OS-protected bootstrap or client-facing constructor exists.
 use crate::{canonical_request::decode_create_directory_frame, handle_mkdir::RootedDirectory};
+#[cfg(test)]
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchDenied;
+
+// A production binary must never silently use process-local replay state.
+// The durable, OS-witnessed issuer has not been implemented yet. Keep the
+// only usable positive fixture behind cfg(test) until that boundary exists.
+enum ReplayAdmission {
+    Unavailable,
+    #[cfg(test)]
+    SyntheticTestOnly(HashSet<[u8; 16]>),
+}
+impl ReplayAdmission {
+    fn consume(&mut self, _request_id: [u8; 16]) -> Result<(), DispatchDenied> {
+        match self {
+            Self::Unavailable => Err(DispatchDenied),
+            #[cfg(test)]
+            Self::SyntheticTestOnly(ids) => {
+                if ids.len() >= 1024 || !ids.insert(_request_id) {
+                    Err(DispatchDenied)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic_len(&self) -> usize {
+        match self {
+            Self::Unavailable => 0,
+            Self::SyntheticTestOnly(ids) => ids.len(),
+        }
+    }
+}
 
 /// Cannot be instantiated by MCP clients or downstream crates.
 /// Fields are private; there is intentionally NO production constructor.
@@ -17,15 +50,16 @@ pub struct DispatchDenied;
 ///     Dir::open_ambient_dir(".", ambient_authority()).unwrap());
 /// let _grant = SealedDirectoryGrant {
 ///     root_ref: String::new(), expected_epoch: 7, rooted,
-///     used_requests: Default::default(), active: true,
+///     replay: Default::default(), active: true,
 /// };
 /// ```
 pub struct SealedDirectoryGrant {
     root_ref: String,
     expected_epoch: u64,
     rooted: RootedDirectory,
-    // Same canonical 16-byte UUID identity consumed by durable replay storage.
-    used_requests: HashSet<[u8; 16]>,
+    // No volatile replay fallback in non-test builds. A future issuer must
+    // provide a trusted durable claimer before operational dispatch is enabled.
+    replay: ReplayAdmission,
     active: bool,
 }
 
@@ -50,15 +84,13 @@ impl SealedDirectoryGrant {
     /// Validate C4d data, rootRef, epoch and one-shot request identity.
     #[cfg(any(target_os = "linux", test))]
     fn execute_c4d_impl(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
-        const MAX_REQUESTS_PER_EPOCH: usize = 1024;
         if !self.active || self.expected_epoch == 0 {
             return Err(DispatchDenied);
         }
         let request = decode_create_directory_frame(wire).map_err(|_| DispatchDenied)?;
         if request.root_ref() != self.root_ref
             || request.expected_epoch() != self.expected_epoch
-            || self.used_requests.len() >= MAX_REQUESTS_PER_EPOCH
-            || !self.used_requests.insert(request.request_id_bytes())
+            || self.replay.consume(request.request_id_bytes()).is_err()
         {
             return Err(DispatchDenied);
         }
@@ -95,7 +127,7 @@ mod tests {
             rooted: RootedDirectory::from_preopened(
                 Dir::open_ambient_dir(root, ambient_authority()).unwrap(),
             ),
-            used_requests: HashSet::new(),
+            replay: ReplayAdmission::SyntheticTestOnly(HashSet::new()),
             active: true,
         }
     }
@@ -284,6 +316,24 @@ mod tests {
     }
 
     #[test]
+    fn no_issued_durable_replay_authority_denies_without_creating_files() {
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        let mut grant = fixture(&inside);
+        grant.replay = ReplayAdmission::Unavailable;
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 7, ID, "forbidden")),
+            Err(DispatchDenied)
+        );
+        assert!(!inside.join("forbidden").exists());
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 7, ID, "again")),
+            Err(DispatchDenied)
+        );
+        assert!(!inside.join("again").exists());
+    }
+    #[test]
     fn matching_root_epoch_creates_only_inside_then_replay_denies() {
         let f = tempfile::tempdir().unwrap();
         let inside = f.path().join("inside");
@@ -328,7 +378,7 @@ mod tests {
             let id = format!("11111111-1111-4111-8111-{n:012x}");
             assert_eq!(grant.execute_c4d(&wire(ROOT, 7, &id, "existing")), Ok(()));
         }
-        assert_eq!(grant.used_requests.len(), 1024);
+        assert_eq!(grant.replay.synthetic_len(), 1024);
         let next = "11111111-1111-4111-8111-ffffffffffff";
         assert_eq!(
             grant.execute_c4d(&wire(ROOT, 7, next, "forbidden")),

@@ -6,6 +6,7 @@
 //! broker MUST obtain and protect an OS-anchored storage handle and policy owner.
 
 pub mod policy_bytes;
+pub mod replay_ledger;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior, MAIN_DB};
 use std::{path::Path, time::Duration};

@@ -95,15 +95,16 @@ fn matches_linux_filesystem_identity(fsuid: u32, fsgid: u32, expected: (u32, u32
     expected.0 != 0 && expected.1 != 0 && fsuid == expected.0 && fsgid == expected.1
 }
 
-// The service may not hold latent permitted or inheritable capabilities that
-// could be activated later, even when none are currently effective.
+// A dedicated service needs zero effective/permitted/inheritable capabilities
+// AND kernel-enforced no_new_privs, so exec cannot restore privilege.
 #[cfg(any(target_os = "linux", test))]
 fn linux_service_has_no_extra_capabilities(
     effective: u64,
     permitted: u64,
     inheritable: u64,
+    no_new_privs: bool,
 ) -> bool {
-    effective == 0 && permitted == 0 && inheritable == 0
+    no_new_privs && effective == 0 && permitted == 0 && inheritable == 0
 }
 
 #[cfg(target_os = "linux")]
@@ -168,10 +169,12 @@ mod linux_identity {
         // capget(2) is read-only; deny any latent permitted, inheritable or
         // currently effective privilege before using a filesystem handle.
         let caps = rustix::thread::capabilities(None).map_err(|_| IdentityDenied)?;
+        let no_new_privs = rustix::thread::no_new_privs().map_err(|_| IdentityDenied)?;
         if !linux_service_has_no_extra_capabilities(
             caps.effective.bits(),
             caps.permitted.bits(),
             caps.inheritable.bits(),
+            no_new_privs,
         ) {
             return Err(IdentityDenied);
         }
@@ -218,11 +221,12 @@ mod linux_identity {
             let before = rustix::thread::capabilities(None).unwrap();
             let after = rustix::thread::capabilities(None).unwrap();
             assert_eq!(before, after);
-            assert!(linux_service_has_no_extra_capabilities(
-                before.effective.bits(),
-                before.permitted.bits(),
-                before.inheritable.bits(),
-            ));
+            // Query (not set) the kernel thread flag; runner may not have NNP.
+            let nnp = rustix::thread::no_new_privs().unwrap();
+            assert_eq!(nnp, rustix::thread::no_new_privs().unwrap());
+            assert_eq!(before.effective.bits(), 0);
+            assert_eq!(before.permitted.bits(), 0);
+            assert_eq!(before.inheritable.bits(), 0);
         }
         #[test]
         fn dedicated_uid_gid_required_in_all_real_effective_saved_slots() {
@@ -298,11 +302,28 @@ mod linux_capability_contract_tests {
 
     #[test]
     fn any_effective_permitted_or_inheritable_linux_capability_denies() {
-        assert!(linux_service_has_no_extra_capabilities(0, 0, 0));
-        assert!(!linux_service_has_no_extra_capabilities(1 << 1, 0, 0));
-        assert!(!linux_service_has_no_extra_capabilities(0, 1 << 7, 0));
-        assert!(!linux_service_has_no_extra_capabilities(0, 0, 1 << 21));
-        assert!(!linux_service_has_no_extra_capabilities(0, 0, 1 << 40));
-        assert!(!linux_service_has_no_extra_capabilities(1 << 63, 0, 0));
+        // A zero capability set does not authorize a service without NNP.
+        assert!(!linux_service_has_no_extra_capabilities(0, 0, 0, false));
+        assert!(linux_service_has_no_extra_capabilities(0, 0, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(1 << 1, 0, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(0, 1 << 7, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(
+            0,
+            0,
+            1 << 21,
+            true
+        ));
+        assert!(!linux_service_has_no_extra_capabilities(
+            0,
+            0,
+            1 << 40,
+            true
+        ));
+        assert!(!linux_service_has_no_extra_capabilities(
+            1 << 63,
+            0,
+            0,
+            true
+        ));
     }
 }

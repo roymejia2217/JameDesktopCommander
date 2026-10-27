@@ -29,6 +29,29 @@ crash-consistent publishing operations:** `install` does not demonstrate
 atomic updates, durable fsync ordering, concurrent readers, authenticated
 policy origin or safe recovery. No production updater or service is installed.
 
+## SQLite auxiliary-file denial for immutable main-image snapshots
+
+The protected Linux policy reader now checks the **fixed** SQLite names
+`policy.sqlite3-journal`, `policy.sqlite3-wal`, and `policy.sqlite3-shm`
+with `fstatat(AT_SYMLINK_NOFOLLOW)` relative to the existing OS-opened,
+root-owned administrative directory descriptor. If any entry exists
+(including a symlink), or a lookup fails for a reason other than `ENOENT`,
+the candidate is DENIED. The same check runs before opening the SQLite
+main image, immediately after pinning the main-image inode, and on both
+sides of the snapshot byte read. The reader retains the owned directory
+descriptor so it cannot be redirected by renaming a pathname supplied by
+a client. The real Linux acceptance script adds one root-owned entry of
+each type, and a symlinked journal, and requires denial before restoring
+the directory to its no-sidecar state.
+
+This explicitly excludes a **known present** hot rollback journal or WAL
+from the supported read-only immutable snapshot contract. It does NOT
+prove that a root administrator cannot perform a concurrent unsafe
+publication, that main-file bytes are durable across a crash, or that
+a missing sidecar means a SQLite transaction was committed. Only an
+approved administrative publisher with crash-injection and durable
+directory/fsync ordering can establish those guarantees.
+
 ## Limits preventing release
 
 The now-implemented in-memory SQLite parse does not reopen a pathname and does not require filesystem journal sidecars. However, it is only a bounded **snapshot read**, not an authenticated publisher protocol, policy semantics or a live SQLite write transaction. No protected updater, independently approved effective policy semantics, crash-consistent atomic replacement of an immutable SQLite generation, root-admin witness write/recovery state machine, service replay ledger linkage, session revocation or MCP operation grant has been implemented. An administrator restoring both DB and witness remains undetectable under the selected local-only assurance tier. Existing `E_POLICY_UNAVAILABLE` startup denial remains unchanged. Whole-machine administrator rollback is outside the selected local identity-separation assurance tier.

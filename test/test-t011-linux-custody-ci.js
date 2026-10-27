@@ -93,6 +93,19 @@ test('policy/witness forward publication mismatches deny; consistent whole rollb
   ]) assert.match(script, marker);
 });
 
+test('protected SQLite main-image snapshot rejects real rollback and WAL sidecars', () => {
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const marker of [
+    /E_POLICY_JOURNAL_SIDECAR_DENIED/,
+    /E_POLICY_WAL_SIDECAR_DENIED/,
+    /E_POLICY_SHM_SIDECAR_DENIED/,
+    /E_POLICY_SYMLINK_SIDECAR_DENIED/,
+    /policy-snapshot-deny/,
+  ]) assert.match(script, marker);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

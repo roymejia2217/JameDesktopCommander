@@ -86,11 +86,38 @@ fn open_fixed_admin_directory() -> Result<OwnedFd, IdentityDenied> {
     open_component(&etc, c"jdc-authority")
 }
 
+// A hot journal or WAL sidecar means the standalone main SQLite bytes
+// cannot be proved committed without running the disk VFS/recovery.
+// Refuse even symlinks and malformed entries. This uses a rooted FD,
+// immutable fixed names, and does NOT follow a client-controlled pathname.
+fn require_no_sqlite_sidecars(directory: &OwnedFd) -> Result<(), IdentityDenied> {
+    for name in [
+        c"policy.sqlite3-journal",
+        c"policy.sqlite3-wal",
+        c"policy.sqlite3-shm",
+    ] {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            return Err(IdentityDenied);
+        }
+    }
+    Ok(())
+}
+
 /// Read-only, root-admin-owned SQLite-file *candidate* pinned to a kernel
 /// opened file object. This checks inode custody and SQLite file signature
 /// only; it deliberately does NOT parse policy, attest an updater, open a
 /// SQLite VFS connection, authorize a request or grant an OS capability.
 pub struct ObservedAdminPolicyFile {
+    directory: OwnedFd,
     file: File,
     device: u64,
     inode: u64,
@@ -109,6 +136,7 @@ impl ObservedAdminPolicyFile {
         mut self,
     ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
         const MAX_IMAGE: usize = 4 * 1024 * 1024;
+        require_no_sqlite_sidecars(&self.directory)?;
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|_| IdentityDenied)?;
@@ -125,6 +153,7 @@ impl ObservedAdminPolicyFile {
         {
             return Err(IdentityDenied);
         }
+        require_no_sqlite_sidecars(&self.directory)?;
         jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&bytes)
             .map_err(|_| IdentityDenied)
     }
@@ -133,6 +162,7 @@ impl ObservedAdminPolicyFile {
 /// replace, chmod, hardlink or reach through a symlink. No implicit creation.
 pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, IdentityDenied> {
     let directory = open_fixed_admin_directory()?;
+    require_no_sqlite_sidecars(&directory)?;
     let expected_group = unsafe { libc::getegid() };
     let raw = unsafe {
         libc::openat(
@@ -166,7 +196,9 @@ pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, Identi
     {
         return Err(IdentityDenied);
     }
+    require_no_sqlite_sidecars(&directory)?;
     Ok(ObservedAdminPolicyFile {
+        directory,
         file,
         device: after.st_dev,
         inode: after.st_ino,

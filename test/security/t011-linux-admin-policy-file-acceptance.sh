@@ -34,7 +34,7 @@ source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 cleanup() {
   local code=$?
-  sudo -n rm -f -- "$alias" "$policy" "$anchor" || code=1
+  sudo -n rm -f -- "$alias" "$policy" "$anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
   rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" || code=1
   exit "$code"
@@ -93,6 +93,25 @@ verdict CANDIDATE sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 after="$(sudo -n sha256sum -- "$policy" | cut -d' ' -f1)"
 [[ "$after" == "$before" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_BYTES_CHANGED' >&2; exit 1; }
+
+# Hot SQLite sidecars are never silently ignored when parsing an isolated
+# main DB image. Root owns the protected parent; service has read-only access.
+for entry in journal wal shm; do
+  sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor" "${policy}-${entry}"
+  case "$entry" in
+    journal) printf '%s\n' 'E_POLICY_JOURNAL_SIDECAR_DENIED' ;;
+    wal) printf '%s\n' 'E_POLICY_WAL_SIDECAR_DENIED' ;;
+    shm) printf '%s\n' 'E_POLICY_SHM_SIDECAR_DENIED' ;;
+  esac
+  verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+  sudo -n rm -- "${policy}-${entry}"
+  verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+done
+sudo -n ln -s -- "$source_file" "${policy}-journal"
+printf '%s\n' 'E_POLICY_SYMLINK_SIDECAR_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${policy}-journal"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 
 # Adversarial policy-publish ordering matrix. These are deliberate
 # administrator simulations on an ephemeral test runner, NOT a publisher:

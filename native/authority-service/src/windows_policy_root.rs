@@ -41,6 +41,12 @@ impl ObservedWindowsStateDirectory {
     pub fn metadata(&self) -> Result<std::fs::Metadata, IdentityDenied> {
         self.file.metadata().map_err(|_| IdentityDenied)
     }
+
+    /// Consume the already DACL-checked kernel directory handle.
+    /// This handle cannot be issued before dedicated SCM identity verification.
+    pub(crate) fn into_verified_file(self) -> File {
+        self.file
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,8 +313,33 @@ mod tests {
     }
 
     #[test]
+    fn staging_bootstrap_requires_an_observed_scoped_service_handle() {
+        use crate::handle_mkdir::ProtectedStagingDirectory;
+        // Compile-time contract: no strings, ambient paths, or naked Dir
+        // can be passed to the constructor for protected staging.
+        let checked: fn(ObservedWindowsStateDirectory) -> ProtectedStagingDirectory =
+            ProtectedStagingDirectory::from_verified_windows_state;
+        let _ = checked;
+    }
+
+    #[test]
     fn unprovisioned_process_never_issues_a_policy_state_observation() {
         let temp = tempfile::tempdir().unwrap();
+        let open_directory = || {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                .open(temp.path())
+                .unwrap()
+        };
+        assert!(
+            crate::handle_mkdir::ProtectedStagingDirectory::from_preopened_service_state(
+                open_directory()
+            )
+            .is_err(),
+            "ordinary Windows process must not convert arbitrary handle to protected staging"
+        );
         assert_eq!(
             observe_preopened_service_state({
                 use std::os::windows::fs::OpenOptionsExt;

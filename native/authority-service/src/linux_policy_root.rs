@@ -15,6 +15,12 @@ pub struct ObservedPolicyDirectory {
 }
 
 impl ObservedPolicyDirectory {
+    /// Consume the owner/mode-checked pinned kernel descriptor exactly once.
+    /// The caller must still bind it to an independently attested policy.
+    pub(crate) fn into_verified_fd(self) -> OwnedFd {
+        self.fd
+    }
+
     /// Snapshot the opened inode identity; this is **not** an authorization token.
     /// A future broker must compare it to separately trusted policy provenance.
     pub fn file_identity(&self) -> Result<(u64, u64), IdentityDenied> {
@@ -188,6 +194,39 @@ mod tests {
         assert!(open_verified_existing_directory(alias.to_str().unwrap(), uid, gid).is_err());
     }
     #[test]
+    fn verified_linux_state_directory_is_consumed_as_an_opened_staging_capability() {
+        use crate::handle_mkdir::{ProtectedStagingDirectory, RootedDirectory};
+        use cap_std::{ambient_authority, fs::Dir};
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("CI home directory required");
+        let fixture = tempfile::tempdir_in(home).unwrap();
+        let state = fixture.path().join("service-state");
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(allowed.join("target.bin"), b"OLD").unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let observed = open_verified_existing_directory(state.to_str().unwrap(), uid, gid)
+            .expect("existing protected state directory");
+        let staging = ProtectedStagingDirectory::from_verified_linux_state(observed);
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        rooted
+            .replace_existing_file_staged(
+                &staging,
+                "target.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"NEW",
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(allowed.join("target.bin")).unwrap(), b"NEW");
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 0);
+    }
+
+    #[test]
     fn correctly_owned_nonwritable_ancestors_return_a_pinned_kernel_descriptor() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let home = std::env::var_os("HOME").expect("Linux CI must provide a home directory");
@@ -250,5 +289,9 @@ mod tests {
     #[test]
     fn ordinary_process_cannot_grant_itself_the_service_state_root() {
         assert!(observe_provisioned_directory().is_err());
+        assert!(
+            crate::handle_mkdir::ProtectedStagingDirectory::from_provisioned_linux_state().is_err(),
+            "ordinary process must not bootstrap a service-owned staging capability"
+        );
     }
 }

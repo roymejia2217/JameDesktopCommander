@@ -30,6 +30,51 @@ pub struct ProtectedStagingDirectory {
     root: Dir,
 }
 
+impl ProtectedStagingDirectory {
+    /// Windows bootstrap consumes a preopened directory handle; the OS token,
+    /// protected DACL and service SID are checked before accepting it.
+    /// Caller must independently pin the expected state-root object identity.
+    #[cfg(windows)]
+    pub fn from_preopened_service_state(
+        preopened: std::fs::File,
+    ) -> Result<Self, crate::IdentityDenied> {
+        let observed = crate::windows_policy_root::observe_preopened_service_state(preopened)?;
+        Ok(Self::from_verified_windows_state(observed))
+    }
+
+    /// Linux bootstrap accepts only the independently provisioned absolute
+    /// systemd state directory, observed as pinned, non-symlink OS handles.
+    /// Still NO validated policy bytes, grants or complete service lifecycle.
+    #[cfg(target_os = "linux")]
+    pub fn from_provisioned_linux_state() -> Result<Self, crate::IdentityDenied> {
+        let observed = crate::linux_policy_root::observe_provisioned_directory()?;
+        Ok(Self::from_verified_linux_state(observed))
+    }
+
+    /// Conversion only, NOT authorization: OS owner/DACL and service identity
+    /// must already have been checked by the state observer on this same handle.
+    /// No caller-controlled pathname is reopened.
+    #[cfg(windows)]
+    pub(crate) fn from_verified_windows_state(
+        observed: crate::windows_policy_root::ObservedWindowsStateDirectory,
+    ) -> Self {
+        Self {
+            root: Dir::from_std_file(observed.into_verified_file()),
+        }
+    }
+
+    /// Linux uses the already verified O_PATH directory fd as an openat root.
+    /// No path traversal, symlink resolution or ambient reopen is performed.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_verified_linux_state(
+        observed: crate::linux_policy_root::ObservedPolicyDirectory,
+    ) -> Self {
+        Self {
+            root: Dir::from(observed.into_verified_fd()),
+        }
+    }
+}
+
 fn validate_single_child(name: &str) -> io::Result<()> {
     // Never use a second character policy. The protocol grammar is the only
     // source of truth; explicitly require exactly one component here.

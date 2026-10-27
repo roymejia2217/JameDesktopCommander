@@ -250,6 +250,28 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
     Ok(ObservedEpochFloor { epoch, digest })
 }
 
+/// Compare *exact, internally hashed policy bytes* with a separately
+/// privileged, fixed-path HKLM epoch/digest anchor. No MCP request data may
+/// supply this witness. All failures deny without creating or repairing state.
+///
+/// NON-RELEASE: this offline SQLite pathname is not yet an OS-pinned database
+/// handle; the protected updater, crash reconciliation and privileged broker
+/// have not been implemented. The returned bytes convey no filesystem grant.
+pub fn verify_existing_policy_against_protected_registry(
+    database: &std::path::Path,
+) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
+    // Never touch a caller-supplied path until identity and the independent
+    // immutable read-only registry authority pass kernel ACL verification.
+    let witness = observe_fixed_epoch_floor()?;
+    let store = jdc_authority_store::policy_bytes::PolicyBytesStore::open_existing(database)
+        .map_err(|_| IdentityDenied)?;
+    let policy = store.read_verified().map_err(|_| IdentityDenied)?;
+    if !witness.matches_snapshot(policy.epoch(), policy.digest()) {
+        return Err(IdentityDenied);
+    }
+    Ok(policy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +352,12 @@ mod tests {
             "a forged same-epoch policy must not be accepted"
         );
     }
+    #[test]
+    fn unprivileged_process_cannot_join_policy_store_to_registry_authority() {
+        let bogus = std::path::Path::new("never-a-valid-policy-database");
+        assert!(verify_existing_policy_against_protected_registry(bogus).is_err());
+    }
+
     #[test]
     fn ordinary_process_cannot_become_epoch_authority() {
         assert!(observe_fixed_epoch_floor().is_err());

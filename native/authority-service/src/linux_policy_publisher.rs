@@ -362,25 +362,19 @@ pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
 
     let (old_image, old_group) =
         read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
-    let (old_witness, witness_group) =
-        read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    let (old_witness, witness_group) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
     let (next_image, next_group) =
         read_protected_fixed(&dir, c".policy-next.sqlite3", 512, 4 * 1024 * 1024)?;
     let (next_witness, next_witness_group) =
         read_protected_fixed(&dir, c".policy-next-anchor", 40, 40)?;
-    if old_group != witness_group
-        || old_group != next_group
-        || old_group != next_witness_group
-    {
+    if old_group != witness_group || old_group != next_group || old_group != next_witness_group {
         return Err(IdentityDenied);
     }
 
-    let old = PolicyBytesStore::read_verified_serialized(&old_image)
-        .map_err(|_| IdentityDenied)?;
-    let next = PolicyBytesStore::read_verified_serialized(&next_image)
-        .map_err(|_| IdentityDenied)?;
-    let (old_epoch, old_digest) =
-        crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
+    let old = PolicyBytesStore::read_verified_serialized(&old_image).map_err(|_| IdentityDenied)?;
+    let next =
+        PolicyBytesStore::read_verified_serialized(&next_image).map_err(|_| IdentityDenied)?;
+    let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
     let (next_epoch, next_digest) =
         crate::epoch_anchor_wire::parse_epoch_digest_wire(&next_witness)?;
     if old.epoch() != record.old_epoch
@@ -398,9 +392,19 @@ pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
     // Recheck the identity and content of every fixed/staged entry before
     // switching names; a changed record or unexpected sidecar fails closed.
     for (name, original, min, max) in [
-        (c"policy.sqlite3", old_image.as_slice(), 512, 4 * 1024 * 1024),
+        (
+            c"policy.sqlite3",
+            old_image.as_slice(),
+            512,
+            4 * 1024 * 1024,
+        ),
         (c"policy-anchor", old_witness.as_slice(), 40, 40),
-        (c".policy-next.sqlite3", next_image.as_slice(), 512, 4 * 1024 * 1024),
+        (
+            c".policy-next.sqlite3",
+            next_image.as_slice(),
+            512,
+            4 * 1024 * 1024,
+        ),
         (c".policy-next-anchor", next_witness.as_slice(), 40, 40),
     ] {
         let (again, group) = read_protected_fixed(&dir, name, min, max)?;
@@ -420,10 +424,8 @@ pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
     require_absent_sqlite_sidecars(&dir)?;
     require_absent_name(&dir, c".policy-next.sqlite3")?;
     require_absent_name(&dir, c".policy-next-anchor")?;
-    let (published, pgroup) =
-        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
-    let (witness, wgroup) =
-        read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    let (published, pgroup) = read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (witness, wgroup) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
     if published != next_image
         || witness != next_witness
         || pgroup != old_group

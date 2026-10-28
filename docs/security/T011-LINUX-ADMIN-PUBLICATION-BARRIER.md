@@ -104,6 +104,35 @@ operator-authenticated provenance, secure monotonic witness and in-flight
 authorization are still mandatory before production. No automated
 clear-all marker or rollback to older permissions is permitted.
 
+## Recovery before the first final rename (research-only)
+
+The root-only `recover_before_policy_rename()` covers a strictly bounded
+interruption after the **durable 88-byte JDC-POL1 transition record** and
+both exclusive staging files are prepared, but before either final
+`renameat`. It requires a root-owned original intent, matching old epoch and
+digest in both the installed SQLite image and old witness, and matching new
+epoch/digest in both staged files. Every opened object must retain the
+root:service 0640 single-link custody contract; missing, malformed, aliased,
+symbolic or mismatched staged entries deny. It re-reads all four entries,
+revalidates the durable record, then publishes SQLite and witness in that
+order with a directory `fsync` after each rename. Finally it re-reads the
+installed pair and verifies the original intent record before unlinking
+only that exact marker, then `fsync`s the directory.
+
+The mandatory Linux T011 test uses genuine epoch-4 and epoch-5 policy
+images with separately derived root witnesses. It proves **DENY** for a
+coherent pair of staged objects under an *empty* intent, and for a wrong
+staged witness under a correctly recorded intent. Only a fully matching,
+strictly forward staged pair may complete publication.
+
+**Limits:** the intentional root-only recovery grants no filesystem
+capability, does not validate externally signed administrative provenance,
+and does not detect whole-directory offline rollback by a compromised
+root principal. It also does not linearize against concurrent malicious
+root filesystem mutations or demonstrate power-loss persistence for every
+kernel cutpoint. The service and all MCP handlers remain deny-only /
+unmigrated in this research branch.
+
 ## Recovery after witness rename but before intent removal
 
 Another power-loss boundary exists **after both final files were renamed**

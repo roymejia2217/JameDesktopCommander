@@ -258,6 +258,7 @@ dependencies = [
 name = "jdc-authority-store"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "rusqlite",
  "sha2",
 ]

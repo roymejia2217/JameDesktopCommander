@@ -6,7 +6,11 @@ use crate::StoreDenied;
 use rusqlite::OpenFlags;
 use rusqlite::MAIN_DB;
 use rusqlite::{params, Connection, TransactionBehavior};
-#[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
+#[cfg(any(
+    target_os = "linux",
+    test,
+    all(feature = "offline-fixture", debug_assertions)
+))]
 use std::time::Duration;
 
 const MAX_CLAIMS_PER_EPOCH: i64 = 1024;
@@ -71,10 +75,17 @@ fn verify_schema(db: &Connection) -> Result<(), StoreDenied> {
     Ok(())
 }
 impl ReplayClaimLedger {
-    // Only usable inside this crate's isolated offline fixture. Future service
-    // construction requires an independently reviewed OS-descriptor-bound VFS.
-    #[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
-    fn from_existing_connection(db: Connection, expected_epoch: u64) -> Result<Self, StoreDenied> {
+    // Crate-private: external callers cannot supply an arbitrary Connection.
+    // Production Linux construction requires OS-custodied SQLite acquisition.
+    #[cfg(any(
+        target_os = "linux",
+        test,
+        all(feature = "offline-fixture", debug_assertions)
+    ))]
+    pub(crate) fn from_existing_connection(
+        db: Connection,
+        expected_epoch: u64,
+    ) -> Result<Self, StoreDenied> {
         if expected_epoch == 0 {
             return Err(StoreDenied);
         }
@@ -229,7 +240,38 @@ impl ReplayClaimLedger {
                 |r| r.get(0),
             )
             .map_err(|_| StoreDenied)?;
-        if existing >= MAX_CLAIMS_PER_EPOCH {
+        // The reader and writer must enforce the SAME retention envelope.
+        // Otherwise a valid 17th epoch can be committed and immediately make
+        // the next independently checked bootstrap reject the whole image.
+        // All checks share this IMMEDIATE transaction with the insert.
+        const MAX_GENERATIONS: i64 = 16;
+        let (total, generations, latest_epoch, largest_generation): (
+            i64,
+            i64,
+            Option<Vec<u8>>,
+            Option<i64>,
+        ) = tx
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT epoch), MAX(epoch),
+               (SELECT MAX(n) FROM
+                   (SELECT COUNT(*) AS n FROM replay_claims GROUP BY epoch))
+             FROM replay_claims",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(|_| StoreDenied)?;
+        let latest_is_future = if let Some(latest) = latest_epoch {
+            latest.len() != 8 || latest.as_slice() > epoch.as_slice()
+        } else {
+            false
+        };
+        if existing >= MAX_CLAIMS_PER_EPOCH
+            || total >= MAX_GENERATIONS * MAX_CLAIMS_PER_EPOCH
+            || generations > MAX_GENERATIONS
+            || (generations == MAX_GENERATIONS && existing == 0)
+            || largest_generation.unwrap_or(0) > MAX_CLAIMS_PER_EPOCH
+            || latest_is_future
+        {
             return Err(StoreDenied);
         }
         if tx
@@ -471,6 +513,33 @@ mod tests {
             "NEGATIVE PROOF: untrusted whole-file SQLite rollback revives an ID"
         );
     }
+    #[test]
+    fn seventeenth_replay_generation_is_denied_without_losing_old_claims() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let mut db = Connection::open(&path).unwrap();
+        let tx = db.transaction().unwrap();
+        for epoch in 1..=16u64 {
+            tx.execute(
+                "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+                params![
+                    epoch.to_be_bytes().as_slice(),
+                    canonical_id(epoch as u8).as_slice()
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        drop(db);
+        assert!(open(&path, 17).claim_once(canonical_id(0x17)).is_err());
+        let db = Connection::open(&path).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 16, "denied admission may not rewrite history");
+    }
+
     #[test]
     fn claim_limit_never_evicts_a_consumed_request() {
         let f = tempdir().unwrap();

@@ -16,6 +16,7 @@ pub struct UnissuedIssuer {
     replay_file: ObservedReplayFile,
     replay_writer: LinuxReplayIssuerLedger,
     expected_client: PreparedMcpClient,
+    inherited_listener: std::os::unix::net::UnixListener,
     policy_epoch: u64,
     policy_digest: [u8; 32],
     revoked: bool,
@@ -26,6 +27,14 @@ impl UnissuedIssuer {
     pub fn observe_os_attested() -> Result<Self, IdentityDenied> {
         let policy = IssuerPolicy::from_os_attested()?;
         let expected_client = PreparedMcpClient::from_provisioned_system_account()?;
+        // A request listener supplied by a caller must not become privileged
+        // IPC authority. Adopt the kernel's exact single inherited FD3 once.
+        const ENDPOINT: &str = "/run/jdc-authority-ipc/authority.sock";
+        let inherited_listener = crate::unix_activation::retain_inherited_systemd_listener(
+            std::path::Path::new(ENDPOINT),
+            unsafe { libc::geteuid() },
+            expected_client.expected_gid(),
+        )?;
         let replay_file = ObservedReplayFile::from_os_attested()?;
         let mut roots = Vec::new();
         for root_ref in policy.root_refs() {
@@ -62,6 +71,7 @@ impl UnissuedIssuer {
             replay_file,
             replay_writer,
             expected_client,
+            inherited_listener,
             policy_epoch: policy.epoch(),
             policy_digest: *policy.digest(),
             revoked: false,
@@ -112,7 +122,7 @@ impl UnissuedIssuer {
     /// and a second protected-policy observation after bounded frame receipt.
     /// This does not establish systemd's provenance for the listener, nor
     /// grant any filesystem operation or acknowledge a client request.
-    pub fn inspect_one_named_client(
+    fn inspect_one_named_client(
         &mut self,
         listener: &std::os::unix::net::UnixListener,
         deadline: std::time::Duration,
@@ -139,6 +149,21 @@ impl UnissuedIssuer {
                 )
             },
         )
+    }
+
+    /// Only the FD retained from the one root-custodied activation
+    /// inventory can be used by the future broker request loop.
+    /// The duplicated handle shares the same kernel listening socket and
+    /// remains non-authorizing; policy is still verified before/after read.
+    pub fn inspect_one_inherited_client(
+        &mut self,
+        deadline: std::time::Duration,
+    ) -> Result<(), IdentityDenied> {
+        let listener = self
+            .inherited_listener
+            .try_clone()
+            .map_err(|_| IdentityDenied)?;
+        self.inspect_one_named_client(&listener, deadline)
     }
 
     pub fn observed_root_count(&self) -> usize {

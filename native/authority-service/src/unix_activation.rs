@@ -209,6 +209,60 @@ pub(crate) fn inspect_root_custodied_named_listener(
     )
 }
 
+/// Convert one already-owned kernel listening FD to a long-lived Rust
+/// listener, only after checking its exact path, protected directory chain,
+/// socket owner/group/mode and correct AF_UNIX stream/listener shape.
+/// The parent UID override is strictly internal for Linux test fixtures.
+fn retain_owned_listener(
+    fd: std::os::fd::OwnedFd,
+    path: &Path,
+    expected_uid: libc::uid_t,
+    expected_gid: libc::gid_t,
+    protected_parent_uid: libc::uid_t,
+) -> Result<std::os::unix::net::UnixListener, IdentityDenied> {
+    use std::os::fd::AsFd;
+    inspect_custodied_named_listener(
+        fd.as_fd(),
+        path,
+        expected_uid,
+        expected_gid,
+        protected_parent_uid,
+    )?;
+    let listener = std::os::unix::net::UnixListener::from(fd);
+    // systemd activation FDs need not be configured nonblocking by default.
+    // The bounded acceptor *requires* nonblocking mode before each poll.
+    listener.set_nonblocking(true).map_err(|_| IdentityDenied)?;
+    inspect_custodied_named_listener(
+        listener.as_fd(),
+        path,
+        expected_uid,
+        expected_gid,
+        protected_parent_uid,
+    )?;
+    Ok(listener)
+}
+
+/// Single-threaded service bootstrap: adopt the one correctly named FD3
+/// from the established sd-notify implementation, retain its ownership and
+/// validate the independently root-managed socket namespace. LISTEN_* env
+/// values alone NEVER count as privileged provenance.
+pub(crate) fn retain_inherited_systemd_listener(
+    expected_path: &Path,
+    service_uid: libc::uid_t,
+    client_gid: libc::gid_t,
+) -> Result<std::os::unix::net::UnixListener, IdentityDenied> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let mut received = sd_notify::listen_fds_with_names().map_err(|_| IdentityDenied)?;
+    let count = received.len();
+    let (fd, name) = received.next().ok_or(IdentityDenied)?;
+    validate_activation_descriptor_set(count, fd, &name)?;
+    // SAFETY: sd-notify validated the activation inventory and returns a
+    // unique FD3 to be adopted exactly once. No later borrow_raw(3) or second
+    // sd-notify inventory lookup is performed in this issuer instance.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    retain_owned_listener(owned, expected_path, service_uid, client_gid, 0)
+}
+
 /// Examine systemd-compatible startup descriptors using the established
 /// `sd-notify` crate, then verify their kernel shape. This is an observation
 /// only: LISTEN_PID/FDS/FDNAMES can be forged by the launching process and
@@ -306,6 +360,37 @@ mod tests {
             inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
             Err(IdentityDenied),
             "nofollow must reject a symlink socket name"
+        );
+    }
+
+    #[test]
+    fn kernel_owned_listener_is_retained_and_untrusted_fd_is_denied() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = temp.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        let owned: OwnedFd = listener.into();
+        let held = retain_owned_listener(owned, &path, uid, gid, uid).unwrap();
+        let flags = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+        let _client = UnixStream::connect(&path).unwrap();
+        assert!(
+            held.accept().is_ok(),
+            "retained FD must still accept its real socket"
+        );
+        let other_path = temp.path().join("other.sock");
+        let other = UnixListener::bind(&other_path).unwrap();
+        let untrusted: OwnedFd = other.into();
+        assert!(
+            retain_owned_listener(untrusted, &path, uid, gid, uid).is_err(),
+            "another listening kernel FD cannot replace the observed named endpoint"
         );
     }
 

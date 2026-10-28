@@ -203,11 +203,12 @@ impl LinuxReplayIssuerLedger {
         // or plant a SQLite journal in this namespace. The standard unix
         // VFS (not /proc/self/fd) owns SQLite journal and POSIX locking.
         let path = state.join("claims.sqlite3");
-        let db = Connection::open_with_flags(
+        let db = Connection::open_with_flags_and_vfs(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW
                 | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+            "unix",
         )
         .map_err(|_| StoreDenied)?;
         let ledger = ReplayClaimLedger::from_existing_connection(db, epoch)?;

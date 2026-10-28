@@ -12,6 +12,14 @@ fn main() {
             }
             println!("PUBLISH_INTENT_CREATED");
         }
+        "recover-split" if args.next().is_none() => {
+            if jdc_authority_service::linux_policy_publisher::recover_after_policy_rename().is_err()
+            {
+                eprintln!("E_PUBLISHER_RECOVERY_STATE_DENIED");
+                std::process::exit(1);
+            }
+            println!("PUBLISH_SPLIT_RECOVERED");
+        }
         "commit-v2" => {
             // CI-only: source is a synthetic SQLite v2 fixture in an
             // ephemeral runner. No production updater accepts a path.

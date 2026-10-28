@@ -165,6 +165,85 @@ pub fn commit_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied>
     Ok(())
 }
 
+/// Administrator-only recovery for exactly ONE provable interrupted state:
+/// the next SQLite image already occupies its final fixed name, the old
+/// witness is still installed, and the validated next witness is staged.
+/// Every other state remains DENIED for manual incident investigation.
+/// The marker is never cleared unless a strictly forward matching
+/// policy+witness generation was durably published and revalidated.
+pub fn recover_after_policy_rename() -> Result<(), IdentityDenied> {
+    use jdc_authority_store::policy_bytes::PolicyBytesStore;
+    let dir = open_admin_directory()?;
+    let intent = require_admin_intent(&dir)?;
+    require_absent_sqlite_sidecars(&dir)?;
+    require_absent_name(&dir, c".policy-next.sqlite3")?;
+    let (published, published_group) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (old_witness, old_group) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    let (staged_witness, staged_group) =
+        read_protected_fixed(&dir, c".policy-next-anchor", 40, 40)?;
+    if published_group != old_group || published_group != staged_group {
+        return Err(IdentityDenied);
+    }
+    let new_policy =
+        PolicyBytesStore::read_verified_serialized(&published).map_err(|_| IdentityDenied)?;
+    let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
+    let (next_epoch, next_digest) =
+        crate::epoch_anchor_wire::parse_epoch_digest_wire(&staged_witness)?;
+    // The old independent witness must have nonzero proof of a DIFFERENT
+    // generation, and the new generation must strictly advance it.
+    if old_epoch == 0
+        || old_digest == [0; 32]
+        || old_epoch >= new_policy.epoch()
+        || next_epoch != new_policy.epoch()
+        || next_digest != *new_policy.digest()
+        || next_digest == old_digest
+    {
+        return Err(IdentityDenied);
+    }
+    if require_admin_intent(&dir)? != intent {
+        return Err(IdentityDenied);
+    }
+    rename_fixed(&dir, c".policy-next-anchor", c"policy-anchor")?;
+    sync_directory(&dir)?;
+    require_absent_sqlite_sidecars(&dir)?;
+    require_absent_name(&dir, c".policy-next-anchor")?;
+    let (actual_policy, pgroup) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (actual_witness, wgroup) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    if pgroup != published_group
+        || wgroup != published_group
+        || actual_policy != published
+        || actual_witness != staged_witness
+        || require_admin_intent(&dir)? != intent
+    {
+        return Err(IdentityDenied);
+    }
+    // The already checked policy and exact witness are now jointly
+    // published; a return without unlink means fail-closed partial state.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), c".policy-publish-inflight".as_ptr(), 0) } != 0 {
+        return Err(IdentityDenied);
+    }
+    sync_directory(&dir)?;
+    Ok(())
+}
+
+fn require_absent_name(dir: &OwnedFd, name: &std::ffi::CStr) -> Result<(), IdentityDenied> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 fn require_root_identity() -> Result<(), IdentityDenied> {
     if unsafe {
         libc::getuid() != 0 || libc::geteuid() != 0 || libc::getgid() != 0 || libc::getegid() != 0
@@ -360,6 +439,12 @@ mod tests {
         // Never run this test with administrator privileges.
         assert_ne!(unsafe { libc::geteuid() }, 0);
         assert_eq!(begin_fixed_publication(), Err(IdentityDenied));
+    }
+
+    #[test]
+    fn nonroot_may_not_recover_an_administrator_publication() {
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        assert_eq!(recover_after_policy_rename(), Err(IdentityDenied));
     }
 
     #[test]

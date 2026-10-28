@@ -211,6 +211,27 @@ test('root-only admin publisher validates forward immutable generation and fsync
   ]) assert.match(script, marker);
 });
 
+test('admin recovery only completes an authenticated split policy-rename state', () => {
+  const publisher = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const match of [
+    /pub fn recover_after_policy_rename\(/,
+    /c"\.policy-next-anchor"/, /require_admin_intent\(/,
+    /require_absent_name\(/, /old_epoch >= new_policy\.epoch\(\)/,
+    /rename_fixed\(/, /sync_directory\(/,
+  ]) assert.match(publisher, match);
+  for (const match of [
+    /E_RECOVER_SPLIT_POLICY_TO_V3_SUCCESS/,
+    /E_RECOVER_UNMATCHED_ANCHOR_DENIED/,
+    /E_RECOVER_STALE_POLICY_DENIED/,
+    /recover-split/, /init-policy-bytes-v3/,
+  ]) assert.match(script, match);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

@@ -34,11 +34,13 @@ source_anchor="$(mktemp /tmp/jdc-policy-anchor.XXXXXXXX)"
 mismatch_anchor="$(mktemp /tmp/jdc-policy-mismatch.XXXXXXXX)"
 source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
+source_file_v3="$(mktemp /tmp/jdc-policy-v3.XXXXXXXX)"
+source_anchor_v3="$(mktemp /tmp/jdc-policy-witness-v3.XXXXXXXX)"
 cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" || code=1
   exit "$code"
 }
 trap cleanup EXIT
@@ -47,6 +49,8 @@ trap cleanup EXIT
 "$fixture" write-policy-anchor-mismatch "$mismatch_anchor"
 "$fixture" init-policy-bytes-v2 "$source_file_v2"
 "$fixture" write-policy-anchor-v2 "$source_anchor_v2"
+"$fixture" init-policy-bytes-v3 "$source_file_v3"
+"$fixture" write-policy-anchor-v3 "$source_anchor_v3"
 [[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 && "$(wc -c < "$source_anchor_v2")" -eq 40 ]] || exit 1
 [[ "$(stat -c '%s' -- "$source_file")" -ge 512 ]] || exit 1
 sudo -n install -d -o root -g root -m 0755 -- "$directory"
@@ -230,4 +234,30 @@ verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" po
 # production candidate deliberately offers no automatic repair operation.
 sudo -n rm -- "$publish_intent"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
+# Recovery acceptance: admin intent persists after a simulated interrupted
+# policy rename. No automatic repair and no rollback to a lower epoch.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v3" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-split 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_STALE_POLICY_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_STALE_POLICY_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v2" "${directory}/.policy-next-anchor"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v3" "$policy"
+if sudo -n -- "$publisher" recover-split 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_UNMATCHED_ANCHOR_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_UNMATCHED_ANCHOR_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+
+# Only the strictly forward, exactly matching stage can complete the
+# interrupted rename. No blanket intent removal is available.
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v3" "${directory}/.policy-next-anchor"
+verdict PUBLISH_SPLIT_RECOVERED sudo -n -- "$publisher" recover-split
+[[ ! -e "$publish_intent" && ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v3
+printf '%s\n' 'E_RECOVER_SPLIT_POLICY_TO_V3_SUCCESS'
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

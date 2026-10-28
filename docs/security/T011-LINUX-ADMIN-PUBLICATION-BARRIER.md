@@ -31,6 +31,41 @@ The existing mandatory T011 Linux CI runner (ephemeral GitHub-hosted only) provi
 
 Native Linux unit tests also use real filesystem entries under a temporary directory to verify file, missing entry, and symlink transitions. These are not mock stat structs.
 
+## Restricted split-generation recovery
+
+An administrator-controlled power interruption can occur after `renameat`
+publishes the new SQLite image, but before the separately staged witness is
+installed. The durable intent remains present so every reader denies. The
+root-only `recover_after_policy_rename()` can finish **only this provable
+split state**, under the fixed kernel-pinned root-owned administrative
+directory. It demands an intact root:root 0600 intent, absence of the staged
+SQLite image (the final SQLite name must already have been replaced),
+absence of all SQLite sidecars, a verified root:service 0640 current policy,
+a separately root-owned old witness and a root:service 0640 staged next
+witness. The old witness epoch must be nonzero and **strictly lower** than
+the current SQLite image epoch; the staged witness must match the exact
+effective policy epoch and SHA-256 digest, and must differ from the old
+witness. This function accepts no client path or policy bytes.
+
+On a match, the function renames the staged witness, fsyncs the directory,
+reopens and verifies the two actual published artifacts, checks that the
+same intent inode is still present and only then unlinks the intent and
+fsyncs the directory. Failure preserves the intent whenever possible. The
+real Linux CI acceptance exercises both mismatched/stale cases (DENY) and
+a genuine epoch-2→epoch-3 split recovery (SUCCESS) using independently
+root-owned synthetic SQLite fixtures. It is an event-driven, non-release,
+privileged acceptance on a disposable runner.
+
+**Explicit limits:** This covers one interrupted state only. It does not
+recover a commit stopped before the SQLite rename, after a witness rename,
+or after unlinking the intent but before the final directory fsync.
+An empty intent does not record an independently signed immutable expected
+transition, and neither the resulting pair nor process-local monitor can
+detect full offline rollback of all root state. Independent crash injection,
+operator-authenticated provenance, secure monotonic witness and in-flight
+authorization are still mandatory before production. No automated
+clear-all marker or rollback to older permissions is permitted.
+
 ## Administrator publisher requirements still missing
 
 The implemented root-only begin/commit protocol supplies an exclusive marker, a strictly forward image+witness transition, staged fsync/rename ordering, and denial of a failed publication. It does NOT establish policy-source signature/provenance, approved semantic authorization, administrative operator authentication beyond root kernel identity, a documented recovery operator for every crash boundary, or a state machine linearized with in-flight native filesystem operations. Concurrency against malicious root processes, crash injection after each file and directory synchronization, power-loss persistence and safe fail-closed recovery after every crash window all require independent acceptance. It cannot be deployed as a complete trusted policy issuer.

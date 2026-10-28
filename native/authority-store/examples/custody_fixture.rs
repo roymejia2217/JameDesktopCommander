@@ -49,8 +49,10 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
             bytes.extend_from_slice(&[0x33u8; 32]);
             std::fs::write(path, bytes).map_err(|e| e.to_string())
         }
-        "write-policy-anchor" | "write-policy-anchor-v2" => {
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v2") {
+        "write-policy-anchor" | "write-policy-anchor-v2" | "write-policy-anchor-v3" => {
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v3") {
+                (3, b"approved-policy-fixture-v3")
+            } else if command.ends_with("-v2") {
                 (2, b"approved-policy-fixture-v2")
             } else {
                 (1, b"approved-policy-fixture")
@@ -62,9 +64,11 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
             );
             std::fs::write(path, bytes).map_err(|e| e.to_string())
         }
-        "init-policy-bytes" | "init-policy-bytes-v2" => {
+        "init-policy-bytes" | "init-policy-bytes-v2" | "init-policy-bytes-v3" => {
             use jdc_authority_store::policy_bytes::PolicyBytesStore;
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v2") {
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v3") {
+                (3, b"approved-policy-fixture-v3")
+            } else if command.ends_with("-v2") {
                 (2, b"approved-policy-fixture-v2")
             } else {
                 (1, b"approved-policy-fixture")
@@ -139,6 +143,25 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn independent_epoch_three_fixture_is_forward_and_digest_bound() {
+        let d = tempdir().unwrap();
+        let image = d.path().join("v3.sqlite3");
+        let witness = d.path().join("witness-v3");
+        execute("init-policy-bytes-v3", &image).unwrap();
+        execute("write-policy-anchor-v3", &witness).unwrap();
+        let policy = jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(
+            &std::fs::read(&image).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(policy.epoch(), 3);
+        assert_eq!(policy.bytes(), b"approved-policy-fixture-v3");
+        let wire = std::fs::read(&witness).unwrap();
+        assert_eq!(wire.len(), 40);
+        assert_eq!(&wire[..8], &3u64.to_be_bytes());
+        assert_eq!(&wire[8..], policy.digest());
+    }
+
     #[test]
     fn independent_admin_epoch_two_fixture_differs_from_epoch_one() {
         use jdc_authority_store::policy_bytes::PolicyBytesStore;

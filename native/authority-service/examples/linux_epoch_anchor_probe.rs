@@ -52,8 +52,13 @@ fn main() {
         }
         return;
     }
-    if action == "policy-snapshot" || action == "policy-snapshot-v2" {
-        let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v2" {
+    if action == "policy-snapshot"
+        || action == "policy-snapshot-v2"
+        || action == "policy-snapshot-v3"
+    {
+        let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v3" {
+            (3, b"approved-policy-fixture-v3")
+        } else if action == "policy-snapshot-v2" {
             (2, b"approved-policy-fixture-v2")
         } else {
             (1, b"approved-policy-fixture")

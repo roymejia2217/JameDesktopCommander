@@ -310,6 +310,37 @@ mod tests {
     }
 
     #[test]
+    fn kernel_owned_listener_is_retained_and_untrusted_fd_is_denied() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = temp.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        let owned: OwnedFd = listener.into();
+        let held = retain_owned_listener(owned, &path, uid, gid, uid).unwrap();
+        let flags = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+        let _client = UnixStream::connect(&path).unwrap();
+        assert!(
+            held.accept().is_ok(),
+            "retained FD must still accept its real socket"
+        );
+        let other_path = temp.path().join("other.sock");
+        let other = UnixListener::bind(&other_path).unwrap();
+        let untrusted: OwnedFd = other.into();
+        assert!(
+            retain_owned_listener(untrusted, &path, uid, gid, uid).is_err(),
+            "another listening kernel FD cannot replace the observed named endpoint"
+        );
+    }
+
+    #[test]
     fn kernel_rejects_connected_socket_and_datagram_descriptors() {
         let (_client, connected) = UnixStream::pair().unwrap();
         let dir = tempfile::tempdir().unwrap();

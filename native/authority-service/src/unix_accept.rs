@@ -235,7 +235,11 @@ mod tests {
             || {
                 validations += 1;
                 if validations == 1 {
+                    assert!(!changed.load(Ordering::SeqCst));
+                    // The first validation must succeed before the worker
+                    // can change policy. Never race the first state read.
                     prechecked.send(()).unwrap();
+                    return Ok(());
                 }
                 if changed.load(Ordering::SeqCst) {
                     Err(IdentityDenied)

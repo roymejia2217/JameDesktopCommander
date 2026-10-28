@@ -398,10 +398,10 @@ pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
     // Recheck the identity and content of every fixed/staged entry before
     // switching names; a changed record or unexpected sidecar fails closed.
     for (name, original, min, max) in [
-        (c"policy.sqlite3".as_ref(), old_image.as_slice(), 512, 4 * 1024 * 1024),
-        (c"policy-anchor".as_ref(), old_witness.as_slice(), 40, 40),
-        (c".policy-next.sqlite3".as_ref(), next_image.as_slice(), 512, 4 * 1024 * 1024),
-        (c".policy-next-anchor".as_ref(), next_witness.as_slice(), 40, 40),
+        (c"policy.sqlite3", old_image.as_slice(), 512, 4 * 1024 * 1024),
+        (c"policy-anchor", old_witness.as_slice(), 40, 40),
+        (c".policy-next.sqlite3", next_image.as_slice(), 512, 4 * 1024 * 1024),
+        (c".policy-next-anchor", next_witness.as_slice(), 40, 40),
     ] {
         let (again, group) = read_protected_fixed(&dir, name, min, max)?;
         if again.as_slice() != original || group != old_group {
@@ -804,6 +804,12 @@ mod tests {
             PolicyTransitionRecord::new(7, [0x11; 32], 8, [0x11; 32]),
             Err(IdentityDenied)
         );
+    }
+
+    #[test]
+    fn unprivileged_process_cannot_complete_a_pre_rename_administrative_publication() {
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        assert_eq!(recover_before_policy_rename(), Err(IdentityDenied));
     }
 
     #[test]

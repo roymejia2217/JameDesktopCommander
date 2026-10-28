@@ -303,6 +303,7 @@ test('pre-rename recovery binds both stages to one durable root transition', () 
   for (const evidence of [
     /E_RECOVER_PRE_EMPTY_INTENT_DENIED/,
     /E_RECOVER_PRE_WRONG_STAGE_DENIED/,
+    /E_RECOVER_PRE_SYMLINK_STAGE_DENIED/,
     /E_RECOVER_PRE_RENAME_TO_V5_SUCCESS/,
     /prepare-v5/, /recover-pre/,
     /init-policy-bytes-v5/, /policy-snapshot-v5/,

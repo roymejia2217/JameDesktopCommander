@@ -18,6 +18,9 @@ pub mod sealed_dispatch;
 // Experimental anchored Linux policy directory observer. No policy grant.
 #[cfg(target_os = "linux")]
 pub mod linux_policy_root;
+// Fixed-name descriptor-pinned replay file custody, not a SQLite VFS or grant.
+#[cfg(target_os = "linux")]
+mod linux_replay_file;
 
 // Independent root-admin-owned Linux epoch witness, observation only.
 #[cfg(target_os = "linux")]

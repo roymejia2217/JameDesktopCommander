@@ -22,6 +22,12 @@ impl ObservedPolicyDirectory {
         self.fd
     }
 
+    /// The internal replay reader retains the exact kernel-attested state
+    /// directory; never expose it to MCP, policy JSON or external crates.
+    pub(crate) fn into_replay_state_fd(self) -> OwnedFd {
+        self.fd
+    }
+
     /// Snapshot the opened inode identity; this is **not** an authorization token.
     /// A future broker must compare it to separately trusted policy provenance.
     pub fn file_identity(&self) -> Result<(u64, u64), IdentityDenied> {
@@ -138,6 +144,13 @@ fn assert_trusted_directory(
         return Err(IdentityDenied);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn observe_test_state_directory(
+    path: &str,
+) -> Result<ObservedPolicyDirectory, IdentityDenied> {
+    open_verified_existing_directory(path, unsafe { libc::geteuid() }, unsafe { libc::getegid() })
 }
 
 #[cfg(test)]

@@ -262,6 +262,28 @@ test('systemd IPC policy-denial failure provides exact invocation diagnostics wi
   assert.match(script, /exit 1/);
 });
 
+test('completed policy+witness recovery requires a durable expected transition record', () => {
+  const publisher = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const acceptance = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const required of [
+    /pub fn recover_after_witness_rename\(/,
+    /read_transition_intent\(/,
+    /require_absent_name\(&dir, c"\.policy-next\.sqlite3"\)/,
+    /require_absent_name\(&dir, c"\.policy-next-anchor"\)/,
+  ]) assert.match(publisher, required);
+  for (const required of [
+    /E_RECOVER_COMPLETED_MISMATCH_DENIED/,
+    /E_RECOVER_COMPLETED_TO_V4_SUCCESS/,
+    /E_RECOVER_COMPLETED_STAGED_ALIAS_DENIED/,
+    /E_RECOVER_COMPLETED_EMPTY_INTENT_DENIED/,
+    /recover-completed/, /prepare-v4/, /init-policy-bytes-v4/,
+  ]) assert.match(acceptance, required);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

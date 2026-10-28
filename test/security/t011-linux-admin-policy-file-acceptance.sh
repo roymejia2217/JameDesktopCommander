@@ -36,11 +36,13 @@ source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 source_file_v3="$(mktemp /tmp/jdc-policy-v3.XXXXXXXX)"
 source_anchor_v3="$(mktemp /tmp/jdc-policy-witness-v3.XXXXXXXX)"
+source_file_v4="$(mktemp /tmp/jdc-policy-v4.XXXXXXXX)"
+source_anchor_v4="$(mktemp /tmp/jdc-policy-witness-v4.XXXXXXXX)"
 cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" || code=1
   exit "$code"
 }
 trap cleanup EXIT
@@ -51,6 +53,8 @@ trap cleanup EXIT
 "$fixture" write-policy-anchor-v2 "$source_anchor_v2"
 "$fixture" init-policy-bytes-v3 "$source_file_v3"
 "$fixture" write-policy-anchor-v3 "$source_anchor_v3"
+"$fixture" init-policy-bytes-v4 "$source_file_v4"
+"$fixture" write-policy-anchor-v4 "$source_anchor_v4"
 [[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 && "$(wc -c < "$source_anchor_v2")" -eq 40 ]] || exit 1
 [[ "$(stat -c '%s' -- "$source_file")" -ge 512 ]] || exit 1
 sudo -n install -d -o root -g root -m 0755 -- "$directory"
@@ -284,4 +288,41 @@ verdict PUBLISH_SPLIT_RECOVERED sudo -n -- "$publisher" recover-split
 [[ ! -e "$publish_intent" && ! -e "${directory}/.policy-next-anchor" ]] || exit 1
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v3
 printf '%s\n' 'E_RECOVER_SPLIT_POLICY_TO_V3_SUCCESS'
+
+# Simulate a crash after both durable names were published but before
+# unlinking intent. No deletion is allowed without matching transition.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+verdict PUBLISH_PREPARED sudo -n -- "$publisher" prepare-v4 "$source_file_v4"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v4" "$policy"
+if sudo -n -- "$publisher" recover-completed 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_COMPLETED_MISMATCH_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_COMPLETED_MISMATCH_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v4" "$anchor"
+# Even a fully matching final pair cannot clear intent if an attacker has
+# inserted a stale or symbolic staged file under the protected parent.
+sudo -n ln -s -- "$source_file" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-completed 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_COMPLETED_STAGED_ALIAS_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_COMPLETED_STAGED_ALIAS_DENIED'
+sudo -n rm -- "${directory}/.policy-next-anchor"
+verdict PUBLISH_COMPLETED_RECOVERED sudo -n -- "$publisher" recover-completed
+[[ ! -e "$publish_intent" && ! -e "${directory}/.policy-next.sqlite3" && ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v4
+printf '%s\n' 'E_RECOVER_COMPLETED_TO_V4_SUCCESS'
+# Final positive policy/witness bytes alone never authorize an empty
+# marker to be cleared by the recovery path.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+if sudo -n -- "$publisher" recover-completed 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_COMPLETED_EMPTY_INTENT_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_COMPLETED_EMPTY_INTENT_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "$publish_intent"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v4
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

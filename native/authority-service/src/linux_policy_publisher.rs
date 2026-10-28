@@ -417,6 +417,65 @@ pub fn recover_after_policy_rename() -> Result<(), IdentityDenied> {
     Ok(())
 }
 
+/// Root-only recovery for a fully installed, strictly forward generation
+/// whose final durable marker removal was interrupted. This is NOT
+/// permission to clear an arbitrary stale intent: it requires the exact
+/// persisted old/new transition and both verified final objects, with no
+/// staged names left. All ambiguous states remain fail-closed.
+pub fn recover_after_witness_rename() -> Result<(), IdentityDenied> {
+    use jdc_authority_store::policy_bytes::PolicyBytesStore;
+    let dir = open_admin_directory()?;
+    let intent = require_admin_intent(&dir)?;
+    let record = read_transition_intent(&dir, intent)?;
+    require_absent_sqlite_sidecars(&dir)?;
+    require_absent_name(&dir, c".policy-next.sqlite3")?;
+    require_absent_name(&dir, c".policy-next-anchor")?;
+
+    let (actual_image, policy_group) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (actual_witness, witness_group) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    if policy_group != witness_group {
+        return Err(IdentityDenied);
+    }
+    let policy =
+        PolicyBytesStore::read_verified_serialized(&actual_image).map_err(|_| IdentityDenied)?;
+    let (epoch, digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&actual_witness)?;
+    if epoch != record.next_epoch
+        || digest != record.next_digest
+        || policy.epoch() != record.next_epoch
+        || *policy.digest() != record.next_digest
+    {
+        return Err(IdentityDenied);
+    }
+
+    // Reopen both fixed objects and confirm they remained byte-identical
+    // and under the same trusted root:service principal before clearing.
+    let (again_image, again_policy_group) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (again_witness, again_witness_group) =
+        read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    if again_policy_group != policy_group
+        || again_witness_group != witness_group
+        || again_image != actual_image
+        || again_witness != actual_witness
+        || require_admin_intent(&dir)? != intent
+        || read_transition_intent(&dir, intent)? != record
+    {
+        return Err(IdentityDenied);
+    }
+    require_absent_sqlite_sidecars(&dir)?;
+    require_absent_name(&dir, c".policy-next.sqlite3")?;
+    require_absent_name(&dir, c".policy-next-anchor")?;
+
+    // Both files were already published and durably validated. Only
+    // the exact original intent inode is removed; never touch policy bytes.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), c".policy-publish-inflight".as_ptr(), 0) } != 0 {
+        return Err(IdentityDenied);
+    }
+    sync_directory(&dir)?;
+    Ok(())
+}
+
 fn require_absent_name(dir: &OwnedFd, name: &std::ffi::CStr) -> Result<(), IdentityDenied> {
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     let result = unsafe {
@@ -653,6 +712,12 @@ mod tests {
             PolicyTransitionRecord::new(7, [0x11; 32], 8, [0x11; 32]),
             Err(IdentityDenied)
         );
+    }
+
+    #[test]
+    fn unprivileged_process_cannot_clear_even_a_completed_publication_intent() {
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        assert_eq!(recover_after_witness_rename(), Err(IdentityDenied));
     }
 
     #[test]

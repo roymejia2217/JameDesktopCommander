@@ -104,6 +104,30 @@ operator-authenticated provenance, secure monotonic witness and in-flight
 authorization are still mandatory before production. No automated
 clear-all marker or rollback to older permissions is permitted.
 
+## Recovery after witness rename but before intent removal
+
+Another power-loss boundary exists **after both final files were renamed**
+but before the original root-owned publication intent was unlinked. A
+separate, root-only `recover_after_witness_rename()` addresses only
+this exact end state: a valid 88-byte root:root `JDC-POL1` transition
+record; no staged SQLite or staged witness names; no hot journal, WAL
+or SHM; and a verified root:service 0640 final SQLite image plus
+independently stored witness with epoch and digest **identical** to the
+record's next generation. Both final files are reopened and checked for
+byte stability, trusted owner/group and the same intent inode before
+the marker is unlinked and the directory fsynced. A mismatched witness,
+missing record, leftover stage or other ambiguity remains DENIED.
+
+Mandatory Linux acceptance uses a genuine epoch-4 SQLite image and
+matching root-owned witness. It first installs only the new policy
+while the old witness is still present (DENY), then installs the
+matching witness and requires the root-only completed-state recovery,
+removal of just the intent, and service-side positive verification
+of epoch-4 policy bytes. This is a **controlled root fixture simulation**,
+not proof of sudden-power-loss durability at every syscall, signature
+validation, an antirollback witness outside local root control, or
+authorization while MCP filesystem operations are in flight.
+
 ## Administrator publisher requirements still missing
 
 The implemented root-only begin/commit protocol supplies an exclusive marker, a strictly forward image+witness transition, staged fsync/rename ordering, and denial of a failed publication. It does NOT establish policy-source signature/provenance, approved semantic authorization, administrative operator authentication beyond root kernel identity, a documented recovery operator for every crash boundary, or a state machine linearized with in-flight native filesystem operations. Concurrency against malicious root processes, crash injection after each file and directory synchronization, power-loss persistence and safe fail-closed recovery after every crash window all require independent acceptance. It cannot be deployed as a complete trusted policy issuer.

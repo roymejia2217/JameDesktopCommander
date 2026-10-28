@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn provisioned_peer_identity_is_a_nonforgeable_kernel_nss_binding() {
+        let approved = PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+            .expect("positive control requires an NSS-registered nonroot test principal");
+        let (_sender, stream) = UnixStream::pair().unwrap();
+        let peer = approved.authenticate(stream.as_fd()).unwrap();
+        assert_eq!(peer.uid(), unsafe { libc::geteuid() });
+        assert_eq!(peer.gid(), unsafe { libc::getegid() });
+        assert!(
+            PreparedMcpClient::from_named_os_account_for_test(c"root").is_err(),
+            "a root account cannot be a prepared MCP IPC client"
+        );
+        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(approved.authenticate(file.as_fd()), Err(IdentityDenied));
+    }
+
+    #[test]
     fn system_account_match_uses_nss_and_kernel_not_peer_payload() {
         use std::ffi::{CStr, CString};
         // Positive control: resolve our *independent host account record*

@@ -127,6 +127,15 @@ pub(crate) fn read_authenticated_frame(
     Ok(AuthenticatedFrame { wire })
 }
 
+pub(crate) fn read_prepared_client_frame(
+    stream: &UnixStream,
+    principal: &crate::unix_peer::PreparedMcpClient,
+    deadline: Duration,
+) -> Result<AuthenticatedFrame, IdentityDenied> {
+    let peer = principal.authenticate(stream.as_fd())?;
+    read_authenticated_frame(stream, peer.uid(), peer.gid(), deadline)
+}
+
 /// Backward-compatible observation-only API. Do not authorize from Ok(()).
 pub fn inspect_one_session(
     stream: &UnixStream,
@@ -152,6 +161,17 @@ mod tests {
         assert_ne!(uid, 0, "non-root kernel positive control required");
         assert_ne!(gid, 0, "non-root kernel group positive control required");
         (uid, gid)
+    }
+
+    #[test]
+    fn prepared_peer_positive_control() {
+        let who =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.write_all(&valid_request()).unwrap();
+        sender.shutdown(Shutdown::Write).unwrap();
+        assert!(read_prepared_client_frame(&receiver, &who, Duration::from_secs(1)).is_ok());
     }
 
     fn valid_request() -> Vec<u8> {

@@ -56,8 +56,11 @@ fn main() {
         || action == "policy-snapshot-v2"
         || action == "policy-snapshot-v3"
         || action == "policy-snapshot-v4"
+        || action == "policy-snapshot-v5"
     {
-        let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v4" {
+        let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v5" {
+            (5, b"approved-policy-fixture-v5")
+        } else if action == "policy-snapshot-v4" {
             (4, b"approved-policy-fixture-v4")
         } else if action == "policy-snapshot-v3" {
             (3, b"approved-policy-fixture-v3")

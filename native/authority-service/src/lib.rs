@@ -38,6 +38,8 @@ pub mod frame_reader;
 
 // C4d request data validator only; no trusted IPC client or operation grant.
 pub mod canonical_request;
+// Protected-policy root compiler; no grant, client constructor or issuer activation.
+pub mod issuer_policy;
 
 // Never enable an IPC listener solely because peer credentials are observable.
 // This module only reads kernel-verified Unix peer metadata; it grants nothing.

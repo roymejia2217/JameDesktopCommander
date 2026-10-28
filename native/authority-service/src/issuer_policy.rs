@@ -1,6 +1,9 @@
 //! Exact policy-to-root binding for the native issuer (not yet a service).
 //! Policy bytes do NOT confer authority without an OS-owned witness and service identity.
-use crate::{handle_mkdir::RootedDirectory, IdentityDenied};
+#[cfg(any(test, target_os = "linux"))]
+use crate::handle_mkdir::RootedDirectory;
+#[cfg(any(test, target_os = "linux"))]
+use crate::IdentityDenied;
 
 #[cfg(test)]
 mod tests {
@@ -142,7 +145,9 @@ mod tests {
         assert!(p.open_root(R).is_err());
     }
 }
+#[cfg(any(test, target_os = "linux"))]
 use cap_fs_ext::DirExt;
+#[cfg(any(test, target_os = "linux"))]
 use cap_std::{ambient_authority, fs::Dir};
 #[cfg(any(test, target_os = "linux"))]
 use serde::{Deserialize, Serialize};
@@ -151,11 +156,21 @@ use std::collections::HashSet;
 
 /// Data validated against the *already OS-attested* admin policy snapshot.
 /// This cannot be created from a client request, environment, or CLI option.
+/// The public observation is NOT a way to mint operative directory handles.
+/// ```compile_fail
+/// use jdc_authority_service::issuer_policy::IssuerPolicy;
+/// fn bypass(policy: IssuerPolicy) {
+///     let privileged = policy.open_root("0123456789abcdef0123456789abcdef").unwrap();
+///     privileged.create_child("unauthorized").unwrap();
+/// }
+/// ```
 pub struct IssuerPolicy {
     epoch: u64,
     digest: [u8; 32],
+    #[cfg(any(test, target_os = "linux"))]
     roots: Vec<PolicyRoot>,
 }
+#[cfg(any(test, target_os = "linux"))]
 struct PolicyRoot {
     root_ref: String,
     disk_root: String,
@@ -177,6 +192,7 @@ struct RootWire {
     #[serde(rename = "absolutePath")]
     absolute_path: String,
 }
+#[cfg(any(test, target_os = "linux"))]
 fn root_components(path: &str) -> Result<(&str, Vec<&str>), IdentityDenied> {
     if path.len() > 4096 || path.chars().any(|c| c as u32 == 0) {
         return Err(IdentityDenied);
@@ -281,7 +297,8 @@ impl IssuerPolicy {
     /// absolute root; the OS volume root is the only initial ambient open.
     /// Every other path component is traversed under a capability handle.
     /// This is a ROOT-BINDING primitive, not a replay/revocation grant.
-    pub fn open_root(&self, root_ref: &str) -> Result<RootedDirectory, IdentityDenied> {
+    #[cfg(any(test, target_os = "linux"))]
+    pub(crate) fn open_root(&self, root_ref: &str) -> Result<RootedDirectory, IdentityDenied> {
         let selected = self
             .roots
             .iter()

@@ -172,6 +172,92 @@ mod tests {
     }
 
     #[test]
+    fn prepared_issuer_listener_denies_policy_revocation_during_frame_read() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        use std::thread;
+        let (dir, listener) = fixture();
+        let path = dir.path().join("authority.sock");
+        let client =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let changed = Arc::new(AtomicBool::new(false));
+        let revoked = Arc::clone(&changed);
+        let (prechecked, start_client) = mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            start_client.recv().unwrap();
+            revoked.store(true, Ordering::SeqCst);
+            let mut sender = UnixStream::connect(path).unwrap();
+            sender.write_all(&wire()).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+        });
+        let mut validations = 0;
+        let decision = observe_one_named_prepared_with_checks(
+            &listener,
+            client,
+            &dir.path().join("authority.sock"),
+            Duration::from_secs(2),
+            || {
+                validations += 1;
+                if validations == 1 {
+                    prechecked.send(()).unwrap();
+                }
+                if changed.load(Ordering::SeqCst) {
+                    Err(IdentityDenied)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        worker.join().unwrap();
+        assert_eq!(decision, Err(IdentityDenied));
+        assert_eq!(
+            validations, 2,
+            "policy must be rechecked after the OS-authenticated frame"
+        );
+    }
+
+    #[test]
+    fn prepared_issuer_listener_accepts_genuine_peer_only_as_data() {
+        let (dir, listener) = fixture();
+        let path = dir.path().join("authority.sock");
+        let client =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let mut sender = UnixStream::connect(&path).unwrap();
+        sender.write_all(&wire()).unwrap();
+        sender.shutdown(Shutdown::Write).unwrap();
+        let mut validations = 0;
+        assert_eq!(
+            observe_one_named_prepared_with_checks(
+                &listener,
+                client,
+                &path,
+                Duration::from_secs(2),
+                || {
+                    validations += 1;
+                    Ok(())
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(validations, 2);
+        assert_eq!(
+            observe_one_named_prepared_with_checks(
+                &listener,
+                client,
+                &dir.path().join("other.sock"),
+                Duration::from_millis(20),
+                || Ok(())
+            ),
+            Err(IdentityDenied),
+            "a different named listener is denied even with matching peer UID/GID"
+        );
+    }
+
+    #[test]
     fn valid_named_socket_connection_is_only_observed_not_authorized() {
         let (dir, listener) = fixture();
         let (uid, gid) = ids();

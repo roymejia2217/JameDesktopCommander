@@ -18,6 +18,13 @@ enum ReplayAdmission {
     Unavailable,
     // Production-compiled storage adapter. No production path may *construct*
     // a usable ledger until verified OS custody and publisher are implemented.
+    #[cfg_attr(
+        all(target_os = "linux", not(test)),
+        expect(
+            dead_code,
+            reason = "the sealed ledger constructor is unavailable until OS-pinned SQLite VFS is proven"
+        )
+    )]
     Durable(jdc_authority_store::replay_ledger::ReplayClaimLedger),
     #[cfg(test)]
     SyntheticTestOnly(HashSet<[u8; 16]>),
@@ -126,6 +133,13 @@ impl SealedDirectoryGrant {
         expect(
             dead_code,
             reason = "trusted OS-custodied ledger constructor is not available yet"
+        )
+    )]
+    #[cfg_attr(
+        all(target_os = "linux", not(test)),
+        expect(
+            dead_code,
+            reason = "no OS-attested SQLite write connection can be minted by the service yet"
         )
     )]
     pub(crate) fn from_issued_with_ledger(

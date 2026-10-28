@@ -20,7 +20,10 @@ pub mod sealed_dispatch;
 pub mod linux_policy_root;
 // Fixed-name descriptor-pinned replay file custody, not a SQLite VFS or grant.
 #[cfg(target_os = "linux")]
-mod linux_replay_file;
+pub mod linux_replay_file;
+// Data-only OS-attested issuer bootstrap. The service still denies grants.
+#[cfg(target_os = "linux")]
+pub mod linux_issuer_bootstrap;
 
 // Independent root-admin-owned Linux epoch witness, observation only.
 #[cfg(target_os = "linux")]

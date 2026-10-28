@@ -287,6 +287,13 @@ impl IssuerPolicy {
     ) -> Result<Self, IdentityDenied> {
         Self::decode_verified(bytes, epoch, digest)
     }
+    /// Root references are already validated against the OS-attested
+    /// administrator-owned policy; only the issuer crate can enumerate them.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn root_refs(&self) -> impl Iterator<Item = &str> {
+        self.roots.iter().map(|r| r.root_ref.as_str())
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

@@ -116,7 +116,7 @@ impl ObservedReplayFile {
         if raw < 0 {
             return Err(IdentityDenied);
         }
-        let mut file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+        let file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
         let meta = Self::metadata(&file)?;
         if !Self::valid_leaf(&meta) {
             return Err(IdentityDenied);

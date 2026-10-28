@@ -233,44 +233,48 @@ impl ReplayClaimLedger {
             .map_err(|_| StoreDenied)?;
         verify_schema(&tx)?;
         let epoch = self.expected_epoch.to_be_bytes();
-        let existing: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM replay_claims WHERE epoch=?1",
-                params![epoch.as_slice()],
-                |r| r.get(0),
-            )
-            .map_err(|_| StoreDenied)?;
-        // The reader and writer must enforce the SAME retention envelope.
-        // Otherwise a valid 17th epoch can be committed and immediately make
-        // the next independently checked bootstrap reject the whole image.
-        // All checks share this IMMEDIATE transaction with the insert.
-        const MAX_GENERATIONS: i64 = 16;
-        let (total, generations, latest_epoch, largest_generation): (
-            i64,
-            i64,
-            Option<Vec<u8>>,
-            Option<i64>,
-        ) = tx
-            .query_row(
-                "SELECT COUNT(*), COUNT(DISTINCT epoch), MAX(epoch),
-               (SELECT MAX(n) FROM
-                   (SELECT COUNT(*) AS n FROM replay_claims GROUP BY epoch))
-             FROM replay_claims",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .map_err(|_| StoreDenied)?;
-        let latest_is_future = if let Some(latest) = latest_epoch {
-            latest.len() != 8 || latest.as_slice() > epoch.as_slice()
-        } else {
-            false
-        };
-        if existing >= MAX_CLAIMS_PER_EPOCH
-            || total >= MAX_GENERATIONS * MAX_CLAIMS_PER_EPOCH
-            || generations > MAX_GENERATIONS
-            || (generations == MAX_GENERATIONS && existing == 0)
-            || largest_generation.unwrap_or(0) > MAX_CLAIMS_PER_EPOCH
-            || latest_is_future
+        // Reconcile ALL historical identities inside the SAME SQLite
+        // IMMEDIATE transaction as the new claim, with the reader's exact
+        // epoch/UUIDv4 invariants. Aggregate counts and schema constraints
+        // alone cannot detect a forged or zero-generation historical row.
+        const MAX_GENERATIONS: usize = 16;
+        let mut generations = std::collections::BTreeMap::<u64, usize>::new();
+        let mut total = 0usize;
+        {
+            let mut statement = tx
+                .prepare("SELECT epoch, request FROM replay_claims")
+                .map_err(|_| StoreDenied)?;
+            let mut rows = statement.query([]).map_err(|_| StoreDenied)?;
+            while let Some(row) = rows.next().map_err(|_| StoreDenied)? {
+                let prior_epoch: Vec<u8> = row.get(0).map_err(|_| StoreDenied)?;
+                let prior_id: Vec<u8> = row.get(1).map_err(|_| StoreDenied)?;
+                if prior_epoch.len() != 8
+                    || prior_id.len() != 16
+                    || prior_id[6] >> 4 != 4
+                    || prior_id[8] & 0b1100_0000 != 0b1000_0000
+                {
+                    return Err(StoreDenied);
+                }
+                let number = u64::from_be_bytes(prior_epoch.try_into().map_err(|_| StoreDenied)?);
+                if number == 0 || number > self.expected_epoch {
+                    return Err(StoreDenied);
+                }
+                let count = generations.entry(number).or_default();
+                *count += 1;
+                total += 1;
+                if *count > MAX_CLAIMS_PER_EPOCH as usize
+                    || generations.len() > MAX_GENERATIONS
+                    || total > MAX_GENERATIONS * MAX_CLAIMS_PER_EPOCH as usize
+                {
+                    return Err(StoreDenied);
+                }
+            }
+        }
+        if generations.get(&self.expected_epoch).copied().unwrap_or(0)
+            >= MAX_CLAIMS_PER_EPOCH as usize
+            || total >= MAX_GENERATIONS * MAX_CLAIMS_PER_EPOCH as usize
+            || (generations.len() == MAX_GENERATIONS
+                && !generations.contains_key(&self.expected_epoch))
         {
             return Err(StoreDenied);
         }
@@ -386,6 +390,39 @@ mod tests {
                 .is_err(),
             "additional schema objects must deny"
         );
+    }
+
+    #[test]
+    fn replay_claim_denies_foreign_history_inside_same_transaction() {
+        for (old_epoch, old_request) in [
+            (7u64, [0x11u8; 16]),       // malformed UUID, valid schema
+            (0u64, canonical_id(0x12)), // no administrator generation zero
+            (8u64, canonical_id(0x13)), // future generation
+        ] {
+            let f = tempdir().unwrap();
+            let path = f.path().join("claims.sqlite3");
+            setup(&path);
+            let db = Connection::open(&path).unwrap();
+            db.execute(
+                "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+                params![old_epoch.to_be_bytes().as_slice(), old_request.as_slice()],
+            )
+            .unwrap();
+            drop(db);
+            let attempted = canonical_id(0x44);
+            assert!(
+                open(&path, 7).claim_once(attempted).is_err(),
+                "malformed old history must deny a valid new claim"
+            );
+            let db = Connection::open(&path).unwrap();
+            let count: i64 = db
+                .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "foreign history must remain untouched; claim uncommitted"
+            );
+        }
     }
 
     #[test]

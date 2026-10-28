@@ -2,12 +2,16 @@
 //! The listener MUST already be bound by a protected service/socket manager
 //! and set nonblocking. This module cannot establish provenance of its path.
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::sealed_dispatch::{DispatchDenied, SealedDirectoryGrant};
-use crate::unix_session::{read_authenticated_frame, AuthenticatedFrame};
+use crate::unix_peer::PreparedMcpClient;
+use crate::unix_session::{
+    read_authenticated_frame, read_prepared_client_frame, AuthenticatedFrame,
+};
 
 const MAX_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -15,12 +19,10 @@ use crate::IdentityDenied;
 
 /// Obtain a kernel-authenticated frame from exactly one prebound named
 /// nonblocking listener. This only establishes principal+syntax, not policy.
-fn read_one_named_authenticated(
+fn accept_one_named_stream(
     listener: &UnixListener,
-    expected_uid: u32,
-    expected_gid: u32,
     deadline: Duration,
-) -> Result<AuthenticatedFrame, IdentityDenied> {
+) -> Result<(UnixStream, Duration), IdentityDenied> {
     if deadline.is_zero() || deadline > MAX_DEADLINE {
         return Err(IdentityDenied);
     }
@@ -94,10 +96,41 @@ fn read_one_named_authenticated(
         if budget.is_zero() {
             return Err(IdentityDenied);
         }
-        // This call only verifies kernel identity and request *syntax*.
-        // It does not return or operate on a privileged filesystem handle.
-        return read_authenticated_frame(&stream, expected_uid, expected_gid, budget);
+        // Return only the OS-connected stream and the strictly remaining
+        // deadline; identity and frame validation occur before observation.
+        return Ok((stream, budget));
     }
+}
+
+fn read_one_named_authenticated(
+    listener: &UnixListener,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<AuthenticatedFrame, IdentityDenied> {
+    let (stream, remaining) = accept_one_named_stream(listener, deadline)?;
+    read_authenticated_frame(&stream, expected_uid, expected_gid, remaining)
+}
+
+/// Bind the prepared NSS peer to the kernel-named listener and revalidate
+/// administrator policy BOTH before and after the potentially blocking read.
+/// This returns observation only. It cannot mint a grant or dispatch I/O.
+pub(crate) fn observe_one_named_prepared_with_checks(
+    listener: &UnixListener,
+    principal: PreparedMcpClient,
+    expected_path: &Path,
+    deadline: Duration,
+    mut revalidate: impl FnMut() -> Result<(), IdentityDenied>,
+) -> Result<(), IdentityDenied> {
+    revalidate()?;
+    crate::unix_activation::inspect_named_listener(listener.as_fd(), expected_path)?;
+    let observed = accept_one_named_stream(listener, deadline)
+        .and_then(|(stream, budget)| read_prepared_client_frame(&stream, &principal, budget))
+        .map(|_| ());
+    // Even a correctly authenticated request may be stale by the time its
+    // complete frame arrives. An invalid frame must not hide epoch drift.
+    revalidate()?;
+    observed
 }
 
 /// Observation-only compatibility interface; cannot create a sealed grant.
@@ -169,6 +202,96 @@ mod tests {
             0o600
         );
         (dir, listener)
+    }
+
+    #[test]
+    fn prepared_issuer_listener_denies_policy_revocation_during_frame_read() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        use std::thread;
+        let (dir, listener) = fixture();
+        let path = dir.path().join("authority.sock");
+        let client =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let changed = Arc::new(AtomicBool::new(false));
+        let revoked = Arc::clone(&changed);
+        let (prechecked, start_client) = mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            start_client.recv().unwrap();
+            revoked.store(true, Ordering::SeqCst);
+            let mut sender = UnixStream::connect(path).unwrap();
+            sender.write_all(&wire()).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+        });
+        let mut validations = 0;
+        let decision = observe_one_named_prepared_with_checks(
+            &listener,
+            client,
+            &dir.path().join("authority.sock"),
+            Duration::from_secs(2),
+            || {
+                validations += 1;
+                if validations == 1 {
+                    assert!(!changed.load(Ordering::SeqCst));
+                    // The first validation must succeed before the worker
+                    // can change policy. Never race the first state read.
+                    prechecked.send(()).unwrap();
+                    return Ok(());
+                }
+                if changed.load(Ordering::SeqCst) {
+                    Err(IdentityDenied)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        worker.join().unwrap();
+        assert_eq!(decision, Err(IdentityDenied));
+        assert_eq!(
+            validations, 2,
+            "policy must be rechecked after the OS-authenticated frame"
+        );
+    }
+
+    #[test]
+    fn prepared_issuer_listener_accepts_genuine_peer_only_as_data() {
+        let (dir, listener) = fixture();
+        let path = dir.path().join("authority.sock");
+        let client =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let mut sender = UnixStream::connect(&path).unwrap();
+        sender.write_all(&wire()).unwrap();
+        sender.shutdown(Shutdown::Write).unwrap();
+        let mut validations = 0;
+        assert_eq!(
+            observe_one_named_prepared_with_checks(
+                &listener,
+                client,
+                &path,
+                Duration::from_secs(2),
+                || {
+                    validations += 1;
+                    Ok(())
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(validations, 2);
+        assert_eq!(
+            observe_one_named_prepared_with_checks(
+                &listener,
+                client,
+                &dir.path().join("other.sock"),
+                Duration::from_millis(20),
+                || Ok(())
+            ),
+            Err(IdentityDenied),
+            "a different named listener is denied even with matching peer UID/GID"
+        );
     }
 
     #[test]

@@ -96,8 +96,35 @@ impl UnissuedIssuer {
         deadline: std::time::Duration,
     ) -> Result<(), IdentityDenied> {
         self.revalidate()?;
-        crate::unix_session::read_prepared_client_frame(stream, &self.expected_client, deadline)
-            .map(|_| ())
+        let observed = crate::unix_session::read_prepared_client_frame(
+            stream,
+            &self.expected_client,
+            deadline,
+        );
+        // Receipt of an authenticated frame is not evidence that the root
+        // administrator kept the same epoch throughout a blocked socket read.
+        self.revalidate()?;
+        observed.map(|_| ())
+    }
+
+    /// One genuine named AF_UNIX listener, with a fixed NSS client identity
+    /// and a second protected-policy observation after bounded frame receipt.
+    /// This does not establish systemd's provenance for the listener, nor
+    /// grant any filesystem operation or acknowledge a client request.
+    pub fn inspect_one_named_client(
+        &mut self,
+        listener: &std::os::unix::net::UnixListener,
+        deadline: std::time::Duration,
+    ) -> Result<(), IdentityDenied> {
+        const ENDPOINT: &str = "/run/jdc-authority-ipc/authority.sock";
+        let principal = self.expected_client;
+        crate::unix_accept::observe_one_named_prepared_with_checks(
+            listener,
+            principal,
+            std::path::Path::new(ENDPOINT),
+            deadline,
+            || self.revalidate(),
+        )
     }
 
     pub fn observed_root_count(&self) -> usize {

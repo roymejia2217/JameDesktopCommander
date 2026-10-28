@@ -252,6 +252,16 @@ test('root-only recovery requires a durable epoch/digest bound transition record
   ]) assert.match(acceptance, contract);
 });
 
+test('systemd IPC policy-denial failure provides exact invocation diagnostics without bypass', () => {
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8',
+  );
+  assert.match(script, /E_SOCKET_JOURNAL_DIAGNOSTICS/);
+  assert.match(script, /journalctl -b -u "\$service_name"/);
+  assert.match(script, /E_SOCKET_ACTIVATED_SERVICE_IDENTITY_OR_POLICY_FAILURE/);
+  assert.match(script, /exit 1/);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

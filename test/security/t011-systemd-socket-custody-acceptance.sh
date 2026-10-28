@@ -212,7 +212,14 @@ invocation_journal="$(sudo -n journalctl -b -u "$service_name" \
   "_SYSTEMD_INVOCATION_ID=$after_invocation" --no-pager --output=cat)"
 if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"$invocation_journal" ||
    grep -Fq 'E_IDENTITY_REQUIRED' <<<"$invocation_journal"; then
+  # This remains a mandatory FAIL. Preserve exact invocation diagnostics
+  # rather than treating an empty/stale journal as a passing denial.
   printf '%s\n' 'E_SOCKET_ACTIVATED_SERVICE_IDENTITY_OR_POLICY_FAILURE' >&2
+  printf 'E_SOCKET_JOURNAL_DIAGNOSTICS invocation=%s\n' "$after_invocation" >&2
+  printf '%s\n' "$invocation_journal" >&2
+  sudo -n systemctl show "$service_name" \
+    -p ActiveState -p Result -p ExecMainStatus -p InvocationID >&2
+  sudo -n journalctl -b -u "$service_name" --no-pager -n 30 --output=verbose >&2
   exit 1
 fi
 if [[ -e "$state_dir/must-not-create" || -L "$state_dir/must-not-create" ]]; then

@@ -355,6 +355,15 @@ if sudo -n -- "$publisher" recover-pre 2>/dev/null; then
 fi
 printf '%s\n' 'E_RECOVER_PRE_WRONG_STAGE_DENIED'
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${directory}/.policy-next-anchor"
+sudo -n ln -s -- "$source_anchor_v5" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-pre 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_PRE_SYMLINK_STAGE_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_PRE_SYMLINK_STAGE_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${directory}/.policy-next-anchor"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v5" "${directory}/.policy-next-anchor"
 verdict PUBLISH_PRE_RENAME_RECOVERED sudo -n -- "$publisher" recover-pre
 [[ ! -e "$publish_intent" && ! -e "${directory}/.policy-next.sqlite3" && ! -e "${directory}/.policy-next-anchor" ]] || exit 1

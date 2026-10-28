@@ -165,6 +165,46 @@ test('native restricted append must not change outside bytes via a hard-link ali
   });
 });
 
+test('text read, text append and text rewrite reject a real cross-root alias', () => {
+  withIsolatedRoot(({ cap, allowed, outside }) => {
+    const outsideText = path.join(outside, 'outside-note.txt');
+    fs.writeFileSync(outsideText, 'OUTSIDE-TEXT-ORIGINAL');
+    const insideAlias = path.join(allowed, 'alias-note.txt');
+    fs.linkSync(outsideText, insideAlias);
+    assert.equal(fs.statSync(insideAlias).ino, fs.statSync(outsideText).ino);
+    assert.ok(fs.statSync(outsideText).nlink >= 2);
+    assert.throws(() => cap.readText('alias-note.txt'), /shared or nonregular object/i);
+    assert.throws(() => cap.appendText('alias-note.txt', '-APPENDED'),
+      /shared or nonregular object/i);
+    assert.throws(() => cap.writeText('alias-note.txt', 'REWRITTEN'),
+      /shared or nonregular object/i);
+    assert.equal(fs.readFileSync(outsideText, 'utf8'), 'OUTSIDE-TEXT-ORIGINAL');
+    assert.equal(fs.readFileSync(insideAlias, 'utf8'), 'OUTSIDE-TEXT-ORIGINAL');
+  });
+});
+
+test('native restricted stat denies outside hard-link object metadata', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    assert.throws(() => cap.statRelative(relative), /shared or nonregular object/i,
+      'A cross-root hard-link alias must not disclose outside object metadata');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native restricted stat preserves valid single-link file and directory metadata', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    fs.writeFileSync(path.join(allowed, 'legitimate.bin'), Buffer.from([1, 2, 3, 4]));
+    fs.mkdirSync(path.join(allowed, 'legitimate-dir'));
+    assert.deepEqual(cap.statRelative('legitimate.bin'), {
+      kind: 'file', sizeBytes: '4',
+    });
+    const directory = cap.statRelative('legitimate-dir');
+    assert.equal(directory.kind, 'directory');
+    assert.match(directory.sizeBytes, /^\d+$/);
+  });
+});
+
 test('final-component replacement with a hard link after an in-root checkpoint is denied', () => {
   withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
     const name = 'linked-outside-sentinel.bin';
@@ -195,3 +235,191 @@ test('closed handle fails for all added directory operations', () => {
     assert.throws(() => cap.removeEmptyDirectoryRelative('nope'), /closed/i);
   });
 });
+
+test('native atomic byte rewrite denies a known multi-link object, preserving both names', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    const authorizedName = path.join(allowed, relative);
+    // Cross-root aliases are never approved for restricted operations.
+    // Independent inode replacement is insufficient to prove their origin.
+    assert.throws(() => cap.writeBytes(relative, Buffer.from([0x61, 0x62, 0x63]), 'rewrite'),
+      /shared or nonregular object/i);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+    assert.deepEqual(fs.readFileSync(authorizedName), original);
+    assert.equal(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino);
+  });
+});
+
+test('native atomic text rewrite also denies a known multi-link object', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    const authorizedName = path.join(allowed, relative);
+    assert.throws(() => cap.writeText(relative, 'ALLOWED-REPLACEMENT'),
+      /shared or nonregular object/i);
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+    assert.deepEqual(fs.readFileSync(authorizedName), original);
+    assert.equal(fs.statSync(sentinel).ino, fs.statSync(authorizedName).ino);
+  });
+});
+
+test('single-link reads, appends and atomic rewrites remain usable', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    const name = 'sole-owner.txt';
+    fs.writeFileSync(path.join(allowed, name), 'initial');
+    assert.equal(fs.statSync(path.join(allowed, name)).nlink, 1);
+    assert.equal(cap.readText(name), 'initial');
+    cap.appendText(name, '-append');
+    assert.equal(cap.readText(name), 'initial-append');
+    cap.writeText(name, 'fresh');
+    assert.equal(cap.readText(name), 'fresh');
+    cap.writeBytes(name, Buffer.from([0x01, 0x02]), 'append');
+    assert.deepEqual(cap.readBytes(name), Buffer.from([0x66, 0x72, 0x65, 0x73, 0x68, 0x01, 0x02]));
+    cap.writeBytes(name, Buffer.from([0x00, 0xff]), 'rewrite');
+    assert.deepEqual(fs.readFileSync(path.join(allowed, name)), Buffer.from([0x00, 0xff]));
+    cap.appendText('new-sole-owner.txt', 'created');
+    assert.equal(cap.readText('new-sole-owner.txt'), 'created');
+    assert.equal(fs.statSync(path.join(allowed, 'new-sole-owner.txt')).nlink, 1);
+  });
+});
+
+test('atomic rewrite is repeatable and failed publication leaves no temporary file', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    cap.createDirectory('nested');
+    cap.writeText('nested/repeat.txt', 'first');
+    cap.writeText('nested/repeat.txt', 'second');
+    cap.writeBytes('nested/repeat.txt', Buffer.from([0x00, 0xfe]), 'rewrite');
+    assert.deepEqual(fs.readFileSync(path.join(allowed, 'nested', 'repeat.txt')),
+      Buffer.from([0x00, 0xfe]));
+    assert.deepEqual(fs.readdirSync(path.join(allowed, 'nested')), ['repeat.txt']);
+
+    cap.createDirectory('nested/target-directory');
+    assert.throws(() => cap.writeText('nested/target-directory', 'should fail'));
+    assert.deepEqual(fs.readdirSync(path.join(allowed, 'nested')).sort(),
+      ['repeat.txt', 'target-directory']);
+    assert.ok(fs.statSync(path.join(allowed, 'nested', 'target-directory')).isDirectory());
+  });
+});
+
+test('native atomic rewrite must not bypass a protected read-only existing target', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    const existing = path.join(allowed, 'read-only-target.bin');
+    const original = Buffer.from('PRESERVE-PROTECTED-BYTES');
+    fs.writeFileSync(existing, original);
+    fs.chmodSync(existing, 0o444);
+    try {
+      assert.throws(() => cap.writeBytes('read-only-target.bin',
+        Buffer.from('FORBIDDEN-REPLACE'), 'rewrite'),
+      'A protected existing target must not be silently replaced');
+      assert.deepEqual(fs.readFileSync(existing), original);
+    } finally {
+      fs.chmodSync(existing, 0o666);
+    }
+  });
+});
+
+test('native atomic rewrite must respect explicit Windows NTFS write-data denial',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function command(executable, args) {
+      const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 8000,
+        windowsHide: true });
+      assert.equal(result.error, undefined,
+        'Windows ACL command failed to start: ' + executable);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+      return result.stdout.trim();
+    }
+    const sid = command('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value']);
+    assert.match(sid, /^S-1-5-\d+(?:-\d+)+$/, 'Fixture requires current Windows SID');
+    withIsolatedRoot(({ cap, allowed }) => {
+      const target = path.join(allowed, 'deny-write-data.txt');
+      fs.writeFileSync(target, Buffer.from('RETAIN-NTFS-PROTECTED-CONTENT'));
+      try {
+        command('icacls.exe', [target, '/deny', '*' + sid + ':(WD)']);
+        assert.throws(() => fs.openSync(target, 'r+'), /EACCES|EPERM/,
+          'Fixture must independently prove write-data denial at the OS boundary');
+        assert.throws(() => cap.writeText('deny-write-data.txt', 'NOT-AUTHORIZED'),
+          'Capability rewrite must not bypass an explicit target write-data denial');
+        assert.equal(fs.readFileSync(target, 'utf8'), 'RETAIN-NTFS-PROTECTED-CONTENT');
+      } finally {
+        // Only remove an ACL added to our disposable fixture, never a user file.
+        command('icacls.exe', [target, '/remove:d', '*' + sid]);
+      }
+    });
+  });
+
+test('native atomic rewrite preserves explicit target NTFS DACL protections',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function acl(args) {
+      const result = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+    }
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'explicit-dacl-target.txt');
+      const before = path.join(base, 'dacl-before.txt');
+      const after = path.join(base, 'dacl-after.txt');
+      fs.writeFileSync(target, 'BEFORE');
+      // ANONYMOUS LOGON is not this user. A denied READ_DATA ACE on the
+      // existing object must not silently disappear on authorized rewrite.
+      acl([target, '/deny', '*S-1-5-7:(RD)']);
+      acl([target, '/save', before]);
+      cap.writeText('explicit-dacl-target.txt', 'AFTER');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'atomic replacement must preserve explicit NTFS target DACL');
+    });
+  });
+
+test('native atomic rewrite preserves protected NTFS DACL inheritance flags',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    function acl(args) {
+      const result = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, (result.stderr || result.stdout || '').trim());
+    }
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'protected-inheritance.txt');
+      const before = path.join(base, 'protected-acl-before.txt');
+      const after = path.join(base, 'protected-acl-after.txt');
+      fs.writeFileSync(target, 'BEFORE');
+      // Convert inherited ACEs to explicit and protect the resulting DACL.
+      acl([target, '/inheritance:d']);
+      acl([target, '/save', before]);
+      cap.writeText('protected-inheritance.txt', 'AFTER');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'replacement must preserve protected DACL inheritance configuration');
+    });
+  });
+
+test('native atomic rewrite preserves existing NTFS mandatory integrity label',
+  { skip: process.platform !== 'win32' }, () => {
+    const { spawnSync } = require('node:child_process');
+    const acl = (args) => {
+      const proc = spawnSync('icacls.exe', args,
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      assert.equal(proc.error, undefined);
+      assert.equal(proc.status, 0, (proc.stderr || proc.stdout || '').trim());
+      return proc.stdout;
+    };
+    withIsolatedRoot(({ cap, base, allowed }) => {
+      const target = path.join(allowed, 'low-integrity-target.txt');
+      const before = path.join(base, 'integrity-before.txt');
+      const after = path.join(base, 'integrity-after.txt');
+      fs.writeFileSync(target, 'ORIGINAL-LOW-INTEGRITY');
+      acl([target, '/setintegritylevel', 'L']);
+      acl([target, '/save', before]);
+      assert.match(acl([target]), /Mandatory Label|Mandatory Label\\Low Mandatory Level|Etiqueta obligatoria|S-1-16-4096|Low Mandatory Level/i,
+        'Fixture must really install a low mandatory integrity label');
+      cap.writeText('low-integrity-target.txt', 'AUTHORIZED-NEW-CONTENT');
+      acl([target, '/save', after]);
+      assert.deepEqual(fs.readFileSync(after), fs.readFileSync(before),
+        'atomic replacement must preserve mandatory integrity level, not just DACL');
+      assert.equal(fs.readFileSync(target, 'utf8'), 'AUTHORIZED-NEW-CONTENT');
+    });
+  });

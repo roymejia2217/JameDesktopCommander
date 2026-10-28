@@ -705,6 +705,27 @@ export async function readMultipleFiles(paths: string[]): Promise<MultiFileResul
 }
 
 export async function createDirectory(dirPath: string): Promise<void> {
+    // T011-C: The legacy validatePath()+fs.mkdir() is not a restricted
+    // authorization boundary. A native grant MUST be minted by the
+    // independently protected broker; Node must never fabricate rootRef or
+    // expectedEpoch from a config digest, and no fallback is permitted.
+    let configuredRoots: string[] | undefined;
+    try {
+        // This stable API enforces persisted-policy read failure semantics.
+        // A disk-observed experimental policy candidate is never an
+        // authority; it is not consulted by production handlers.
+        configuredRoots = await configManager.getAllowedDirectoriesForFilesystem();
+    } catch {
+        throw new Error('E_POLICY_UNAVAILABLE: filesystem authorization policy cannot be loaded');
+    }
+    if (configuredRoots === undefined ||
+        (configuredRoots.length > 0 && !configuredRoots.includes('/'))) {
+        // No privileged issuer, authenticated IPC, or durable replay ledger
+        // exists yet. This entire restricted/legacy-unset path denies.
+        throw new Error('E_POLICY_UNAVAILABLE: restricted directory creation requires native authority');
+    }
+    // This preserves ONLY the legacy policy's *explicitly unrestricted* mode.
+    // Do not describe this path as confined or protected by T011.
     const validPath = await validatePath(dirPath);
     await fs.mkdir(validPath, { recursive: true });
 }

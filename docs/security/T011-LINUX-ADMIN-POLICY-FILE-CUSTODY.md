@@ -52,6 +52,32 @@ a missing sidecar means a SQLite transaction was committed. Only an
 approved administrative publisher with crash-injection and durable
 directory/fsync ordering can establish those guarantees.
 
+## Fixed-name inode revalidation after kernel descriptor acquisition
+
+An OS-pinned file descriptor remains attached to its inode when an
+administrator replaces its original fixed directory entry. That can make
+a verified snapshot stale even when the observed file still has identical
+length and its independent witness matches an earlier generation.
+
+The observer therefore compares `fstat` of the *already opened* file
+with `fstatat(AT_SYMLINK_NOFOLLOW)` of the fixed
+`policy.sqlite3` name relative to the **same verified directory FD**.
+It rejects any missing, symlinked, multiply linked, different-owner,
+different-inode, different-device or different-size named object. This
+check is repeated during pinning, before the actual bounded read, after
+reading, and after SQLite in-memory validation. A Linux-only Rust test
+uses an actual temporary filesystem and an open handle to demonstrate
+that a same-size rename replacement, unlink, symlink and hardlink alias
+are refused, while a stable singly linked file passes. No client path
+is accepted and no second SQLite connection opens by pathname.
+
+This closes the *observed changed final name at those checkpoints*
+case; it does not guarantee that a privileged administrator cannot
+change the name immediately **after** the last check. Live grants must
+still have an approved immutable publication protocol, epoch
+revocation and a bound authorization/operation lifetime. The service
+remains deny-only until those independent gates are complete.
+
 ## Limits preventing release
 
 The now-implemented in-memory SQLite parse does not reopen a pathname and does not require filesystem journal sidecars. However, it is only a bounded **snapshot read**, not an authenticated publisher protocol, policy semantics or a live SQLite write transaction. No protected updater, independently approved effective policy semantics, crash-consistent atomic replacement of an immutable SQLite generation, root-admin witness write/recovery state machine, service replay ledger linkage, session revocation or MCP operation grant has been implemented. An administrator restoring both DB and witness remains undetectable under the selected local-only assurance tier. Existing `E_POLICY_UNAVAILABLE` startup denial remains unchanged. Whole-machine administrator rollback is outside the selected local identity-separation assurance tier.

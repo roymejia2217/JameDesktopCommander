@@ -112,6 +112,39 @@ fn require_no_sqlite_sidecars(directory: &OwnedFd) -> Result<(), IdentityDenied>
     Ok(())
 }
 
+// The identity of an open FD is immutable, but the name it was opened
+// through can be replaced after opening. Re-check the fixed leaf without
+// following symlinks against the same OS-pinned parent directory descriptor.
+// No caller path is accepted and no new policy file is opened.
+fn require_pinned_policy_name(directory: &OwnedFd, pinned: &File) -> Result<(), IdentityDenied> {
+    let handle = metadata(pinned)?;
+    let mut slot = MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            c"policy.sqlite3".as_ptr(),
+            slot.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(IdentityDenied);
+    }
+    let named = unsafe { slot.assume_init() };
+    if (named.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || named.st_nlink != 1
+        || named.st_dev != handle.st_dev
+        || named.st_ino != handle.st_ino
+        || named.st_size != handle.st_size
+        || named.st_uid != handle.st_uid
+        || named.st_gid != handle.st_gid
+        || (named.st_mode & 0o7777) != (handle.st_mode & 0o7777)
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 /// Read-only, root-admin-owned SQLite-file *candidate* pinned to a kernel
 /// opened file object. This checks inode custody and SQLite file signature
 /// only; it deliberately does NOT parse policy, attest an updater, open a
@@ -137,6 +170,7 @@ impl ObservedAdminPolicyFile {
     ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
         const MAX_IMAGE: usize = 4 * 1024 * 1024;
         require_no_sqlite_sidecars(&self.directory)?;
+        require_pinned_policy_name(&self.directory, &self.file)?;
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|_| IdentityDenied)?;
@@ -154,8 +188,15 @@ impl ObservedAdminPolicyFile {
             return Err(IdentityDenied);
         }
         require_no_sqlite_sidecars(&self.directory)?;
-        jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&bytes)
-            .map_err(|_| IdentityDenied)
+        require_pinned_policy_name(&self.directory, &self.file)?;
+        let policy =
+            jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&bytes)
+                .map_err(|_| IdentityDenied)?;
+        // Parsing also consumes time. Deny if root published a new name
+        // while the in-memory SQLite image was being validated.
+        require_pinned_policy_name(&self.directory, &self.file)?;
+        require_no_sqlite_sidecars(&self.directory)?;
+        Ok(policy)
     }
 }
 /// Refuse any preexisting candidate that a less-privileged service can
@@ -197,6 +238,7 @@ pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, Identi
         return Err(IdentityDenied);
     }
     require_no_sqlite_sidecars(&directory)?;
+    require_pinned_policy_name(&directory, &file)?;
     Ok(ObservedAdminPolicyFile {
         directory,
         file,
@@ -274,6 +316,48 @@ pub(crate) fn verify_existing_policy_against_root_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pinned_policy_file_denies_final_name_replacement_after_fd_acquisition() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("policy.sqlite3");
+        let replacement = temp.path().join("replacement.sqlite3");
+        fs::write(&path, b"old policy content").unwrap();
+        fs::write(&replacement, b"new policy content").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            fs::metadata(&replacement).unwrap().len(),
+            "replacement must keep size constant to prove real inode identity checking"
+        );
+        let directory: OwnedFd = File::open(temp.path()).unwrap().into();
+        let pinned = File::open(&path).unwrap();
+        assert!(require_pinned_policy_name(&directory, &pinned).is_ok());
+        let alias = temp.path().join("policy-hardlink.sqlite3");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(
+            require_pinned_policy_name(&directory, &pinned).is_err(),
+            "additional same-inode hardlink is not an exclusive policy object"
+        );
+        fs::remove_file(&alias).unwrap();
+        assert!(require_pinned_policy_name(&directory, &pinned).is_ok());
+        fs::rename(&replacement, &path).unwrap();
+        assert!(
+            require_pinned_policy_name(&directory, &pinned).is_err(),
+            "same-size file renamed over the fixed name must never pass"
+        );
+        fs::remove_file(&path).unwrap();
+        assert!(
+            require_pinned_policy_name(&directory, &pinned).is_err(),
+            "removed final name must not validate a stale handle"
+        );
+        fs::write(&replacement, b"another valid policy file").unwrap();
+        std::os::unix::fs::symlink(&replacement, &path).unwrap();
+        assert!(
+            require_pinned_policy_name(&directory, &pinned).is_err(),
+            "symlink must not redirect a previously validated handle"
+        );
+    }
+
     #[test]
     fn root_owned_sqlite_candidate_file_rejects_aliases_and_wrong_principals() {
         let file = tempfile::tempfile().unwrap();

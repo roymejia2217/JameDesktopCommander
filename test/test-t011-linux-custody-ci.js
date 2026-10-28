@@ -106,6 +106,17 @@ test('protected SQLite main-image snapshot rejects real rollback and WAL sidecar
   ]) assert.match(script, marker);
 });
 
+test('Linux OS-pinned policy inode must still occupy fixed name after the read', () => {
+  const implementation = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_epoch_anchor.rs'), 'utf8',
+  );
+  assert.match(implementation, /fn require_pinned_policy_name\(/);
+  assert.match(implementation, /libc::fstatat\(/);
+  assert.match(implementation, /libc::AT_SYMLINK_NOFOLLOW/);
+  assert.match(implementation, /pinned_policy_file_denies_final_name_replacement_after_fd_acquisition/);
+  assert.match(implementation, /require_pinned_policy_name\(&self\.directory, &self\.file\)/);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

@@ -389,6 +389,30 @@ mod tests {
     }
 
     #[test]
+    fn custodied_writer_refuses_corrupt_historical_uuid_without_committing() {
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute(
+            "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+            rusqlite::params![7u64.to_be_bytes().as_slice(), [0x11u8; 16].as_slice()],
+        )
+        .unwrap();
+        drop(db);
+        assert!(writer.claim_once(id()).is_err());
+        assert!(
+            writer.claim_once(id()).is_err(),
+            "failed writer must remain revoked"
+        );
+        let db = Connection::open(&path).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn revocation_permanently_disables_the_writer_without_a_claim() {
         let (_temp, dir) = fixture();
         let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();

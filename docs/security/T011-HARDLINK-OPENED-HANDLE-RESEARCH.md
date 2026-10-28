@@ -26,6 +26,16 @@ file metadata from the **already opened handle**, not a pathname preflight.
 Known multi-link (`nlink != 1`) and nonregular objects are denied before
 read, append or replacement. Existing append targets are opened without
 creation, then checked. Missing targets use `create_new(true)` exclusively.
+
+The follow-up `stat_relative` hardlink confidentiality check also inspects a
+regular file using a root-relative opened handle before returning its size.
+The earlier name-only `symlink_metadata` branch disclosed the size/type of a
+cross-root linked sentinel; the new Windows RED fixture reproduced this and
+the subsequent native build denied it. Directory metadata remains a separate
+name-based, non-release observation, and an inaccessible/read-protected file
+may now fail closed rather than returning metadata. This does **not** protect
+against a hard link added after the handle check, nor prove origin custody.
+
 Atomic rewrite retains the existing kernel WRITE_DATA authorization and
 NTFS DACL/integrity propagation, additionally denying known shared targets.
 
@@ -44,6 +54,25 @@ cases and the complete 17/17 native Node security suite PASS, including
 single-link operations and protected NTFS DACL/integrity behavior. Linux CI
 and real concurrent aliasing remain UNVERIFIED. Keep all adversarial checks;
 do not skip/xfail or lower their assertions to silence contradictions.
+
+### 2026-10-28 additional Windows checkpoint (still non-release)
+
+- RED against the original compiled binary: `statRelative` disclosed
+  the size of a real outside hard-link sentinel; the independent positive
+  single-link file/directory metadata control passed.
+- GREEN after the bounded handle-metadata correction: native security suite
+  **19/19 PASS**, including real NTFS DACL and integrity controls; locked
+  Rust 1.91.1 build, Rustfmt and strict Clippy `-D warnings` PASS.
+- `npm run verify` terminal **370/370 PASS**, TypeScript build and MCP
+  synchronization **34/34 PASS** on this older research branch.
+- `npm run verify:push` **FAILED** at its mandatory runtime audit:
+  **7 findings (4 high, 3 moderate)** in outdated dependencies including
+  `body-parser`, `fast-uri`, `ip-address`, `qs`, `zod` and associated
+  `puppeteer-core` dependency paths. No audit bypass or forced dependency
+  update was applied. Reconcile against current protected `main` in a
+  separate, reviewed integration before any merge or release.
+- Hosted Linux, Node 22/24 and concurrent attacker alias tests have **not**
+  been accepted for this new source revision. `releaseEligible:false`.
 
 **Still required before release:** approved Windows/Linux principal and
 storage-custody threat model; concurrent alias creation and final-component

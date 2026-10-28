@@ -35,7 +35,7 @@ fn require_bounded_size(byte_len: usize) -> Result<()> {
 // Reject a currently observable multi-link object *after* acquiring its handle.
 // This is defense in depth, not a proof of object origin or of protection
 // against links introduced later by a same-principal adversary.
-fn reject_multiply_linked_handle(file: &cap_std::fs::File) -> Result<()> {
+fn checked_file_metadata(file: &cap_std::fs::File) -> Result<cap_std::fs::Metadata> {
     use cap_fs_ext::MetadataExt;
     let meta = file.metadata().map_err(denied)?;
     if !meta.is_file() || meta.nlink() != 1 {
@@ -43,7 +43,11 @@ fn reject_multiply_linked_handle(file: &cap_std::fs::File) -> Result<()> {
             "Capability operation rejected: shared or nonregular object",
         ));
     }
-    Ok(())
+    Ok(meta)
+}
+
+fn reject_multiply_linked_handle(file: &cap_std::fs::File) -> Result<()> {
+    checked_file_metadata(file).map(|_| ())
 }
 
 // Never combine append + create + an initial link check against a pathname.
@@ -403,19 +407,28 @@ impl RootCapability {
         let dir = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("Capability is closed"))?;
-        let metadata = dir.symlink_metadata(relative).map_err(denied)?;
+        let metadata = dir.symlink_metadata(&relative).map_err(denied)?;
         reject_special_entry(&metadata)?;
-        let kind = if metadata.is_file() {
-            "file"
-        } else if metadata.is_dir() {
-            "directory"
-        } else {
+        if metadata.is_file() {
+            // A pathname metadata snapshot does not establish object custody.
+            // Reopen relative to the held root and inspect the actual object
+            // handle, rejecting shared objects before disclosing their size.
+            // A simultaneous new hard link remains outside this proof's scope.
+            let file = dir.open(&relative).map_err(denied)?;
+            // Both size and link count derive from the same handle snapshot.
+            let checked = checked_file_metadata(&file)?;
+            return Ok(CapabilityEntryMetadata {
+                kind: "file".to_owned(),
+                size_bytes: checked.len().to_string(),
+            });
+        }
+        if !metadata.is_dir() {
             return Err(Error::from_reason(
                 "Capability operation rejected: nonregular entry",
             ));
-        };
+        }
         Ok(CapabilityEntryMetadata {
-            kind: kind.to_owned(),
+            kind: "directory".to_owned(),
             size_bytes: metadata.len().to_string(),
         })
     }

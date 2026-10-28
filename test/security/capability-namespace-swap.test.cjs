@@ -183,6 +183,28 @@ test('text read, text append and text rewrite reject a real cross-root alias', (
   });
 });
 
+test('native restricted stat denies outside hard-link object metadata', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    assert.throws(() => cap.statRelative(relative), /shared or nonregular object/i,
+      'A cross-root hard-link alias must not disclose outside object metadata');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native restricted stat preserves valid single-link file and directory metadata', () => {
+  withIsolatedRoot(({ cap, allowed }) => {
+    fs.writeFileSync(path.join(allowed, 'legitimate.bin'), Buffer.from([1, 2, 3, 4]));
+    fs.mkdirSync(path.join(allowed, 'legitimate-dir'));
+    assert.deepEqual(cap.statRelative('legitimate.bin'), {
+      kind: 'file', sizeBytes: '4',
+    });
+    const directory = cap.statRelative('legitimate-dir');
+    assert.equal(directory.kind, 'directory');
+    assert.match(directory.sizeBytes, /^\d+$/);
+  });
+});
+
 test('final-component replacement with a hard link after an in-root checkpoint is denied', () => {
   withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
     const name = 'linked-outside-sentinel.bin';

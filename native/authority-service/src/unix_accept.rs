@@ -2,12 +2,16 @@
 //! The listener MUST already be bound by a protected service/socket manager
 //! and set nonblocking. This module cannot establish provenance of its path.
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::sealed_dispatch::{DispatchDenied, SealedDirectoryGrant};
-use crate::unix_session::{read_authenticated_frame, AuthenticatedFrame};
+use crate::unix_peer::PreparedMcpClient;
+use crate::unix_session::{
+    read_authenticated_frame, read_prepared_client_frame, AuthenticatedFrame,
+};
 
 const MAX_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -15,12 +19,10 @@ use crate::IdentityDenied;
 
 /// Obtain a kernel-authenticated frame from exactly one prebound named
 /// nonblocking listener. This only establishes principal+syntax, not policy.
-fn read_one_named_authenticated(
+fn accept_one_named_stream(
     listener: &UnixListener,
-    expected_uid: u32,
-    expected_gid: u32,
     deadline: Duration,
-) -> Result<AuthenticatedFrame, IdentityDenied> {
+) -> Result<(UnixStream, Duration), IdentityDenied> {
     if deadline.is_zero() || deadline > MAX_DEADLINE {
         return Err(IdentityDenied);
     }
@@ -94,10 +96,41 @@ fn read_one_named_authenticated(
         if budget.is_zero() {
             return Err(IdentityDenied);
         }
-        // This call only verifies kernel identity and request *syntax*.
-        // It does not return or operate on a privileged filesystem handle.
-        return read_authenticated_frame(&stream, expected_uid, expected_gid, budget);
+        // Return only the OS-connected stream and the strictly remaining
+        // deadline; identity and frame validation occur before observation.
+        return Ok((stream, budget));
     }
+}
+
+fn read_one_named_authenticated(
+    listener: &UnixListener,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<AuthenticatedFrame, IdentityDenied> {
+    let (stream, remaining) = accept_one_named_stream(listener, deadline)?;
+    read_authenticated_frame(&stream, expected_uid, expected_gid, remaining)
+}
+
+/// Bind the prepared NSS peer to the kernel-named listener and revalidate
+/// administrator policy BOTH before and after the potentially blocking read.
+/// This returns observation only. It cannot mint a grant or dispatch I/O.
+pub(crate) fn observe_one_named_prepared_with_checks(
+    listener: &UnixListener,
+    principal: PreparedMcpClient,
+    expected_path: &Path,
+    deadline: Duration,
+    mut revalidate: impl FnMut() -> Result<(), IdentityDenied>,
+) -> Result<(), IdentityDenied> {
+    revalidate()?;
+    crate::unix_activation::inspect_named_listener(listener.as_fd(), expected_path)?;
+    let observed = accept_one_named_stream(listener, deadline)
+        .and_then(|(stream, budget)| read_prepared_client_frame(&stream, &principal, budget))
+        .map(|_| ());
+    // Even a correctly authenticated request may be stale by the time its
+    // complete frame arrives. An invalid frame must not hide epoch drift.
+    revalidate()?;
+    observed
 }
 
 /// Observation-only compatibility interface; cannot create a sealed grant.

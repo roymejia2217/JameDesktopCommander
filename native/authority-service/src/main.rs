@@ -4,9 +4,9 @@ fn main() -> ExitCode {
         eprintln!("E_IDENTITY_REQUIRED");
         return ExitCode::FAILURE;
     }
-    // Linux bootstrap observes the independently root-owned policy, opened
-    // native roots and service-private replay-file identity. It NEVER opens
-    // a SQLite VFS or issues a grant; missing/corrupt state always denies.
+    // Linux bootstrap observes root-owned policy and opened native roots,
+    // validates the pinned replay image, and opens a custodied standard-unix
+    // SQLite writer. It NEVER issues a grant; missing state always denies.
     #[cfg(target_os = "linux")]
     if jdc_authority_service::linux_issuer_bootstrap::UnissuedIssuer::observe_os_attested().is_err()
     {

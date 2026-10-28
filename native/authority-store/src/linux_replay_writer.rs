@@ -254,6 +254,21 @@ impl LinuxReplayIssuerLedger {
         sidecars_absent(&self.directory)
     }
 
+    /// Validate pinned state without issuing any filesystem operation.
+    /// A prior uncertain claim cannot be reactivated by a new observation.
+    pub fn validate_custody(&self) -> Result<(), StoreDenied> {
+        if self.permanently_revoked {
+            return Err(StoreDenied);
+        }
+        self.revalidate()
+    }
+
+    /// Irreversibly revoke this writer when the independent administrative
+    /// witness, peer identity or policy epoch no longer matches.
+    pub fn revoke(&mut self) {
+        self.permanently_revoked = true;
+    }
+
     /// Commit exactly once in the immutable constructor-bound epoch, then
     /// revalidate OS file custody. Any uncertainty permanently poisons this
     /// ledger. There is no replay caching or implicit retry.
@@ -371,6 +386,21 @@ mod tests {
         std::fs::rename(&name, &alias).unwrap();
         std::os::unix::fs::symlink(&alias, &name).unwrap();
         assert!(LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).is_err());
+    }
+
+    #[test]
+    fn revocation_permanently_disables_the_writer_without_a_claim() {
+        let (_temp, dir) = fixture();
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        writer.revoke();
+        assert!(writer.validate_custody().is_err());
+        assert!(writer.claim_once(id()).is_err());
+        let db = Connection::open(dir.join("claims.sqlite3")).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

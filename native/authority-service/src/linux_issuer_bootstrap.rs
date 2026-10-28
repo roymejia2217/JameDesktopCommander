@@ -1,16 +1,19 @@
-//! Read-only, OS-attested issuer bootstrap: NO operational grant exists.
-//! Policy, native root handles and writable replay file are all observed
-//! independently before returning. SQLite VFS attachment remains UNAVAILABLE.
+//! OS-attested, NON-ISSUING bootstrap: NO operational grant exists.
+//! Policy, native handles, pinned SQLite reader and standard SQLite unix-VFS
+//! writer are bound independently. Durable claims cannot authorize execution
+//! until authenticated IPC, independent antirollback and grant issuance pass.
 use crate::{
     issuer_policy::IssuerPolicy, linux_replay_file::ObservedReplayFile,
     sealed_dispatch::SealedDirectoryGrant, IdentityDenied,
 };
+use jdc_authority_store::linux_replay_writer::LinuxReplayIssuerLedger;
 
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
 pub struct UnissuedIssuer {
     roots: Vec<SealedDirectoryGrant>,
     replay_file: ObservedReplayFile,
+    replay_writer: LinuxReplayIssuerLedger,
     policy_epoch: u64,
     policy_digest: [u8; 32],
     revoked: bool,
@@ -38,9 +41,23 @@ impl UnissuedIssuer {
         // A valid inode/header is insufficient: verify actual on-disk SQLite
         // schema and every bounded replay identity against the witnessed epoch.
         replay_file.read_verified_snapshot(policy.epoch())?;
+        // Standard SQLite unix VFS only opens after OS principal, root and
+        // full replay-image validation. No arbitrary path or client epoch.
+        let replay_writer = LinuxReplayIssuerLedger::from_provisioned_service(policy.epoch())
+            .map_err(|_| IdentityDenied)?;
+        // Policy may change while SQLite acquires locks or checks schema.
+        let completed = IssuerPolicy::from_os_attested()?;
+        if completed.epoch() != policy.epoch() || completed.digest() != policy.digest() {
+            return Err(IdentityDenied);
+        }
+        replay_writer
+            .validate_custody()
+            .map_err(|_| IdentityDenied)?;
+        replay_file.read_verified_snapshot(policy.epoch())?;
         Ok(Self {
             roots,
             replay_file,
+            replay_writer,
             policy_epoch: policy.epoch(),
             policy_digest: *policy.digest(),
             revoked: false,
@@ -58,6 +75,7 @@ impl UnissuedIssuer {
             .replay_file
             .read_verified_snapshot(self.policy_epoch)
             .is_err()
+            || self.replay_writer.validate_custody().is_err()
             || !matches!(observation, Ok(ref p)
                 if p.epoch() == self.policy_epoch
                 && p.digest() == &self.policy_digest)
@@ -76,10 +94,12 @@ impl UnissuedIssuer {
     pub fn replay_file_identity(&self) -> (u64, u64) {
         self.replay_file.identity()
     }
-    /// No reactivation. All retained native grants remain deny-only because
-    /// their replay admission has not been backed by an OS-authenticated VFS.
+    /// No reactivation. Even a real SQLite writer cannot turn these
+    /// native roots into operational grants without independent antirollback
+    /// and authenticated IPC authority.
     pub fn revoke(&mut self) {
         self.revoked = true;
+        self.replay_writer.revoke();
         for grant in &mut self.roots {
             grant.revoke();
         }

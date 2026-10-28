@@ -4,7 +4,7 @@
 //! until authenticated IPC, independent antirollback and grant issuance pass.
 use crate::{
     issuer_policy::IssuerPolicy, linux_replay_file::ObservedReplayFile,
-    sealed_dispatch::SealedDirectoryGrant, IdentityDenied,
+    sealed_dispatch::SealedDirectoryGrant, unix_peer::PreparedMcpClient, IdentityDenied,
 };
 use jdc_authority_store::linux_replay_writer::LinuxReplayIssuerLedger;
 
@@ -14,6 +14,7 @@ pub struct UnissuedIssuer {
     roots: Vec<SealedDirectoryGrant>,
     replay_file: ObservedReplayFile,
     replay_writer: LinuxReplayIssuerLedger,
+    expected_client: PreparedMcpClient,
     policy_epoch: u64,
     policy_digest: [u8; 32],
     revoked: bool,
@@ -23,6 +24,7 @@ impl UnissuedIssuer {
     /// No input pathname, requested rootRef, epoch or caller-supplied digest.
     pub fn observe_os_attested() -> Result<Self, IdentityDenied> {
         let policy = IssuerPolicy::from_os_attested()?;
+        let expected_client = PreparedMcpClient::from_provisioned_system_account()?;
         let replay_file = ObservedReplayFile::from_os_attested()?;
         let mut roots = Vec::new();
         for root_ref in policy.root_refs() {
@@ -58,6 +60,7 @@ impl UnissuedIssuer {
             roots,
             replay_file,
             replay_writer,
+            expected_client,
             policy_epoch: policy.epoch(),
             policy_digest: *policy.digest(),
             revoked: false,
@@ -85,6 +88,18 @@ impl UnissuedIssuer {
         }
         Ok(())
     }
+    /// Authenticated client-frame observation, never an execution grant.
+    /// The expected identity came only from fixed NSS at service bootstrap.
+    pub fn inspect_client_frame(
+        &mut self,
+        stream: &std::os::unix::net::UnixStream,
+        deadline: std::time::Duration,
+    ) -> Result<(), IdentityDenied> {
+        self.revalidate()?;
+        crate::unix_session::read_prepared_client_frame(stream, &self.expected_client, deadline)
+            .map(|_| ())
+    }
+
     pub fn observed_root_count(&self) -> usize {
         self.roots.len()
     }

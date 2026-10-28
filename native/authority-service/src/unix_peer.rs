@@ -39,6 +39,94 @@ impl KernelPeer {
     }
 }
 
+/// One process-lifetime NSS snapshot of the *fixed* MCP client principal.
+/// Not constructible from request bytes or an arbitrary UID/GID pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreparedMcpClient {
+    uid: u32,
+    gid: u32,
+}
+
+impl PreparedMcpClient {
+    fn lookup(name: &CStr) -> Result<Self, IdentityDenied> {
+        let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
+        let mut result: *mut libc::passwd = ptr::null_mut();
+        let mut scratch = [0 as libc::c_char; 16_384];
+        let rc = unsafe {
+            libc::getpwnam_r(
+                name.as_ptr(),
+                pwd.as_mut_ptr(),
+                scratch.as_mut_ptr(),
+                scratch.len(),
+                &mut result,
+            )
+        };
+        if rc != 0 || result.is_null() {
+            return Err(IdentityDenied);
+        }
+        let pwd = unsafe { pwd.assume_init() };
+        if pwd.pw_uid == 0 || pwd.pw_gid == 0 {
+            return Err(IdentityDenied);
+        }
+        Ok(Self {
+            uid: pwd.pw_uid,
+            gid: pwd.pw_gid,
+        })
+    }
+
+    /// Capture only the administrator-provisioned systemd account at bootstrap.
+    /// The authority service itself must run under a distinct service UID.
+    pub(crate) fn from_provisioned_system_account() -> Result<Self, IdentityDenied> {
+        let identity = Self::lookup(c"jdc-mcp-client")?;
+        if identity.uid == unsafe { libc::geteuid() } {
+            return Err(IdentityDenied);
+        }
+        Ok(identity)
+    }
+
+    pub(crate) fn authenticate(&self, fd: BorrowedFd<'_>) -> Result<KernelPeer, IdentityDenied> {
+        let peer = observe_connected_peer(fd)?;
+        crate::peer_contract::validate_expected_kernel_peer(
+            peer.pid(),
+            peer.uid(),
+            peer.gid(),
+            self.uid,
+            self.gid,
+        )?;
+        Ok(peer)
+    }
+
+    #[cfg(test)]
+    fn from_named_os_account_for_test(name: &CStr) -> Result<Self, IdentityDenied> {
+        Self::lookup(name)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_current_unprivileged_os_account_for_test() -> Result<Self, IdentityDenied> {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return Err(IdentityDenied);
+        }
+        let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
+        let mut result: *mut libc::passwd = ptr::null_mut();
+        let mut scratch = [0 as libc::c_char; 16_384];
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                scratch.as_mut_ptr(),
+                scratch.len(),
+                &mut result,
+            )
+        };
+        if rc != 0 || result.is_null() {
+            return Err(IdentityDenied);
+        }
+        let pwd = unsafe { pwd.assume_init() };
+        Self::lookup(unsafe { CStr::from_ptr(pwd.pw_name) })
+    }
+}
+
 /// Observe a connected peer and compare the kernel credentials against a
 /// separately chosen OS account name resolved through the host NSS service.
 ///
@@ -50,38 +138,7 @@ pub fn inspect_peer_against_os_account(
     fd: BorrowedFd<'_>,
     expected_account_name: &CStr,
 ) -> Result<KernelPeer, IdentityDenied> {
-    let peer = observe_connected_peer(fd)?;
-
-    // getpwnam_r is the standardized re-entrant system account lookup. Deny
-    // missing, truncated, root, NSS errors and accounts with zero primary GID.
-    const NSS_BUFFER: usize = 16_384;
-    let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
-    let mut result: *mut libc::passwd = ptr::null_mut();
-    let mut buffer = [0 as libc::c_char; NSS_BUFFER];
-    // SAFETY: getpwnam_r writes into the provided passwd output and scratch
-    // buffer; only inspect the result after success and a non-null pointer.
-    let status = unsafe {
-        libc::getpwnam_r(
-            expected_account_name.as_ptr(),
-            pwd.as_mut_ptr(),
-            buffer.as_mut_ptr(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if status != 0 || result.is_null() {
-        return Err(IdentityDenied);
-    }
-    // SAFETY: a successful getpwnam_r with a nonnull result initialized pwd.
-    let account = unsafe { pwd.assume_init() };
-    crate::peer_contract::validate_expected_kernel_peer(
-        peer.pid(),
-        peer.uid(),
-        peer.gid(),
-        account.pw_uid,
-        account.pw_gid,
-    )?;
-    Ok(peer)
+    PreparedMcpClient::lookup(expected_account_name)?.authenticate(fd)
 }
 
 fn read_socket_integer_option(fd: BorrowedFd<'_>, name: i32) -> Result<i32, IdentityDenied> {
@@ -216,6 +273,19 @@ mod tests {
         );
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         assert_eq!(approved.authenticate(file.as_fd()), Err(IdentityDenied));
+    }
+
+    #[test]
+    fn fixed_system_client_never_falls_back_to_the_current_login() {
+        let actual = PreparedMcpClient::from_provisioned_system_account();
+        let expected = PreparedMcpClient::lookup(c"jdc-mcp-client").and_then(|account| {
+            if account.uid == unsafe { libc::geteuid() } {
+                Err(IdentityDenied)
+            } else {
+                Ok(account)
+            }
+        });
+        assert_eq!(actual, expected);
     }
 
     #[test]

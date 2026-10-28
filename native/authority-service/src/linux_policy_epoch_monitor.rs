@@ -72,6 +72,7 @@ impl PolicyEpochMonitor {
     /// Bind one issued capability to exactly the observed, administrator
     /// protected epoch AND policy digest. A changed generation poisons the
     /// process-local monitor even when a supplied client epoch looks valid.
+    #[cfg(not(test))] // Actual Linux service witness, unavailable to unit fixtures.
     pub(crate) fn revalidate_issued_policy(
         &mut self,
         epoch: u64,

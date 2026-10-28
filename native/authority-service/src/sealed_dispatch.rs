@@ -128,6 +128,13 @@ impl SealedDirectoryGrant {
             reason = "trusted OS-custodied ledger constructor is not available yet"
         )
     )]
+    #[cfg_attr(
+        all(target_os = "linux", not(test)),
+        expect(
+            dead_code,
+            reason = "no OS-attested SQLite write connection can be minted by the service yet"
+        )
+    )]
     pub(crate) fn from_issued_with_ledger(
         policy: &crate::issuer_policy::IssuerPolicy,
         root_ref: &str,

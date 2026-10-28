@@ -54,6 +54,26 @@ fn immutable_sqlite_image_recovers_exact_policy_without_reopening_its_path() {
     assert_eq!(observed.bytes(), policy);
 }
 #[test]
+fn immutable_policy_image_rejects_wal_header_without_a_recovery_vfs() {
+    let d = tempdir().unwrap();
+    let path = d.path().join("policy.sqlite3");
+    fixture(&path);
+    PolicyBytesStore::open_existing(&path)
+        .unwrap()
+        .commit_after(0, 7, b"approved-policy-fixture")
+        .unwrap();
+    let image = std::fs::read(path).unwrap();
+    assert_eq!((&image[18], &image[19]), (&1, &1));
+    let mut wal = image.clone();
+    wal[18] = 2;
+    wal[19] = 2;
+    assert!(
+        PolicyBytesStore::read_verified_serialized(&wal).is_err(),
+        "WAL-mode primary image alone cannot prove a committed policy without its sidecars"
+    );
+}
+
+#[test]
 fn immutable_sqlite_image_rejects_corruption_truncation_and_oversized_buffers() {
     let f = tempdir().unwrap();
     let path = f.path().join("policy.db");

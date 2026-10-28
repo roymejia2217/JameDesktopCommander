@@ -1,6 +1,6 @@
 # T011 - Linux root-admin publication intent barrier (non-release)
 
-**Scope:** #139, experimental Linux reader-side barrier plus **root-only durable publication-begin primitive**. No authenticated policy-image publisher, commit, rollback recovery or finish/clear operation is provided. The native service binary remains deny-only (`E_POLICY_UNAVAILABLE`), and the helper grants no filesystem rights.
+**Scope:** #139, experimental Linux reader-side barrier plus **root-only durable begin/commit primitives** for a validated immutable SQLite image. There is no approved production policy-source enrollment, root grant issuer, general-purpose recovery or administrative rollback/repair API. The native service binary remains deny-only (`E_POLICY_UNAVAILABLE`), and the helper grants no filesystem rights.
 
 ## Reader invariant
 
@@ -14,19 +14,26 @@ The check occurs during directory acquisition, independently during SQLite candi
 
 The new `linux_policy_publisher::begin_fixed_publication()` checks the actual root real/effective UID and GID, opens the fixed root-owned `/etc/jdc-authority` directory through validated `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` descriptors, creates an **empty, root:root 0600** marker with `O_CREAT|O_EXCL|O_NOFOLLOW`, validates the created inode and calls `sync_all` on the marker followed by `fsync` on the directory. A second begin cannot override an existing marker, and any error after creation deliberately leaves fail-closed state behind. No path, policy bytes or marker-removal operation is exposed. A tiny CI-only Rust example invokes this primitive as the real root user; it is not packaged or registered as a service.
 
+A separate `commit_fixed_publication(next_image: &[u8])` performs the **second, forward-only phase**. It refuses nonroot UID/GID; validates exact v2 SQLite schema, policy bytes, SHA-256 and strictly higher epoch against the already root-owned policy image and separately stored 40-byte witness. It requires an existing single-link root:root 0600 intent. It stages the next image and derived epoch/digest witness into two exclusively created `root:service 0640` files, fsyncs each staged file and their directory, renames the image then witness using `renameat` with a directory fsync after **each** rename, re-reads the actual final files and revalidates the intent before unlinking it and fsyncing the directory. Existing staged files, a symlink, mismatched old witness, or a lower/equal epoch cause DENY without auto-cleanup. A partial failure may leave a new DB with old witness, but the persistent intent forces readers to deny until independent administrative recovery.
+
+This is intentionally **not** a complete production updater: the source of the next image is passed by the trusted root-side caller, with no separate signature/approval protocol; no resilient operator recovery/resume contract, explicit crash injection or IPC issuer exists. The CI-only example reads a synthetic SQLite fixture through a runner-local path but does not expose such an API from the service.
+
 The existing mandatory T011 Linux CI runner (ephemeral GitHub-hosted only) provisions distinct `root`, `jdc-authority` and `jdc-mcp-client` identities. After installing a real root-owned policy and witness, the acceptance script demonstrates:
 
 - The service principal cannot create the intent in the root-owned directory.
 - Root's actual publisher-begin primitive creates the fixed intent durably; a repeated begin fails due to `O_EXCL`, and even otherwise matching policy and witness bytes are denied.
 - Removing the intent allows a **new** data-only snapshot observation.
 - A symlink in place of the marker also denies; removal restores the original bytes.
+- Forward commit from epoch 1 to 2 publishes a genuine root-owned SQLite image plus matching witness and removes the intent after fsync; an epoch-2 snapshot is accepted.
+- An existing exclusive staging file denies publication without overwriting it, and the intent remains active; a trusted CI-only cleanup then permits a new attempt.
+- An attempted downgrade from epoch 2 to epoch 1 denies and retains the intent until separate root cleanup.
 - The prior same-process sticky revocation/epoch-transition, hardlink, sidecar and namespace protections remain mandatory.
 
 Native Linux unit tests also use real filesystem entries under a temporary directory to verify file, missing entry, and symlink transitions. These are not mock stat structs.
 
 ## Administrator publisher requirements still missing
 
-The now-implemented root-only **begin** primitive supplies exclusive marker creation and filesystem sync. A future independently authenticated updater still must ensure the identity and provenance of its approved source bytes, and then prepare a new immutable root:service 0640 generation without exposing half-written content, and publish files through documented OS atomic-rename and durability ordering. It must clear the intent only after every policy/witness generation has been validated and durably committed; failure must leave an intent requiring independent administrative recovery. Concurrent writer serialization, reentrant reader races, source authenticity, exactly monotonic epoch advancement and safe fail-closed recovery after each possible crash window all require adversarial acceptance. This increment **does not implement or prove** those writer guarantees.
+The implemented root-only begin/commit protocol supplies an exclusive marker, a strictly forward image+witness transition, staged fsync/rename ordering, and denial of a failed publication. It does NOT establish policy-source signature/provenance, approved semantic authorization, administrative operator authentication beyond root kernel identity, a documented recovery operator for every crash boundary, or a state machine linearized with in-flight native filesystem operations. Concurrency against malicious root processes, crash injection after each file and directory synchronization, power-loss persistence and safe fail-closed recovery after every crash window all require independent acceptance. It cannot be deployed as a complete trusted policy issuer.
 
 Because local rollback of BOTH policy and witness plus removal of intent can still evade a new process, no hardware-/remote-backed monotonic guarantee is claimed. A reader's last check does not hold a lock against a privileged future publisher: **this is not in-flight authorization linearization**, and it cannot grant/retain a filesystem capability.
 

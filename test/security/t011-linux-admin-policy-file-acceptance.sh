@@ -36,7 +36,7 @@ source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 cleanup() {
   local code=$?
-  sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
+  sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
   rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" || code=1
   exit "$code"
@@ -198,4 +198,36 @@ sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor" "$anchor"
 # hardware-backed or external monotonic authority from this acceptance.
 printf '%s\n' 'E_POLICY_FULL_STATE_ROLLBACK_IS_UNDETECTABLE'
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+# Real root-only two-phase publication. Source is an ephemeral CI-created
+# SQLite image, never a client-supplied policy path in the service.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+
+# Stale exclusive staging file from an interrupted attempt must fail closed.
+sudo -n install -o root -g root -m 0600 -- "$source_anchor" "${directory}/.policy-next.sqlite3"
+if sudo -n -- "$publisher" commit-v2 "$source_file_v2" 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_STALE_STAGE_WAS_OVERWRITTEN' >&2
+  exit 1
+fi
+printf '%s\n' 'E_POLICY_STALE_STAGE_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${directory}/.policy-next.sqlite3"
+verdict PUBLISH_COMMITTED sudo -n -- "$publisher" commit-v2 "$source_file_v2"
+[[ ! -e "$publish_intent" && ! -L "$publish_intent" ]] || exit 1
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
+printf '%s\n' 'E_POLICY_FORWARD_PUBLISH_COMMITTED'
+
+# Forward-only: an attempted downgrade is refused, and the durable
+# intent stays present until an independently trusted admin recovers.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+if sudo -n -- "$publisher" commit-v2 "$source_file" 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_BACKWARD_PUBLISH_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_POLICY_BACKWARD_PUBLISH_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+# CI-only independent root cleanup of the rejected intent; the Rust
+# production candidate deliberately offers no automatic repair operation.
+sudo -n rm -- "$publish_intent"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

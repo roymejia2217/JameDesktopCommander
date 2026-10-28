@@ -190,6 +190,27 @@ test('root-only publisher begins durable intent with exclusive kernel create and
   assert.match(script, /E_POLICY_PUBLISH_DOUBLE_BEGIN_DENIED/);
 });
 
+test('root-only admin publisher validates forward immutable generation and fsync-ordered commit', () => {
+  const source = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const marker of [
+    /fn commit_fixed_publication\(/,
+    /PolicyBytesStore::read_verified_serialized/,
+    /libc::renameat\(/, /libc::unlinkat\(/,
+    /libc::fsync\(/, /\.sync_all\(\)/,
+    /\.policy-next\.sqlite3/, /\.policy-next-anchor/,
+  ]) assert.match(source, marker);
+  for (const marker of [
+    /E_POLICY_FORWARD_PUBLISH_COMMITTED/,
+    /E_POLICY_BACKWARD_PUBLISH_DENIED/,
+    /commit-v2/, /policy-snapshot-v2/,
+  ]) assert.match(script, marker);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

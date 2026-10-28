@@ -93,6 +93,40 @@ mod tests {
         assert!(binding.open_root(R).is_err());
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"SECRET");
     }
+    #[cfg(windows)]
+    #[test]
+    fn issuer_rejects_intermediate_ntfs_junction_even_with_existing_child() {
+        use std::process::Command;
+        let f = tempfile::tempdir().unwrap();
+        let allowed = f.path().join("allowed");
+        let outside = f.path().join("outside");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::create_dir(outside.join("real-child")).unwrap();
+        let sentinel = outside.join("sentinel");
+        fs::write(&sentinel, b"SECRET_NOT_AUTHORIZED").unwrap();
+        let junction = allowed.join("redirect");
+        let result = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "real junction fixture failed: {result:?}"
+        );
+        let requested = junction.join("real-child");
+        let parsed = IssuerPolicy::decode_exact_for_test(
+            &policy(R, requested.to_str().unwrap()),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        assert!(parsed.open_root(R).is_err());
+        assert_eq!(fs::read(sentinel).unwrap(), b"SECRET_NOT_AUTHORIZED");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn issuer_does_not_follow_symlink_root() {
@@ -108,6 +142,7 @@ mod tests {
         assert!(p.open_root(R).is_err());
     }
 }
+use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
 #[cfg(any(test, target_os = "linux"))]
 use serde::{Deserialize, Serialize};
@@ -256,7 +291,7 @@ impl IssuerPolicy {
         let mut opened =
             Dir::open_ambient_dir(anchor, ambient_authority()).map_err(|_| IdentityDenied)?;
         for part in parts {
-            opened = opened.open_dir(part).map_err(|_| IdentityDenied)?;
+            opened = opened.open_dir_nofollow(part).map_err(|_| IdentityDenied)?;
         }
         Ok(RootedDirectory::from_preopened(opened))
     }

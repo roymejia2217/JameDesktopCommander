@@ -232,6 +232,26 @@ test('admin recovery only completes an authenticated split policy-rename state',
   ]) assert.match(script, match);
 });
 
+test('root-only recovery requires a durable epoch/digest bound transition record', () => {
+  const publisher = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const acceptance = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const contract of [
+    /struct PolicyTransitionRecord/, /fn bind_transition_to_intent\(/,
+    /fn read_transition_intent\(/, /pub fn prepare_fixed_publication\(/,
+    /INTENT_RECORD_SIZE/, /write_all\(/, /sync_all\(/,
+    /old_digest != record.old_digest/, /next_digest != record.next_digest/,
+  ]) assert.match(publisher, contract);
+  for (const contract of [
+    /E_RECOVER_EMPTY_INTENT_DENIED/,
+    /E_RECOVER_INVALID_INTENT_DENIED/,
+    /prepare-v3/,
+  ]) assert.match(acceptance, contract);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

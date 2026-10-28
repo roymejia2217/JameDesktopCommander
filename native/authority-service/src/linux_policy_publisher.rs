@@ -1,11 +1,11 @@
-//! Linux root-admin-only durable publication *begin* primitive.
-//! NON-RELEASE: no policy image write, witness update, recovery, grant,
-//! bootstrap or MCP caller entry point. A successful begin leaves the durable
-//! fail-closed intent on disk; there is intentionally NO finish/clear API.
+//! Linux root-admin-owned durable policy publication and narrow recovery.
+//! NON-RELEASE: not a signed policy approval, live grant, broker bootstrap,
+//! MCP operation endpoint, or complete crash/recovery/antirollback protocol.
+//! A failed partial update deliberately preserves the fail-closed intent.
 use crate::IdentityDenied;
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
@@ -94,6 +94,185 @@ pub fn begin_fixed_publication() -> Result<(), IdentityDenied> {
     Ok(())
 }
 
+// Stored in the existing root:root 0600 O_EXCL publication intent.
+// Must be durable BEFORE the first stage write/rename; a zero/partial
+// marker still forces reader DENY and cannot be used for recovery.
+const INTENT_RECORD_SIZE: usize = 88;
+const INTENT_RECORD_MAGIC: [u8; 8] = *b"JDC-POL1";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PolicyTransitionRecord {
+    old_epoch: u64,
+    old_digest: [u8; 32],
+    next_epoch: u64,
+    next_digest: [u8; 32],
+}
+impl PolicyTransitionRecord {
+    fn new(
+        old_epoch: u64,
+        old_digest: [u8; 32],
+        next_epoch: u64,
+        next_digest: [u8; 32],
+    ) -> Result<Self, IdentityDenied> {
+        if old_epoch == 0
+            || next_epoch <= old_epoch
+            || old_digest == [0; 32]
+            || next_digest == [0; 32]
+            || old_digest == next_digest
+        {
+            return Err(IdentityDenied);
+        }
+        Ok(Self {
+            old_epoch,
+            old_digest,
+            next_epoch,
+            next_digest,
+        })
+    }
+    fn encode(self) -> [u8; INTENT_RECORD_SIZE] {
+        let mut bytes = [0u8; INTENT_RECORD_SIZE];
+        bytes[..8].copy_from_slice(&INTENT_RECORD_MAGIC);
+        bytes[8..16].copy_from_slice(&self.old_epoch.to_be_bytes());
+        bytes[16..48].copy_from_slice(&self.old_digest);
+        bytes[48..56].copy_from_slice(&self.next_epoch.to_be_bytes());
+        bytes[56..88].copy_from_slice(&self.next_digest);
+        bytes
+    }
+    fn decode(raw: &[u8]) -> Result<Self, IdentityDenied> {
+        if raw.len() != INTENT_RECORD_SIZE || raw[..8] != INTENT_RECORD_MAGIC {
+            return Err(IdentityDenied);
+        }
+        let mut old_digest = [0u8; 32];
+        old_digest.copy_from_slice(&raw[16..48]);
+        let mut next_digest = [0u8; 32];
+        next_digest.copy_from_slice(&raw[56..88]);
+        Self::new(
+            u64::from_be_bytes(raw[8..16].try_into().map_err(|_| IdentityDenied)?),
+            old_digest,
+            u64::from_be_bytes(raw[48..56].try_into().map_err(|_| IdentityDenied)?),
+            next_digest,
+        )
+    }
+}
+
+/// The root administrator can persist a *precise* forward transition without
+/// exposing any new policy to the service. Only usable after an O_EXCL begin.
+/// This is NOT a signed source/provenance validator or a capability issuer.
+pub fn prepare_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied> {
+    use jdc_authority_store::policy_bytes::PolicyBytesStore;
+    let next =
+        PolicyBytesStore::read_verified_serialized(next_image).map_err(|_| IdentityDenied)?;
+    let dir = open_admin_directory()?;
+    let original = require_admin_intent(&dir)?;
+    require_absent_sqlite_sidecars(&dir)?;
+    let (old_image, group) = read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (witness, witness_group) = read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    if group != witness_group {
+        return Err(IdentityDenied);
+    }
+    let old = PolicyBytesStore::read_verified_serialized(&old_image).map_err(|_| IdentityDenied)?;
+    let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&witness)?;
+    if old_epoch != old.epoch() || old_digest != *old.digest() {
+        return Err(IdentityDenied);
+    }
+    let expected =
+        PolicyTransitionRecord::new(old_epoch, old_digest, next.epoch(), *next.digest())?;
+    bind_transition_to_intent(&dir, original, expected)
+}
+
+fn bind_transition_to_intent(
+    dir: &OwnedFd,
+    original: (u64, u64),
+    expected: PolicyTransitionRecord,
+) -> Result<(), IdentityDenied> {
+    let raw = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".policy-publish-inflight".as_ptr(),
+            libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(IdentityDenied);
+    }
+    let mut file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    let before = file_stat(&file)?;
+    if (before.st_dev, before.st_ino) != original
+        || ![0, INTENT_RECORD_SIZE as i64].contains(&before.st_size)
+        || before.st_uid != 0
+        || before.st_gid != 0
+        || (before.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || (before.st_mode & 0o7777) != 0o600
+        || before.st_nlink != 1
+    {
+        return Err(IdentityDenied);
+    }
+    if before.st_size == 0 {
+        file.write_all(&expected.encode())
+            .map_err(|_| IdentityDenied)?;
+        file.sync_all().map_err(|_| IdentityDenied)?;
+        sync_directory(dir)?;
+    } else {
+        let mut old = [0u8; INTENT_RECORD_SIZE];
+        file.read_exact(&mut old).map_err(|_| IdentityDenied)?;
+        if PolicyTransitionRecord::decode(&old)? != expected {
+            return Err(IdentityDenied);
+        }
+    }
+    let after = file_stat(&file)?;
+    if (after.st_dev, after.st_ino) != original
+        || after.st_size != INTENT_RECORD_SIZE as i64
+        || require_admin_intent(dir)? != original
+    {
+        return Err(IdentityDenied);
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| IdentityDenied)?;
+    let mut persisted = [0u8; INTENT_RECORD_SIZE];
+    file.read_exact(&mut persisted)
+        .map_err(|_| IdentityDenied)?;
+    if PolicyTransitionRecord::decode(&persisted)? != expected {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+fn read_transition_intent(
+    dir: &OwnedFd,
+    identity: (u64, u64),
+) -> Result<PolicyTransitionRecord, IdentityDenied> {
+    let raw = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".policy-publish-inflight".as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(IdentityDenied);
+    }
+    let mut file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    let before = file_stat(&file)?;
+    if (before.st_dev, before.st_ino) != identity
+        || before.st_size != INTENT_RECORD_SIZE as i64
+        || before.st_uid != 0
+        || before.st_gid != 0
+        || (before.st_mode & 0o7777) != 0o600
+        || before.st_nlink != 1
+    {
+        return Err(IdentityDenied);
+    }
+    let mut bytes = [0u8; INTENT_RECORD_SIZE];
+    file.read_exact(&mut bytes).map_err(|_| IdentityDenied)?;
+    let after = file_stat(&file)?;
+    if before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_size != after.st_size
+        || require_admin_intent(dir)? != identity
+    {
+        return Err(IdentityDenied);
+    }
+    PolicyTransitionRecord::decode(&bytes)
+}
+
 /// This is the root-only second phase after durable O_EXCL intent creation.
 /// A validated next image must have a strictly greater epoch than the
 /// existing, independently root-owned SQLite image and 40-byte witness.
@@ -120,6 +299,11 @@ pub fn commit_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied>
     if old_epoch != old.epoch() || &old_digest != old.digest() || next.epoch() <= old.epoch() {
         return Err(IdentityDenied);
     }
+    bind_transition_to_intent(
+        &dir,
+        original_intent,
+        PolicyTransitionRecord::new(old_epoch, old_digest, next.epoch(), *next.digest())?,
+    )?;
 
     let mut witness = [0u8; 40];
     witness[..8].copy_from_slice(&next.epoch().to_be_bytes());
@@ -190,6 +374,7 @@ pub fn recover_after_policy_rename() -> Result<(), IdentityDenied> {
     let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
     let (next_epoch, next_digest) =
         crate::epoch_anchor_wire::parse_epoch_digest_wire(&staged_witness)?;
+    let record = read_transition_intent(&dir, intent)?;
     // The old independent witness must have nonzero proof of a DIFFERENT
     // generation, and the new generation must strictly advance it.
     if old_epoch == 0
@@ -198,6 +383,10 @@ pub fn recover_after_policy_rename() -> Result<(), IdentityDenied> {
         || next_epoch != new_policy.epoch()
         || next_digest != *new_policy.digest()
         || next_digest == old_digest
+        || old_epoch != record.old_epoch
+        || old_digest != record.old_digest
+        || next_epoch != record.next_epoch
+        || next_digest != record.next_digest
     {
         return Err(IdentityDenied);
     }
@@ -297,7 +486,7 @@ fn require_admin_intent(dir: &OwnedFd) -> Result<(u64, u64), IdentityDenied> {
         || s.st_uid != 0
         || s.st_gid != 0
         || (s.st_mode & 0o7777) != 0o600
-        || s.st_size != 0
+        || ![0, INTENT_RECORD_SIZE as i64].contains(&s.st_size)
         || s.st_nlink != 1
     {
         return Err(IdentityDenied);
@@ -439,6 +628,31 @@ mod tests {
         // Never run this test with administrator privileges.
         assert_ne!(unsafe { libc::geteuid() }, 0);
         assert_eq!(begin_fixed_publication(), Err(IdentityDenied));
+    }
+
+    #[test]
+    fn durable_transition_wire_roundtrips_and_rejects_truncation_downgrade() {
+        let record = PolicyTransitionRecord::new(7, [0x11; 32], 8, [0x22; 32]).unwrap();
+        assert_eq!(record.encode().len(), INTENT_RECORD_SIZE);
+        assert_eq!(PolicyTransitionRecord::decode(&record.encode()), Ok(record));
+        assert_eq!(
+            PolicyTransitionRecord::decode(&record.encode()[..87]),
+            Err(IdentityDenied)
+        );
+        let mut corrupted = record.encode();
+        corrupted[0] = b'X';
+        assert_eq!(
+            PolicyTransitionRecord::decode(&corrupted),
+            Err(IdentityDenied)
+        );
+        assert_eq!(
+            PolicyTransitionRecord::new(7, [0x11; 32], 7, [0x22; 32]),
+            Err(IdentityDenied)
+        );
+        assert_eq!(
+            PolicyTransitionRecord::new(7, [0x11; 32], 8, [0x11; 32]),
+            Err(IdentityDenied)
+        );
     }
 
     #[test]

@@ -20,6 +20,25 @@ fn main() {
             }
             println!("PUBLISH_SPLIT_RECOVERED");
         }
+        "prepare-v3" => {
+            // Only this CI-only example accepts an ephemeral fixture path.
+            // Root publisher APIs take verified in-memory bytes, not paths.
+            let source = args.next().unwrap_or_default();
+            if source.is_empty() || args.next().is_some() {
+                std::process::exit(2);
+            }
+            let bytes = std::fs::read(source).unwrap_or_else(|_| {
+                eprintln!("E_PUBLISHER_CI_FIXTURE_UNREADABLE");
+                std::process::exit(1);
+            });
+            if jdc_authority_service::linux_policy_publisher::prepare_fixed_publication(&bytes)
+                .is_err()
+            {
+                eprintln!("E_PUBLISHER_PREPARE_DENIED");
+                std::process::exit(1);
+            }
+            println!("PUBLISH_PREPARED");
+        }
         "commit-v2" => {
             // CI-only: source is a synthetic SQLite v2 fixture in an
             // ephemeral runner. No production updater accepts a path.

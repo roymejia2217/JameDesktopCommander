@@ -234,9 +234,33 @@ verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" po
 # production candidate deliberately offers no automatic repair operation.
 sudo -n rm -- "$publish_intent"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
-# Recovery acceptance: admin intent persists after a simulated interrupted
-# policy rename. No automatic repair and no rollback to a lower epoch.
+# Empty publication intent must NEVER authorize recovery. Model the
+# correct split file names but provide no durable approval record.
 verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v3" "${directory}/.policy-next-anchor"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v3" "$policy"
+if sudo -n -- "$publisher" recover-split 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_EMPTY_INTENT_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_EMPTY_INTENT_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+
+# Truncated or malformed intent is also denied.
+sudo -n install -o root -g root -m 0600 -- "$source_anchor_v3" "$publish_intent"
+if sudo -n -- "$publisher" recover-split 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_INVALID_INTENT_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_INVALID_INTENT_DENIED'
+# Test-only independent cleanup after deliberately injected bad state.
+sudo -n rm -- "$publish_intent" "${directory}/.policy-next-anchor"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v2" "$policy"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v2
+
+# Persist an exact forward transition BEFORE simulating the split rename.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+verdict PUBLISH_PREPARED sudo -n -- "$publisher" prepare-v3 "$source_file_v3"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v3" "${directory}/.policy-next-anchor"
 if sudo -n -- "$publisher" recover-split 2>/dev/null; then
   printf '%s\n' 'E_RECOVER_STALE_POLICY_ACCEPTED' >&2

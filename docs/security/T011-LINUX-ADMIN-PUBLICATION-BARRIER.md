@@ -31,6 +31,44 @@ The existing mandatory T011 Linux CI runner (ephemeral GitHub-hosted only) provi
 
 Native Linux unit tests also use real filesystem entries under a temporary directory to verify file, missing entry, and symlink transitions. These are not mock stat structs.
 
+## Durable, exact forward-transition intent for split recovery
+
+The root:root `0600` `.policy-publish-inflight` entry is no longer
+sufficient evidence by **mere existence**. `begin_fixed_publication`
+still creates an empty durable intent so readers immediately deny.
+Before any new staged file is created, the administrator's
+`commit_fixed_publication` validates the old SQLite image and independent
+root-owned witness plus the strictly forward candidate, then persists a
+fixed 88-byte `JDC-POL1` transition record **inside the same intent
+inode**: magic, old epoch, old SHA-256, next epoch, next SHA-256.
+`prepare_fixed_publication` supports the same durable record preparation
+before a separately simulated crash in the governed Linux acceptance.
+Writing the record requires root-owned exclusive parent custody; it is
+synced to the file and directory and read back before staging or rename.
+A previously prepared record must match the exact transition. Partial,
+empty, invalid-version, zero-digest, non-forward or mismatched records
+are not recoverable and leave reader DENY.
+
+`recover_after_policy_rename` now checks the persisted old epoch/digest
+against the independently owned old witness, and the exact next
+epoch/digest against BOTH the already installed new policy image and
+staged witness. A matching pair of names **without a record** is no
+longer recovery authorization. The real Linux T011 acceptance first
+installs a split v3 policy and staged v3 witness under an *empty* intent
+and proves DENY, then injects a malformed 40-byte marker and proves DENY.
+Only after independently restoring the v2 image and beginning a fresh
+administrative intent does it prepare the v2→v3 record; the existing
+mismatch/forward tests then complete exactly that transition.
+
+The record establishes local root-owned transition **intent**, not
+signature-based source authorization, a protected external monotonic
+clock or trustworthy recovery from a complete privileged disk rollback.
+Errors before full record durability intentionally leave a marker that
+requires separate administrative investigation; no clear/reset endpoint
+is introduced. Concurrent malicious root modifications, crash cutpoints,
+durability under sudden power loss, replay ledger and in-flight MCP
+revocation remain unproven and release-blocking.
+
 ## Restricted split-generation recovery
 
 An administrator-controlled power interruption can occur after `renameat`

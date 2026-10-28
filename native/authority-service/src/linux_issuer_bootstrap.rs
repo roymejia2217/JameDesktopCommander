@@ -35,7 +35,9 @@ impl UnissuedIssuer {
         if policy.epoch() != after.epoch() || policy.digest() != after.digest() {
             return Err(IdentityDenied);
         }
-        replay_file.revalidate_name()?;
+        // A valid inode/header is insufficient: verify actual on-disk SQLite
+        // schema and every bounded replay identity against the witnessed epoch.
+        replay_file.read_verified_snapshot(policy.epoch())?;
         Ok(Self {
             roots,
             replay_file,
@@ -52,7 +54,10 @@ impl UnissuedIssuer {
             return Err(IdentityDenied);
         }
         let observation = IssuerPolicy::from_os_attested();
-        if self.replay_file.revalidate_name().is_err()
+        if self
+            .replay_file
+            .read_verified_snapshot(self.policy_epoch)
+            .is_err()
             || !matches!(observation, Ok(ref p)
                 if p.epoch() == self.policy_epoch
                 && p.digest() == &self.policy_digest)

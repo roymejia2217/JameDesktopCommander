@@ -10,9 +10,11 @@ publish = false
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.149"
 cap-std = "=4.0.3" # Preopened-directory-only operation; no ambient path API.
+cap-fs-ext = "=4.0.3" # OS metadata from the already-open file handle.
 
 [dev-dependencies]
 tempfile = "=3.23.0"
+same-file = "=1.0.6"
 
 [lib]
 name = "jdc_authority_service"

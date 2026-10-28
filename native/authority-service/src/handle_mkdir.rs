@@ -2,7 +2,7 @@
 //! There is no pathname bootstrap, IPC exposure or authorization in this module.
 //! The caller must supply an OS-attested, already-open directory capability.
 use cap_std::fs::{Dir, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use crate::canonical_request::safe_relative_path;
 
@@ -120,6 +120,64 @@ impl RootedDirectory {
         self.root.create_dir(name)
     }
 
+    /// Bounded, handle-relative byte read for an already preopened native root.
+    /// This method does not authenticate policy, a peer, or storage provenance.
+    /// Observed multi-link objects DENY; concurrent new links remain a P0 gap.
+    /// No ambient pathname is ever reopened, and the byte budget is enforced
+    /// both before allocation and during reads if the file grows concurrently.
+    pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
+        const MAX_READ_BYTES: u64 = 1024 * 1024;
+        if !safe_relative_path(relative) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_PATH_DENIED",
+            ));
+        }
+        let mut components = relative.split('/').peekable();
+        let mut opened: Option<Dir> = None;
+        while let Some(component) = components.next() {
+            let parent = opened.as_ref().unwrap_or(&self.root);
+            if components.peek().is_some() {
+                opened = Some(parent.open_dir(component)?);
+            } else {
+                if !parent.symlink_metadata(component)?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_NONREGULAR",
+                    ));
+                }
+                let file = parent.open(component)?;
+                let metadata = file.metadata()?;
+                if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_SHARED_OBJECT",
+                    ));
+                }
+                if metadata.len() > MAX_READ_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_SIZE_DENIED",
+                    ));
+                }
+                let mut bounded = file.take(MAX_READ_BYTES + 1);
+                let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                bounded.read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_READ_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_SIZE_DENIED",
+                    ));
+                }
+                return Ok(bytes);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_READ_PATH_DENIED",
+        ))
+    }
+
     /// Strict create-only, bounded data write under an already-open root.
     /// Never opens or truncates existing files, including external hardlink
     /// aliases; no ambient paths or symlink-following path revalidation.
@@ -186,6 +244,19 @@ impl RootedDirectory {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "E_REPLACE_NONREGULAR",
+                    ));
+                }
+                // A known cross-root hardlink is not an authorized object,
+                // even if inode replacement would leave exterior bytes intact.
+                // Check metadata on an opened capability-relative handle, not
+                // on a second ambient pathname. This is not sufficient proof
+                // against a link introduced *after* the snapshot.
+                let existing = parent.open(component)?;
+                let metadata = existing.metadata()?;
+                if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_SHARED_OBJECT",
                     ));
                 }
                 let stage = format!(".jdc-stage-{stage_nonce}");
@@ -294,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_existing_hardlink_alias_must_preserve_outside_inode_bytes() {
+    fn replace_existing_single_link_preserves_unrelated_outside_inode_bytes() {
         let fixture = tempfile::tempdir().unwrap();
         let allowed = fixture.path().join("allowed");
         let outside = fixture.path().join("outside");
@@ -303,8 +374,7 @@ mod tests {
         let victim = outside.join("victim.bin");
         let previous = b"EXTERNAL_BYTES_MUST_REMAIN_UNTOUCHED";
         std::fs::write(&victim, previous).unwrap();
-        std::fs::hard_link(&victim, allowed.join("alias.bin"))
-            .expect("genuine same-volume hardlink, not a mock");
+        std::fs::write(allowed.join("alias.bin"), b"ORIGINAL_INTERNAL_BYTES").unwrap();
         let stage_dir = fixture.path().join("protected-staging");
         std::fs::create_dir(&stage_dir).unwrap();
         let staging = ProtectedStagingDirectory {
@@ -329,6 +399,109 @@ mod tests {
     }
 
     #[test]
+    fn handle_bounded_read_preserves_valid_internal_bytes_and_rejects_cross_root_alias() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(allowed.join("nested")).unwrap();
+        let inside = [0u8, 0xff, 0x82, 0x10];
+        std::fs::write(allowed.join("nested/inside.bin"), inside).unwrap();
+        let victim = outside.join("secret.bin");
+        let secret = b"DO_NOT_EXPOSE_OUTSIDE_BYTES";
+        std::fs::write(&victim, secret).unwrap();
+        let alias = allowed.join("alias.bin");
+        std::fs::hard_link(&victim, &alias).unwrap();
+        assert!(same_file::is_same_file(&victim, &alias).unwrap());
+
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        assert_eq!(cap.read_bounded_file("nested/inside.bin").unwrap(), inside);
+        let denial = cap
+            .read_bounded_file("alias.bin")
+            .expect_err("known hardlink to exterior object must not be read");
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
+        assert_eq!(std::fs::read(&victim).unwrap(), secret);
+        assert_eq!(std::fs::read(&alias).unwrap(), secret);
+    }
+
+    #[test]
+    fn handle_bounded_read_rejects_oversize_and_traversal_without_exposing_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let outside_file = outside.join("secret.bin");
+        std::fs::write(&outside_file, b"UNTOUCHED_SECRET").unwrap();
+        std::fs::write(allowed.join("oversized.bin"), vec![0xab; 1024 * 1024 + 1]).unwrap();
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let oversized = cap
+            .read_bounded_file("oversized.bin")
+            .expect_err("bounded read must fail before returning any oversized payload");
+        assert_eq!(oversized.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(oversized.to_string(), "E_READ_SIZE_DENIED");
+        for invalid in ["../outside/secret.bin", "new//file", "NUL", "C:/secret"] {
+            assert!(
+                cap.read_bounded_file(invalid).is_err(),
+                "unsafe read: {invalid}"
+            );
+        }
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"UNTOUCHED_SECRET");
+    }
+
+    #[test]
+    fn staged_replacement_must_reject_known_shared_inode_before_any_staging_write() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        let private_stage = fixture.path().join("private-stage");
+        for directory in [&allowed, &outside, &private_stage] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let sentinel = outside.join("sentinel.bin");
+        let original = b"EXTERNAL_SECRET_OBJECT_MUST_NOT_BE_READ_OR_REPLACED";
+        std::fs::write(&sentinel, original).unwrap();
+        let alias = allowed.join("alias.bin");
+        std::fs::hard_link(&sentinel, &alias).expect("real same-volume hardlink");
+        let a = std::fs::metadata(&sentinel).unwrap();
+        let b = std::fs::metadata(&alias).unwrap();
+        // Exact cross-root file identity is verified by the same-file library,
+        // rather than assuming a successful link call is sufficient proof.
+        assert!(same_file::is_same_file(&sentinel, &alias).unwrap());
+        assert_eq!(a.len(), b.len());
+
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        let denial = rooted
+            .replace_existing_file_staged(
+                &staging,
+                "alias.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"ATTACK",
+            )
+            .expect_err("known cross-root hardlink must DENY");
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            denial.to_string(),
+            "E_REPLACE_SHARED_OBJECT",
+            "the denial must be the opened-handle custody guard, not unrelated I/O"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), original);
+        assert_eq!(std::fs::read(&alias).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
+    }
+
+    #[test]
     fn staged_replacement_must_not_use_attacker_writable_destination_directory() {
         let fixture = tempfile::tempdir().unwrap();
         let allowed = fixture.path().join("allowed");
@@ -340,7 +513,7 @@ mod tests {
         let victim = outside.join("victim.bin");
         let protected_bytes = b"ORIGINAL_EXTERNAL_CONTENT";
         std::fs::write(&victim, protected_bytes).unwrap();
-        std::fs::hard_link(&victim, allowed.join("target.bin")).unwrap();
+        std::fs::write(allowed.join("target.bin"), b"ORIGINAL_INTERNAL_BYTES").unwrap();
         // A hostile client occupies the same predictable temporary basename in
         // the *untrusted allowed tree*. A correct implementation never opens it.
         let nonce = "0123456789abcdef0123456789abcdef";

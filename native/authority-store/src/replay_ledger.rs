@@ -6,6 +6,7 @@ use crate::StoreDenied;
 use rusqlite::OpenFlags;
 use rusqlite::MAIN_DB;
 use rusqlite::{params, Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 #[cfg(any(
     target_os = "linux",
     test,
@@ -48,6 +49,41 @@ let _ = ReplayClaimLedger::from_offline_fixture(untrusted, 7);
 pub struct ReplayClaimLedger {
     connection: Connection,
     expected_epoch: u64,
+    // Volatile per-connection continuity, NOT restart-safe antirollback.
+    // Only this constructor's committed claim updates the reference.
+    session_digest: [u8; 32],
+    continuity_revoked: bool,
+}
+
+const SESSION_DOMAIN: &[u8] = b"JDC-replay-live-continuity-v1\0";
+fn new_session_hash() -> Sha256 {
+    let mut hash = Sha256::new();
+    hash.update(SESSION_DOMAIN);
+    hash
+}
+#[cfg(any(
+    target_os = "linux",
+    test,
+    all(feature = "offline-fixture", debug_assertions)
+))]
+fn session_fingerprint(db: &Connection) -> Result<[u8; 32], StoreDenied> {
+    let mut stmt = db
+        .prepare("SELECT epoch, request FROM replay_claims ORDER BY epoch, request LIMIT 16385")
+        .map_err(|_| StoreDenied)?;
+    let mut rows = stmt.query([]).map_err(|_| StoreDenied)?;
+    let mut hash = new_session_hash();
+    let mut count = 0usize;
+    while let Some(row) = rows.next().map_err(|_| StoreDenied)? {
+        let epoch: Vec<u8> = row.get(0).map_err(|_| StoreDenied)?;
+        let id: Vec<u8> = row.get(1).map_err(|_| StoreDenied)?;
+        if epoch.len() != 8 || id.len() != 16 || count >= 16 * MAX_CLAIMS_PER_EPOCH as usize {
+            return Err(StoreDenied);
+        }
+        hash.update(epoch);
+        hash.update(id);
+        count += 1;
+    }
+    Ok(hash.finalize().into())
 }
 fn verify_schema(db: &Connection) -> Result<(), StoreDenied> {
     let app: i64 = db
@@ -109,9 +145,12 @@ impl ReplayClaimLedger {
             return Err(StoreDenied);
         }
         verify_schema(&db)?;
+        let session_digest = session_fingerprint(&db)?;
         Ok(Self {
             connection: db,
             expected_epoch,
+            session_digest,
+            continuity_revoked: false,
         })
     }
 
@@ -222,6 +261,9 @@ impl ReplayClaimLedger {
     /// The ID must come from the independently validated canonical wire frame.
     /// A future issuer must bind this immutable epoch to the trusted witness.
     pub fn claim_once(&mut self, request_id: [u8; 16]) -> Result<(), StoreDenied> {
+        if self.continuity_revoked {
+            return Err(StoreDenied);
+        }
         // Enforce the C4d UUIDv4 version/variant at the last persistence boundary.
         // Raw bytes from untrusted callers must not consume durable replay slots.
         if request_id[6] >> 4 != 4 || request_id[8] & 0b1100_0000 != 0b1000_0000 {
@@ -240,9 +282,15 @@ impl ReplayClaimLedger {
         const MAX_GENERATIONS: usize = 16;
         let mut generations = std::collections::BTreeMap::<u64, usize>::new();
         let mut total = 0usize;
+        let mut observed = new_session_hash();
+        let mut proposed = new_session_hash();
+        let mut pending = [0u8; 24];
+        pending[..8].copy_from_slice(&epoch);
+        pending[8..].copy_from_slice(&request_id);
+        let mut inserted = false;
         {
             let mut statement = tx
-                .prepare("SELECT epoch, request FROM replay_claims")
+                .prepare("SELECT epoch, request FROM replay_claims ORDER BY epoch, request")
                 .map_err(|_| StoreDenied)?;
             let mut rows = statement.query([]).map_err(|_| StoreDenied)?;
             while let Some(row) = rows.next().map_err(|_| StoreDenied)? {
@@ -259,6 +307,15 @@ impl ReplayClaimLedger {
                 if number == 0 || number > self.expected_epoch {
                     return Err(StoreDenied);
                 }
+                let mut prior = [0u8; 24];
+                prior[..8].copy_from_slice(&number.to_be_bytes());
+                prior[8..].copy_from_slice(&prior_id);
+                if !inserted && pending < prior {
+                    proposed.update(pending);
+                    inserted = true;
+                }
+                observed.update(prior);
+                proposed.update(prior);
                 let count = generations.entry(number).or_default();
                 *count += 1;
                 total += 1;
@@ -269,6 +326,13 @@ impl ReplayClaimLedger {
                     return Err(StoreDenied);
                 }
             }
+        }
+        if !inserted {
+            proposed.update(pending);
+        }
+        if <[u8; 32]>::from(observed.finalize()) != self.session_digest {
+            self.continuity_revoked = true;
+            return Err(StoreDenied);
         }
         if generations.get(&self.expected_epoch).copied().unwrap_or(0)
             >= MAX_CLAIMS_PER_EPOCH as usize
@@ -288,7 +352,9 @@ impl ReplayClaimLedger {
         {
             return Err(StoreDenied);
         }
-        tx.commit().map_err(|_| StoreDenied)
+        tx.commit().map_err(|_| StoreDenied)?;
+        self.session_digest = proposed.finalize().into();
+        Ok(())
     }
 }
 
@@ -479,6 +545,58 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0, "denied IDs must not consume the ledger");
     }
+    #[test]
+    fn live_history_substitution_revokes_existing_writer_even_after_restore() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let first = canonical_id(0x31);
+        let substituted = canonical_id(0x32);
+        let attempted = canonical_id(0x33);
+        let mut held = open(&path, 7);
+        held.claim_once(first).unwrap();
+        let outside = Connection::open(&path).unwrap();
+        outside
+            .execute(
+                "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                params![
+                    substituted.as_slice(),
+                    7u64.to_be_bytes().as_slice(),
+                    first.as_slice()
+                ],
+            )
+            .unwrap();
+        assert!(
+            held.claim_once(attempted).is_err(),
+            "same-row-count, same-size valid UUID replacement must deny before a claim"
+        );
+        let rows: i64 = outside
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the failed claim must not change the replay table");
+        outside
+            .execute(
+                "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                params![
+                    first.as_slice(),
+                    7u64.to_be_bytes().as_slice(),
+                    substituted.as_slice()
+                ],
+            )
+            .unwrap();
+        assert!(
+            held.claim_once(attempted).is_err(),
+            "once a live writer detects replacement, restoring the old contents cannot rearm it"
+        );
+        assert_eq!(
+            outside
+                .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn two_independent_connections_cannot_both_claim_same_request() {
         let f = tempdir().unwrap();

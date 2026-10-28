@@ -83,7 +83,29 @@ fn open_fixed_admin_directory() -> Result<OwnedFd, IdentityDenied> {
         return Err(IdentityDenied);
     }
     let etc = open_component(&root, c"etc")?;
-    open_component(&etc, c"jdc-authority")
+    let directory = open_component(&etc, c"jdc-authority")?;
+    require_no_publication_intent(&directory)?;
+    Ok(directory)
+}
+
+// Any administrator-owned publication intent (including an invalid marker
+// or symlink) means durable state MAY be between policy and witness commits.
+// Fail closed, even if the two old files currently happen to match. Only the
+// independently authorized updater may establish or clear this marker.
+fn require_no_publication_intent(directory: &OwnedFd) -> Result<(), IdentityDenied> {
+    let mut st = MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            c".policy-publish-inflight".as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err(IdentityDenied);
+    }
+    Ok(())
 }
 
 // A hot journal or WAL sidecar means the standalone main SQLite bytes
@@ -169,6 +191,7 @@ impl ObservedAdminPolicyFile {
         mut self,
     ) -> Result<jdc_authority_store::policy_bytes::VerifiedPolicy, IdentityDenied> {
         const MAX_IMAGE: usize = 4 * 1024 * 1024;
+        require_no_publication_intent(&self.directory)?;
         require_no_sqlite_sidecars(&self.directory)?;
         require_pinned_policy_name(&self.directory, &self.file)?;
         self.file
@@ -187,6 +210,7 @@ impl ObservedAdminPolicyFile {
         {
             return Err(IdentityDenied);
         }
+        require_no_publication_intent(&self.directory)?;
         require_no_sqlite_sidecars(&self.directory)?;
         require_pinned_policy_name(&self.directory, &self.file)?;
         let policy =
@@ -196,6 +220,7 @@ impl ObservedAdminPolicyFile {
         // while the in-memory SQLite image was being validated.
         require_pinned_policy_name(&self.directory, &self.file)?;
         require_no_sqlite_sidecars(&self.directory)?;
+        require_no_publication_intent(&self.directory)?;
         Ok(policy)
     }
 }
@@ -239,6 +264,7 @@ pub fn observe_fixed_policy_database() -> Result<ObservedAdminPolicyFile, Identi
     }
     require_no_sqlite_sidecars(&directory)?;
     require_pinned_policy_name(&directory, &file)?;
+    require_no_publication_intent(&directory)?;
     Ok(ObservedAdminPolicyFile {
         directory,
         file,
@@ -259,6 +285,8 @@ pub fn observe_matching_admin_policy_snapshot(
     let candidate = observe_fixed_policy_database()?;
     let policy = candidate.read_verified_snapshot()?;
     let after = observe_fixed_epoch_floor()?;
+    let final_authority = open_fixed_admin_directory()?;
+    require_no_publication_intent(&final_authority)?;
     if !before.matches_snapshot(policy.epoch(), policy.digest())
         || !after.matches_snapshot(policy.epoch(), policy.digest())
     {
@@ -292,6 +320,7 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
     if !trusted_file(&metadata(&file)?, group) {
         return Err(IdentityDenied);
     }
+    require_no_publication_intent(&authority)?;
     let (epoch, digest) = parse_epoch_digest_wire(&bytes)?;
     Ok(ObservedEpochFloor { epoch, digest })
 }
@@ -316,6 +345,29 @@ pub(crate) fn verify_existing_policy_against_root_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn real_linux_directory_publication_barrier_denies_files_and_symlinks() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let directory: OwnedFd = File::open(temp.path()).unwrap().into();
+        let marker = temp.path().join(".policy-publish-inflight");
+        assert_eq!(require_no_publication_intent(&directory), Ok(()));
+        fs::write(&marker, b"publication started").unwrap();
+        assert_eq!(
+            require_no_publication_intent(&directory),
+            Err(IdentityDenied)
+        );
+        fs::remove_file(&marker).unwrap();
+        assert_eq!(require_no_publication_intent(&directory), Ok(()));
+        std::os::unix::fs::symlink("/does/not/exist", &marker).unwrap();
+        assert_eq!(
+            require_no_publication_intent(&directory),
+            Err(IdentityDenied)
+        );
+        fs::remove_file(&marker).unwrap();
+        assert_eq!(require_no_publication_intent(&directory), Ok(()));
+    }
+
     #[test]
     fn pinned_policy_file_denies_final_name_replacement_after_fd_acquisition() {
         use std::fs;

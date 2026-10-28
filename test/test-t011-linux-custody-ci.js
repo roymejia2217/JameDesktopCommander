@@ -151,6 +151,45 @@ test('Linux policy monitor is exercised in one real service process across admin
   assert.match(probe, /monitor.revalidate_current\(\)/);
 });
 
+test('administrative publication intent is an OS-pinned fail-closed precondition', () => {
+  const source = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_epoch_anchor.rs'), 'utf8',
+  );
+  const acceptance = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  assert.match(source, /fn require_no_publication_intent\(/);
+  assert.match(source, /c"\.policy-publish-inflight"/);
+  assert.match(source, /libc::AT_SYMLINK_NOFOLLOW/);
+  assert.match(source, /require_no_publication_intent\(&self\.directory\)/);
+  assert.match(source, /require_no_publication_intent\(&authority\)/);
+  for (const marker of [
+    /E_POLICY_PUBLISH_INTENT_DENIED/,
+    /E_POLICY_PUBLISH_SYMLINK_DENIED/,
+    /E_POLICY_PUBLISH_UNPRIVILEGED_CREATE_DENIED/,
+    /policy-snapshot-deny/,
+  ]) assert.match(acceptance, marker);
+});
+
+test('root-only publisher begins durable intent with exclusive kernel create and fsync', () => {
+  const implementation = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const marker of [
+    /fn begin_fixed_publication\(/,
+    /libc::O_EXCL/, /libc::O_NOFOLLOW/, /libc::O_CREAT/,
+    /\.sync_all\(\)/, /libc::fsync\(/,
+    /libc::geteuid\(\)/,
+    /\.policy-publish-inflight/,
+  ]) assert.match(implementation, marker);
+  assert.match(script, /linux_admin_publication_probe/);
+  assert.match(script, /E_POLICY_PUBLISH_INTENT_CREATED/);
+  assert.match(script, /E_POLICY_PUBLISH_DOUBLE_BEGIN_DENIED/);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

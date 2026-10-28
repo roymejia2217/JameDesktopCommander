@@ -23,6 +23,11 @@ pub mod linux_policy_root;
 #[cfg(target_os = "linux")]
 pub mod linux_epoch_anchor;
 
+// Root-only durable intent primitive; deliberately cannot complete an update,
+// publish policy, issue a capability, or be called by the service principal.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_publisher;
+
 // Process-local sticky revocation of independently witnessed policy generations.
 // Data-only, no grant/issuer or IPC entry point.
 #[cfg(target_os = "linux")]

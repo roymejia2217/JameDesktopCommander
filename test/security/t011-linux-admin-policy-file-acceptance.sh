@@ -18,11 +18,13 @@ actual_nnp="$(sudo -n -u jdc-authority -- setpriv --no-new-privs -- awk '/^NoNew
 service_gid="$(id -g jdc-authority)"
 fixture="native/authority-store/target/debug/examples/custody_fixture"
 probe="native/authority-service/target/debug/examples/linux_epoch_anchor_probe"
-[[ -x "$fixture" && -x "$probe" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_MISSING' >&2; exit 1; }
+publisher="native/authority-service/target/debug/examples/linux_admin_publication_probe"
+[[ -x "$fixture" && -x "$probe" && -x "$publisher" ]] || { printf '%s\n' 'E_POLICY_FIXTURE_MISSING' >&2; exit 1; }
 directory='/etc/jdc-authority'
 policy="${directory}/policy.sqlite3"
 anchor="${directory}/policy-anchor"
 alias="${directory}/policy-hardlink"
+publish_intent="${directory}/.policy-publish-inflight"
 [[ ! -e "$directory" && ! -L "$directory" ]] || {
   printf '%s\n' 'E_POLICY_PREEXISTING_STATE' >&2
   exit 1
@@ -34,7 +36,7 @@ source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 cleanup() {
   local code=$?
-  sudo -n rm -f -- "$alias" "$policy" "$anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
+  sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
   rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" || code=1
   exit "$code"
@@ -111,6 +113,35 @@ sudo -n ln -s -- "$source_file" "${policy}-journal"
 printf '%s\n' 'E_POLICY_SYMLINK_SIDECAR_DENIED'
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
 sudo -n rm -- "${policy}-journal"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+
+# A root-admin publication marker prohibits reading even a coherent DB +
+# witness. The less privileged service must not be capable of creating it.
+if sudo -n -u jdc-authority -- setpriv --no-new-privs -- touch "$publish_intent" 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_UNPRIVILEGED_CREATED_ADMIN_MARKER' >&2
+  exit 1
+fi
+printf '%s\n' 'E_POLICY_PUBLISH_UNPRIVILEGED_CREATE_DENIED'
+if sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$publisher" begin 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_UNPRIVILEGED_BEGAN_PUBLISH' >&2
+  exit 1
+fi
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+[[ "$(sudo -n stat -c '%u:%g:%a:%h:%s' -- "$publish_intent")" == '0:0:600:1:0' ]] || exit 1
+printf '%s\n' 'E_POLICY_PUBLISH_INTENT_CREATED'
+if sudo -n -- "$publisher" begin 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_DUPLICATE_PUBLISH_ALLOWED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_POLICY_PUBLISH_DOUBLE_BEGIN_DENIED'
+printf '%s\n' 'E_POLICY_PUBLISH_INTENT_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "$publish_intent"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+sudo -n ln -s -- "$source_file" "$publish_intent"
+printf '%s\n' 'E_POLICY_PUBLISH_SYMLINK_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "$publish_intent"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 
 # The same OS-authenticated service process must observe a stable policy,

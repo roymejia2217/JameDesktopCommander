@@ -114,6 +114,12 @@ impl ReplayClaimLedger {
         Self::from_existing_connection(db, epoch)
     }
 
+    /// Return the immutable epoch captured when this ledger was opened.
+    /// This is identity metadata only, never proof of OS storage custody.
+    pub fn bound_epoch(&self) -> u64 {
+        self.expected_epoch
+    }
+
     /// Claims exactly one request in the epoch pinned at construction.
     /// Failures are DENIALS, including after-commit uncertainty; do not retry.
     /// The ID must come from the independently validated canonical wire frame.

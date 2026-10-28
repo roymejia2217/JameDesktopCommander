@@ -18,13 +18,6 @@ enum ReplayAdmission {
     Unavailable,
     // Production-compiled storage adapter. No production path may *construct*
     // a usable ledger until verified OS custody and publisher are implemented.
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(
-            dead_code,
-            reason = "release issuer intentionally cannot construct a durable admission until OS custody is proven"
-        )
-    )]
     Durable(jdc_authority_store::replay_ledger::ReplayClaimLedger),
     #[cfg(test)]
     SyntheticTestOnly(HashSet<[u8; 16]>),
@@ -124,6 +117,30 @@ impl SealedDirectoryGrant {
         })
     }
 
+    /// Bind a durable claimer to the exact administrative policy epoch.
+    /// A ledger from a different epoch cannot authorize I/O, even when a
+    /// caller provides the expected rootRef and requestId. This routine is
+    /// crate-private; production cannot produce an OS-attested ledger yet.
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(
+            dead_code,
+            reason = "trusted OS-custodied ledger constructor is not available yet"
+        )
+    )]
+    pub(crate) fn from_issued_with_ledger(
+        policy: &crate::issuer_policy::IssuerPolicy,
+        root_ref: &str,
+        ledger: jdc_authority_store::replay_ledger::ReplayClaimLedger,
+    ) -> Result<Self, DispatchDenied> {
+        if policy.epoch() == 0 || policy.epoch() != ledger.bound_epoch() {
+            return Err(DispatchDenied);
+        }
+        let mut grant = Self::from_issuer_policy(policy, root_ref)?;
+        grant.replay = ReplayAdmission::Durable(ledger);
+        Ok(grant)
+    }
+
     /// The only Linux production-compiled dispatch entry takes a frame made
     /// by a checked kernel peer, never raw untrusted caller bytes.
     /// This remains non-authorizing without a protected root/epoch bootstrap.
@@ -212,6 +229,50 @@ mod tests {
             active: true,
         }
     }
+    #[cfg(debug_assertions)]
+    #[test]
+    fn policy_epoch_must_match_immutable_durable_ledger_epoch_before_issuing_root() {
+        use jdc_authority_store::replay_ledger::ReplayClaimLedger;
+        use rusqlite::{Connection, OpenFlags};
+        let f = tempfile::tempdir().unwrap();
+        let allowed = f.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let db_path = f.path().join("claims.sqlite3");
+        let db = Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;
+             CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), PRIMARY KEY(epoch,request)) WITHOUT ROWID"
+        ).unwrap();
+        drop(db);
+        let json = serde_json::to_string(allowed.to_str().unwrap()).unwrap();
+        let wire_policy = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{json}}}]}}"#
+        );
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            wire_policy.as_bytes(),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        let ledger = |epoch| {
+            let conn =
+                Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+            ReplayClaimLedger::from_offline_fixture(conn, epoch).unwrap()
+        };
+        assert!(SealedDirectoryGrant::from_issued_with_ledger(&policy, ROOT, ledger(8)).is_err());
+        assert!(!allowed.join("unauthorized").exists());
+        let mut issued =
+            SealedDirectoryGrant::from_issued_with_ledger(&policy, ROOT, ledger(7)).unwrap();
+        assert_eq!(issued.execute_c4d(&wire(ROOT, 7, ID, "authorized")), Ok(()));
+        assert!(allowed.join("authorized").is_dir());
+        assert!(SealedDirectoryGrant::from_issued_with_ledger(
+            &policy,
+            "00000000000000000000000000000000",
+            ledger(7)
+        )
+        .is_err());
+    }
+
     #[cfg(debug_assertions)] // The offline-fixture constructor is unavailable in release builds.
     #[test]
     fn offline_sqlite_replay_claim_is_consumed_before_actual_mkdir_and_survives_restart() {

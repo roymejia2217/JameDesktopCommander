@@ -98,17 +98,19 @@ export function decodeAuthorityRequestFrame(frame: unknown):
 }
 
 /** A result reports completed broker-side I/O only, never an access grant. */
-export function encodeAuthorityResultFrame(input: unknown, requestId: string): Buffer {
-  const reply = parseOperationResult(input, requestId);
+export function encodeAuthorityResultFrame(
+  input: unknown, requestId: string, expectedEpoch: string,
+): Buffer {
+  const reply = parseOperationResult(input, requestId, expectedEpoch);
   return buildFrame(resultJSON(reply));
 }
 
 export function decodeAuthorityResultFrame(
-  frame: unknown, requestId: string,
+  frame: unknown, requestId: string, expectedEpoch: string,
 ): AuthorityOperationResult {
   try {
     const canonical = payloadText(frame);
-    const reply = parseOperationResult(JSON.parse(canonical) as unknown, requestId);
+    const reply = parseOperationResult(JSON.parse(canonical) as unknown, requestId, expectedEpoch);
     if (resultJSON(reply) !== canonical) deny();
     return reply;
   } catch {

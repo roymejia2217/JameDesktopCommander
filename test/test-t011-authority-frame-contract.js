@@ -38,9 +38,9 @@ test('C4d canonical round-trip for requests, committed and rejected results', ()
   assert.ok(encodeAuthorityRequestFrame(shuffled).equals(encoded),
     'Field order from untrusted objects must never affect canonical bytes');
   for (const result of [committed(), denied()]) {
-    const wire = encodeAuthorityResultFrame(result, request().requestId);
-    assert.deepEqual(decodeAuthorityResultFrame(wire, request().requestId), result);
-    assert.ok(Object.isFrozen(decodeAuthorityResultFrame(wire, request().requestId)));
+    const wire = encodeAuthorityResultFrame(result, request().requestId, request().expectedEpoch);
+    assert.deepEqual(decodeAuthorityResultFrame(wire, request().requestId, request().expectedEpoch), result);
+    assert.ok(Object.isFrozen(decodeAuthorityResultFrame(wire, request().requestId, request().expectedEpoch)));
     assert.equal(wire.readUInt32BE(0), wire.length - 4);
   }
 });
@@ -91,17 +91,17 @@ test('C4d refuses ambiguous Unicode and forged response metadata', () => {
   assert.throws(() => encodeAuthorityRequestFrame({ ...request(), relativePath: 'a\ud800' }), bad);
   const raw = JSON.stringify({ ...request(), relativePath: 'a\ud800' });
   assert.throws(() => decodeAuthorityRequestFrame(frame(raw)), bad);
-  const done = encodeAuthorityResultFrame(committed(), request().requestId);
+  const done = encodeAuthorityResultFrame(committed(), request().requestId, request().expectedEpoch);
   assert.throws(() => decodeAuthorityResultFrame(done,
-    '22222222-2222-4222-8222-222222222222'), bad);
+    '22222222-2222-4222-8222-222222222222', request().expectedEpoch), bad);
   const forged = JSON.stringify({ ...committed(), approvedPath: 'C:/outside' });
-  assert.throws(() => decodeAuthorityResultFrame(frame(forged), request().requestId), bad);
+  assert.throws(() => decodeAuthorityResultFrame(frame(forged), request().requestId, request().expectedEpoch), bad);
   assert.throws(() => encodeAuthorityResultFrame({ ...denied(), approvedPath: '/tmp' },
-    request().requestId), bad);
+    request().requestId, request().expectedEpoch), bad);
   const duplicatedStatus = JSON.stringify(committed()).replace(
     '"status":"committed"', '"status":"committed","status":"committed"');
   assert.throws(() => decodeAuthorityResultFrame(frame(duplicatedStatus),
-    request().requestId), bad);
+    request().requestId, request().expectedEpoch), bad);
 });
 
 test('C4d fails closed before invoking untrusted serializers or prototype hooks', () => {
@@ -113,4 +113,13 @@ test('C4d fails closed before invoking untrusted serializers or prototype hooks'
   Object.defineProperty(field, 'requestId', { enumerable: true, get() { executed++; return request().requestId; } });
   assert.throws(() => encodeAuthorityRequestFrame(field), bad);
   assert.equal(executed, 0);
+});
+
+test('C4d rejects an epoch-swapped committed frame before the caller accepts success', () => {
+  const req = request();
+  const wire = frame(JSON.stringify(committed()));
+  assert.deepEqual(decodeAuthorityResultFrame(wire, req.requestId, req.expectedEpoch), committed());
+  assert.throws(() => decodeAuthorityResultFrame(wire, req.requestId, '7'), bad);
+  assert.throws(() => decodeAuthorityResultFrame(wire, req.requestId), bad);
+  assert.throws(() => encodeAuthorityResultFrame(committed(), req.requestId, '7'), bad);
 });

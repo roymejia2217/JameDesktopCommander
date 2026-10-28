@@ -69,11 +69,11 @@ test('C4c binds results to request identity and forbids replayable path grants',
   const id = valid().requestId;
   const done = { version: 1, kind: 'operation-result', requestId: id,
     status: 'committed', committedEpoch: '18446744073709551615' };
-  assert.deepEqual(parseOperationResult(done, id), done);
-  assert.ok(Object.isFrozen(parseOperationResult(done, id)));
+  assert.deepEqual(parseOperationResult(done, id, valid().expectedEpoch), done);
+  assert.ok(Object.isFrozen(parseOperationResult(done, id, valid().expectedEpoch)));
   const denied = { version: 1, kind: 'operation-result', requestId: id,
     status: 'rejected', errorCode: 'E_POLICY_STALE' };
-  assert.deepEqual(parseOperationResult(denied, id), denied);
+  assert.deepEqual(parseOperationResult(denied, id, valid().expectedEpoch), denied);
   for (const response of [
     { ...done, requestId: '22222222-2222-4222-8222-222222222222' },
     { ...done, rootPath: '/allowed' },
@@ -83,5 +83,16 @@ test('C4c binds results to request identity and forbids replayable path grants',
     { ...denied, errorCode: 'ALLOW_ANY_PATH' },
     { ...done, status: 'rejected' },
     { ...denied, status: 'committed' },
-  ]) assert.throws(() => parseOperationResult(response, id), bad);
+  ]) assert.throws(() => parseOperationResult(response, id, valid().expectedEpoch), bad);
+});
+
+test('C4c refuses a committed reply for a different or unspecified request epoch', () => {
+  const req = valid();
+  const done = { version: 1, kind: 'operation-result', requestId: req.requestId,
+    status: 'committed', committedEpoch: req.expectedEpoch };
+  assert.deepEqual(parseOperationResult(done, req.requestId, req.expectedEpoch), done);
+  assert.throws(() => parseOperationResult({ ...done, committedEpoch: '7' },
+    req.requestId, req.expectedEpoch), bad);
+  assert.throws(() => parseOperationResult(done, req.requestId), bad);
+  assert.throws(() => parseOperationResult(done, req.requestId, '0'), bad);
 });

@@ -6,6 +6,7 @@ use std::{
     io::Read,
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::unix::fs::FileExt,
 };
 
 const NAME: &std::ffi::CStr = c"claims.sqlite3";
@@ -99,6 +100,16 @@ impl ObservedReplayFile {
             || named.st_size != held.st_size
             || named.st_mode != held.st_mode
         {
+            return Err(IdentityDenied);
+        }
+        // A stable inode and size do not imply stable bytes. Check the exact
+        // SQLite header on the pinned FD at each observation without moving
+        // the shared file cursor or reopening the fixed pathname.
+        let mut header = [0u8; 16];
+        self.file
+            .read_exact_at(&mut header, 0)
+            .map_err(|_| IdentityDenied)?;
+        if header != *b"SQLite format 3\x00" {
             return Err(IdentityDenied);
         }
         self.no_sidecars()
@@ -202,6 +213,22 @@ mod tests {
         std::fs::remove_file(&sidecar).unwrap();
         assert!(ObservedReplayFile::from_verified_directory(private(&root)).is_ok());
     }
+    #[test]
+    fn same_inode_same_size_sqlite_header_mutation_invalidates_observed_file() {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let (_temp, root) = setup();
+        let name = provision(&root);
+        let pinned = ObservedReplayFile::from_verified_directory(private(&root)).unwrap();
+        let before = std::fs::metadata(&name).unwrap();
+        let writable = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
+        writable.write_all_at(b"X", 0).unwrap();
+        writable.sync_all().unwrap();
+        let after = std::fs::metadata(&name).unwrap();
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(before.len(), after.len());
+        assert_eq!(pinned.revalidate_name(), Err(IdentityDenied));
+    }
+
     #[test]
     fn symlink_malformed_permissions_or_replaced_leaf_always_deny() {
         let (_temp, root) = setup();

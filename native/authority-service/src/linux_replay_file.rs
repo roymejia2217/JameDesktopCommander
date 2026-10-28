@@ -248,6 +248,25 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_exclusive_writer_denies_file_snapshot_until_transaction_ends() {
+        let (_temp, root) = setup();
+        let path = provision(&root);
+        let pinned = ObservedReplayFile::from_verified_directory(private(&root)).unwrap();
+        assert_eq!(pinned.read_verified_snapshot(7), Ok(0));
+        // Real SQLite uses POSIX fcntl locks, not flock(2). BEGIN EXCLUSIVE
+        // holds the kernel write lock with no journal sidecar or byte change.
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(
+            pinned.read_verified_snapshot(7),
+            Err(IdentityDenied),
+            "a concurrent SQLite write reservation must DENY even when the file is unchanged"
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pinned.read_verified_snapshot(7), Ok(0));
+    }
+
+    #[test]
     fn preexisting_private_sqlite_file_has_a_pinned_identity() {
         let (_temp, root) = setup();
         let name = provision(&root);

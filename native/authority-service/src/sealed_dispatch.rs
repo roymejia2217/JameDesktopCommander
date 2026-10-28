@@ -7,6 +7,60 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchDenied;
 
+// A generation guard must be satisfied BEFORE a replay claim and before I/O.
+// An OS-backed, process-owned generation monitor has no grant issuer yet;
+// the normal runtime remains DENY-only. Test models cannot enter a binary.
+#[derive(Default)]
+enum GenerationAdmission {
+    #[default]
+    Unavailable,
+    #[cfg(test)]
+    SyntheticTestOnly {
+        expected_epoch: u64,
+        observed_epoch: u64,
+        revoked: bool,
+    },
+}
+impl GenerationAdmission {
+    fn revalidate(&mut self, request_epoch: u64) -> Result<(), DispatchDenied> {
+        match self {
+            Self::Unavailable => Err(DispatchDenied),
+            #[cfg(test)]
+            Self::SyntheticTestOnly {
+                expected_epoch,
+                observed_epoch,
+                revoked,
+            } => {
+                if *revoked
+                    || request_epoch == 0
+                    || *expected_epoch != request_epoch
+                    || *observed_epoch != request_epoch
+                {
+                    *revoked = true;
+                    Err(DispatchDenied)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn simulate_observation(&mut self, current_epoch: u64) {
+        if let Self::SyntheticTestOnly {
+            observed_epoch,
+            revoked,
+            expected_epoch,
+        } = self
+        {
+            if *revoked || current_epoch != *expected_epoch {
+                *revoked = true;
+            }
+            *observed_epoch = current_epoch;
+        }
+    }
+}
+
 // A production binary must never silently use process-local replay state.
 // The durable, OS-witnessed issuer has not been implemented yet. Keep the
 // only usable positive fixture behind cfg(test) until that boundary exists.
@@ -63,6 +117,7 @@ pub struct SealedDirectoryGrant {
     // No volatile replay fallback in non-test builds. A future issuer must
     // provide a trusted durable claimer before operational dispatch is enabled.
     replay: ReplayAdmission,
+    generation: GenerationAdmission,
     active: bool,
 }
 
@@ -93,6 +148,7 @@ impl SealedDirectoryGrant {
         let request = decode_create_directory_frame(wire).map_err(|_| DispatchDenied)?;
         if request.root_ref() != self.root_ref
             || request.expected_epoch() != self.expected_epoch
+            || self.generation.revalidate(self.expected_epoch).is_err()
             || self.replay.consume(request.request_id_bytes()).is_err()
         {
             return Err(DispatchDenied);
@@ -131,6 +187,11 @@ mod tests {
                 Dir::open_ambient_dir(root, ambient_authority()).unwrap(),
             ),
             replay: ReplayAdmission::SyntheticTestOnly(HashSet::new()),
+            generation: GenerationAdmission::SyntheticTestOnly {
+                expected_epoch: 7,
+                observed_epoch: 7,
+                revoked: false,
+            },
             active: true,
         }
     }
@@ -402,6 +463,42 @@ mod tests {
             Ok(()),
             "NEGATIVE PROOF: synthetic grant does not persist request replay protection"
         );
+    }
+
+    #[test]
+    fn unavailable_or_revoked_generation_denies_before_replay_claim_or_filesystem_io() {
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        let mut grant = fixture(&inside);
+
+        grant.generation = GenerationAdmission::Unavailable;
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 7, ID, "unavailable")),
+            Err(DispatchDenied)
+        );
+        assert_eq!(grant.replay.synthetic_len(), 0);
+        assert!(!inside.join("unavailable").exists());
+
+        grant.generation = GenerationAdmission::SyntheticTestOnly {
+            expected_epoch: 7,
+            observed_epoch: 8,
+            revoked: false,
+        };
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 7, ID, "forward-change")),
+            Err(DispatchDenied)
+        );
+        assert_eq!(grant.replay.synthetic_len(), 0);
+        assert!(!inside.join("forward-change").exists());
+        grant.generation.simulate_observation(7);
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 7, ID, "restored-old")),
+            Err(DispatchDenied),
+            "restoring earlier generation must not reactivate poisoned grant"
+        );
+        assert_eq!(grant.replay.synthetic_len(), 0);
+        assert!(!inside.join("restored-old").exists());
     }
 
     #[test]

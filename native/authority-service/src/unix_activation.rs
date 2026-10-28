@@ -209,6 +209,60 @@ pub(crate) fn inspect_root_custodied_named_listener(
     )
 }
 
+/// Convert one already-owned kernel listening FD to a long-lived Rust
+/// listener, only after checking its exact path, protected directory chain,
+/// socket owner/group/mode and correct AF_UNIX stream/listener shape.
+/// The parent UID override is strictly internal for Linux test fixtures.
+fn retain_owned_listener(
+    fd: std::os::fd::OwnedFd,
+    path: &Path,
+    expected_uid: libc::uid_t,
+    expected_gid: libc::gid_t,
+    protected_parent_uid: libc::uid_t,
+) -> Result<std::os::unix::net::UnixListener, IdentityDenied> {
+    use std::os::fd::AsFd;
+    inspect_custodied_named_listener(
+        fd.as_fd(),
+        path,
+        expected_uid,
+        expected_gid,
+        protected_parent_uid,
+    )?;
+    let listener = std::os::unix::net::UnixListener::from(fd);
+    // systemd activation FDs need not be configured nonblocking by default.
+    // The bounded acceptor *requires* nonblocking mode before each poll.
+    listener.set_nonblocking(true).map_err(|_| IdentityDenied)?;
+    inspect_custodied_named_listener(
+        listener.as_fd(),
+        path,
+        expected_uid,
+        expected_gid,
+        protected_parent_uid,
+    )?;
+    Ok(listener)
+}
+
+/// Single-threaded service bootstrap: adopt the one correctly named FD3
+/// from the established sd-notify implementation, retain its ownership and
+/// validate the independently root-managed socket namespace. LISTEN_* env
+/// values alone NEVER count as privileged provenance.
+pub(crate) fn retain_inherited_systemd_listener(
+    expected_path: &Path,
+    service_uid: libc::uid_t,
+    client_gid: libc::gid_t,
+) -> Result<std::os::unix::net::UnixListener, IdentityDenied> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let mut received = sd_notify::listen_fds_with_names().map_err(|_| IdentityDenied)?;
+    let count = received.len();
+    let (fd, name) = received.next().ok_or(IdentityDenied)?;
+    validate_activation_descriptor_set(count, fd, &name)?;
+    // SAFETY: sd-notify validated the activation inventory and returns a
+    // unique FD3 to be adopted exactly once. No later borrow_raw(3) or second
+    // sd-notify inventory lookup is performed in this issuer instance.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    retain_owned_listener(owned, expected_path, service_uid, client_gid, 0)
+}
+
 /// Examine systemd-compatible startup descriptors using the established
 /// `sd-notify` crate, then verify their kernel shape. This is an observation
 /// only: LISTEN_PID/FDS/FDNAMES can be forged by the launching process and

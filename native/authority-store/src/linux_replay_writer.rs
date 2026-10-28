@@ -203,11 +203,12 @@ impl LinuxReplayIssuerLedger {
         // or plant a SQLite journal in this namespace. The standard unix
         // VFS (not /proc/self/fd) owns SQLite journal and POSIX locking.
         let path = state.join("claims.sqlite3");
-        let db = Connection::open_with_flags(
+        let db = Connection::open_with_flags_and_vfs(
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW
                 | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+            "unix",
         )
         .map_err(|_| StoreDenied)?;
         let ledger = ReplayClaimLedger::from_existing_connection(db, epoch)?;
@@ -321,6 +322,50 @@ mod tests {
         id[6] = 0x40;
         id[8] = 0x80;
         id
+    }
+
+    #[test]
+    fn service_writer_cannot_inherit_process_default_nolock_vfs() {
+        const CHILD: &str = "JDC_SQLITE_VFS_DENIAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the SQLite process-global VFS registry from other tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact",
+                    "linux_replay_writer::tests::service_writer_cannot_inherit_process_default_nolock_vfs",
+                    "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "child SQLite process must pass:\n{}",
+                String::from_utf8_lossy(&output.stdout).to_string()
+                    + &String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // This child deliberately chooses SQLite's official *no locking*
+        // VFS as the default. The custodied service writer MUST ignore it.
+        let no_lock = unsafe { rusqlite::ffi::sqlite3_vfs_find(c"unix-none".as_ptr()) };
+        assert!(
+            !no_lock.is_null(),
+            "Linux SQLite must expose unix-none negative control"
+        );
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_vfs_register(no_lock, 1) },
+            rusqlite::ffi::SQLITE_OK
+        );
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let holder =
+            Connection::open_with_flags_and_vfs(&path, OpenFlags::SQLITE_OPEN_READ_WRITE, "unix")
+                .unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(
+            LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).is_err(),
+            "must observe Unix POSIX locks, never process-default unix-none"
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert!(LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).is_ok());
     }
 
     #[test]

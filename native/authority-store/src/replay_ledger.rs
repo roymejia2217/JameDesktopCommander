@@ -4,7 +4,6 @@
 use crate::StoreDenied;
 #[cfg(test)]
 use rusqlite::OpenFlags;
-#[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
 use rusqlite::MAIN_DB;
 use rusqlite::{params, Connection, TransactionBehavior};
 #[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
@@ -114,6 +113,93 @@ impl ReplayClaimLedger {
         Self::from_existing_connection(db, epoch)
     }
 
+    /// Read-only verification of an already OS-read, bounded SQLite image.
+    /// DATA ONLY: neither custody, replay freshness nor permission to mutate
+    /// follows from these bytes. Never reopen the source filename.
+    /// Preserve bounded historical claims across policy epochs, while
+    /// limiting both retained generations and claims within each generation.
+    /// Never evict previously consumed IDs during observation.
+    pub fn inspect_serialized_snapshot(raw: &[u8], epoch: u64) -> Result<u32, StoreDenied> {
+        const MAX_IMAGE: usize = 16 * 1024 * 1024;
+        const MAX_GENERATIONS: usize = 16;
+        const MAX_TOTAL: u32 = MAX_CLAIMS_PER_EPOCH as u32 * MAX_GENERATIONS as u32;
+        if epoch == 0
+            || raw.len() < 512
+            || raw.len() > MAX_IMAGE
+            || !raw.len().is_multiple_of(512)
+            || raw.get(..16) != Some(b"SQLite format 3\0")
+            || raw[18] != 1
+            || raw[19] != 1
+        {
+            return Err(StoreDenied);
+        }
+        let mut db = Connection::open_in_memory().map_err(|_| StoreDenied)?;
+        db.deserialize_read_exact(MAIN_DB, std::io::Cursor::new(raw), raw.len(), true)
+            .map_err(|_| StoreDenied)?;
+        db.pragma_update(None, "query_only", 1)
+            .map_err(|_| StoreDenied)?;
+        let read_only: i64 = db
+            .pragma_query_value(None, "query_only", |r| r.get(0))
+            .map_err(|_| StoreDenied)?;
+        if read_only != 1 {
+            return Err(StoreDenied);
+        }
+        verify_schema(&db)?;
+        let integrity: String = db
+            .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
+            .map_err(|_| StoreDenied)?;
+        if integrity != "ok" {
+            return Err(StoreDenied);
+        }
+        let mut statement = db
+            .prepare(
+                "SELECT typeof(epoch),length(epoch),substr(epoch,1,9),
+                    typeof(request),length(request),substr(request,1,17)
+             FROM replay_claims LIMIT 16385",
+            )
+            .map_err(|_| StoreDenied)?;
+        let mut rows = statement.query([]).map_err(|_| StoreDenied)?;
+        let mut count: u32 = 0;
+        let mut generations = std::collections::BTreeMap::<u64, u32>::new();
+        while let Some(row) = rows.next().map_err(|_| StoreDenied)? {
+            if count >= MAX_TOTAL {
+                return Err(StoreDenied);
+            }
+            let kind_epoch: String = row.get(0).map_err(|_| StoreDenied)?;
+            let epoch_len: i64 = row.get(1).map_err(|_| StoreDenied)?;
+            let epoch_blob: Vec<u8> = row.get(2).map_err(|_| StoreDenied)?;
+            let kind_request: String = row.get(3).map_err(|_| StoreDenied)?;
+            let request_len: i64 = row.get(4).map_err(|_| StoreDenied)?;
+            let request_blob: Vec<u8> = row.get(5).map_err(|_| StoreDenied)?;
+            if kind_epoch != "blob"
+                || epoch_len != 8
+                || epoch_blob.len() != 8
+                || kind_request != "blob"
+                || request_len != 16
+                || request_blob.len() != 16
+            {
+                return Err(StoreDenied);
+            }
+            let existing_epoch =
+                u64::from_be_bytes(epoch_blob.try_into().map_err(|_| StoreDenied)?);
+            if existing_epoch == 0
+                || existing_epoch > epoch
+                || request_blob[6] >> 4 != 4
+                || request_blob[8] & 0b1100_0000 != 0b1000_0000
+            {
+                return Err(StoreDenied);
+            }
+            let per_generation = generations.entry(existing_epoch).or_default();
+            *per_generation += 1;
+            if *per_generation > MAX_CLAIMS_PER_EPOCH as u32 || generations.len() > MAX_GENERATIONS
+            {
+                return Err(StoreDenied);
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Return the immutable epoch captured when this ledger was opened.
     /// This is identity metadata only, never proof of OS storage custody.
     pub fn bound_epoch(&self) -> u64 {
@@ -186,6 +272,80 @@ mod tests {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
         ReplayClaimLedger::from_existing_connection(db, expected_epoch).unwrap()
     }
+    #[test]
+    fn read_only_serialized_replay_snapshot_checks_actual_rows_and_epoch() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        open(&path, 7).claim_once(canonical_id(0x12)).unwrap();
+        let image = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let count = ReplayClaimLedger::inspect_serialized_snapshot(&image, 7).unwrap();
+        assert_eq!(count, 1);
+        assert!(ReplayClaimLedger::inspect_serialized_snapshot(&image, 0).is_err());
+        assert!(ReplayClaimLedger::inspect_serialized_snapshot(&image, 6).is_err());
+        assert!(ReplayClaimLedger::inspect_serialized_snapshot(&image[..32], 7).is_err());
+        let mut changed = image.clone();
+        changed[18] = 2; // WAL write-version needs a recovery VFS, not raw pages
+        assert!(ReplayClaimLedger::inspect_serialized_snapshot(&changed, 7).is_err());
+    }
+
+    #[test]
+    fn serialized_snapshot_retains_bounded_claims_across_policy_epochs() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let mut db = Connection::open(&path).unwrap();
+        let tx = db.transaction().unwrap();
+        for (epoch, count) in [(7u64, 600u32), (8u64, 500u32)] {
+            for n in 0..count {
+                let mut id = [0u8; 16];
+                id[0..4].copy_from_slice(&n.to_be_bytes());
+                id[6] = 0x40;
+                id[8] = 0x80;
+                tx.execute(
+                    "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+                    params![epoch.to_be_bytes().as_slice(), id.as_slice()],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(db);
+        assert_eq!(
+            ReplayClaimLedger::inspect_serialized_snapshot(&std::fs::read(path).unwrap(), 8),
+            Ok(1100)
+        );
+    }
+
+    #[test]
+    fn serialized_replay_snapshot_rejects_untrusted_row_and_extra_schema() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let db = Connection::open(&path).unwrap();
+        let epoch = 7u64.to_be_bytes();
+        db.execute(
+            "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+            params![epoch.as_slice(), [0x11u8; 16].as_slice()],
+        )
+        .unwrap();
+        drop(db);
+        assert!(
+            ReplayClaimLedger::inspect_serialized_snapshot(&std::fs::read(&path).unwrap(), 7)
+                .is_err(),
+            "invalid UUID version/variant must deny even if SQLite constraints pass"
+        );
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE injected (x TEXT)").unwrap();
+        drop(db);
+        assert!(
+            ReplayClaimLedger::inspect_serialized_snapshot(&std::fs::read(&path).unwrap(), 7)
+                .is_err(),
+            "additional schema objects must deny"
+        );
+    }
+
     #[test]
     fn committed_claim_survives_close_and_denies_replay_after_restart() {
         let f = tempdir().unwrap();

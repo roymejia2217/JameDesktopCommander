@@ -69,6 +69,51 @@ impl ObservedReplayFile {
             && (512..=16 * 1024 * 1024).contains(&st.st_size)
     }
 
+    /// Observe the exact bounded SQLite content on the kernel-opened FD.
+    /// Deserialization happens read-only in memory; no SQLite pathname,
+    /// journal or attached VFS is opened. DATA ONLY, not replay freshness or
+    /// a claim/write capability. This cannot attest a privileged rollback.
+    pub fn read_verified_snapshot(&self, epoch: u64) -> Result<u32, IdentityDenied> {
+        self.revalidate_name()?;
+        let before = Self::metadata(&self.file)?;
+        if !Self::valid_leaf(&before) {
+            return Err(IdentityDenied);
+        }
+        let len = usize::try_from(before.st_size).map_err(|_| IdentityDenied)?;
+        let mut bytes = vec![0u8; len];
+        self.file
+            .read_exact_at(&mut bytes, 0)
+            .map_err(|_| IdentityDenied)?;
+        let after = Self::metadata(&self.file)?;
+        if before.st_dev != after.st_dev
+            || before.st_ino != after.st_ino
+            || before.st_size != after.st_size
+            || before.st_mode != after.st_mode
+            || before.st_mtime != after.st_mtime
+            || before.st_mtime_nsec != after.st_mtime_nsec
+            || before.st_ctime != after.st_ctime
+            || before.st_ctime_nsec != after.st_ctime_nsec
+        {
+            return Err(IdentityDenied);
+        }
+        self.revalidate_name()?;
+        let count =
+            jdc_authority_store::replay_ledger::ReplayClaimLedger::inspect_serialized_snapshot(
+                &bytes, epoch,
+            )
+            .map_err(|_| IdentityDenied)?;
+        self.revalidate_name()?;
+        let end = Self::metadata(&self.file)?;
+        if after.st_mtime != end.st_mtime
+            || after.st_mtime_nsec != end.st_mtime_nsec
+            || after.st_ctime != end.st_ctime
+            || after.st_ctime_nsec != end.st_ctime_nsec
+        {
+            return Err(IdentityDenied);
+        }
+        Ok(count)
+    }
+
     pub fn identity(&self) -> (u64, u64) {
         self.identity
     }
@@ -171,14 +216,37 @@ mod tests {
         let db = rusqlite::Connection::open(&name).unwrap();
         db.execute_batch(
             "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;
-             CREATE TABLE replay_claims (epoch BLOB NOT NULL, request BLOB NOT NULL,
-             PRIMARY KEY(epoch,request)) WITHOUT ROWID",
+             CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), PRIMARY KEY(epoch,request)) WITHOUT ROWID",
         )
         .unwrap();
         drop(db);
         std::fs::set_permissions(&name, std::fs::Permissions::from_mode(0o600)).unwrap();
         name
     }
+    #[test]
+    fn pinned_replay_image_is_validated_through_sqlite_without_path_reopen() {
+        let (_temp, root) = setup();
+        let path = provision(&root);
+        let pinned = ObservedReplayFile::from_verified_directory(private(&root)).unwrap();
+        assert_eq!(pinned.read_verified_snapshot(7), Ok(0));
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let mut id = [0x31u8; 16];
+        id[6] = 0x40;
+        id[8] = 0x80;
+        db.execute(
+            "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+            rusqlite::params![7u64.to_be_bytes().as_slice(), id.as_slice()],
+        )
+        .unwrap();
+        drop(db);
+        assert_eq!(pinned.read_verified_snapshot(7), Ok(1));
+        assert!(pinned.read_verified_snapshot(6).is_err());
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE injected (x TEXT)").unwrap();
+        drop(db);
+        assert!(pinned.read_verified_snapshot(7).is_err());
+    }
+
     #[test]
     fn preexisting_private_sqlite_file_has_a_pinned_identity() {
         let (_temp, root) = setup();

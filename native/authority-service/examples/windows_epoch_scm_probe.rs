@@ -100,7 +100,14 @@ mod windows {
         use super::*;
         #[test]
         fn unprovisioned_caller_cannot_assert_authority() {
-            assert_eq!(observation(), DENIED_SERVICE_IDENTITY);
+            // Release binaries must deny at the earlier explicit non-debug
+            // gate; only debug probes proceed to validate the OS token.
+            let expected = if cfg!(debug_assertions) {
+                DENIED_SERVICE_IDENTITY
+            } else {
+                DENIED_NOT_DEBUG
+            };
+            assert_eq!(observation(), expected);
         }
     }
 }

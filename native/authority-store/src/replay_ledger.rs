@@ -2,17 +2,33 @@
 //! A trusted broker must supply a verified OS-owned SQLite connection, binding
 //! the epoch, database file and independent policy witness before any grant.
 use crate::StoreDenied;
+#[cfg(test)]
+use rusqlite::OpenFlags;
+#[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
+use rusqlite::MAIN_DB;
 use rusqlite::{params, Connection, TransactionBehavior};
-#[cfg(test)]
-use rusqlite::{OpenFlags, MAIN_DB};
-#[cfg(test)]
+#[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
 use std::time::Duration;
 
 const MAX_CLAIMS_PER_EPOCH: i64 = 1024;
 const REPLAY_SCHEMA: &str = "CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), PRIMARY KEY(epoch,request)) WITHOUT ROWID";
 
 /// A private-issuer durable replay primitive, NOT an authority to perform I/O.
-/// There is deliberately no public connection/path constructor.
+/// There is deliberately no public production connection/path constructor.
+/// The fixture API exists only in explicitly opted-in debug builds.
+/// Compile-fail coverage is conditional: with the test feature enabled, the
+/// fixture intentionally exists, and its test must not claim otherwise.
+#[cfg_attr(
+    not(feature = "offline-fixture"),
+    doc = r#"
+```compile_fail
+use jdc_authority_store::replay_ledger::ReplayClaimLedger;
+use rusqlite::Connection;
+let untrusted = Connection::open_in_memory().unwrap();
+let _ = ReplayClaimLedger::from_offline_fixture(untrusted, 7);
+```
+"#
+)]
 /// ```compile_fail
 /// use jdc_authority_store::replay_ledger::ReplayClaimLedger;
 /// use rusqlite::Connection;
@@ -58,7 +74,7 @@ fn verify_schema(db: &Connection) -> Result<(), StoreDenied> {
 impl ReplayClaimLedger {
     // Only usable inside this crate's isolated offline fixture. Future service
     // construction requires an independently reviewed OS-descriptor-bound VFS.
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
     fn from_existing_connection(db: Connection, expected_epoch: u64) -> Result<Self, StoreDenied> {
         if expected_epoch == 0 {
             return Err(StoreDenied);
@@ -87,6 +103,15 @@ impl ReplayClaimLedger {
             connection: db,
             expected_epoch,
         })
+    }
+
+    /// OFFLINE TEST FIXTURE ONLY. Compiled only for explicitly opted-in
+    /// development builds with debug assertions. Never an OS-attested store:
+    /// arbitrary Connection values cannot prove file identity or rollback
+    /// resistance. No production issuer may call this function.
+    #[cfg(all(feature = "offline-fixture", debug_assertions))]
+    pub fn from_offline_fixture(db: Connection, epoch: u64) -> Result<Self, StoreDenied> {
+        Self::from_existing_connection(db, epoch)
     }
 
     /// Claims exactly one request in the epoch pinned at construction.

@@ -116,10 +116,13 @@ impl ReplayClaimLedger {
     /// Read-only verification of an already OS-read, bounded SQLite image.
     /// DATA ONLY: neither custody, replay freshness nor permission to mutate
     /// follows from these bytes. Never reopen the source filename.
-    /// This intentionally refuses historical replay tables larger than the
-    /// per-generation bound instead of silently discarding consumed IDs.
+    /// Preserve bounded historical claims across policy epochs, while
+    /// limiting both retained generations and claims within each generation.
+    /// Never evict previously consumed IDs during observation.
     pub fn inspect_serialized_snapshot(raw: &[u8], epoch: u64) -> Result<u32, StoreDenied> {
         const MAX_IMAGE: usize = 16 * 1024 * 1024;
+        const MAX_GENERATIONS: usize = 16;
+        const MAX_TOTAL: u32 = MAX_CLAIMS_PER_EPOCH as u32 * MAX_GENERATIONS as u32;
         if epoch == 0
             || raw.len() < 512
             || raw.len() > MAX_IMAGE
@@ -152,13 +155,14 @@ impl ReplayClaimLedger {
             .prepare(
                 "SELECT typeof(epoch),length(epoch),substr(epoch,1,9),
                     typeof(request),length(request),substr(request,1,17)
-             FROM replay_claims LIMIT 1025",
+             FROM replay_claims LIMIT 16385",
             )
             .map_err(|_| StoreDenied)?;
         let mut rows = statement.query([]).map_err(|_| StoreDenied)?;
         let mut count: u32 = 0;
+        let mut generations = std::collections::BTreeMap::<u64, u32>::new();
         while let Some(row) = rows.next().map_err(|_| StoreDenied)? {
-            if count >= MAX_CLAIMS_PER_EPOCH as u32 {
+            if count >= MAX_TOTAL {
                 return Err(StoreDenied);
             }
             let kind_epoch: String = row.get(0).map_err(|_| StoreDenied)?;
@@ -182,6 +186,12 @@ impl ReplayClaimLedger {
                 || existing_epoch > epoch
                 || request_blob[6] >> 4 != 4
                 || request_blob[8] & 0b1100_0000 != 0b1000_0000
+            {
+                return Err(StoreDenied);
+            }
+            let per_generation = generations.entry(existing_epoch).or_default();
+            *per_generation += 1;
+            if *per_generation > MAX_CLAIMS_PER_EPOCH as u32 || generations.len() > MAX_GENERATIONS
             {
                 return Err(StoreDenied);
             }
@@ -278,6 +288,34 @@ mod tests {
         let mut changed = image.clone();
         changed[18] = 2; // WAL write-version needs a recovery VFS, not raw pages
         assert!(ReplayClaimLedger::inspect_serialized_snapshot(&changed, 7).is_err());
+    }
+
+    #[test]
+    fn serialized_snapshot_retains_bounded_claims_across_policy_epochs() {
+        let f = tempdir().unwrap();
+        let path = f.path().join("claims.sqlite3");
+        setup(&path);
+        let mut db = Connection::open(&path).unwrap();
+        let tx = db.transaction().unwrap();
+        for (epoch, count) in [(7u64, 600u32), (8u64, 500u32)] {
+            for n in 0..count {
+                let mut id = [0u8; 16];
+                id[0..4].copy_from_slice(&n.to_be_bytes());
+                id[6] = 0x40;
+                id[8] = 0x80;
+                tx.execute(
+                    "INSERT INTO replay_claims(epoch,request) VALUES (?1,?2)",
+                    params![epoch.to_be_bytes().as_slice(), id.as_slice()],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(db);
+        assert_eq!(
+            ReplayClaimLedger::inspect_serialized_snapshot(&std::fs::read(path).unwrap(), 8),
+            Ok(1100)
+        );
     }
 
     #[test]

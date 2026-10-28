@@ -243,6 +243,7 @@ dependencies = [
  "cap-std",
  "jdc-authority-store",
  "libc",
+ "rusqlite",
  "rustix",
  "same-file",
  "sd-notify",

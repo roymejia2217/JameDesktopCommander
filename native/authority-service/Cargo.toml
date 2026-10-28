@@ -15,6 +15,8 @@ cap-fs-ext = "=4.0.3" # OS metadata from the already-open file handle.
 [dev-dependencies]
 tempfile = "=3.23.0"
 same-file = "=1.0.6"
+rusqlite = { version = "=0.37.0", default-features = false, features = ["bundled"] }
+jdc-authority-store = { path = "../authority-store", features = ["offline-fixture"] }
 
 [lib]
 name = "jdc_authority_service"

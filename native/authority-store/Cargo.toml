@@ -6,6 +6,10 @@ rust-version = "1.91"
 license = "MIT"
 publish = false
 
+[features]
+# Explicit, development-only SQLite fixtures. No production OS authority.
+offline-fixture = []
+
 [dependencies]
 rusqlite = { version = "=0.37.0", default-features = false, features = ["bundled", "serialize"] }
 sha2 = "=0.10.9"

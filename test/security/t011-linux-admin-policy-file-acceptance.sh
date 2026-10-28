@@ -113,6 +113,36 @@ verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" po
 sudo -n rm -- "${policy}-journal"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
 
+# The same OS-authenticated service process must observe a stable policy,
+# deny a root-controlled transition, and remain denied after restoration.
+# The coprocess pipes provide deterministic event-driven handshakes:
+# no clocks, polling loops, or path inputs are sent to the native observer.
+coproc POLICY_MON {
+  sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-monitor-stdin
+}
+monitor_pid="$POLICY_MON_PID"
+read -r -t 10 monitor_line <&"${POLICY_MON[0]}" || {
+  printf '%s\n' 'E_POLICY_MONITOR_START_TIMEOUT' >&2
+  exit 1
+}
+[[ "$monitor_line" == 'MONITOR_READY' ]] || exit 1
+printf 'check\n' >&"${POLICY_MON[1]}"
+read -r -t 10 monitor_line <&"${POLICY_MON[0]}" || exit 1
+[[ "$monitor_line" == 'MONITOR_MATCH' ]] || exit 1
+
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v2" "$policy"
+printf 'check\n' >&"${POLICY_MON[1]}"
+read -r -t 10 monitor_line <&"${POLICY_MON[0]}" || exit 1
+[[ "$monitor_line" == 'MONITOR_DENIED' ]] || exit 1
+
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file" "$policy"
+printf 'check\n' >&"${POLICY_MON[1]}"
+read -r -t 10 monitor_line <&"${POLICY_MON[0]}" || exit 1
+[[ "$monitor_line" == 'MONITOR_DENIED' ]] || exit 1
+wait "$monitor_pid" || exit 1
+printf '%s\n' 'E_POLICY_MONITOR_STICKY_DENIAL'
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot
+
 # Adversarial policy-publish ordering matrix. These are deliberate
 # administrator simulations on an ephemeral test runner, NOT a publisher:
 # install(1) is not an atomic durable update or a service implementation.

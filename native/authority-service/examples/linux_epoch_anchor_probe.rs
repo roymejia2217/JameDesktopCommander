@@ -12,6 +12,37 @@ fn main() {
         eprintln!("E_ANCHOR_INVALID_PROBE_ARGUMENTS");
         std::process::exit(2);
     }
+    if action == "policy-monitor-stdin" {
+        use jdc_authority_service::linux_policy_epoch_monitor::PolicyEpochMonitor;
+        use std::io::{BufRead, Write};
+        // An event-driven, disposable CI process holds ONE monitor instance
+        // while an independently privileged administrator changes the state.
+        // This is a data-only proof: no filesystem operation is granted.
+        let mut monitor = PolicyEpochMonitor::from_current_os_attested().unwrap_or_else(|_| {
+            eprintln!("E_POLICY_MONITOR_INITIAL_DENIAL");
+            std::process::exit(1);
+        });
+        let stdin = std::io::stdin();
+        let mut incoming = stdin.lock();
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "MONITOR_READY").unwrap();
+        out.flush().unwrap();
+        for _ in 0..3 {
+            let mut line = String::new();
+            if incoming.read_line(&mut line).unwrap_or(0) == 0 || line != "check\n" {
+                eprintln!("E_POLICY_MONITOR_INVALID_HANDSHAKE");
+                std::process::exit(1);
+            }
+            let answer = if monitor.revalidate_current().is_ok() {
+                "MONITOR_MATCH"
+            } else {
+                "MONITOR_DENIED"
+            };
+            writeln!(out, "{answer}").unwrap();
+            out.flush().unwrap();
+        }
+        return;
+    }
     if action == "policy-snapshot-deny" {
         if observe_matching_admin_policy_snapshot().is_err() {
             println!("DENIED");

@@ -131,6 +131,26 @@ test('Linux observed-policy generation monitor must revoke permanently on any dr
   ]) assert.match(source, m);
 });
 
+test('Linux policy monitor is exercised in one real service process across admin update and restoration', () => {
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  const probe = fs.readFileSync(
+    path.join(repo, 'native/authority-service/examples/linux_epoch_anchor_probe.rs'), 'utf8',
+  );
+  for (const marker of [
+    /coproc POLICY_MON/,
+    /policy-monitor-stdin/,
+    /E_POLICY_MONITOR_STICKY_DENIAL/,
+    /read -r -t 10/,
+    /MONITOR_READY/,
+    /MONITOR_MATCH/,
+    /MONITOR_DENIED/,
+  ]) assert.match(script, marker);
+  assert.match(probe, /PolicyEpochMonitor::from_current_os_attested/);
+  assert.match(probe, /monitor.revalidate_current\(\)/);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

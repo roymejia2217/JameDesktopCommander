@@ -78,6 +78,137 @@ pub fn inspect_named_listener(
     validate_listener_shape(domain, kind, accepting, named, matches)
 }
 
+/// Verify that the fixed socket's *filesystem namespace* is controlled by a
+/// different, trusted principal and the socket node has exactly the declared
+/// systemd ownership/mode. A kernel name string is not a namespace proof.
+/// This does NOT independently authenticate LISTEN_PID/FDS as systemd.
+fn inspect_custodied_named_listener(
+    fd: BorrowedFd<'_>,
+    expected_path: &Path,
+    expected_socket_uid: libc::uid_t,
+    expected_socket_gid: libc::gid_t,
+    protected_dir_uid: libc::uid_t,
+) -> Result<(), IdentityDenied> {
+    use std::{
+        ffi::CString,
+        os::fd::{FromRawFd, OwnedFd},
+        path::Component,
+    };
+
+    inspect_named_listener(fd, expected_path)?;
+    let source = expected_path.as_os_str().as_bytes();
+    if !source.starts_with(b"/") || source.ends_with(b"/") || source.windows(2).any(|w| w == b"//")
+    {
+        return Err(IdentityDenied);
+    }
+    let mut pieces = Vec::new();
+    for component in expected_path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => {
+                let name = part.as_bytes();
+                if name.is_empty() || name.len() > 255 {
+                    return Err(IdentityDenied);
+                }
+                pieces.push(CString::new(name).map_err(|_| IdentityDenied)?);
+            }
+            _ => return Err(IdentityDenied),
+        }
+    }
+    if pieces.len() < 2 || pieces.len() > 64 || expected_socket_uid == 0 || expected_socket_gid == 0
+    {
+        return Err(IdentityDenied);
+    }
+    let raw = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(IdentityDenied);
+    }
+    let mut directory = unsafe { OwnedFd::from_raw_fd(raw) };
+    for (index, name) in pieces[..pieces.len() - 1].iter().enumerate() {
+        let mut current = MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(directory.as_raw_fd(), current.as_mut_ptr()) } != 0 {
+            return Err(IdentityDenied);
+        }
+        let current = unsafe { current.assume_init() };
+        if (current.st_mode & libc::S_IFMT) != libc::S_IFDIR
+            || current.st_mode & 0o022 != 0
+            || (current.st_uid != 0 && current.st_uid != protected_dir_uid)
+        {
+            return Err(IdentityDenied);
+        }
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(IdentityDenied);
+        }
+        let opened = unsafe { OwnedFd::from_raw_fd(next) };
+        let mut metadata = MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(opened.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+            return Err(IdentityDenied);
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        let final_parent = index + 1 == pieces.len() - 1;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || (metadata.st_uid != 0 && metadata.st_uid != protected_dir_uid)
+            || metadata.st_mode & 0o022 != 0
+            || (final_parent
+                && (metadata.st_uid != protected_dir_uid || metadata.st_mode & 0o7777 != 0o755))
+        {
+            return Err(IdentityDenied);
+        }
+        directory = opened;
+    }
+    let mut socket = MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            pieces.last().ok_or(IdentityDenied)?.as_ptr(),
+            socket.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(IdentityDenied);
+    }
+    let socket = unsafe { socket.assume_init() };
+    if socket.st_mode & libc::S_IFMT != libc::S_IFSOCK
+        || socket.st_uid != expected_socket_uid
+        || socket.st_gid != expected_socket_gid
+        || socket.st_mode & 0o7777 != 0o660
+        || socket.st_nlink != 1
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+/// Production-only acceptance: the entire socket namespace must be rooted
+/// under a root-owned 0755 parent, with declared service/client UID/GID.
+pub(crate) fn inspect_root_custodied_named_listener(
+    fd: BorrowedFd<'_>,
+    expected_path: &Path,
+    expected_socket_uid: libc::uid_t,
+    expected_socket_gid: libc::gid_t,
+) -> Result<(), IdentityDenied> {
+    inspect_custodied_named_listener(
+        fd,
+        expected_path,
+        expected_socket_uid,
+        expected_socket_gid,
+        0,
+    )
+}
+
 /// Examine systemd-compatible startup descriptors using the established
 /// `sd-notify` crate, then verify their kernel shape. This is an observation
 /// only: LISTEN_PID/FDS/FDNAMES can be forged by the launching process and
@@ -119,6 +250,62 @@ mod tests {
         assert_eq!(
             inspect_named_listener(listener.as_fd(), Path::new("/not-the-owned.sock")),
             Err(IdentityDenied)
+        );
+    }
+
+    #[test]
+    fn socket_file_and_ancestor_custody_is_stricter_than_kernel_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let fixture = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = fixture.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive control needs unprivileged Linux user");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert_eq!(inspect_named_listener(listener.as_fd(), &path), Ok(()));
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "genuine private endpoint must be admissible in test-owned fixture"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(inspect_named_listener(listener.as_fd(), &path), Ok(()));
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "socket that admits arbitrary users must deny"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "untrusted parent can replace the socket"
+        );
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid.wrapping_add(1),
+                uid
+            ),
+            Err(IdentityDenied),
+            "systemd SocketGroup cannot silently drift"
+        );
+        let saved = fixture.path().join("original.sock");
+        std::fs::rename(&path, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &path).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "nofollow must reject a symlink socket name"
         );
     }
 

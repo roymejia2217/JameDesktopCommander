@@ -48,6 +48,12 @@ pub(crate) struct PreparedMcpClient {
 }
 
 impl PreparedMcpClient {
+    /// Only the bootstrap-provisioned principal supplies the expected socket
+    /// group. No client-provided UID/GID is accepted by this accessor.
+    pub(crate) fn expected_gid(&self) -> u32 {
+        self.gid
+    }
+
     fn lookup(name: &CStr) -> Result<Self, IdentityDenied> {
         let mut pwd = MaybeUninit::<libc::passwd>::zeroed();
         let mut result: *mut libc::passwd = ptr::null_mut();

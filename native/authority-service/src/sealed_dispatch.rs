@@ -18,13 +18,6 @@ enum ReplayAdmission {
     Unavailable,
     // Production-compiled storage adapter. No production path may *construct*
     // a usable ledger until verified OS custody and publisher are implemented.
-    #[cfg_attr(
-        all(target_os = "linux", not(test)),
-        expect(
-            dead_code,
-            reason = "the sealed ledger constructor is unavailable until OS-pinned SQLite VFS is proven"
-        )
-    )]
     Durable(jdc_authority_store::replay_ledger::ReplayClaimLedger),
     #[cfg(test)]
     SyntheticTestOnly(HashSet<[u8; 16]>),

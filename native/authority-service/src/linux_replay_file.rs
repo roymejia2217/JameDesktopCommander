@@ -7,7 +7,67 @@ use std::{
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     os::unix::fs::FileExt,
+    sync::Mutex,
 };
+
+/// SQLite's rollback-journal POSIX lock protocol uses PENDING_BYTE at 1 GiB,
+/// RESERVED_BYTE after it, and 510 SHARED bytes. One nonblocking Linux OFD
+/// read lock over that *whole* region conflicts with a real SQLite writer's
+/// byte-range POSIX locks. OFD locks survive closes of unrelated descriptors.
+const SQLITE_LOCK_START: libc::off_t = 0x4000_0000;
+const SQLITE_LOCK_SPAN: libc::off_t = 512;
+
+/// File-description lock held throughout one exact byte-image acquisition.
+/// No fcntl F_SETLKW, sleeps, retries or process-wide POSIX lock ownership.
+struct SqliteSnapshotLock<'a> {
+    file: &'a File,
+    armed: bool,
+}
+
+impl SqliteSnapshotLock<'_> {
+    fn record(kind: i16) -> libc::flock {
+        libc::flock {
+            l_type: kind,
+            l_whence: libc::SEEK_SET as i16,
+            l_start: SQLITE_LOCK_START,
+            l_len: SQLITE_LOCK_SPAN,
+            l_pid: 0,
+        }
+    }
+
+    fn try_acquire(file: &File) -> Result<SqliteSnapshotLock<'_>, IdentityDenied> {
+        let mut lock = Self::record(libc::F_RDLCK as i16);
+        // SAFETY: live pinned O_RDWR file FD, properly initialized flock,
+        // nonblocking F_OFD_SETLK; no pointer escapes this call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &mut lock) } != 0 {
+            return Err(IdentityDenied);
+        }
+        Ok(SqliteSnapshotLock { file, armed: true })
+    }
+
+    fn release(&mut self) -> Result<(), IdentityDenied> {
+        if !self.armed {
+            return Err(IdentityDenied);
+        }
+        let mut unlock = Self::record(libc::F_UNLCK as i16);
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_OFD_SETLK, &mut unlock) } != 0 {
+            return Err(IdentityDenied);
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for SqliteSnapshotLock<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut unlock = Self::record(libc::F_UNLCK as i16);
+            // Best-effort error cleanup. Normal success checks release() first.
+            // The owned descriptor is closed by ObservedReplayFile on teardown.
+            unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_OFD_SETLK, &mut unlock) };
+        }
+    }
+}
 
 const NAME: &std::ffi::CStr = c"claims.sqlite3";
 const SIDE_NAMES: [&std::ffi::CStr; 3] = [
@@ -20,6 +80,9 @@ pub struct ObservedReplayFile {
     directory: OwnedFd,
     file: File,
     identity: (u64, u64),
+    // OFD locks are keyed by open-file-description; concurrent calls on this
+    // same FD must not unlock each other's snapshot. Try-lock DENY, not wait.
+    snapshot_gate: Mutex<()>,
 }
 
 impl ObservedReplayFile {
@@ -74,6 +137,8 @@ impl ObservedReplayFile {
     /// journal or attached VFS is opened. DATA ONLY, not replay freshness or
     /// a claim/write capability. This cannot attest a privileged rollback.
     pub fn read_verified_snapshot(&self, epoch: u64) -> Result<u32, IdentityDenied> {
+        let _local_snapshot = self.snapshot_gate.try_lock().map_err(|_| IdentityDenied)?;
+        let mut os_snapshot = SqliteSnapshotLock::try_acquire(&self.file)?;
         self.revalidate_name()?;
         let before = Self::metadata(&self.file)?;
         if !Self::valid_leaf(&before) {
@@ -111,6 +176,8 @@ impl ObservedReplayFile {
         {
             return Err(IdentityDenied);
         }
+        // An OFD unlock error also denies the observation, never a grant.
+        os_snapshot.release()?;
         Ok(count)
     }
 
@@ -181,6 +248,7 @@ impl ObservedReplayFile {
             directory,
             file,
             identity: (meta.st_dev, meta.st_ino),
+            snapshot_gate: Mutex::new(()),
         };
         observed.revalidate_name()?;
         let mut header = [0u8; 16];
@@ -263,6 +331,19 @@ mod tests {
             "a concurrent SQLite write reservation must DENY even when the file is unchanged"
         );
         writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(pinned.read_verified_snapshot(7), Ok(0));
+    }
+
+    #[test]
+    fn overlapping_reads_on_one_descriptor_deny_without_unlocking_each_other() {
+        let (_temp, root) = setup();
+        provision(&root);
+        let pinned = ObservedReplayFile::from_verified_directory(private(&root)).unwrap();
+        // An OFD lock is shared by all threads using one open description.
+        // Its local gate must not allow another read to release it early.
+        let in_flight = pinned.snapshot_gate.lock().unwrap();
+        assert_eq!(pinned.read_verified_snapshot(7), Err(IdentityDenied));
+        drop(in_flight);
         assert_eq!(pinned.read_verified_snapshot(7), Ok(0));
     }
 

@@ -123,6 +123,62 @@ mod tests {
     }
 
     #[test]
+    fn socket_file_and_ancestor_custody_is_stricter_than_kernel_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let fixture = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = fixture.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive control needs unprivileged Linux user");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert_eq!(inspect_named_listener(listener.as_fd(), &path), Ok(()));
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "genuine private endpoint must be admissible in test-owned fixture"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(inspect_named_listener(listener.as_fd(), &path), Ok(()));
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "socket that admits arbitrary users must deny"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "untrusted parent can replace the socket"
+        );
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid.wrapping_add(1),
+                uid
+            ),
+            Err(IdentityDenied),
+            "systemd SocketGroup cannot silently drift"
+        );
+        let saved = fixture.path().join("original.sock");
+        std::fs::rename(&path, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &path).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Err(IdentityDenied),
+            "nofollow must reject a symlink socket name"
+        );
+    }
+
+    #[test]
     fn kernel_rejects_connected_socket_and_datagram_descriptors() {
         let (_client, connected) = UnixStream::pair().unwrap();
         let dir = tempfile::tempdir().unwrap();

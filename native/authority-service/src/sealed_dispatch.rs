@@ -64,9 +64,54 @@ pub struct SealedDirectoryGrant {
     // provide a trusted durable claimer before operational dispatch is enabled.
     replay: ReplayAdmission,
     active: bool,
+    #[cfg(all(target_os = "linux", not(test)))]
+    epoch_monitor: Option<crate::linux_policy_epoch_monitor::PolicyEpochMonitor>,
+    #[cfg(all(target_os = "linux", not(test)))]
+    policy_digest: [u8; 32],
 }
 
 impl SealedDirectoryGrant {
+    /// Bind the OS-pinned root from a separately attested administrative policy.
+    /// This constructor cannot issue execution rights by itself: the replay
+    /// admission is deliberately Unavailable until a trusted durable store is
+    /// independently bound to the same epoch, policy and service identity.
+    pub(crate) fn from_issuer_policy(
+        policy: &crate::issuer_policy::IssuerPolicy,
+        root_ref: &str,
+    ) -> Result<Self, DispatchDenied> {
+        if policy.epoch() == 0 {
+            return Err(DispatchDenied);
+        }
+        // The normal Linux build must reobserve independently root-owned
+        // policy+witness; a self-supplied policy or epoch is insufficient.
+        #[cfg(all(target_os = "linux", not(test)))]
+        let mut monitor = {
+            let mut observed =
+                crate::linux_policy_epoch_monitor::PolicyEpochMonitor::from_current_os_attested()
+                    .map_err(|_| DispatchDenied)?;
+            observed
+                .revalidate_issued_policy(policy.epoch(), policy.digest())
+                .map_err(|_| DispatchDenied)?;
+            observed
+        };
+        let rooted = policy.open_root(root_ref).map_err(|_| DispatchDenied)?;
+        #[cfg(all(target_os = "linux", not(test)))]
+        monitor
+            .revalidate_issued_policy(policy.epoch(), policy.digest())
+            .map_err(|_| DispatchDenied)?;
+        Ok(Self {
+            root_ref: root_ref.to_owned(),
+            expected_epoch: policy.epoch(),
+            rooted,
+            replay: ReplayAdmission::Unavailable,
+            active: true,
+            #[cfg(all(target_os = "linux", not(test)))]
+            epoch_monitor: Some(monitor),
+            #[cfg(all(target_os = "linux", not(test)))]
+            policy_digest: *policy.digest(),
+        })
+    }
+
     /// The only Linux production-compiled dispatch entry takes a frame made
     /// by a checked kernel peer, never raw untrusted caller bytes.
     /// This remains non-authorizing without a protected root/epoch bootstrap.
@@ -89,6 +134,19 @@ impl SealedDirectoryGrant {
     fn execute_c4d_impl(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
         if !self.active || self.expected_epoch == 0 {
             return Err(DispatchDenied);
+        }
+        // Must precede request-ID consumption and *all* filesystem mutation.
+        // In normal Linux builds an unprovisioned monitor ALWAYS denies.
+        #[cfg(all(target_os = "linux", not(test)))]
+        {
+            let witnessed = self.epoch_monitor.as_mut().ok_or(DispatchDenied)?;
+            if witnessed
+                .revalidate_issued_policy(self.expected_epoch, &self.policy_digest)
+                .is_err()
+            {
+                self.active = false; // sticky for this sealed capability
+                return Err(DispatchDenied);
+            }
         }
         let request = decode_create_directory_frame(wire).map_err(|_| DispatchDenied)?;
         if request.root_ref() != self.root_ref
@@ -134,6 +192,40 @@ mod tests {
             active: true,
         }
     }
+    #[test]
+    fn os_root_issued_from_admin_policy_cannot_dispatch_without_durable_replay() {
+        let f = tempfile::tempdir().unwrap();
+        let allowed = f.path().join("allowed");
+        let outside = f.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("secret");
+        std::fs::write(&sentinel, b"NEVER_CHANGED").unwrap();
+        let json_path = serde_json::to_string(allowed.to_str().unwrap()).unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{json_path}}}]}}"#
+        );
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            policy_bytes.as_bytes(),
+            9,
+            [1; 32],
+        )
+        .unwrap();
+        let mut grant = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        assert_eq!(grant.expected_epoch, 9);
+        assert_eq!(
+            grant.execute_c4d(&wire(ROOT, 9, ID, "blocked")),
+            Err(DispatchDenied)
+        );
+        assert!(!allowed.join("blocked").exists());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"NEVER_CHANGED");
+        assert!(SealedDirectoryGrant::from_issuer_policy(
+            &policy,
+            "00000000000000000000000000000000"
+        )
+        .is_err());
+    }
+
     #[test]
     fn canonical_unicode_and_internal_spaces_execute_inside_pinned_root() {
         let f = tempfile::tempdir().unwrap();

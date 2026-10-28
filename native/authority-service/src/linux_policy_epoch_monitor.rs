@@ -69,6 +69,30 @@ impl PolicyEpochMonitor {
         }
     }
 
+    /// Bind one issued capability to exactly the observed, administrator
+    /// protected epoch AND policy digest. A changed generation poisons the
+    /// process-local monitor even when a supplied client epoch looks valid.
+    pub(crate) fn revalidate_issued_policy(
+        &mut self,
+        epoch: u64,
+        digest: &[u8; 32],
+    ) -> Result<(), IdentityDenied> {
+        self.revalidate_current()?;
+        self.assert_issued_identity(epoch, digest)
+    }
+
+    fn assert_issued_identity(
+        &mut self,
+        epoch: u64,
+        digest: &[u8; 32],
+    ) -> Result<(), IdentityDenied> {
+        if self.permanently_revoked || self.epoch != epoch || &self.digest != digest {
+            self.permanently_revoked = true;
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+
     /// An observation of revocation is permanent for this instance, even if
     /// a prior valid policy image and witness are restored later.
     pub fn is_revoked(&self) -> bool {
@@ -82,6 +106,24 @@ mod tests {
 
     const OLD: [u8; 32] = [0x11; 32];
     const NEW: [u8; 32] = [0x22; 32];
+
+    #[test]
+    fn issued_capability_must_match_exact_observed_epoch_and_digest() {
+        for (epoch, digest) in [(8, OLD), (7, NEW), (0, OLD)] {
+            let mut monitor = PolicyEpochMonitor::from_verified_parts(7, OLD).unwrap();
+            assert_eq!(monitor.observe_or_poison(Ok((7, OLD))), Ok(()));
+            assert_eq!(
+                monitor.assert_issued_identity(epoch, &digest),
+                Err(IdentityDenied)
+            );
+            assert!(monitor.is_revoked());
+            assert_eq!(monitor.assert_issued_identity(7, &OLD), Err(IdentityDenied));
+        }
+        let mut monitor = PolicyEpochMonitor::from_verified_parts(7, OLD).unwrap();
+        assert_eq!(monitor.observe_or_poison(Ok((7, OLD))), Ok(()));
+        assert_eq!(monitor.assert_issued_identity(7, &OLD), Ok(()));
+        assert!(!monitor.is_revoked());
+    }
 
     #[test]
     fn rejects_unauthenticated_or_uninitialized_initial_generation() {

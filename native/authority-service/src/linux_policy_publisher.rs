@@ -349,6 +349,98 @@ pub fn commit_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied>
     Ok(())
 }
 
+/// Root-only recovery for the precise state *before* either final rename:
+/// old policy and witness remain installed, while two complete staged
+/// files match a previously durable root-owned forward transition record.
+/// No generic intent reset, grant, path argument or rollback is provided.
+pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
+    use jdc_authority_store::policy_bytes::PolicyBytesStore;
+    let dir = open_admin_directory()?;
+    let intent = require_admin_intent(&dir)?;
+    let record = read_transition_intent(&dir, intent)?;
+    require_absent_sqlite_sidecars(&dir)?;
+
+    let (old_image, old_group) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (old_witness, witness_group) =
+        read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    let (next_image, next_group) =
+        read_protected_fixed(&dir, c".policy-next.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (next_witness, next_witness_group) =
+        read_protected_fixed(&dir, c".policy-next-anchor", 40, 40)?;
+    if old_group != witness_group
+        || old_group != next_group
+        || old_group != next_witness_group
+    {
+        return Err(IdentityDenied);
+    }
+
+    let old = PolicyBytesStore::read_verified_serialized(&old_image)
+        .map_err(|_| IdentityDenied)?;
+    let next = PolicyBytesStore::read_verified_serialized(&next_image)
+        .map_err(|_| IdentityDenied)?;
+    let (old_epoch, old_digest) =
+        crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
+    let (next_epoch, next_digest) =
+        crate::epoch_anchor_wire::parse_epoch_digest_wire(&next_witness)?;
+    if old.epoch() != record.old_epoch
+        || *old.digest() != record.old_digest
+        || old_epoch != record.old_epoch
+        || old_digest != record.old_digest
+        || next.epoch() != record.next_epoch
+        || *next.digest() != record.next_digest
+        || next_epoch != record.next_epoch
+        || next_digest != record.next_digest
+    {
+        return Err(IdentityDenied);
+    }
+
+    // Recheck the identity and content of every fixed/staged entry before
+    // switching names; a changed record or unexpected sidecar fails closed.
+    for (name, original, min, max) in [
+        (c"policy.sqlite3".as_ref(), old_image.as_slice(), 512, 4 * 1024 * 1024),
+        (c"policy-anchor".as_ref(), old_witness.as_slice(), 40, 40),
+        (c".policy-next.sqlite3".as_ref(), next_image.as_slice(), 512, 4 * 1024 * 1024),
+        (c".policy-next-anchor".as_ref(), next_witness.as_slice(), 40, 40),
+    ] {
+        let (again, group) = read_protected_fixed(&dir, name, min, max)?;
+        if again.as_slice() != original || group != old_group {
+            return Err(IdentityDenied);
+        }
+    }
+    if require_admin_intent(&dir)? != intent || read_transition_intent(&dir, intent)? != record {
+        return Err(IdentityDenied);
+    }
+    require_absent_sqlite_sidecars(&dir)?;
+
+    rename_fixed(&dir, c".policy-next.sqlite3", c"policy.sqlite3")?;
+    sync_directory(&dir)?;
+    rename_fixed(&dir, c".policy-next-anchor", c"policy-anchor")?;
+    sync_directory(&dir)?;
+    require_absent_sqlite_sidecars(&dir)?;
+    require_absent_name(&dir, c".policy-next.sqlite3")?;
+    require_absent_name(&dir, c".policy-next-anchor")?;
+    let (published, pgroup) =
+        read_protected_fixed(&dir, c"policy.sqlite3", 512, 4 * 1024 * 1024)?;
+    let (witness, wgroup) =
+        read_protected_fixed(&dir, c"policy-anchor", 40, 40)?;
+    if published != next_image
+        || witness != next_witness
+        || pgroup != old_group
+        || wgroup != old_group
+        || require_admin_intent(&dir)? != intent
+        || read_transition_intent(&dir, intent)? != record
+    {
+        return Err(IdentityDenied);
+    }
+
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), c".policy-publish-inflight".as_ptr(), 0) } != 0 {
+        return Err(IdentityDenied);
+    }
+    sync_directory(&dir)?;
+    Ok(())
+}
+
 /// Administrator-only recovery for exactly ONE provable interrupted state:
 /// the next SQLite image already occupies its final fixed name, the old
 /// witness is still installed, and the validated next witness is staged.

@@ -23,6 +23,11 @@ pub mod linux_policy_root;
 #[cfg(target_os = "linux")]
 pub mod linux_epoch_anchor;
 
+// Process-local sticky revocation of independently witnessed policy generations.
+// Data-only, no grant/issuer or IPC entry point.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_epoch_monitor;
+
 // C4d native transport framing only, not an authenticated listener or authority.
 pub mod frame_reader;
 

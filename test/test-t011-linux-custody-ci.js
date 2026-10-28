@@ -117,6 +117,20 @@ test('Linux OS-pinned policy inode must still occupy fixed name after the read',
   assert.match(implementation, /require_pinned_policy_name\(&self\.directory, &self\.file\)/);
 });
 
+test('Linux observed-policy generation monitor must revoke permanently on any drift', () => {
+  const source = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_epoch_monitor.rs'), 'utf8',
+  );
+  for (const m of [
+    /struct PolicyEpochMonitor/,
+    /fn from_current_os_attested\(/,
+    /fn revalidate_current\(/,
+    /fn observe_or_poison\(/,
+    /fn sticky_denial_prevents_reactivation_after_rollback\(/,
+    /fn changed_epoch_or_digest_revokes_the_observed_generation\(/,
+  ]) assert.match(source, m);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

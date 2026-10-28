@@ -22,7 +22,7 @@ enum GenerationAdmission {
     },
 }
 impl GenerationAdmission {
-    fn revalidate(&mut self, request_epoch: u64) -> Result<(), DispatchDenied> {
+    fn revalidate(&mut self, _request_epoch: u64) -> Result<(), DispatchDenied> {
         match self {
             Self::Unavailable => Err(DispatchDenied),
             #[cfg(test)]
@@ -32,9 +32,9 @@ impl GenerationAdmission {
                 revoked,
             } => {
                 if *revoked
-                    || request_epoch == 0
-                    || *expected_epoch != request_epoch
-                    || *observed_epoch != request_epoch
+                    || _request_epoch == 0
+                    || *expected_epoch != _request_epoch
+                    || *observed_epoch != _request_epoch
                 {
                     *revoked = true;
                     Err(DispatchDenied)

@@ -6,7 +6,11 @@ use crate::StoreDenied;
 use rusqlite::OpenFlags;
 use rusqlite::MAIN_DB;
 use rusqlite::{params, Connection, TransactionBehavior};
-#[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
+#[cfg(any(
+    target_os = "linux",
+    test,
+    all(feature = "offline-fixture", debug_assertions)
+))]
 use std::time::Duration;
 
 const MAX_CLAIMS_PER_EPOCH: i64 = 1024;
@@ -71,10 +75,17 @@ fn verify_schema(db: &Connection) -> Result<(), StoreDenied> {
     Ok(())
 }
 impl ReplayClaimLedger {
-    // Only usable inside this crate's isolated offline fixture. Future service
-    // construction requires an independently reviewed OS-descriptor-bound VFS.
-    #[cfg(any(test, all(feature = "offline-fixture", debug_assertions)))]
-    fn from_existing_connection(db: Connection, expected_epoch: u64) -> Result<Self, StoreDenied> {
+    // Crate-private: external callers cannot supply an arbitrary Connection.
+    // Production Linux construction requires OS-custodied SQLite acquisition.
+    #[cfg(any(
+        target_os = "linux",
+        test,
+        all(feature = "offline-fixture", debug_assertions)
+    ))]
+    pub(crate) fn from_existing_connection(
+        db: Connection,
+        expected_epoch: u64,
+    ) -> Result<Self, StoreDenied> {
         if expected_epoch == 0 {
             return Err(StoreDenied);
         }

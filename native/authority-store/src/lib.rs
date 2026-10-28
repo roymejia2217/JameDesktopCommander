@@ -5,10 +5,10 @@
 //! Path-based opening is for offline feasibility testing ONLY; any production
 //! broker MUST obtain and protect an OS-anchored storage handle and policy owner.
 
-pub mod policy_bytes;
-pub mod replay_ledger;
 #[cfg(target_os = "linux")]
 pub mod linux_replay_writer;
+pub mod policy_bytes;
+pub mod replay_ledger;
 // Test-only: single-database policy/replay atomicity feasibility, not issuer.
 #[cfg(test)]
 mod coherent_transaction_proof;

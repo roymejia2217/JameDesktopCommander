@@ -78,6 +78,137 @@ pub fn inspect_named_listener(
     validate_listener_shape(domain, kind, accepting, named, matches)
 }
 
+/// Verify that the fixed socket's *filesystem namespace* is controlled by a
+/// different, trusted principal and the socket node has exactly the declared
+/// systemd ownership/mode. A kernel name string is not a namespace proof.
+/// This does NOT independently authenticate LISTEN_PID/FDS as systemd.
+fn inspect_custodied_named_listener(
+    fd: BorrowedFd<'_>,
+    expected_path: &Path,
+    expected_socket_uid: libc::uid_t,
+    expected_socket_gid: libc::gid_t,
+    protected_dir_uid: libc::uid_t,
+) -> Result<(), IdentityDenied> {
+    use std::{
+        ffi::CString,
+        os::fd::{FromRawFd, OwnedFd},
+        path::Component,
+    };
+
+    inspect_named_listener(fd, expected_path)?;
+    let source = expected_path.as_os_str().as_bytes();
+    if !source.starts_with(b"/") || source.ends_with(b"/") || source.windows(2).any(|w| w == b"//")
+    {
+        return Err(IdentityDenied);
+    }
+    let mut pieces = Vec::new();
+    for component in expected_path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => {
+                let name = part.as_bytes();
+                if name.is_empty() || name.len() > 255 {
+                    return Err(IdentityDenied);
+                }
+                pieces.push(CString::new(name).map_err(|_| IdentityDenied)?);
+            }
+            _ => return Err(IdentityDenied),
+        }
+    }
+    if pieces.len() < 2 || pieces.len() > 64 || expected_socket_uid == 0 || expected_socket_gid == 0
+    {
+        return Err(IdentityDenied);
+    }
+    let raw = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(IdentityDenied);
+    }
+    let mut directory = unsafe { OwnedFd::from_raw_fd(raw) };
+    for (index, name) in pieces[..pieces.len() - 1].iter().enumerate() {
+        let mut current = MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(directory.as_raw_fd(), current.as_mut_ptr()) } != 0 {
+            return Err(IdentityDenied);
+        }
+        let current = unsafe { current.assume_init() };
+        if (current.st_mode & libc::S_IFMT) != libc::S_IFDIR
+            || current.st_mode & 0o022 != 0
+            || (current.st_uid != 0 && current.st_uid != protected_dir_uid)
+        {
+            return Err(IdentityDenied);
+        }
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(IdentityDenied);
+        }
+        let opened = unsafe { OwnedFd::from_raw_fd(next) };
+        let mut metadata = MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(opened.as_raw_fd(), metadata.as_mut_ptr()) } != 0 {
+            return Err(IdentityDenied);
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        let final_parent = index + 1 == pieces.len() - 1;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || (metadata.st_uid != 0 && metadata.st_uid != protected_dir_uid)
+            || metadata.st_mode & 0o022 != 0
+            || (final_parent
+                && (metadata.st_uid != protected_dir_uid || metadata.st_mode & 0o7777 != 0o755))
+        {
+            return Err(IdentityDenied);
+        }
+        directory = opened;
+    }
+    let mut socket = MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            pieces.last().ok_or(IdentityDenied)?.as_ptr(),
+            socket.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(IdentityDenied);
+    }
+    let socket = unsafe { socket.assume_init() };
+    if socket.st_mode & libc::S_IFMT != libc::S_IFSOCK
+        || socket.st_uid != expected_socket_uid
+        || socket.st_gid != expected_socket_gid
+        || socket.st_mode & 0o7777 != 0o660
+        || socket.st_nlink != 1
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+/// Production-only acceptance: the entire socket namespace must be rooted
+/// under a root-owned 0755 parent, with declared service/client UID/GID.
+pub(crate) fn inspect_root_custodied_named_listener(
+    fd: BorrowedFd<'_>,
+    expected_path: &Path,
+    expected_socket_uid: libc::uid_t,
+    expected_socket_gid: libc::gid_t,
+) -> Result<(), IdentityDenied> {
+    inspect_custodied_named_listener(
+        fd,
+        expected_path,
+        expected_socket_uid,
+        expected_socket_gid,
+        0,
+    )
+}
+
 /// Examine systemd-compatible startup descriptors using the established
 /// `sd-notify` crate, then verify their kernel shape. This is an observation
 /// only: LISTEN_PID/FDS/FDNAMES can be forged by the launching process and

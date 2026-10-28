@@ -7,6 +7,7 @@ use crate::{
     sealed_dispatch::SealedDirectoryGrant, unix_peer::PreparedMcpClient, IdentityDenied,
 };
 use jdc_authority_store::linux_replay_writer::LinuxReplayIssuerLedger;
+use std::os::fd::AsFd;
 
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
@@ -118,12 +119,25 @@ impl UnissuedIssuer {
     ) -> Result<(), IdentityDenied> {
         const ENDPOINT: &str = "/run/jdc-authority-ipc/authority.sock";
         let principal = self.expected_client;
+        let named = std::path::Path::new(ENDPOINT);
         crate::unix_accept::observe_one_named_prepared_with_checks(
             listener,
             principal,
-            std::path::Path::new(ENDPOINT),
+            named,
             deadline,
-            || self.revalidate(),
+            || {
+                self.revalidate()?;
+                // systemd's root-owned directory is not writable by the
+                // authority account or its MCP client. Verify its ancestry
+                // and the socket node's exact user/group/mode on BOTH sides
+                // of the potentially blocking read.
+                crate::unix_activation::inspect_root_custodied_named_listener(
+                    listener.as_fd(),
+                    named,
+                    unsafe { libc::geteuid() },
+                    principal.expected_gid(),
+                )
+            },
         )
     }
 

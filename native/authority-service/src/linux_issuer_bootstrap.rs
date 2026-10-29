@@ -310,6 +310,84 @@ mod tests {
     }
 
     #[test]
+    fn issuer_root_selection_claims_once_before_handle_bounded_read() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        const ROOT: &str = "0123456789abcdef0123456789abcdef";
+        let home = std::env::var_os("HOME").expect("native Linux fixture needs HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let allowed = temp.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let expected = b"ISSUER_SELECTED_ROOT";
+        std::fs::write(allowed.join("inside.bin"), expected).unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap(),
+        );
+        let policy =
+            IssuerPolicy::decode_exact_for_test(policy_bytes.as_bytes(), 7, [1; 32]).unwrap();
+        let mut roots = vec![SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap()];
+
+        let authenticated = |root: &str, epoch: u64, request_id: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"read-file","requestId":"{request_id}","expectedEpoch":"{epoch}","rootRef":"{root}","relativePath":"inside.bin"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&wire).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &receiver,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        };
+
+        let mut claims = Vec::new();
+        let result = execute_claimed_read_on_roots(
+            &mut roots,
+            7,
+            authenticated(ROOT, 7, "44444444-4444-4444-8444-444444444444"),
+            |id| {
+                claims.push(id);
+                Result::<(), crate::sealed_dispatch::DispatchDenied>::Ok(())
+            },
+        );
+        assert_eq!(result, Ok(expected.to_vec()));
+        assert_eq!(
+            claims.len(),
+            1,
+            "one authority-owned replay claim is required"
+        );
+
+        let mut unexpected_claim = false;
+        let wrong_root = execute_claimed_read_on_roots(
+            &mut roots,
+            7,
+            authenticated(
+                "fedcba9876543210fedcba9876543210",
+                7,
+                "55555555-5555-4555-8555-555555555555",
+            ),
+            |_| {
+                unexpected_claim = true;
+                Result::<(), crate::sealed_dispatch::DispatchDenied>::Ok(())
+            },
+        );
+        assert_eq!(wrong_root, Err(crate::sealed_dispatch::DispatchDenied));
+        assert!(
+            !unexpected_claim,
+            "unissued rootRef must be denied before spending replay identity"
+        );
+    }
+
+    #[test]
     fn ordinary_unprovisioned_process_cannot_bootstrap_privileged_issuer() {
         assert!(UnissuedIssuer::observe_os_attested().is_err());
     }

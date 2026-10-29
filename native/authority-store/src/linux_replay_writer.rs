@@ -547,6 +547,42 @@ mod tests {
     }
 
     #[test]
+    fn issuer_custody_denies_valid_sqlite_schema_extension_after_open() {
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        writer.claim_once(id()).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch("CREATE TABLE injected (value INTEGER)")
+            .unwrap();
+        let count: i64 = external
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "schema change must preserve the valid claim fixture"
+        );
+        drop(external);
+        assert!(
+            writer.validate_custody().is_err(),
+            "live issuer must verify the exact single-table SQLite schema"
+        );
+        let repair = Connection::open(&path).unwrap();
+        repair.execute_batch("DROP TABLE injected").unwrap();
+        drop(repair);
+        assert!(
+            writer.validate_custody().is_err(),
+            "schema repair cannot revive issuer"
+        );
+        assert!(
+            writer.claim_once(id()).is_err(),
+            "revoked writer cannot claim again"
+        );
+    }
+
+    #[test]
     fn revocation_permanently_disables_the_writer_without_a_claim() {
         let (_temp, dir) = fixture();
         let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();

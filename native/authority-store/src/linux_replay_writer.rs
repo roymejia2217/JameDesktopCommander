@@ -12,7 +12,7 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::{ffi::OsStrExt, fs::FileExt},
     },
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 const STATE_DIR: &str = "/var/lib/jdc-authority";
@@ -30,6 +30,10 @@ const DB_MAX: libc::off_t = 16 * 1024 * 1024;
 pub struct LinuxReplayIssuerLedger {
     ledger: ReplayClaimLedger,
     directory: OwnedFd,
+    // Only the private constructor chooses this path: fixed trusted state in
+    // production, a preverified protected test root in native acceptance.
+    state_path: PathBuf,
+    production: bool,
     file: File,
     identity: (u64, u64),
     permanently_revoked: bool,
@@ -215,6 +219,8 @@ impl LinuxReplayIssuerLedger {
         let mut opened = Self {
             ledger,
             directory,
+            state_path: state.to_path_buf(),
+            production,
             file,
             identity: (st.st_dev, st.st_ino),
             permanently_revoked: false,
@@ -224,6 +230,17 @@ impl LinuxReplayIssuerLedger {
     }
 
     fn revalidate(&self) -> Result<(), StoreDenied> {
+        // Checking only claims.sqlite3 inside the retained directory does NOT
+        // prove that directory still occupies the administrator-designated
+        // state path. Re-traverse every ancestor using the original custody
+        // policy, then compare kernel directory identities. Never follow a
+        // symlink, accept a client path, or fall back to pathname SQLite I/O.
+        let current = open_checked_directory(&self.state_path, self.production)?;
+        let retained = metadata(&self.directory)?;
+        let named = metadata(&current)?;
+        if (retained.st_dev, retained.st_ino) != (named.st_dev, named.st_ino) {
+            return Err(StoreDenied);
+        }
         sidecars_absent(&self.directory)?;
         let held = metadata(&self.file)?;
         if !valid_file(&held) || (held.st_dev, held.st_ino) != self.identity {
@@ -383,6 +400,58 @@ mod tests {
         );
         holder.execute_batch("ROLLBACK").unwrap();
         assert!(LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).is_ok());
+    }
+
+    #[test]
+    fn live_writer_must_revoke_on_entire_protected_state_directory_replacement() {
+        use std::os::unix::fs::MetadataExt;
+        let (_temp, state) = fixture();
+        let original = state.with_file_name("state-parked");
+        let substitute_parked = state.with_file_name("state-substitute");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&state, 7).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let pinned = std::fs::metadata(&state).unwrap();
+        std::fs::rename(&state, &original).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::copy(
+            original.join("claims.sqlite3"),
+            state.join("claims.sqlite3"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            state.join("claims.sqlite3"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let replacement = std::fs::metadata(&state).unwrap();
+        assert_ne!(
+            (pinned.dev(), pinned.ino()),
+            (replacement.dev(), replacement.ino()),
+            "real namespace substitution must select a distinct directory inode"
+        );
+        assert!(
+            LinuxReplayIssuerLedger::open_protected_fixture(&state, 7).is_ok(),
+            "replacement is itself a valid protected SQLite state directory"
+        );
+        assert!(
+            writer.validate_custody().is_err(),
+            "a valid retained SQLite file must not survive removal of its parent from the fixed state path"
+        );
+        std::fs::rename(&state, &substitute_parked).unwrap();
+        std::fs::rename(&original, &state).unwrap();
+        assert!(
+            writer.validate_custody().is_err(),
+            "repair of the administrative name must not revive the old writer"
+        );
+        assert!(writer.claim_once(id()).is_err());
+        assert_eq!(
+            LinuxReplayIssuerLedger::open_protected_fixture(&state, 7)
+                .unwrap()
+                .validate_custody(),
+            Ok(()),
+            "a separately verified new session may bind restored state"
+        );
     }
 
     #[test]

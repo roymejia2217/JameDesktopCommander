@@ -28,7 +28,14 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.doesNotMatch(acceptance, /sudo -n -u jdc-mcp-client -- node(?:\s|$)/m);
   assert.match(acceptance, /encodeAuthorityRequestFrame/);
   assert.match(acceptance, /decodeAuthorityReadReplyFrame/);
-  assert.match(acceptance, /dist\/security\/authority-frame-contract\.js/);
+  assert.match(acceptance, /contract_dir='\/usr\/libexec\/jdc\/read-e2e-contract'/);
+  assert.match(acceptance, /authority-frame-contract\.js/);
+  assert.match(acceptance, /authority-operation-contract\.js/);
+  assert.match(acceptance, /install -d -o root -g root -m 0755 -- "\$contract_dir"/);
+  assert.match(acceptance, /install -o root -g root -m 0644 -- "\$contract_source" "\$installed_contract"/);
+  assert.match(acceptance, /cmp -s -- "\$contract_source" "\$installed_contract"/);
+  assert.match(acceptance, /sudo -n -u jdc-mcp-client -- test -r "\$installed_contract"/);
+  assert.doesNotMatch(acceptance, /contract="\$\(realpath -e -- dist\/security\/authority-frame-contract\.js\)"/);
   assert.match(acceptance, /"kind":"read-file"/);
   assert.match(acceptance, /SELECT hex\(epoch\), hex\(request\) FROM replay_claims/);
   assert.match(acceptance, /jdc-authority\.service\.d\/read-e2e\.conf/);

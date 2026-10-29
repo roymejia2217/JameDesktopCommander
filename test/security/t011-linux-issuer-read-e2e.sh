@@ -29,8 +29,10 @@ fi
 
 fixture='native/authority-store/target/debug/examples/issuer_read_fixture'
 probe='native/authority-service/target/debug/examples/linux_issuer_read_probe'
-contract="$(realpath -e -- dist/security/authority-frame-contract.js)"
-[[ -x "$fixture" && -x "$probe" && -r "$contract" ]] || {
+contract_source="$(realpath -e -- dist/security/authority-frame-contract.js)"
+operation_contract_source="$(realpath -e -- dist/security/authority-operation-contract.js)"
+[[ -x "$fixture" && -x "$probe" &&
+   -r "$contract_source" && -r "$operation_contract_source" ]] || {
   printf '%s\n' 'E_ISSUER_READ_E2E_BINARIES_MISSING' >&2
   exit 1
 }
@@ -51,6 +53,9 @@ socket_unit='/run/systemd/system/jdc-authority.socket'
 dropin_dir='/run/systemd/system/jdc-authority.service.d'
 dropin='/run/systemd/system/jdc-authority.service.d/read-e2e.conf'
 installed_probe='/usr/libexec/jdc/jdc-authority-read-e2e'
+contract_dir='/usr/libexec/jdc/read-e2e-contract'
+installed_contract="$contract_dir/authority-frame-contract.js"
+installed_operation_contract="$contract_dir/authority-operation-contract.js"
 service_source="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"
 socket_source="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.socket)"
 
@@ -59,6 +64,7 @@ if [[ -e "$admin_dir" || -L "$admin_dir" ||
       -e "$socket_unit" || -L "$socket_unit" ||
       -e "$dropin_dir" || -L "$dropin_dir" ||
       -e "$installed_probe" || -L "$installed_probe" ||
+      -e "$contract_dir" || -L "$contract_dir" ||
       -e "$socket_dir" || -L "$socket_dir" ]]; then
   printf '%s\n' 'E_ISSUER_READ_E2E_PREEXISTING_STATE' >&2
   exit 1
@@ -85,7 +91,7 @@ cleanup() {
   trap - EXIT
   sudo -n systemctl stop jdc-authority.socket jdc-authority.service >/dev/null 2>&1 || :
   sudo -n systemctl reset-failed jdc-authority.service >/dev/null 2>&1 || :
-  sudo -n rm -rf -- "$dropin_dir" || code=1
+  sudo -n rm -rf -- "$dropin_dir" "$contract_dir" || code=1
   sudo -n rm -f -- "$service_unit" "$socket_unit" "$installed_probe" || code=1
   sudo -n systemctl daemon-reload || code=1
   sudo -n rm -rf -- "$admin_dir" "$read_root" || code=1
@@ -117,6 +123,17 @@ sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$replay_source" "$
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/inside.bin"
 sudo -n install -D -o root -g root -m 0755 -- "$probe" "$installed_probe"
+sudo -n install -d -o root -g root -m 0755 -- "$contract_dir"
+sudo -n install -o root -g root -m 0644 -- "$contract_source" "$installed_contract"
+sudo -n install -o root -g root -m 0644 --   "$operation_contract_source" "$installed_operation_contract"
+sudo -n cmp -s -- "$contract_source" "$installed_contract"
+sudo -n cmp -s -- "$operation_contract_source" "$installed_operation_contract"
+sudo -n -u jdc-mcp-client -- test -r "$installed_contract"
+sudo -n -u jdc-mcp-client -- test -r "$installed_operation_contract"
+[[ "$(stat -c '%U:%G:%a' "$contract_dir")" == 'root:root:755' &&
+   "$(stat -c '%U:%G:%a' "$installed_contract")" == 'root:root:644' &&
+   "$(stat -c '%U:%G:%a' "$installed_operation_contract")" == 'root:root:644' ]] || exit 1
+contract="$installed_contract"
 sudo -n install -o root -g root -m 0644 -- "$service_source" "$service_unit"
 sudo -n install -o root -g root -m 0644 -- "$socket_source" "$socket_unit"
 sudo -n install -d -o root -g root -m 0755 -- "$dropin_dir"

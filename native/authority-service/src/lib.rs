@@ -67,6 +67,9 @@ pub mod unix_accept;
 pub mod unix_activation;
 
 #[cfg(windows)]
+mod windows_acl_aces;
+
+#[cfg(windows)]
 pub mod windows_token;
 
 // Read-only, non-authorizing Windows kernel handle/DACL observation.

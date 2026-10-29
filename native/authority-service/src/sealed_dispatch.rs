@@ -282,13 +282,6 @@ impl SealedDirectoryGrant {
     }
 
     #[cfg(target_os = "linux")]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "non-release read dispatch has no issuer or response transport"
-        )
-    )]
     fn execute_read_impl(&mut self, wire: &[u8]) -> Result<Vec<u8>, DispatchDenied> {
         self.ensure_live_generation()?;
         let request =

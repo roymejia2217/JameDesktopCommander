@@ -11,6 +11,13 @@ use std::os::fd::AsFd;
 
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
+/// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
+/// the one retained systemd listener and its pre/post IPC custody checks.
+///
+/// ```compile_fail
+/// use jdc_authority_service::linux_issuer_bootstrap::UnissuedIssuer;
+/// let _unauthorized_stream_admission = UnissuedIssuer::inspect_client_frame;
+/// ```
 pub struct UnissuedIssuer {
     roots: Vec<SealedDirectoryGrant>,
     replay_file: ObservedReplayFile,

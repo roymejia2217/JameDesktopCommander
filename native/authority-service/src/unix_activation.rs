@@ -483,6 +483,51 @@ mod tests {
     }
 
     #[test]
+    fn socket_group_mismatch_revokes_the_session_not_only_one_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let dir = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        let mut revoked = false;
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid.wrapping_add(1),
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "NSS SocketGroup mismatch must deny"
+        );
+        assert!(revoked, "security mismatch must latch");
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "a fresh observer can verify unchanged socket metadata"
+        );
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "the old session must remain denied even after identity reconciliation"
+        );
+    }
+
+    #[test]
     fn kernel_rejects_connected_socket_and_datagram_descriptors() {
         let (_client, connected) = UnixStream::pair().unwrap();
         let dir = tempfile::tempdir().unwrap();

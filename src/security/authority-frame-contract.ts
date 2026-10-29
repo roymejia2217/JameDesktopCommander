@@ -7,14 +7,21 @@ import { TextDecoder } from 'node:util';
 import {
   AuthorityContractError,
   parseCreateDirectoryRequest,
+  parseReadFileRequest,
   parseOperationResult,
   type AuthorityOperationResult,
-  type CreateDirectoryAuthorityRequest,
+  type AuthorityRequest,
 } from './authority-operation-contract.js';
 
 export const MAX_AUTHORITY_FRAME_PAYLOAD_BYTES = 8192;
+export const MAX_AUTHORITY_READ_PAYLOAD_BYTES = 1024 * 1024;
 const LENGTH_BYTES = 4;
+const READ_REPLY_HEADER_BYTES = 6;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+export type AuthorityReadReply =
+  | Readonly<{ version: 1; status: 'ok'; bytes: Buffer }>
+  | Readonly<{ version: 1; status: 'denied' }>;
 
 function deny(): never {
   throw new AuthorityContractError();
@@ -54,7 +61,15 @@ function buildFrame(payload: string): Buffer {
   return frame;
 }
 
-function requestJSON(req: Readonly<CreateDirectoryAuthorityRequest>): string {
+function parseAuthorityRequest(input: unknown): Readonly<AuthorityRequest> {
+  try {
+    return parseCreateDirectoryRequest(input);
+  } catch {
+    return parseReadFileRequest(input);
+  }
+}
+
+function requestJSON(req: Readonly<AuthorityRequest>): string {
   assertWellFormedValues(req);
   return JSON.stringify({
     version: req.version,
@@ -81,15 +96,14 @@ function resultJSON(reply: AuthorityOperationResult): string {
 }
 /** Encode only validated data, in a single deterministic property order. */
 export function encodeAuthorityRequestFrame(input: unknown): Buffer {
-  const req = parseCreateDirectoryRequest(input);
+  const req = parseAuthorityRequest(input);
   return buildFrame(requestJSON(req));
 }
 
-export function decodeAuthorityRequestFrame(frame: unknown):
-    Readonly<CreateDirectoryAuthorityRequest> {
+export function decodeAuthorityRequestFrame(frame: unknown): Readonly<AuthorityRequest> {
   try {
     const canonical = payloadText(frame);
-    const req = parseCreateDirectoryRequest(JSON.parse(canonical) as unknown);
+    const req = parseAuthorityRequest(JSON.parse(canonical) as unknown);
     if (requestJSON(req) !== canonical) deny();
     return req;
   } catch {
@@ -113,6 +127,34 @@ export function decodeAuthorityResultFrame(
     const reply = parseOperationResult(JSON.parse(canonical) as unknown, requestId, expectedEpoch);
     if (resultJSON(reply) !== canonical) deny();
     return reply;
+  } catch {
+    return deny();
+  }
+}
+
+/** Decode the native one-request-per-connection read response.
+ * Status 1 is a generic denial and MUST carry zero payload bytes. */
+export function decodeAuthorityReadReplyFrame(frame: unknown): AuthorityReadReply {
+  try {
+    if (!Buffer.isBuffer(frame) ||
+        frame.byteLength < READ_REPLY_HEADER_BYTES ||
+        frame.byteLength > READ_REPLY_HEADER_BYTES + MAX_AUTHORITY_READ_PAYLOAD_BYTES) deny();
+    const bytes = Buffer.from(frame);
+    if (bytes[0] !== 1) deny();
+    const status = bytes[1];
+    const length = bytes.readUInt32BE(2);
+    if (length > MAX_AUTHORITY_READ_PAYLOAD_BYTES ||
+        length !== bytes.length - READ_REPLY_HEADER_BYTES) deny();
+    if (status === 1) {
+      if (length !== 0) deny();
+      return Object.freeze({ version: 1, status: 'denied' });
+    }
+    if (status !== 0) deny();
+    return Object.freeze({
+      version: 1,
+      status: 'ok',
+      bytes: Buffer.from(bytes.subarray(READ_REPLY_HEADER_BYTES)),
+    });
   } catch {
     return deny();
   }

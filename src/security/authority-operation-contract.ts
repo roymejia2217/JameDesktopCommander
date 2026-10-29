@@ -25,6 +25,15 @@ export interface CreateDirectoryAuthorityRequest {
   readonly rootRef: string;
   readonly relativePath: string;
 }
+export interface ReadFileAuthorityRequest {
+  readonly version: 1;
+  readonly kind: 'read-file';
+  readonly requestId: string;
+  readonly expectedEpoch: string;
+  readonly rootRef: string;
+  readonly relativePath: string;
+}
+export type AuthorityRequest = CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest;
 export type AuthorityOperationResult =
   | Readonly<{
     version: 1;
@@ -94,20 +103,32 @@ function pathIsSafe(value: unknown): value is string {
     Buffer.byteLength(part, 'utf8') <= 255);
 }
 
-/** Validate data shape only; the protected authority must authenticate caller
- * identity and perform the operation on pinned OS handles itself. */
-export function parseCreateDirectoryRequest(input: unknown): Readonly<CreateDirectoryAuthorityRequest> {
+function parsePathRequest(
+  input: unknown,
+  kind: 'create-directory' | 'read-file',
+): Readonly<CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest> {
   try {
     const obj = record(input, ['version', 'kind', 'requestId', 'expectedEpoch',
       'rootRef', 'relativePath']);
-    if (obj.version !== 1 || obj.kind !== 'create-directory' ||
+    if (obj.version !== 1 || obj.kind !== kind ||
         !requestId(obj.requestId) || !canonicalEpoch(obj.expectedEpoch) ||
         typeof obj.rootRef !== 'string' || !rootReferencePattern.test(obj.rootRef) ||
         !pathIsSafe(obj.relativePath)) throw new AuthorityContractError();
-    return Object.freeze({ ...obj }) as unknown as Readonly<CreateDirectoryAuthorityRequest>;
+    return Object.freeze({ ...obj }) as unknown as
+      Readonly<CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest>;
   } catch {
     throw new AuthorityContractError();
   }
+}
+
+/** Validate data shape only; the protected authority must authenticate caller
+ * identity and perform the operation on pinned OS handles itself. */
+export function parseCreateDirectoryRequest(input: unknown): Readonly<CreateDirectoryAuthorityRequest> {
+  return parsePathRequest(input, 'create-directory') as Readonly<CreateDirectoryAuthorityRequest>;
+}
+
+export function parseReadFileRequest(input: unknown): Readonly<ReadFileAuthorityRequest> {
+  return parsePathRequest(input, 'read-file') as Readonly<ReadFileAuthorityRequest>;
 }
 /** A committed result is notification of completed broker-side I/O, never
  * permission for the untrusted Node process to perform subsequent I/O. */

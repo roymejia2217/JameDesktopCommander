@@ -1,10 +1,16 @@
-//! OS-attested, NON-ISSUING bootstrap: NO operational grant exists.
+//! OS-attested, non-transferable issuer bootstrap.
 //! Policy, native handles, pinned SQLite reader and standard SQLite unix-VFS
-//! writer are bound independently. Durable claims cannot authorize execution
-//! until authenticated IPC, independent antirollback and grant issuance pass.
+//! writer are bound independently. One non-release read path now executes
+//! entirely inside this issuer after authenticated IPC and a durable claim;
+//! no handle or reusable grant escapes. The installed binary remains deny-only,
+//! and independent restart antirollback plus namespace/object races remain P0.
 use crate::{
-    issuer_policy::IssuerPolicy, linux_replay_file::ObservedReplayFile,
-    sealed_dispatch::SealedDirectoryGrant, unix_peer::PreparedMcpClient, IdentityDenied,
+    issuer_policy::IssuerPolicy,
+    linux_replay_file::ObservedReplayFile,
+    sealed_dispatch::{DispatchDenied, SealedDirectoryGrant},
+    unix_peer::PreparedMcpClient,
+    unix_session::AuthenticatedFrame,
+    IdentityDenied,
 };
 use jdc_authority_store::linux_replay_writer::LinuxReplayIssuerLedger;
 use std::os::fd::AsFd;
@@ -45,10 +51,29 @@ fn require_consistent_replay_pair(
     Ok(())
 }
 
+fn execute_claimed_read_on_roots(
+    roots: &mut [SealedDirectoryGrant],
+    policy_epoch: u64,
+    frame: AuthenticatedFrame,
+    claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+) -> Result<Vec<u8>, DispatchDenied> {
+    let request = crate::canonical_request::decode_read_file_frame(frame.wire())
+        .map_err(|_| DispatchDenied)?;
+    if request.expected_epoch() != policy_epoch {
+        return Err(DispatchDenied);
+    }
+    let selected = roots
+        .iter_mut()
+        .find(|root| root.matches_bound_identity(request.root_ref(), request.expected_epoch()))
+        .ok_or(DispatchDenied)?;
+    selected.execute_authenticated_read_with_external_claim(frame, claim)
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
-/// observation. Nothing exposes those handles or approves MCP operations.
-/// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
-/// the one retained systemd listener and its pre/post IPC custody checks.
+/// observation. Handles and replay authority never escape this object. Its
+/// non-release read dispatcher accepts only the retained systemd listener and
+/// bootstrap-prepared principal; a consumer must NOT admit an arbitrary
+/// caller-supplied UnixStream or caller-selected root.
 ///
 /// ```compile_fail
 /// use jdc_authority_service::linux_issuer_bootstrap::UnissuedIssuer;
@@ -181,6 +206,47 @@ impl UnissuedIssuer {
         }
         Ok(())
     }
+
+    fn execute_claimed_read(
+        &mut self,
+        frame: AuthenticatedFrame,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        if self.revoked {
+            return Err(DispatchDenied);
+        }
+        let epoch = self.policy_epoch;
+        let (roots, replay_writer) = (&mut self.roots, &mut self.replay_writer);
+        execute_claimed_read_on_roots(roots, epoch, frame, |request_id| {
+            replay_writer
+                .claim_once(request_id)
+                .map_err(|_| DispatchDenied)
+        })
+    }
+
+    /// Non-release integration boundary. It only uses the listener retained
+    /// from systemd activation and the fixed bootstrap-prepared MCP principal;
+    /// no caller can inject a root handle, replay store, UID/GID or pathname.
+    /// The installed binary remains deny-only and does not call this method.
+    pub fn dispatch_one_inherited_read_reply(
+        &mut self,
+        deadline: std::time::Duration,
+    ) -> Result<(), DispatchDenied> {
+        let listener = self
+            .inherited_listener
+            .try_clone()
+            .map_err(|_| DispatchDenied)?;
+        let principal = self.expected_client;
+        crate::unix_accept::dispatch_one_named_prepared_read_reply(
+            &listener,
+            self,
+            principal,
+            deadline,
+            |issuer| issuer.revalidate().map_err(|_| DispatchDenied),
+            |issuer, frame| issuer.execute_claimed_read(frame),
+            |issuer| issuer.revoke(),
+        )
+    }
+
     /// One genuine named AF_UNIX listener, with a fixed NSS client identity
     /// and a second protected-policy observation after bounded frame receipt.
     /// This does not establish systemd's provenance for the listener, nor
@@ -384,6 +450,22 @@ mod tests {
         assert!(
             !unexpected_claim,
             "unissued rootRef must be denied before spending replay identity"
+        );
+
+        let mut stale_claim = false;
+        let stale_epoch = execute_claimed_read_on_roots(
+            &mut roots,
+            7,
+            authenticated(ROOT, 8, "66666666-6666-4666-8666-666666666666"),
+            |_| {
+                stale_claim = true;
+                Result::<(), crate::sealed_dispatch::DispatchDenied>::Ok(())
+            },
+        );
+        assert_eq!(stale_epoch, Err(crate::sealed_dispatch::DispatchDenied));
+        assert!(
+            !stale_claim,
+            "stale expectedEpoch must be denied before spending replay identity"
         );
     }
 

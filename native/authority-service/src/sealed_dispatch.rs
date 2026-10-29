@@ -283,10 +283,15 @@ impl SealedDirectoryGrant {
         root_ref: &str,
         request_epoch: u64,
     ) -> Result<(), DispatchDenied> {
-        if root_ref != self.root_ref || request_epoch != self.expected_epoch {
+        if !self.matches_bound_identity(root_ref, request_epoch) {
             return Err(DispatchDenied);
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn matches_bound_identity(&self, root_ref: &str, request_epoch: u64) -> bool {
+        self.active && root_ref == self.root_ref && request_epoch == self.expected_epoch
     }
 
     /// Validate the request, spend its replay identity, then perform one

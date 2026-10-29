@@ -22,6 +22,10 @@ pub(crate) struct AuthenticatedFrame {
 }
 
 impl AuthenticatedFrame {
+    pub(crate) fn wire(&self) -> &[u8] {
+        &self.wire
+    }
+
     pub(crate) fn into_wire(self) -> Vec<u8> {
         self.wire
     }

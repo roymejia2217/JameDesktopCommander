@@ -38,11 +38,13 @@ source_file_v3="$(mktemp /tmp/jdc-policy-v3.XXXXXXXX)"
 source_anchor_v3="$(mktemp /tmp/jdc-policy-witness-v3.XXXXXXXX)"
 source_file_v4="$(mktemp /tmp/jdc-policy-v4.XXXXXXXX)"
 source_anchor_v4="$(mktemp /tmp/jdc-policy-witness-v4.XXXXXXXX)"
+source_file_v5="$(mktemp /tmp/jdc-policy-v5.XXXXXXXX)"
+source_anchor_v5="$(mktemp /tmp/jdc-policy-witness-v5.XXXXXXXX)"
 cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" "$source_file_v5" "$source_anchor_v5" || code=1
   exit "$code"
 }
 trap cleanup EXIT
@@ -55,6 +57,8 @@ trap cleanup EXIT
 "$fixture" write-policy-anchor-v3 "$source_anchor_v3"
 "$fixture" init-policy-bytes-v4 "$source_file_v4"
 "$fixture" write-policy-anchor-v4 "$source_anchor_v4"
+"$fixture" init-policy-bytes-v5 "$source_file_v5"
+"$fixture" write-policy-anchor-v5 "$source_anchor_v5"
 [[ "$(wc -c < "$source_anchor")" -eq 40 && "$(wc -c < "$mismatch_anchor")" -eq 40 && "$(wc -c < "$source_anchor_v2")" -eq 40 ]] || exit 1
 [[ "$(stat -c '%s' -- "$source_file")" -ge 512 ]] || exit 1
 sudo -n install -d -o root -g root -m 0755 -- "$directory"
@@ -325,4 +329,44 @@ printf '%s\n' 'E_RECOVER_COMPLETED_EMPTY_INTENT_DENIED'
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
 sudo -n rm -- "$publish_intent"
 verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v4
+# Crash before the FIRST final rename: old names remain coherent,
+# and both staged names must match the independently persisted record.
+# Merely creating a marker and two coherent files cannot authorize recovery.
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v5" "${directory}/.policy-next.sqlite3"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v5" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-pre 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_PRE_EMPTY_INTENT_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_PRE_EMPTY_INTENT_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+
+# Test-only independently privileged cleanup after the adversarial fixture.
+sudo -n rm -- "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor"
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v4
+verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+verdict PUBLISH_PREPARED sudo -n -- "$publisher" prepare-v5 "$source_file_v5"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_file_v5" "${directory}/.policy-next.sqlite3"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v4" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-pre 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_PRE_WRONG_STAGE_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_PRE_WRONG_STAGE_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${directory}/.policy-next-anchor"
+sudo -n ln -s -- "$source_anchor_v5" "${directory}/.policy-next-anchor"
+if sudo -n -- "$publisher" recover-pre 2>/dev/null; then
+  printf '%s\n' 'E_RECOVER_PRE_SYMLINK_STAGE_ACCEPTED' >&2
+  exit 1
+fi
+printf '%s\n' 'E_RECOVER_PRE_SYMLINK_STAGE_DENIED'
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+sudo -n rm -- "${directory}/.policy-next-anchor"
+sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v5" "${directory}/.policy-next-anchor"
+verdict PUBLISH_PRE_RENAME_RECOVERED sudo -n -- "$publisher" recover-pre
+[[ ! -e "$publish_intent" && ! -e "${directory}/.policy-next.sqlite3" && ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-v5
+printf '%s\n' 'E_RECOVER_PRE_RENAME_TO_V5_SUCCESS'
 printf '%s\n' 'LINUX_ADMIN_POLICY_FILE_CUSTODY_PASS'

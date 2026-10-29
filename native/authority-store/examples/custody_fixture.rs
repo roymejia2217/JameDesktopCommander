@@ -52,8 +52,11 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
         "write-policy-anchor"
         | "write-policy-anchor-v2"
         | "write-policy-anchor-v3"
-        | "write-policy-anchor-v4" => {
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v4") {
+        | "write-policy-anchor-v4"
+        | "write-policy-anchor-v5" => {
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v5") {
+                (5, b"approved-policy-fixture-v5")
+            } else if command.ends_with("-v4") {
                 (4, b"approved-policy-fixture-v4")
             } else if command.ends_with("-v3") {
                 (3, b"approved-policy-fixture-v3")
@@ -72,9 +75,12 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
         "init-policy-bytes"
         | "init-policy-bytes-v2"
         | "init-policy-bytes-v3"
-        | "init-policy-bytes-v4" => {
+        | "init-policy-bytes-v4"
+        | "init-policy-bytes-v5" => {
             use jdc_authority_store::policy_bytes::PolicyBytesStore;
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v4") {
+            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v5") {
+                (5, b"approved-policy-fixture-v5")
+            } else if command.ends_with("-v4") {
                 (4, b"approved-policy-fixture-v4")
             } else if command.ends_with("-v3") {
                 (3, b"approved-policy-fixture-v3")
@@ -153,6 +159,25 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn independent_epoch_five_fixture_is_forward_and_digest_bound() {
+        let d = tempdir().unwrap();
+        let image = d.path().join("v5.sqlite3");
+        let witness = d.path().join("witness-v5");
+        execute("init-policy-bytes-v5", &image).unwrap();
+        execute("write-policy-anchor-v5", &witness).unwrap();
+        let policy = jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(
+            &std::fs::read(&image).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(policy.epoch(), 5);
+        assert_eq!(policy.bytes(), b"approved-policy-fixture-v5");
+        let wire = std::fs::read(&witness).unwrap();
+        assert_eq!(wire.len(), 40);
+        assert_eq!(&wire[..8], &5u64.to_be_bytes());
+        assert_eq!(&wire[8..], policy.digest());
+    }
+
     #[test]
     fn independent_epoch_four_fixture_is_forward_and_digest_bound() {
         let d = tempdir().unwrap();

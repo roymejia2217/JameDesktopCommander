@@ -12,6 +12,15 @@ fn main() {
             }
             println!("PUBLISH_INTENT_CREATED");
         }
+        "recover-pre" if args.next().is_none() => {
+            if jdc_authority_service::linux_policy_publisher::recover_before_policy_rename()
+                .is_err()
+            {
+                eprintln!("E_PUBLISHER_PRE_RENAME_RECOVERY_DENIED");
+                std::process::exit(1);
+            }
+            println!("PUBLISH_PRE_RENAME_RECOVERED");
+        }
         "recover-completed" if args.next().is_none() => {
             if jdc_authority_service::linux_policy_publisher::recover_after_witness_rename()
                 .is_err()
@@ -29,7 +38,7 @@ fn main() {
             }
             println!("PUBLISH_SPLIT_RECOVERED");
         }
-        "prepare-v3" | "prepare-v4" => {
+        "prepare-v3" | "prepare-v4" | "prepare-v5" => {
             // Only this CI-only example accepts an ephemeral fixture path.
             // Root publisher APIs take verified in-memory bytes, not paths.
             let source = args.next().unwrap_or_default();

@@ -284,6 +284,32 @@ test('completed policy+witness recovery requires a durable expected transition r
   ]) assert.match(acceptance, required);
 });
 
+test('pre-rename recovery binds both stages to one durable root transition', () => {
+  const source = fs.readFileSync(
+    path.join(repo, 'native/authority-service/src/linux_policy_publisher.rs'), 'utf8',
+  );
+  const script = fs.readFileSync(
+    path.join(repo, 'test/security/t011-linux-admin-policy-file-acceptance.sh'), 'utf8',
+  );
+  for (const evidence of [
+    /pub fn recover_before_policy_rename\(/,
+    /read_transition_intent\(/,
+    /read_protected_fixed\(&dir, c"\.policy-next\.sqlite3"/,
+    /read_protected_fixed\(&dir, c"\.policy-next-anchor"/,
+    /require_absent_sqlite_sidecars\(/,
+    /rename_fixed\(&dir, c"\.policy-next\.sqlite3", c"policy\.sqlite3"\)/,
+    /rename_fixed\(&dir, c"\.policy-next-anchor", c"policy-anchor"\)/,
+  ]) assert.match(source, evidence);
+  for (const evidence of [
+    /E_RECOVER_PRE_EMPTY_INTENT_DENIED/,
+    /E_RECOVER_PRE_WRONG_STAGE_DENIED/,
+    /E_RECOVER_PRE_SYMLINK_STAGE_DENIED/,
+    /E_RECOVER_PRE_RENAME_TO_V5_SUCCESS/,
+    /prepare-v5/, /recover-pre/,
+    /init-policy-bytes-v5/, /policy-snapshot-v5/,
+  ]) assert.match(script, evidence);
+});
+
 test('root-admin epoch witness is exercised under actual NNP service and foreign principals', () => {
   for (const [name, command] of [
     ['Lint Linux protected epoch witness acceptance',

@@ -1,16 +1,59 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configManager, ConfigManager } from '../dist/config-manager.js';
-import { validatePath, writeFile as filesystemWriteFile } from '../dist/tools/filesystem.js';
+import { validatePath, writeFile as filesystemWriteFile, readFileInternal, createDirectory, moveFile, listDirectory } from '../dist/tools/filesystem.js';
 
 async function withFixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'jdc-policy-fail-closed-'));
   try { await run(root); }
   finally { await rm(root, { recursive: true, force: true }); }
 }
+
+test('all restricted local filesystem operations deny before path I/O without a native issuer', async () => {
+  await withFixture(async root => {
+    const source = join(root, 'source.txt');
+    const moved = join(root, 'moved.txt');
+    const child = join(root, 'child');
+    await writeFile(source, 'UNCHANGED');
+    const previous = configManager.getAllowedDirectoriesForFilesystem;
+    configManager.getAllowedDirectoriesForFilesystem = async () => [root];
+    try {
+      await assert.rejects(validatePath(source), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(readFileInternal(source), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(filesystemWriteFile(source, 'CHANGED', 'rewrite'), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(createDirectory(child), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(moveFile(source, moved), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(listDirectory(root), /E_POLICY_UNAVAILABLE/);
+      assert.equal(await readFile(source, 'utf8'), 'UNCHANGED');
+      await assert.rejects(stat(moved), { code: 'ENOENT' });
+      await assert.rejects(stat(child), { code: 'ENOENT' });
+    } finally {
+      configManager.getAllowedDirectoriesForFilesystem = previous;
+    }
+  });
+});
+
+test('legacy-unset and explicit unrestricted modes remain distinguishable', async () => {
+  await withFixture(async root => {
+    const source = join(root, 'source.txt');
+    await writeFile(source, 'BEFORE');
+    const previous = configManager.getAllowedDirectoriesForFilesystem;
+    try {
+      configManager.getAllowedDirectoriesForFilesystem = async () => undefined;
+      await assert.rejects(validatePath(source), /E_POLICY_UNAVAILABLE/);
+      await assert.rejects(filesystemWriteFile(source, 'AFTER', 'rewrite'), /E_POLICY_UNAVAILABLE/);
+      assert.equal(await readFile(source, 'utf8'), 'BEFORE');
+      configManager.getAllowedDirectoriesForFilesystem = async () => [];
+      await filesystemWriteFile(source, 'AFTER', 'rewrite');
+      assert.equal(await readFile(source, 'utf8'), 'AFTER');
+    } finally {
+      configManager.getAllowedDirectoriesForFilesystem = previous;
+    }
+  });
+});
 
 test('failed authorization policy lookup denies filesystem read and write', async () => {
   await withFixture(async root => {

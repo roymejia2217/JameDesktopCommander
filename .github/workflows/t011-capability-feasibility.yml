@@ -280,6 +280,14 @@ jobs:
       - name: Compile the original TypeScript C4d validator
         run: npm run build
 
+      - name: Lint real Node-to-issuer read acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-linux-issuer-read-e2e.sh && bash -n test/security/t011-linux-issuer-read-e2e.sh
+
+      - name: Prove real Node principal receives issuer-owned handle-bound bytes
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-linux-issuer-read-e2e.sh
+
       - name: Compare exact C4d request admission between Node 22 and native Rust
         run: node --test test/security/c4d-native-parity.test.mjs
 

@@ -17,6 +17,7 @@ const base = () => ({
   rootRef: '0123456789abcdef0123456789abcdef',
   relativePath: 'project/科研',
 });
+const read = () => ({ ...base(), kind: 'read-file', relativePath: 'project/data.bin' });
 function frame(data) {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
   const output = Buffer.allocUnsafe(4 + bytes.length);
@@ -34,6 +35,7 @@ test('native Rust matches canonical TypeScript C4d request admission exactly', (
   const add = (label, bytes) => cases.push({ label, bytes });
   const baseline = encodeAuthorityRequestFrame(base());
   add('baseline', baseline);
+  add('read-file baseline', encodeAuthorityRequestFrame(read()));
   for (const path of ['ok', '科研/archivo', 'emoji/😀', 'a'.repeat(255),
     'a/'.repeat(63) + 'z', 'a/b/c', 'AUXIL', 'com0', 'file.name']) {
     add('valid path ' + path.slice(0, 25), encodeAuthorityRequestFrame({ ...base(), relativePath: path }));

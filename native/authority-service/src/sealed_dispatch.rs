@@ -196,18 +196,32 @@ impl SealedDirectoryGrant {
     /// existing pinned OS handle. This returns bounded data inside the crate;
     /// no service response protocol, exposed grant or MCP bridge exists yet.
     #[cfg(target_os = "linux")]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "non-release read dispatch has no issuer or response transport"
-        )
-    )]
     pub(crate) fn execute_authenticated_read(
         &mut self,
         frame: crate::unix_session::AuthenticatedFrame,
     ) -> Result<Vec<u8>, DispatchDenied> {
         self.execute_read_impl(&frame.into_wire())
+    }
+
+    /// Issuer-owned replay path: the caller must already hold a kernel-
+    /// authenticated frame and supplies the single durable replay claim.
+    /// Raw request bytes never become a production entry point.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn execute_authenticated_read_with_external_claim(
+        &mut self,
+        frame: crate::unix_session::AuthenticatedFrame,
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.execute_read_with_external_claim_impl(&frame.into_wire(), claim)
+    }
+
+    #[cfg(test)]
+    fn execute_read_with_external_claim(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.execute_read_with_external_claim_impl(wire, claim)
     }
 
     /// Raw-input dispatch exists strictly for isolated adversarial unit tests.
@@ -248,9 +262,7 @@ impl SealedDirectoryGrant {
         request_epoch: u64,
         request_id: [u8; 16],
     ) -> Result<(), DispatchDenied> {
-        if root_ref != self.root_ref || request_epoch != self.expected_epoch {
-            return Err(DispatchDenied);
-        }
+        self.require_bound_identity(root_ref, request_epoch)?;
         // A ledger write/validation failure is indistinguishable from storage
         // rollback or corruption at this boundary. In a durable session it
         // permanently revokes the grant rather than implicitly re-admitting
@@ -263,6 +275,23 @@ impl SealedDirectoryGrant {
             return Err(DispatchDenied);
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn require_bound_identity(
+        &self,
+        root_ref: &str,
+        request_epoch: u64,
+    ) -> Result<(), DispatchDenied> {
+        if !self.matches_bound_identity(root_ref, request_epoch) {
+            return Err(DispatchDenied);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn matches_bound_identity(&self, root_ref: &str, request_epoch: u64) -> bool {
+        self.active && root_ref == self.root_ref && request_epoch == self.expected_epoch
     }
 
     /// Validate the request, spend its replay identity, then perform one
@@ -291,11 +320,33 @@ impl SealedDirectoryGrant {
             request.expected_epoch(),
             request.request_id_bytes(),
         )?;
+        self.read_bound_file(request.relative_path())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn execute_read_with_external_claim_impl(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.ensure_live_generation()?;
+        let request =
+            crate::canonical_request::decode_read_file_frame(wire).map_err(|_| DispatchDenied)?;
+        self.require_bound_identity(request.root_ref(), request.expected_epoch())?;
+        if claim(request.request_id_bytes()).is_err() {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        self.read_bound_file(request.relative_path())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn read_bound_file(&self, relative_path: &str) -> Result<Vec<u8>, DispatchDenied> {
         // The previously implemented bounded file reader uses only the sealed
         // OS handle and rejects observed multi-link files. This is *not* a
         // proof against concurrent link creation; #148 remains P0.
         self.rooted
-            .read_bounded_file(request.relative_path())
+            .read_bounded_file(relative_path)
             .map_err(|_| DispatchDenied)
     }
     pub fn revoke(&mut self) {
@@ -328,6 +379,46 @@ mod tests {
             replay: ReplayAdmission::SyntheticTestOnly(HashSet::new()),
             active: true,
         }
+    }
+
+    #[test]
+    fn externally_claimed_read_uses_one_authority_claim_and_revokes_on_claim_failure() {
+        let f = tempfile::tempdir().unwrap();
+        let expected = b"ISSUER_OWNED_REPLAY";
+        std::fs::write(f.path().join("inside.bin"), expected).unwrap();
+        let request = "44444444-4444-4444-8444-444444444444";
+        let body = format!(
+            r#"{{"version":1,"kind":"read-file","requestId":"{request}","expectedEpoch":"7","rootRef":"{ROOT}","relativePath":"inside.bin"}}"#,
+        );
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(body.as_bytes());
+
+        let mut grant = fixture(f.path());
+        grant.replay = ReplayAdmission::Unavailable;
+        let mut claimed = Vec::new();
+        assert_eq!(
+            grant.execute_read_with_external_claim(&wire, |id| {
+                claimed.push(id);
+                Ok(())
+            }),
+            Ok(expected.to_vec()),
+        );
+        assert_eq!(
+            claimed.len(),
+            1,
+            "exactly one durable authority claim is required"
+        );
+
+        let mut denied = fixture(f.path());
+        denied.replay = ReplayAdmission::Unavailable;
+        assert_eq!(
+            denied.execute_read_with_external_claim(&wire, |_| Err(DispatchDenied)),
+            Err(DispatchDenied),
+        );
+        assert!(
+            !denied.active,
+            "uncertain durable claim must revoke the grant"
+        );
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -674,6 +765,210 @@ mod tests {
         );
         assert!(!allowed.join("changed").exists());
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"UNMODIFIED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn named_kernel_authenticated_read_replies_once_with_bounded_binary_payload() {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        let outside = f.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(inside.join("bytes.bin"), [0, 255, 0x81, 42]).unwrap();
+        let sentinel = outside.join("never-expose.bin");
+        let outside_bytes = b"OUTSIDE_BYTES_MUST_NOT_BE_EMITTED";
+        std::fs::write(&sentinel, outside_bytes).unwrap();
+        std::fs::hard_link(&sentinel, inside.join("alias.bin")).unwrap();
+        let socket_path = f.path().join("native.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (uid, gid) = (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+        assert_ne!(uid, 0);
+        assert_ne!(gid, 0);
+        let mut grant = fixture(&inside);
+
+        fn exchange(
+            listener: &UnixListener,
+            socket: &Path,
+            grant: &mut SealedDirectoryGrant,
+            peer: (u32, u32),
+            request: (&str, u64, &str),
+        ) -> (Result<(), DispatchDenied>, Vec<u8>) {
+            let (uid, gid) = peer;
+            let (id, epoch, relative) = request;
+            let body = format!(
+                r#"{{"version":1,"kind":"read-file","requestId":"{id}","expectedEpoch":"{epoch}","rootRef":"{ROOT}","relativePath":"{relative}"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let mut client = UnixStream::connect(socket).unwrap();
+            client.write_all(&wire).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            // The legacy fixture supplies an unchanged root. Production
+            // must supply administrator-attested custody, never this closure.
+            let result = crate::unix_accept::dispatch_one_named_read_reply(
+                listener,
+                grant,
+                uid,
+                gid,
+                Duration::from_secs(2),
+                |_| Ok(()),
+            );
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            (result, response)
+        }
+
+        let good = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            (uid, gid),
+            (ID, 7, "bytes.bin"),
+        );
+        assert_eq!(good.0, Ok(()));
+        assert_eq!(
+            good.1,
+            [vec![1, 0, 0, 0, 0, 4], vec![0, 255, 0x81, 42]].concat()
+        );
+
+        let replay = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            (uid, gid),
+            (ID, 7, "bytes.bin"),
+        );
+        assert_eq!(replay.0, Err(DispatchDenied));
+        assert_eq!(replay.1, [1, 1, 0, 0, 0, 0], "replay must not expose bytes");
+
+        let alias = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            (uid, gid),
+            ("22222222-2222-4222-8222-222222222222", 7, "alias.bin"),
+        );
+        assert_eq!(alias.0, Err(DispatchDenied));
+        assert_eq!(
+            alias.1,
+            [1, 1, 0, 0, 0, 0],
+            "outside alias must not expose bytes"
+        );
+
+        let stale = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            (uid, gid),
+            ("33333333-3333-4333-8333-333333333333", 8, "bytes.bin"),
+        );
+        assert_eq!(stale.0, Err(DispatchDenied));
+        assert_eq!(
+            stale.1,
+            [1, 1, 0, 0, 0, 0],
+            "stale epoch must not expose bytes"
+        );
+        assert_eq!(std::fs::read(sentinel).unwrap(), outside_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn named_read_must_revalidate_pinned_root_after_io_before_reply() {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        let parked = f.path().join("parked");
+        std::fs::create_dir(&inside).unwrap();
+        let secret = b"PRE_REPLY_ROOT_DRIFT_MUST_NOT_LEAK";
+        std::fs::write(inside.join("secret.bin"), secret).unwrap();
+        let inode = std::fs::metadata(&inside).unwrap();
+        let json = serde_json::to_string(inside.to_str().unwrap()).unwrap();
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            format!(
+                r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{json}}}]}}"#
+            )
+            .as_bytes(),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        let mut grant = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        grant.replay = ReplayAdmission::SyntheticTestOnly(HashSet::new());
+        let sock = f.path().join("server.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let body = format!(
+            r#"{{"version":1,"kind":"read-file","requestId":"{ID}","expectedEpoch":"7","rootRef":"{ROOT}","relativePath":"secret.bin"}}"#,
+        );
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(body.as_bytes());
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client.write_all(&wire).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let mut checks = 0;
+        let result = crate::unix_accept::dispatch_one_named_read_reply(
+            &listener,
+            &mut grant,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            Duration::from_secs(2),
+            |root| {
+                checks += 1;
+                if checks == 3 {
+                    // The original OS FD still points to a valid file while the
+                    // administrator pathname now selects a DIFFERENT inode.
+                    std::fs::rename(&inside, &parked).unwrap();
+                    std::fs::create_dir(&inside).unwrap();
+                    let substitute = std::fs::metadata(&inside).unwrap();
+                    assert_ne!(
+                        (inode.dev(), inode.ino()),
+                        (substitute.dev(), substitute.ino())
+                    );
+                }
+                root.revalidate_root_binding(&policy)
+            },
+        );
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert_eq!(
+            checks, 3,
+            "must check before admission, after authentication, and after I/O"
+        );
+        assert_eq!(result, Err(DispatchDenied));
+        assert_eq!(
+            response,
+            [1, 1, 0, 0, 0, 0],
+            "post-read policy drift cannot disclose bytes"
+        );
+        assert!(
+            !response
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "no portion of the protected payload may be sent after custody drift"
+        );
+        assert!(
+            !grant.active,
+            "policy drift must permanently revoke the retained capability"
+        );
+        std::fs::remove_dir(&inside).unwrap();
+        std::fs::rename(&parked, &inside).unwrap();
+        assert_eq!(grant.revalidate_root_binding(&policy), Err(DispatchDenied));
+        assert_eq!(std::fs::read(inside.join("secret.bin")).unwrap(), secret);
     }
 
     #[cfg(target_os = "linux")]

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   encodeAuthorityRequestFrame, decodeAuthorityRequestFrame,
   encodeAuthorityResultFrame, decodeAuthorityResultFrame,
+  decodeAuthorityReadReplyFrame,
 } from '../dist/security/authority-frame-contract.js';
 
 const request = () => ({
@@ -12,6 +13,7 @@ const request = () => ({
   rootRef: '0123456789abcdef0123456789abcdef',
   relativePath: '科研/dir',
 });
+const readRequest = () => ({ ...request(), kind: 'read-file', relativePath: '科研/data.bin' });
 const committed = () => ({
   version: 1, kind: 'operation-result', requestId: request().requestId,
   status: 'committed', committedEpoch: '18446744073709551615',
@@ -37,6 +39,8 @@ test('C4d canonical round-trip for requests, committed and rejected results', ()
   const shuffled = { relativePath: '科研/dir', ...request() };
   assert.ok(encodeAuthorityRequestFrame(shuffled).equals(encoded),
     'Field order from untrusted objects must never affect canonical bytes');
+  const readWire = encodeAuthorityRequestFrame(readRequest());
+  assert.deepEqual(decodeAuthorityRequestFrame(readWire), readRequest());
   for (const result of [committed(), denied()]) {
     const wire = encodeAuthorityResultFrame(result, request().requestId, request().expectedEpoch);
     assert.deepEqual(decodeAuthorityResultFrame(wire, request().requestId, request().expectedEpoch), result);
@@ -45,6 +49,33 @@ test('C4d canonical round-trip for requests, committed and rejected results', ()
   }
 });
 
+test('C4d read reply preserves binary bytes and represents denial without payload', () => {
+  const payload = Buffer.from([0, 255, 0x81, 42]);
+  const ok = Buffer.alloc(6 + payload.length);
+  ok[0] = 1;
+  ok[1] = 0;
+  ok.writeUInt32BE(payload.length, 2);
+  payload.copy(ok, 6);
+  const decoded = decodeAuthorityReadReplyFrame(ok);
+  assert.equal(decoded.status, 'ok');
+  assert.deepEqual(decoded.bytes, payload);
+  assert.notEqual(decoded.bytes, ok.subarray(6), 'decoder must return an owned payload snapshot');
+  ok[6] = 99;
+  assert.deepEqual(decoded.bytes, payload, 'later mutation of transport memory must not alter result bytes');
+
+  assert.deepEqual(
+    decodeAuthorityReadReplyFrame(Buffer.from([1, 1, 0, 0, 0, 0])),
+    { version: 1, status: 'denied' },
+  );
+  for (const malformed of [
+    Buffer.from([1, 0, 0, 0, 0]),
+    Buffer.from([2, 1, 0, 0, 0, 0]),
+    Buffer.from([1, 2, 0, 0, 0, 0]),
+    Buffer.from([1, 1, 0, 0, 0, 1, 7]),
+    Buffer.from([1, 0, 0, 0, 0, 2, 7]),
+    Buffer.alloc(6 + 1024 * 1024 + 1),
+  ]) assert.throws(() => decodeAuthorityReadReplyFrame(malformed), bad);
+});
 test('C4d denies missing, trailing, oversized, nested, and mismatched frames', () => {
   const good = encodeAuthorityRequestFrame(request());
   const wrong = [

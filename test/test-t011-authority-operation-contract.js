@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   parseCreateDirectoryRequest,
+  parseReadFileRequest,
   parseOperationResult,
   AUTHORITY_PROTOCOL_VERSION,
 } from '../dist/security/authority-operation-contract.js';
@@ -14,6 +15,7 @@ const valid = () => ({
   rootRef: '0123456789abcdef0123456789abcdef',
   relativePath: 'project/nuevo',
 });
+const readRequest = () => ({ ...valid(), kind: 'read-file', relativePath: 'project/data.bin' });
 const bad = { code: 'E_AUTHORITY_CONTRACT' };
 
 test('C4c request contract accepts canonical bounded handle-relative operations', () => {
@@ -23,6 +25,13 @@ test('C4c request contract accepts canonical bounded handle-relative operations'
   assert.ok(Object.isFrozen(req));
   assert.equal(parseCreateDirectoryRequest({ ...valid(), relativePath: '科研/archivo' }).relativePath,
     '科研/archivo');
+});
+test('C4c read-file request uses the same canonical root, epoch and relative-path grammar', () => {
+  const req = parseReadFileRequest(readRequest());
+  assert.deepEqual(req, readRequest());
+  assert.ok(Object.isFrozen(req));
+  assert.throws(() => parseReadFileRequest(valid()), bad);
+  assert.throws(() => parseReadFileRequest({ ...readRequest(), relativePath: '../outside' }), bad);
 });
 test('C4c rejects pathname approvals, invalid roots, missing fields and extras', () => {
   for (const value of [

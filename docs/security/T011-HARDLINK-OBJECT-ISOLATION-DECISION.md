@@ -88,6 +88,23 @@ The nonshipping native probe uses `cap_std::fs::Dir` and
 has **not** been wired into production MCP handlers. The evidence disproves
 its claimed O property; it does not demonstrate a shipped handler exploit.
 
+### Non-release read postcheck evidence (issue #148)
+
+The native handle-bound bounded read now rechecks the link count on **the
+same open file object** after consuming at most the configured byte budget and
+before returning any bytes. An actual OS-thread hard-link insertion between
+the first opened-handle snapshot and the read is an explicit deterministic
+RED-to-GREEN test: both real names must refer to the same file object,
+the caller receives a typed denial, exterior bytes remain exact, and a
+legitimate single-link read still succeeds after removing the alias.
+
+This narrows one observed race window; it **does not** provide invariant O:
+a link can still be introduced after the final snapshot or removed before
+it. It also does not prove a principal-isolated storage domain, immutable
+root provenance, or policy revocation during an in-flight read. Do not count
+this test as one of the four missing MCP-level #147 GREEN cases, or permit
+production read routing based on it.
+
 ## 3. Platform constraints and unresolved assumptions
 
 | Dimension | Linux | Windows |

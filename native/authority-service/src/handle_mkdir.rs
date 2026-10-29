@@ -126,6 +126,17 @@ impl RootedDirectory {
     /// No ambient pathname is ever reopened, and the byte budget is enforced
     /// both before allocation and during reads if the file grows concurrently.
     pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
+        self.read_bounded_file_with_mid_read_hook(relative, || {})
+    }
+
+    // The callback is internal and never exposed to the broker or MCP.
+    // A deterministic OS-thread test introduces an alias after the first
+    // opened-handle metadata snapshot, before returning any bytes.
+    fn read_bounded_file_with_mid_read_hook(
+        &self,
+        relative: &str,
+        after_preflight: impl FnOnce(),
+    ) -> io::Result<Vec<u8>> {
         const MAX_READ_BYTES: u64 = 1024 * 1024;
         if !safe_relative_path(relative) {
             return Err(io::Error::new(
@@ -160,6 +171,7 @@ impl RootedDirectory {
                         "E_READ_SIZE_DENIED",
                     ));
                 }
+                after_preflight();
                 let mut bounded = file.take(MAX_READ_BYTES + 1);
                 let mut bytes = Vec::with_capacity(metadata.len() as usize);
                 bounded.read_to_end(&mut bytes)?;
@@ -167,6 +179,20 @@ impl RootedDirectory {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "E_READ_SIZE_DENIED",
+                    ));
+                }
+                // Recheck the SAME opened OS object after reading and before
+                // releasing any bytes. This catches a concurrent hard-link
+                // introduced after the initial nlink==1 observation.
+                // This is defense-in-depth, not a linearizable object-origin
+                // proof: a new link can still arrive after this snapshot.
+                let observed_after_read = bounded.get_ref().metadata()?;
+                if !observed_after_read.is_file()
+                    || cap_fs_ext::MetadataExt::nlink(&observed_after_read) != 1
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_SHARED_OBJECT",
                     ));
                 }
                 return Ok(bytes);
@@ -426,6 +452,47 @@ mod tests {
         assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
         assert_eq!(std::fs::read(&victim).unwrap(), secret);
         assert_eq!(std::fs::read(&alias).unwrap(), secret);
+    }
+
+    #[test]
+    fn concurrent_hardlink_introduced_after_read_preflight_must_deny_all_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let internal = allowed.join("private.bin");
+        let external_alias = outside.join("new-alias.bin");
+        let bytes = b"NO_BYTES_AFTER_CROSS_ROOT_ALIAS";
+        std::fs::write(&internal, bytes).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+
+        let denial = rooted
+            .read_bounded_file_with_mid_read_hook("private.bin", || {
+                // A separate OS thread introduces an exterior alias only after
+                // the native opened-handle nlink==1 preflight. Do not allow setup
+                // failure to be counted as a successful denial.
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            std::fs::hard_link(&internal, &external_alias)
+                                .expect("actual concurrent OS hard-link creation must succeed");
+                        })
+                        .join()
+                        .expect("attacker must run");
+                });
+                assert!(same_file::is_same_file(&internal, &external_alias).unwrap());
+            })
+            .expect_err("a new exterior alias must prevent returning any bytes");
+
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
+        assert_eq!(std::fs::read(&external_alias).unwrap(), bytes);
+        assert_eq!(std::fs::read(&internal).unwrap(), bytes);
+        std::fs::remove_file(&external_alias).unwrap();
+        assert_eq!(rooted.read_bounded_file("private.bin").unwrap(), bytes);
     }
 
     #[test]

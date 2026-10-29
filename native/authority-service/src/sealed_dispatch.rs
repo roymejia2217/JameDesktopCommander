@@ -117,6 +117,39 @@ impl SealedDirectoryGrant {
         })
     }
 
+    /// The policy's current root pathname must still designate the SAME
+    /// OS object as this already-open capability. A replacement or missing
+    /// root irreversibly revokes this grant; repairing the name cannot revive it.
+    /// No caller-provided pathname or ambient re-open of the old handle.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn revalidate_root_binding(
+        &mut self,
+        policy: &crate::issuer_policy::IssuerPolicy,
+    ) -> Result<(), DispatchDenied> {
+        if !self.active || self.expected_epoch != policy.epoch() {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        #[cfg(not(test))]
+        if self.policy_digest != *policy.digest() {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        let matches = policy
+            .open_root(&self.root_ref)
+            .and_then(|opened| {
+                self.rooted
+                    .same_open_directory(&opened)
+                    .map_err(|_| crate::IdentityDenied)
+            })
+            .unwrap_or(false);
+        if !matches {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        Ok(())
+    }
+
     /// Bind a durable claimer to the exact administrative policy epoch.
     /// A ledger from a different epoch cannot authorize I/O, even when a
     /// caller provides the expected rootRef and requestId. This routine is
@@ -236,6 +269,54 @@ mod tests {
             active: true,
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn issuer_root_custody_is_sticky_after_real_rename_and_replacement() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed");
+        let moved = temp.path().join("moved-original");
+        fs::create_dir(&allowed).unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap()
+        );
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            policy_bytes.as_bytes(),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        let mut old = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        assert_eq!(old.revalidate_root_binding(&policy), Ok(()));
+        fs::rename(&allowed, &moved).unwrap();
+        fs::create_dir(&allowed).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let retained = fs::metadata(&moved).unwrap();
+        let replacement = fs::metadata(&allowed).unwrap();
+        assert_ne!(
+            (retained.dev(), retained.ino()),
+            (replacement.dev(), replacement.ino()),
+            "test must prove the policy root actually changed OS object"
+        );
+        assert!(
+            old.revalidate_root_binding(&policy).is_err(),
+            "an intact pinned FD is no longer the policy-designated directory"
+        );
+        fs::remove_dir(&allowed).unwrap();
+        fs::rename(&moved, &allowed).unwrap();
+        assert!(
+            old.revalidate_root_binding(&policy).is_err(),
+            "restoring the original name cannot reactivate a revoked grant"
+        );
+        let mut fresh = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        assert_eq!(
+            fresh.revalidate_root_binding(&policy),
+            Ok(()),
+            "a newly issued sealed root can bind the recovered policy pathname"
+        );
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn policy_epoch_must_match_immutable_durable_ledger_epoch_before_issuing_root() {

@@ -113,6 +113,32 @@ impl RootedDirectory {
         Self { root }
     }
 
+    /// Re-validate object identity, never an ambient request path. Both
+    /// directory handles have already been opened by trusted issuer policy.
+    /// This proves equality only at this observation instant; concurrent
+    /// namespace changes and hard-link object isolation remain separate P0s.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn same_open_directory(&self, other: &Self) -> io::Result<bool> {
+        use std::{mem::MaybeUninit, os::fd::AsRawFd};
+        fn stat_dir(fd: libc::c_int) -> io::Result<libc::stat> {
+            let mut slot = MaybeUninit::<libc::stat>::uninit();
+            if unsafe { libc::fstat(fd, slot.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let st = unsafe { slot.assume_init() };
+            if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "E_ROOT_NOT_DIRECTORY",
+                ));
+            }
+            Ok(st)
+        }
+        let original = stat_dir(self.root.as_raw_fd())?;
+        let observed = stat_dir(other.root.as_raw_fd())?;
+        Ok(original.st_dev == observed.st_dev && original.st_ino == observed.st_ino)
+    }
+
     /// Atomic OS-relative single-child mkdir. The supplied handle remains
     /// anchored even if the root's original pathname changes independently.
     pub fn create_child(&self, name: &str) -> io::Result<()> {

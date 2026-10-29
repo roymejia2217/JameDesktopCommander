@@ -19,7 +19,8 @@ done
 
 fixture='native/authority-store/target/debug/examples/issuer_read_fixture'
 probe='native/authority-service/target/debug/examples/linux_issuer_read_probe'
-[[ -x "$fixture" && -x "$probe" ]] || {
+contract="$(realpath -e -- dist/security/authority-frame-contract.js)"
+[[ -x "$fixture" && -x "$probe" && -r "$contract" ]] || {
   printf '%s\n' 'E_ISSUER_READ_E2E_BINARIES_MISSING' >&2
   exit 1
 }
@@ -125,45 +126,43 @@ sudo -n systemctl start jdc-authority.socket
 [[ "$(stat -c '%U:%G:%a' "$socket_path")" == 'jdc-authority:jdc-mcp-client:660' &&
    "$(stat -c '%U:%G:%a' "$socket_dir")" == 'root:root:755' ]] || exit 1
 
-sudo -n -u jdc-mcp-client -- node - "$socket_path" <<'NODE'
-const net = require('node:net');
-const assert = require('node:assert/strict');
-const socketPath = process.argv[2];
-const payload = Buffer.from(
+sudo -n -u jdc-mcp-client -- node --input-type=module - "$socket_path" "$contract" <<'NODE'
+import assert from 'node:assert/strict';
+import net from 'node:net';
+import { pathToFileURL } from 'node:url';
+
+const [socketPath, contractPath] = process.argv.slice(2);
+const { encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame } =
+  await import(pathToFileURL(contractPath).href);
+const request = JSON.parse(
   '{"version":1,"kind":"read-file","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"inside.bin"}',
-  'utf8',
 );
-const frame = Buffer.allocUnsafe(4 + payload.length);
-frame.writeUInt32BE(payload.length, 0);
-payload.copy(frame, 4);
-const chunks = [];
-let total = 0;
-const client = net.createConnection({ path: socketPath });
-client.setTimeout(5000);
-client.on('connect', () => {
-  client.end(frame);
+const frame = encodeAuthorityRequestFrame(request);
+const rawReply = await new Promise((resolve, reject) => {
+  const chunks = [];
+  let total = 0;
+  const client = net.createConnection({ path: socketPath });
+  client.setTimeout(5000);
+  client.once('connect', () => client.end(frame));
+  client.on('data', (chunk) => {
+    total += chunk.length;
+    if (total > 1024 * 1024 + 6) {
+      client.destroy(new Error('oversized authority reply'));
+      return;
+    }
+    chunks.push(Buffer.from(chunk));
+  });
+  client.once('timeout', () => client.destroy(new Error('authority reply timeout')));
+  client.once('error', reject);
+  client.once('close', (hadError) => {
+    if (!hadError) resolve(Buffer.concat(chunks, total));
+  });
 });
-client.on('data', (chunk) => {
-  total += chunk.length;
-  if (total > 1024 * 1024 + 6) throw new Error('oversized authority reply');
-  chunks.push(Buffer.from(chunk));
-});
-client.on('timeout', () => client.destroy(new Error('authority reply timeout')));
-client.on('error', (error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-client.on('close', () => {
-  if (process.exitCode) return;
-  const reply = Buffer.concat(chunks);
-  assert.ok(reply.length >= 6);
-  const header = [...reply.subarray(0, 6)];
-  assert.deepEqual(header, [1, 0, 0, 0, 0, 8]);
-  const length = reply.readUInt32BE(2);
-  assert.equal(reply.length, 6 + length);
-  assert.deepEqual(reply.subarray(6), Buffer.from([0, 255, 0x81, 42, 74, 68, 67, 10]));
-  console.log('T011_NODE_MCP_CLIENT_RECEIVED_EXACT_BINARY_READ_REPLY');
-});
+const reply = decodeAuthorityReadReplyFrame(rawReply);
+assert.equal(reply.status, 'ok');
+if (reply.status !== 'ok') throw new Error('issuer denied canonical read');
+assert.deepEqual(reply.bytes, Buffer.from([0, 255, 0x81, 42, 74, 68, 67, 10]));
+console.log('T011_NODE_MCP_CLIENT_RECEIVED_EXACT_BINARY_READ_REPLY');
 NODE
 
 sudo -n journalctl --sync
@@ -176,6 +175,20 @@ if grep -Fq 'E_ISSUER_READ_E2E_DENIED' <<<"$journal"; then
   printf '%s\n' 'E_ISSUER_READ_E2E_MIXED_SERVICE_VERDICT' >&2
   exit 1
 fi
+
+sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = db.execute(
+    "SELECT hex(epoch), hex(request) FROM replay_claims ORDER BY epoch, request"
+).fetchall()
+expected = [("0000000000000001", "11111111111141118111111111111111")]
+if rows != expected:
+    raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_NOT_DURABLE:{rows!r}")
+print("T011_ISSUER_READ_E2E_DURABLE_REPLAY_CLAIM_PASS")
+PY
 
 [[ "$(sudo -n stat -c '%u:%g:%a:%h' "$state_dir/claims.sqlite3")" == \
    "$service_uid:$service_gid:600:1" ]] || exit 1

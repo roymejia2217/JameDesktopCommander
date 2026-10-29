@@ -112,10 +112,12 @@ export function parseCreateDirectoryRequest(input: unknown): Readonly<CreateDire
 /** A committed result is notification of completed broker-side I/O, never
  * permission for the untrusted Node process to perform subsequent I/O. */
 export function parseOperationResult(
-  input: unknown, expectedRequestId: string,
+  input: unknown, expectedRequestId: string, expectedEpoch: string,
 ): AuthorityOperationResult {
   try {
-    if (!requestId(expectedRequestId)) throw new AuthorityContractError();
+    if (!requestId(expectedRequestId) || !canonicalEpoch(expectedEpoch)) {
+      throw new AuthorityContractError();
+    }
     if (input === null || typeof input !== 'object' || Array.isArray(input)) {
       throw new AuthorityContractError();
     }
@@ -130,7 +132,8 @@ export function parseOperationResult(
       committed ? 'committedEpoch' : 'errorCode']);
     if (obj.version !== 1 || obj.kind !== 'operation-result' ||
         obj.requestId !== expectedRequestId) throw new AuthorityContractError();
-    if (committed && !canonicalEpoch(obj.committedEpoch)) throw new AuthorityContractError();
+    if (committed && (!canonicalEpoch(obj.committedEpoch) ||
+        obj.committedEpoch !== expectedEpoch)) throw new AuthorityContractError();
     if (rejected && !rejectionCodes.has(obj.errorCode)) throw new AuthorityContractError();
     return Object.freeze({ ...obj }) as AuthorityOperationResult;
   } catch {

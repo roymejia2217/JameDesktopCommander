@@ -458,6 +458,85 @@ mod tests {
     }
 
     #[test]
+    fn issuer_custody_denies_valid_same_inode_replay_history_substitution() {
+        use std::os::unix::fs::MetadataExt;
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        let original_id = id();
+        writer.claim_once(original_id).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let before = std::fs::metadata(&path).unwrap();
+        let mut substituted_id = original_id;
+        substituted_id[0] ^= 0x42;
+        // An independently opened SQLite connection changes one *valid*
+        // UUIDv4 claim with the same epoch and total row count. The test
+        // must not obtain denial merely by corrupting schema or file header.
+        let other = Connection::open(&path).unwrap();
+        assert_eq!(
+            other
+                .execute(
+                    "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                    rusqlite::params![
+                        substituted_id.as_slice(),
+                        7u64.to_be_bytes().as_slice(),
+                        original_id.as_slice()
+                    ]
+                )
+                .unwrap(),
+            1,
+            "positive attacker fixture must actually replace the consumed identity"
+        );
+        drop(other);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "valid substitution preserves DB size"
+        );
+        let audit = Connection::open(&path).unwrap();
+        let changed: Vec<u8> = audit
+            .query_row(
+                "SELECT request FROM replay_claims WHERE epoch=?1",
+                [7u64.to_be_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(changed, substituted_id);
+        drop(audit);
+        assert!(
+            writer.validate_custody().is_err(),
+            "generic issuer liveness must not accept changed live replay history"
+        );
+        // Even repairing the original committed row may not resurrect the
+        // same issuer after it observed compromised history.
+        let repair = Connection::open(&path).unwrap();
+        assert_eq!(
+            repair
+                .execute(
+                    "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                    rusqlite::params![
+                        original_id.as_slice(),
+                        7u64.to_be_bytes().as_slice(),
+                        substituted_id.as_slice()
+                    ]
+                )
+                .unwrap(),
+            1
+        );
+        drop(repair);
+        assert!(
+            writer.validate_custody().is_err(),
+            "repair cannot restore a revoked writer"
+        );
+        assert!(
+            writer.claim_once(substituted_id).is_err(),
+            "no new claim after compromised history"
+        );
+    }
+
+    #[test]
     fn revocation_permanently_disables_the_writer_without_a_claim() {
         let (_temp, dir) = fixture();
         let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();

@@ -386,6 +386,58 @@ mod tests {
     }
 
     #[test]
+    fn live_writer_must_revoke_on_entire_protected_state_directory_replacement() {
+        use std::os::unix::fs::MetadataExt;
+        let (_temp, state) = fixture();
+        let original = state.with_file_name("state-parked");
+        let substitute_parked = state.with_file_name("state-substitute");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&state, 7).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let pinned = std::fs::metadata(&state).unwrap();
+        std::fs::rename(&state, &original).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::copy(
+            original.join("claims.sqlite3"),
+            state.join("claims.sqlite3"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            state.join("claims.sqlite3"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let replacement = std::fs::metadata(&state).unwrap();
+        assert_ne!(
+            (pinned.dev(), pinned.ino()),
+            (replacement.dev(), replacement.ino()),
+            "real namespace substitution must select a distinct directory inode"
+        );
+        assert!(
+            LinuxReplayIssuerLedger::open_protected_fixture(&state, 7).is_ok(),
+            "replacement is itself a valid protected SQLite state directory"
+        );
+        assert!(
+            writer.validate_custody().is_err(),
+            "a valid retained SQLite file must not survive removal of its parent from the fixed state path"
+        );
+        std::fs::rename(&state, &substitute_parked).unwrap();
+        std::fs::rename(&original, &state).unwrap();
+        assert!(
+            writer.validate_custody().is_err(),
+            "repair of the administrative name must not revive the old writer"
+        );
+        assert!(writer.claim_once(id()).is_err());
+        assert_eq!(
+            LinuxReplayIssuerLedger::open_protected_fixture(&state, 7)
+                .unwrap()
+                .validate_custody(),
+            Ok(()),
+            "a separately verified new session may bind restored state"
+        );
+    }
+
+    #[test]
     fn protected_writer_persists_across_restart_and_rejects_insecure_modes() {
         let (_temp, dir) = fixture();
         let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();

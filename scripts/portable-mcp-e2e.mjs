@@ -335,13 +335,19 @@ try {
   });
   assert.notEqual(configured.isError, true, 'Could not enable the restricted file policy');
 
+  // Restricted pathname access is deliberately unavailable until an OS-owned
+  // handle-bound issuer is wired. The same in-root file must deny, not fall
+  // back to validatePath()+fs.* under the restricted allowlist.
   const allowedRead = await callFixtureTool('read_file', { path: allowedFile });
-  assert.notEqual(allowedRead.isError, true, 'Policy denied an explicitly allowed file');
+  assert.equal(allowedRead.isError, true, 'Unissued restricted read succeeded');
+  assert.match(toolText(allowedRead), /E_POLICY_UNAVAILABLE/);
   const allowedWrite = await callFixtureTool('write_file', {
     path: allowedFile, content: 'inside-updated\n', mode: 'rewrite',
   });
-  assert.notEqual(allowedWrite.isError, true, 'Policy denied an explicitly allowed write');
-  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-updated\n');
+  assert.equal(allowedWrite.isError, true, 'Unissued restricted rewrite succeeded');
+  assert.match(toolText(allowedWrite), /E_POLICY_UNAVAILABLE/);
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
+    'Denied in-root rewrite altered an existing file');
 
   // A configured directory may itself be a symlink/junction alias.
   // Compare its canonical target against the already canonical file path.
@@ -352,8 +358,9 @@ try {
   });
   assert.notEqual(aliasConfigured.isError, true, 'Cannot configure allowed directory alias');
   const aliasRead = await callFixtureTool('read_file', { path: allowedFile });
-  assert.notEqual(aliasRead.isError, true, 'Canonical allowed directory alias denied valid access');
-  assert.ok(toolText(aliasRead).includes('inside-updated'), 'Alias returned wrong contents');
+  assert.equal(aliasRead.isError, true,
+    'Configuring a directory alias cannot enable the unissued restricted backend');
+  assert.match(toolText(aliasRead), /E_POLICY_UNAVAILABLE/);
 
   const missingConfigured = await callFixtureTool('set_config_value', {
     key: 'allowedDirectories', value: [join(working, 'nonexistent-allowed-root')],
@@ -412,15 +419,37 @@ try {
   }
   assert.equal(await readFile(deniedFile, 'utf8'), 'outside-initial\n',
     'Unauthorized file was modified');
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
+    'Restricted mode changed the inside file before native authorization');
 
+  // Compatibility positive controls run only in the explicitly unrestricted
+  // legacy mode. These preserve real packaged MCP read/rewrite/alias behavior
+  // without masquerading as native restricted authorization.
+  const unrestricted = await callFixtureTool('set_config_value', {
+    key: 'allowedDirectories', value: [],
+  });
+  assert.notEqual(unrestricted.isError, true, 'Cannot explicitly select legacy unrestricted mode');
+  const unrestrictedRead = await callFixtureTool('read_file', { path: allowedFile });
+  assert.notEqual(unrestrictedRead.isError, true, 'Legacy unrestricted read failed');
+  assert.ok(toolText(unrestrictedRead).includes('inside-initial'));
+  const unrestrictedWrite = await callFixtureTool('write_file', {
+    path: allowedFile, content: 'inside-updated\n', mode: 'rewrite',
+  });
+  assert.notEqual(unrestrictedWrite.isError, true, 'Legacy unrestricted rewrite failed');
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-updated\n');
+  const unrestrictedAlias = await callFixtureTool('read_file', {
+    path: join(allowedAlias, 'inside.txt'),
+  });
+  assert.notEqual(unrestrictedAlias.isError, true, 'Legacy unrestricted alias read failed');
+  assert.ok(toolText(unrestrictedAlias).includes('inside-updated'));
 
   console.log(JSON.stringify({
     result: 'PASS', target: manifest.target, toolCount: tools.length,
     resourcesRead: read.contents.length, promptCount: prompts.length,
     freshMcpChallengeCalls: 2,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
-    modeOmissionRejected: true, accessPositiveChecks: 3,
-    unresolvedAllowlistDenied: true,
+    modeOmissionRejected: true, legacyUnrestrictedPositiveChecks: 3,
+    restrictedNativeUnavailableDenials: 3, unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
     outsideBytesPreserved: true, packagedWorkspaceChecks: 3,
     opencodeMissingTokenDenied: true,

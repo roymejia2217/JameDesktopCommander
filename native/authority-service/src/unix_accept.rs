@@ -236,6 +236,47 @@ fn write_bounded_read_reply(
     Ok(())
 }
 
+/// Dispatch one reply through a single caller-owned authority state. The
+/// principal is a bootstrap-prepared OS identity, the frame is kernel-
+/// authenticated, and every security transition operates on the same mutable
+/// state. No grant or replay token escapes this boundary.
+pub(crate) fn dispatch_one_named_prepared_read_reply<A>(
+    listener: &UnixListener,
+    authority: &mut A,
+    principal: PreparedMcpClient,
+    deadline: Duration,
+    mut revalidate: impl FnMut(&mut A) -> Result<(), DispatchDenied>,
+    mut execute: impl FnMut(&mut A, AuthenticatedFrame) -> Result<Vec<u8>, DispatchDenied>,
+    mut revoke: impl FnMut(&mut A),
+) -> Result<(), DispatchDenied> {
+    if revalidate(authority).is_err() {
+        revoke(authority);
+        return Err(DispatchDenied);
+    }
+    let (stream, budget) =
+        accept_one_named_stream(listener, deadline).map_err(|_| DispatchDenied)?;
+    let expires = Instant::now().checked_add(budget).ok_or(DispatchDenied)?;
+    let frame =
+        read_prepared_client_frame(&stream, &principal, budget).map_err(|_| DispatchDenied)?;
+    if revalidate(authority).is_err() {
+        revoke(authority);
+        let _ = write_bounded_read_reply(&stream, None, expires);
+        return Err(DispatchDenied);
+    }
+    let result = execute(authority, frame);
+    if revalidate(authority).is_err() {
+        revoke(authority);
+        let _ = write_bounded_read_reply(&stream, None, expires);
+        return Err(DispatchDenied);
+    }
+    let payload = result.as_ref().ok().map(Vec::as_slice);
+    if write_bounded_read_reply(&stream, payload, expires).is_err() {
+        revoke(authority);
+        return Err(DispatchDenied);
+    }
+    result.map(|_| ())
+}
+
 /// Non-release, crate-private response experiment: one named OS-authenticated
 /// read request, one bounded response, no grant fabrication. The currently
 /// installed production binary has no issuer and never calls this function.

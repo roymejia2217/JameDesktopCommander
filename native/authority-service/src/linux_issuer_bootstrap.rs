@@ -254,12 +254,13 @@ mod tests {
         let replacement = temp.path().join("replacement.sqlite3");
         for file in [&original, &replacement] {
             let db = rusqlite::Connection::open(file).unwrap();
-            db.execute_batch(
-                "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;
-                 CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8),
-                 request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16),
-                 PRIMARY KEY(epoch,request)) WITHOUT ROWID;"
-            ).unwrap();
+            db.execute_batch(concat!(
+                "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;",
+                "CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), ",
+                "request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), ",
+                "PRIMARY KEY(epoch,request)) WITHOUT ROWID"
+            ))
+            .unwrap();
         }
         // Both files must pass the actual read-only replay-image validator;
         // otherwise the denial could be caused by invalid SQLite content.

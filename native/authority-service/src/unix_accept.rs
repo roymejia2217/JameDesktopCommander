@@ -158,15 +158,171 @@ pub fn dispatch_one_named_c4d(
     grant.execute_authenticated_c4d(frame)
 }
 
+/// One bounded binary response on the already accepted authenticated socket.
+/// v1 header: [version=1, status=0 success or 1 denied, u32 BE length];
+/// denial never includes pathname, error details or arbitrary bytes.
+/// This primitive has no issuer constructor, response replay cache or MCP API.
+fn write_bounded_read_reply(
+    stream: &UnixStream,
+    payload: Option<&[u8]>,
+    expires: Instant,
+) -> Result<(), DispatchDenied> {
+    const MAX_REPLY_BYTES: usize = 1024 * 1024;
+    let data = payload.unwrap_or(&[]);
+    if data.len() > MAX_REPLY_BYTES {
+        return Err(DispatchDenied);
+    }
+    let status = u8::from(payload.is_none());
+    let mut header = [0u8; 6];
+    header[0] = 1;
+    header[1] = status;
+    header[2..].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    for chunk in [&header[..], data] {
+        let mut unsent = chunk;
+        while !unsent.is_empty() {
+            let remaining = expires.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(DispatchDenied);
+            }
+            let mut slot = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+            // SAFETY: poll observes one live borrowed UnixStream descriptor,
+            // and slot is a fully initialized stack object.
+            let ready = unsafe { libc::poll(&mut slot, 1, millis.max(1)) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(DispatchDenied);
+            }
+            if slot.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+                || slot.revents & libc::POLLOUT == 0
+            {
+                return Err(DispatchDenied);
+            }
+            // SAFETY: send reads at most unsent.len() bytes from an immutable
+            // live slice; MSG_DONTWAIT cannot block and MSG_NOSIGNAL prevents
+            // SIGPIPE on a disconnect. Neither call owns the socket.
+            let sent = unsafe {
+                libc::send(
+                    stream.as_raw_fd(),
+                    unsent.as_ptr().cast(),
+                    unsent.len(),
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            };
+            if sent < 0 {
+                if matches!(
+                    io::Error::last_os_error().kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    continue;
+                }
+                return Err(DispatchDenied);
+            }
+            if sent == 0 || Instant::now() >= expires {
+                return Err(DispatchDenied);
+            }
+            unsent = &unsent[sent as usize..];
+        }
+    }
+    Ok(())
+}
+
+/// Non-release, crate-private response experiment: one named OS-authenticated
+/// read request, one bounded response, no grant fabrication. The currently
+/// installed production binary has no issuer and never calls this function.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "non-release read responses have no issued service loop"
+    )
+)]
+pub(crate) fn dispatch_one_named_read_reply(
+    listener: &UnixListener,
+    grant: &mut SealedDirectoryGrant,
+    expected_uid: u32,
+    expected_gid: u32,
+    deadline: Duration,
+) -> Result<(), DispatchDenied> {
+    let (stream, budget) =
+        accept_one_named_stream(listener, deadline).map_err(|_| DispatchDenied)?;
+    let expires = Instant::now().checked_add(budget).ok_or(DispatchDenied)?;
+    // The frame is accepted only after genuine kernel peer authentication
+    // and complete canonical v1 parsing. No response on identity failure.
+    let frame = read_authenticated_frame(&stream, expected_uid, expected_gid, budget)
+        .map_err(|_| DispatchDenied)?;
+    let result = grant.execute_authenticated_read(frame);
+    let payload = result.as_ref().ok().map(Vec::as_slice);
+    if write_bounded_read_reply(&stream, payload, expires).is_err() {
+        grant.revoke(); // a partial/dropped reply must not revive this session
+        return Err(DispatchDenied);
+    }
+    result.map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::Shutdown;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::time::Instant;
+
+    #[test]
+    fn reply_writer_has_bounded_deadline_and_refuses_oversize_before_sending() {
+        use std::os::fd::AsRawFd;
+        let (server, mut client) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let size: libc::c_int = 4096;
+        // SAFETY: this sets a bounded send buffer for one valid owned socket;
+        // the pointer and byte count exactly match the live integer.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    server.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let too_large = vec![42u8; 1024 * 1024 + 1];
+        assert_eq!(
+            write_bounded_read_reply(
+                &server,
+                Some(&too_large),
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Err(DispatchDenied),
+        );
+        client.set_nonblocking(true).unwrap();
+        let mut untouched = [0u8; 1];
+        assert_eq!(
+            client.read(&mut untouched).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let bounded = vec![7u8; 1024 * 1024];
+        let start = Instant::now();
+        assert_eq!(
+            write_bounded_read_reply(&server, Some(&bounded), start + Duration::from_millis(90)),
+            Err(DispatchDenied),
+            "a client that never reads must not stall the authority service",
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     fn ids() -> (u32, u32) {
         let uid = unsafe { libc::geteuid() };

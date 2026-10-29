@@ -192,6 +192,33 @@ fn inspect_custodied_named_listener(
     Ok(())
 }
 
+/// Fail-closed session-level custody latch. A privileged namespace drift
+/// permanently invalidates this issuer, even if the node is later repaired.
+/// Client frame parsing failures do NOT set this latch.
+fn inspect_latched_custodied_named_listener(
+    fd: BorrowedFd<'_>,
+    expected_path: &Path,
+    expected_socket_uid: libc::uid_t,
+    expected_socket_gid: libc::gid_t,
+    protected_dir_uid: libc::uid_t,
+    revoked: &mut bool,
+) -> Result<(), IdentityDenied> {
+    if *revoked {
+        return Err(IdentityDenied);
+    }
+    let checked = inspect_custodied_named_listener(
+        fd,
+        expected_path,
+        expected_socket_uid,
+        expected_socket_gid,
+        protected_dir_uid,
+    );
+    if checked.is_err() {
+        *revoked = true;
+    }
+    checked
+}
+
 /// Production-only acceptance: the entire socket namespace must be rooted
 /// under a root-owned 0755 parent, with declared service/client UID/GID.
 pub(crate) fn inspect_root_custodied_named_listener(
@@ -199,13 +226,15 @@ pub(crate) fn inspect_root_custodied_named_listener(
     expected_path: &Path,
     expected_socket_uid: libc::uid_t,
     expected_socket_gid: libc::gid_t,
+    revoked: &mut bool,
 ) -> Result<(), IdentityDenied> {
-    inspect_custodied_named_listener(
+    inspect_latched_custodied_named_listener(
         fd,
         expected_path,
         expected_socket_uid,
         expected_socket_gid,
         0,
+        revoked,
     )
 }
 
@@ -391,6 +420,175 @@ mod tests {
         assert!(
             retain_owned_listener(untrusted, &path, uid, gid, uid).is_err(),
             "another listening kernel FD cannot replace the observed named endpoint"
+        );
+    }
+
+    #[test]
+    fn socket_custody_drift_latches_revocation_even_if_permissions_are_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let dir = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive fixture needs unprivileged OS principal");
+        let mut revoked = false;
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Ok(())
+        );
+        assert!(!revoked);
+
+        // The kernel still owns a valid listener, but a 0666 namespace node
+        // is no longer under exclusive service/client custody.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied)
+        );
+        assert!(
+            revoked,
+            "one custody violation must irreversibly revoke this session"
+        );
+
+        // An administrator repairing the path must not resurrect an issuer
+        // that observed a trust-boundary violation during its lifetime.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "repaired kernel namespace is valid for a fresh issuer only"
+        );
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied)
+        );
+    }
+
+    #[test]
+    fn socket_parent_permission_drift_revokes_session_after_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let dir = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "positive control requires nonroot");
+        let mut revoked = false;
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Ok(())
+        );
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "writable parent directory must invalidate the issuer"
+        );
+        assert!(revoked, "root directory-chain custody loss must latch");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "repaired namespace may validate for a NEW session"
+        );
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "repaired directory must not restore the revoked session"
+        );
+    }
+
+    #[test]
+    fn socket_group_mismatch_revokes_the_session_not_only_one_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("Linux CI requires HOME");
+        let dir = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("authority.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        let mut revoked = false;
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid.wrapping_add(1),
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "NSS SocketGroup mismatch must deny"
+        );
+        assert!(revoked, "security mismatch must latch");
+        assert_eq!(
+            inspect_custodied_named_listener(listener.as_fd(), &path, uid, gid, uid),
+            Ok(()),
+            "a fresh observer can verify unchanged socket metadata"
+        );
+        assert_eq!(
+            inspect_latched_custodied_named_listener(
+                listener.as_fd(),
+                &path,
+                uid,
+                gid,
+                uid,
+                &mut revoked
+            ),
+            Err(IdentityDenied),
+            "the old session must remain denied even after identity reconciliation"
         );
     }
 

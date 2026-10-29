@@ -7,10 +7,9 @@ use windows_sys::Win32::{
     Security::{
         AclSizeInformation,
         Authorization::{GetSecurityInfo, SE_REGISTRY_KEY},
-        EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsValidSid,
-        IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
-        ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        EqualSid, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsWellKnownSid,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     },
     System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS,
@@ -22,7 +21,6 @@ use windows_sys::Win32::{
 // No caller input or environment variable may select a different authority.
 const KEY_PATH: &str = "SOFTWARE\\JameDesktopCommander\\Authority\\EpochAnchor";
 const VALUE_NAME: &str = "PolicyAnchorV1";
-const ACCESS_ALLOWED_TYPE: u8 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trustee {
@@ -149,13 +147,7 @@ fn verify_protected_registry_acl(key: HKEY, service_sid: &[u8]) -> Result<(), Id
     if code != 0 || descriptor.is_null() || owner.is_null() || acl.is_null() {
         return Err(IdentityDenied);
     }
-    if unsafe { IsValidSid(owner) } == 0 || unsafe { IsValidAcl(acl) } == 0 {
-        return Err(IdentityDenied);
-    }
-    if !matches!(
-        trustee(owner, service_sid),
-        Trustee::System | Trustee::Administrators
-    ) {
+    if unsafe { IsValidAcl(acl) } == 0 {
         return Err(IdentityDenied);
     }
     let (mut control, mut revision) = (0u16, 0u32);
@@ -177,33 +169,25 @@ fn verify_protected_registry_acl(key: HKEY, service_sid: &[u8]) -> Result<(), Id
     {
         return Err(IdentityDenied);
     }
-    let mut aces = Vec::with_capacity(3);
-    for i in 0..3 {
-        let mut raw: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(acl, i, &mut raw) } == 0 || raw.is_null() {
-            return Err(IdentityDenied);
-        }
-        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
-        let off = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        let len = header.AceSize as usize;
-        if header.AceType != ACCESS_ALLOWED_TYPE
-            || len < off + 8
-            || len > info.AclBytesInUse as usize
-        {
-            return Err(IdentityDenied);
-        }
-        let sid = unsafe { raw.cast::<u8>().add(off) };
-        let count = unsafe { *sid.add(1) } as usize;
-        if count > 15 || 8 + 4 * count > len - off || unsafe { IsValidSid(sid.cast()) } == 0 {
-            return Err(IdentityDenied);
-        }
-        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
-        aces.push(KeyAce {
-            trustee: trustee(sid.cast(), service_sid),
-            mask: ace.Mask,
-            flags: header.AceFlags,
-        });
+    // All ACE, owner-SID and DACL bytes are copied from one independently
+    // bounded self-relative descriptor before any Rust field access.
+    let copied =
+        unsafe { crate::windows_acl_aces::observe_three_aces(descriptor, owner, acl, &info) }?;
+    if !matches!(
+        trustee(copied.owner_sid.as_ptr().cast_mut().cast(), service_sid),
+        Trustee::System | Trustee::Administrators
+    ) {
+        return Err(IdentityDenied);
     }
+    let aces: Vec<KeyAce> = copied
+        .aces
+        .iter()
+        .map(|ace| KeyAce {
+            trustee: trustee(ace.sid.as_ptr().cast_mut().cast(), service_sid),
+            mask: ace.mask,
+            flags: ace.flags,
+        })
+        .collect();
     admit_acl(&aces)
 }
 

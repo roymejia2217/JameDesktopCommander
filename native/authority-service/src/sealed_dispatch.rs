@@ -714,12 +714,15 @@ mod tests {
             let mut client = UnixStream::connect(socket).unwrap();
             client.write_all(&wire).unwrap();
             client.shutdown(Shutdown::Write).unwrap();
+            // The legacy fixture supplies an unchanged root. Production
+            // must supply administrator-attested custody, never this closure.
             let result = crate::unix_accept::dispatch_one_named_read_reply(
                 listener,
                 grant,
                 uid,
                 gid,
                 Duration::from_secs(2),
+                |_| Ok(()),
             );
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();

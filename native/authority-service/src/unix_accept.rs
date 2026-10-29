@@ -252,7 +252,15 @@ pub(crate) fn dispatch_one_named_read_reply(
     expected_uid: u32,
     expected_gid: u32,
     deadline: Duration,
+    mut revalidate: impl FnMut(&mut SealedDirectoryGrant) -> Result<(), DispatchDenied>,
 ) -> Result<(), DispatchDenied> {
+    // A valid kernel peer is not enough: this caller must possess the still-
+    // current administrator-policy/root custody observation. Fail before
+    // even accepting new work when the process generation has drifted.
+    if revalidate(grant).is_err() {
+        grant.revoke();
+        return Err(DispatchDenied);
+    }
     let (stream, budget) =
         accept_one_named_stream(listener, deadline).map_err(|_| DispatchDenied)?;
     let expires = Instant::now().checked_add(budget).ok_or(DispatchDenied)?;
@@ -260,7 +268,23 @@ pub(crate) fn dispatch_one_named_read_reply(
     // and complete canonical v1 parsing. No response on identity failure.
     let frame = read_authenticated_frame(&stream, expected_uid, expected_gid, budget)
         .map_err(|_| DispatchDenied)?;
+    // The pathname namespace may change while reading from the socket.
+    // A failed post-auth check sends no file bytes and revokes this grant.
+    if revalidate(grant).is_err() {
+        grant.revoke();
+        let _ = write_bounded_read_reply(&stream, None, expires);
+        return Err(DispatchDenied);
+    }
     let result = grant.execute_authenticated_read(frame);
+    // An already-open handle can remain valid after the administrator moves
+    // its name elsewhere. Never send bytes acquired under a stale root.
+    // This check is point-in-time; it is not a namespace lock or a substitute
+    // for claim-to-operation linearization and outside-hardlink protection.
+    if revalidate(grant).is_err() {
+        grant.revoke();
+        let _ = write_bounded_read_reply(&stream, None, expires);
+        return Err(DispatchDenied);
+    }
     let payload = result.as_ref().ok().map(Vec::as_slice);
     if write_bounded_read_reply(&stream, payload, expires).is_err() {
         grant.revoke(); // a partial/dropped reply must not revive this session

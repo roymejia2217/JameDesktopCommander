@@ -280,6 +280,30 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn reply_writer_delivers_full_binary_megabyte_across_partial_socket_sends() {
+        use std::thread;
+        let (server, mut client) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let expected: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+        let peer = thread::spawn(move || {
+            let mut header = [0u8; 6];
+            client.read_exact(&mut header).unwrap();
+            assert_eq!(header, [1, 0, 0, 16, 0, 0]);
+            let mut received = vec![0u8; 1024 * 1024];
+            client.read_exact(&mut received).unwrap();
+            received
+        });
+        let sent = write_bounded_read_reply(
+            &server,
+            Some(&expected),
+            Instant::now() + Duration::from_secs(5),
+        );
+        drop(server);
+        assert_eq!(sent, Ok(()));
+        assert_eq!(peer.join().unwrap(), expected);
+    }
+
+    #[test]
     fn reply_writer_has_bounded_deadline_and_refuses_oversize_before_sending() {
         use std::os::fd::AsRawFd;
         let (server, mut client) = UnixStream::pair().unwrap();

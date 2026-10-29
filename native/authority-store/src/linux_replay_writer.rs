@@ -12,7 +12,7 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::{ffi::OsStrExt, fs::FileExt},
     },
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 const STATE_DIR: &str = "/var/lib/jdc-authority";
@@ -30,6 +30,10 @@ const DB_MAX: libc::off_t = 16 * 1024 * 1024;
 pub struct LinuxReplayIssuerLedger {
     ledger: ReplayClaimLedger,
     directory: OwnedFd,
+    // Only the private constructor chooses this path: fixed trusted state in
+    // production, a preverified protected test root in native acceptance.
+    state_path: PathBuf,
+    production: bool,
     file: File,
     identity: (u64, u64),
     permanently_revoked: bool,
@@ -215,6 +219,8 @@ impl LinuxReplayIssuerLedger {
         let mut opened = Self {
             ledger,
             directory,
+            state_path: state.to_path_buf(),
+            production,
             file,
             identity: (st.st_dev, st.st_ino),
             permanently_revoked: false,
@@ -224,6 +230,17 @@ impl LinuxReplayIssuerLedger {
     }
 
     fn revalidate(&self) -> Result<(), StoreDenied> {
+        // Checking only claims.sqlite3 inside the retained directory does NOT
+        // prove that directory still occupies the administrator-designated
+        // state path. Re-traverse every ancestor using the original custody
+        // policy, then compare kernel directory identities. Never follow a
+        // symlink, accept a client path, or fall back to pathname SQLite I/O.
+        let current = open_checked_directory(&self.state_path, self.production)?;
+        let retained = metadata(&self.directory)?;
+        let named = metadata(&current)?;
+        if (retained.st_dev, retained.st_ino) != (named.st_dev, named.st_ino) {
+            return Err(StoreDenied);
+        }
         sidecars_absent(&self.directory)?;
         let held = metadata(&self.file)?;
         if !valid_file(&held) || (held.st_dev, held.st_ino) != self.identity {

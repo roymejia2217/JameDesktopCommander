@@ -236,6 +236,46 @@ mod tests {
             active: true,
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn issuer_root_custody_is_sticky_after_real_rename_and_replacement() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed");
+        let moved = temp.path().join("moved-original");
+        fs::create_dir(&allowed).unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap()
+        );
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            policy_bytes.as_bytes(),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        let mut old = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        assert_eq!(old.revalidate_root_binding(&policy), Ok(()));
+        fs::rename(&allowed, &moved).unwrap();
+        fs::create_dir(&allowed).unwrap();
+        assert!(
+            old.revalidate_root_binding(&policy).is_err(),
+            "an intact pinned FD is no longer the policy-designated directory"
+        );
+        fs::remove_dir(&allowed).unwrap();
+        fs::rename(&moved, &allowed).unwrap();
+        assert!(
+            old.revalidate_root_binding(&policy).is_err(),
+            "restoring the original name cannot reactivate a revoked grant"
+        );
+        let mut fresh = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        assert_eq!(
+            fresh.revalidate_root_binding(&policy),
+            Ok(()),
+            "a newly issued sealed root can bind the recovered policy pathname"
+        );
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn policy_epoch_must_match_immutable_durable_ledger_epoch_before_issuing_root() {

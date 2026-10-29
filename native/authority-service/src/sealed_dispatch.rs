@@ -196,13 +196,6 @@ impl SealedDirectoryGrant {
     /// existing pinned OS handle. This returns bounded data inside the crate;
     /// no service response protocol, exposed grant or MCP bridge exists yet.
     #[cfg(target_os = "linux")]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "non-release read dispatch has no issuer or response transport"
-        )
-    )]
     pub(crate) fn execute_authenticated_read(
         &mut self,
         frame: crate::unix_session::AuthenticatedFrame,
@@ -708,12 +701,11 @@ mod tests {
             listener: &UnixListener,
             socket: &Path,
             grant: &mut SealedDirectoryGrant,
-            uid: u32,
-            gid: u32,
-            id: &str,
-            epoch: u64,
-            relative: &str,
+            peer: (u32, u32),
+            request: (&str, u64, &str),
         ) -> (Result<(), DispatchDenied>, Vec<u8>) {
+            let (uid, gid) = peer;
+            let (id, epoch, relative) = request;
             let body = format!(
                 r#"{{"version":1,"kind":"read-file","requestId":"{id}","expectedEpoch":"{epoch}","rootRef":"{ROOT}","relativePath":"{relative}"}}"#,
             );
@@ -738,11 +730,8 @@ mod tests {
             &listener,
             &socket_path,
             &mut grant,
-            uid,
-            gid,
-            ID,
-            7,
-            "bytes.bin",
+            (uid, gid),
+            (ID, 7, "bytes.bin"),
         );
         assert_eq!(good.0, Ok(()));
         assert_eq!(
@@ -754,11 +743,8 @@ mod tests {
             &listener,
             &socket_path,
             &mut grant,
-            uid,
-            gid,
-            ID,
-            7,
-            "bytes.bin",
+            (uid, gid),
+            (ID, 7, "bytes.bin"),
         );
         assert_eq!(replay.0, Err(DispatchDenied));
         assert_eq!(replay.1, [1, 1, 0, 0, 0, 0], "replay must not expose bytes");
@@ -767,11 +753,8 @@ mod tests {
             &listener,
             &socket_path,
             &mut grant,
-            uid,
-            gid,
-            "22222222-2222-4222-8222-222222222222",
-            7,
-            "alias.bin",
+            (uid, gid),
+            ("22222222-2222-4222-8222-222222222222", 7, "alias.bin"),
         );
         assert_eq!(alias.0, Err(DispatchDenied));
         assert_eq!(
@@ -784,11 +767,8 @@ mod tests {
             &listener,
             &socket_path,
             &mut grant,
-            uid,
-            gid,
-            "33333333-3333-4333-8333-333333333333",
-            8,
-            "bytes.bin",
+            (uid, gid),
+            ("33333333-3333-4333-8333-333333333333", 8, "bytes.bin"),
         );
         assert_eq!(stale.0, Err(DispatchDenied));
         assert_eq!(

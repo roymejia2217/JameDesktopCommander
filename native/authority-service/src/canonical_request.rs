@@ -152,9 +152,23 @@ impl CanonicalCreateDirectory {
 /// Canonical read data reuses the same strict fields and single UUIDv4
 /// replay identity as create-directory. Parsing does not grant authority.
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    all(target_os = "linux", not(test)),
+    expect(
+        dead_code,
+        reason = "non-release read dispatch has no authenticated service issuer yet"
+    )
+)]
 pub(crate) struct CanonicalReadFile(CanonicalCreateDirectory);
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    all(target_os = "linux", not(test)),
+    expect(
+        dead_code,
+        reason = "non-release read dispatch has no authenticated service issuer yet"
+    )
+)]
 impl CanonicalReadFile {
     pub(crate) fn request_id_bytes(&self) -> [u8; 16] {
         self.0.request_id_bytes()
@@ -182,6 +196,13 @@ pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    all(target_os = "linux", not(test)),
+    expect(
+        dead_code,
+        reason = "non-release read dispatch has no authenticated service issuer yet"
+    )
+)]
 pub(crate) fn decode_read_file_frame(frame: &[u8]) -> Result<CanonicalReadFile, FrameDenied> {
     let (request, kind) = decode_typed_frame(frame)?;
     if kind != WireKind::ReadFile {

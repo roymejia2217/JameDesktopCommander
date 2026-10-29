@@ -196,6 +196,13 @@ impl SealedDirectoryGrant {
     /// existing pinned OS handle. This returns bounded data inside the crate;
     /// no service response protocol, exposed grant or MCP bridge exists yet.
     #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "non-release read dispatch has no issuer or response transport"
+        )
+    )]
     pub(crate) fn execute_authenticated_read(
         &mut self,
         frame: crate::unix_session::AuthenticatedFrame,
@@ -275,6 +282,13 @@ impl SealedDirectoryGrant {
     }
 
     #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "non-release read dispatch has no issuer or response transport"
+        )
+    )]
     fn execute_read_impl(&mut self, wire: &[u8]) -> Result<Vec<u8>, DispatchDenied> {
         self.ensure_live_generation()?;
         let request =

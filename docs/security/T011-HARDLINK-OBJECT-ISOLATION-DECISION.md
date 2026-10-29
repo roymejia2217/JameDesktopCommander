@@ -105,6 +105,31 @@ root provenance, or policy revocation during an in-flight read. Do not count
 this test as one of the four missing MCP-level #147 GREEN cases, or permit
 production read routing based on it.
 
+### Disposable cross-volume OS-principal acceptance (non-release)
+
+The #148 experimental native matrix now includes a dedicated **fail-closed**
+OS isolation proof on both supported platforms. Linux mounts a genuinely
+distinct `tmpfs` with the `jdc-authority` UID/GID and restrictive mode;
+Windows creates and formats an ephemeral NTFS VHD in the GitHub-hosted runner
+and grants the volume root exclusively to its dedicated service SID,
+SYSTEM and Administrators. Separate unprivileged attacker identities must
+succeed at creating a **real same-volume hard link** in their own storage,
+but must fail to import an exterior name into the protected volume.
+Administrators must also be unable to create cross-volume hard links
+(the filesystem boundary, rather than just an ACL denial). Independent
+device/disk identity and exact exterior-byte integrity are verified. Runner
+setup or positive controls failing is **FAIL**, never a skip or a success.
+
+These are deployment-feasibility **experiments**, not proof that arbitrary
+user-supplied `allowedDirectories` already occupy dedicated volumes, that
+a malicious administrator or remount cannot introduce another object
+namespace, or that Windows reparse/mount aliases are eliminated. Nor do
+they show that the production native service runs in such a volume, or
+that its MCP operations and in-flight revocations are already secured.
+The required object invariant O and the four original PR #147 RED cases
+remain open until the deployment model and real SDK/portable flows
+independently enforce these conditions.
+
 ## 3. Platform constraints and unresolved assumptions
 
 | Dimension | Linux | Windows |

@@ -22,7 +22,10 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
       workflow.indexOf('Prove real Node principal receives issuer-owned handle-bound bytes'),
     'the E2E must run only after the production TypeScript contract has been compiled',
   );
-  assert.match(acceptance, /sudo -n -u jdc-mcp-client -- node --input-type=module/);
+  assert.match(acceptance, /node_binary="\$\(realpath -e -- "\$\(command -v node\)"\)"/);
+  assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --version/);
+  assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --input-type=module/);
+  assert.doesNotMatch(acceptance, /sudo -n -u jdc-mcp-client -- node(?:\s|$)/m);
   assert.match(acceptance, /encodeAuthorityRequestFrame/);
   assert.match(acceptance, /decodeAuthorityReadReplyFrame/);
   assert.match(acceptance, /dist\/security\/authority-frame-contract\.js/);

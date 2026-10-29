@@ -17,6 +17,16 @@ for account in jdc-authority jdc-mcp-client; do
   getent passwd "$account" >/dev/null
 done
 
+# sudo intentionally substitutes a restricted PATH for the target principal.
+# Carry the exact setup-node executable across the identity boundary instead
+# of silently invoking an unrelated system Node binary.
+node_binary="$(realpath -e -- "$(command -v node)")"
+if [[ "$("$node_binary" --version)" != 'v22.19.0' ||
+      "$(sudo -n -u jdc-mcp-client -- "$node_binary" --version)" != 'v22.19.0' ]]; then
+  printf '%s\n' 'E_ISSUER_READ_E2E_NODE_VERSION_MISMATCH' >&2
+  exit 1
+fi
+
 fixture='native/authority-store/target/debug/examples/issuer_read_fixture'
 probe='native/authority-service/target/debug/examples/linux_issuer_read_probe'
 contract="$(realpath -e -- dist/security/authority-frame-contract.js)"
@@ -126,7 +136,7 @@ sudo -n systemctl start jdc-authority.socket
 [[ "$(stat -c '%U:%G:%a' "$socket_path")" == 'jdc-authority:jdc-mcp-client:660' &&
    "$(stat -c '%U:%G:%a' "$socket_dir")" == 'root:root:755' ]] || exit 1
 
-sudo -n -u jdc-mcp-client -- node --input-type=module - "$socket_path" "$contract" <<'NODE'
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$socket_path" "$contract" <<'NODE'
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { pathToFileURL } from 'node:url';

@@ -190,4 +190,44 @@ mod tests {
     fn ordinary_unprovisioned_process_cannot_bootstrap_privileged_issuer() {
         assert!(UnissuedIssuer::observe_os_attested().is_err());
     }
+
+    #[test]
+    fn generic_issuer_liveness_check_must_revoke_after_socket_custody_drift() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::var_os("HOME").expect("native Linux fixture needs HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = temp.path().join("authority.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0, "fixture must not run with privileged account");
+        let mut revoked = false;
+        assert_eq!(
+            revalidate_listener_custody(&listener, &path, uid, gid, uid, &mut revoked),
+            Ok(()),
+            "valid kernel listener remains admissible"
+        );
+        assert!(!revoked);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(
+            revalidate_listener_custody(&listener, &path, uid, gid, uid, &mut revoked),
+            Err(IdentityDenied),
+            "a liveness check must observe socket-custody loss without any IPC client"
+        );
+        assert!(revoked, "loss of custody must be sticky");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert_eq!(
+            revalidate_listener_custody(&listener, &path, uid, gid, uid, &mut revoked),
+            Err(IdentityDenied),
+            "repair cannot reuse revoked issuer session"
+        );
+        let mut fresh = false;
+        assert_eq!(
+            revalidate_listener_custody(&listener, &path, uid, gid, uid, &mut fresh),
+            Ok(()),
+            "a new independently verified session may pass"
+        );
+    }
 }

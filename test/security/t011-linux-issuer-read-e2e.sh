@@ -132,6 +132,7 @@ import net from 'node:net';
 import { pathToFileURL } from 'node:url';
 
 const [socketPath, contractPath] = process.argv.slice(2);
+assert.equal(process.version, 'v22.19.0', 'E_ISSUER_READ_E2E_NODE_VERSION_MISMATCH');
 const { encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame } =
   await import(pathToFileURL(contractPath).href);
 const request = JSON.parse(

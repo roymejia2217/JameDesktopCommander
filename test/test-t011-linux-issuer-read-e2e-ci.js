@@ -26,8 +26,11 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --version/);
   assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --input-type=module/);
   assert.doesNotMatch(acceptance, /sudo -n -u jdc-mcp-client -- node(?:\s|$)/m);
-  assert.match(acceptance, /encodeAuthorityRequestFrame/);
-  assert.match(acceptance, /decodeAuthorityReadReplyFrame/);
+  assert.match(acceptance, /requestIssuerOwnedRead/);
+  assert.doesNotMatch(acceptance, /net\.createConnection/);
+  assert.match(acceptance, /requestIssuerOwnedRead/);
+  assert.match(acceptance, /installed_read_client/);
+  assert.match(acceptance, /authority-read-client[.]mjs/);
   assert.match(acceptance, /contract_dir='\/usr\/libexec\/jdc\/read-e2e-contract'/);
   assert.match(acceptance, /authority-frame-contract\.js/);
   assert.match(acceptance, /authority-operation-contract\.js/);

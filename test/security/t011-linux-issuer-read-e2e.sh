@@ -31,8 +31,10 @@ fixture='native/authority-store/target/debug/examples/issuer_read_fixture'
 probe='native/authority-service/target/debug/examples/linux_issuer_read_probe'
 contract_source="$(realpath -e -- dist/security/authority-frame-contract.js)"
 operation_contract_source="$(realpath -e -- dist/security/authority-operation-contract.js)"
+read_client_source="$(realpath -e -- test/security/support/authority-read-client.mjs)"
 [[ -x "$fixture" && -x "$probe" &&
-   -r "$contract_source" && -r "$operation_contract_source" ]] || {
+   -r "$contract_source" && -r "$operation_contract_source" &&
+   -r "$read_client_source" ]] || {
   printf '%s\n' 'E_ISSUER_READ_E2E_BINARIES_MISSING' >&2
   exit 1
 }
@@ -56,6 +58,7 @@ installed_probe='/usr/libexec/jdc/jdc-authority-read-e2e'
 contract_dir='/usr/libexec/jdc/read-e2e-contract'
 installed_contract="$contract_dir/authority-frame-contract.js"
 installed_operation_contract="$contract_dir/authority-operation-contract.js"
+installed_read_client="$contract_dir/authority-read-client.mjs"
 service_source="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.service)"
 socket_source="$(realpath -e -- packaging/experimental/linux/systemd/jdc-authority.socket)"
 
@@ -125,15 +128,19 @@ sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "
 sudo -n install -D -o root -g root -m 0755 -- "$probe" "$installed_probe"
 sudo -n install -d -o root -g root -m 0755 -- "$contract_dir"
 sudo -n install -o root -g root -m 0644 -- "$contract_source" "$installed_contract"
-sudo -n install -o root -g root -m 0644 --   "$operation_contract_source" "$installed_operation_contract"
+sudo -n install -o root -g root -m 0644 -- "$operation_contract_source" "$installed_operation_contract"
+sudo -n install -o root -g root -m 0644 -- "$read_client_source" "$installed_read_client"
 sudo -n cmp -s -- "$contract_source" "$installed_contract"
 sudo -n cmp -s -- "$operation_contract_source" "$installed_operation_contract"
+sudo -n cmp -s -- "$read_client_source" "$installed_read_client"
 sudo -n -u jdc-mcp-client -- test -r "$installed_contract"
 sudo -n -u jdc-mcp-client -- test -r "$installed_operation_contract"
+sudo -n -u jdc-mcp-client -- test -r "$installed_read_client"
 [[ "$(stat -c '%U:%G:%a' "$contract_dir")" == 'root:root:755' &&
    "$(stat -c '%U:%G:%a' "$installed_contract")" == 'root:root:644' &&
-   "$(stat -c '%U:%G:%a' "$installed_operation_contract")" == 'root:root:644' ]] || exit 1
-contract="$installed_contract"
+   "$(stat -c '%U:%G:%a' "$installed_operation_contract")" == 'root:root:644' &&
+   "$(stat -c '%U:%G:%a' "$installed_read_client")" == 'root:root:644' ]] || exit 1
+read_client="$installed_read_client"
 sudo -n install -o root -g root -m 0644 -- "$service_source" "$service_unit"
 sudo -n install -o root -g root -m 0644 -- "$socket_source" "$socket_unit"
 sudo -n install -d -o root -g root -m 0755 -- "$dropin_dir"
@@ -153,40 +160,22 @@ sudo -n systemctl start jdc-authority.socket
 [[ "$(stat -c '%U:%G:%a' "$socket_path")" == 'jdc-authority:jdc-mcp-client:660' &&
    "$(stat -c '%U:%G:%a' "$socket_dir")" == 'root:root:755' ]] || exit 1
 
-sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$socket_path" "$contract" <<'NODE'
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
 import assert from 'node:assert/strict';
-import net from 'node:net';
 import { pathToFileURL } from 'node:url';
 
-const [socketPath, contractPath] = process.argv.slice(2);
+const [readClientPath, contractPath, operationContractPath] = process.argv.slice(2);
 assert.equal(process.version, 'v22.19.0', 'E_ISSUER_READ_E2E_NODE_VERSION_MISMATCH');
-const { encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame } =
-  await import(pathToFileURL(contractPath).href);
+const { createIssuerReadClient } =
+  await import(pathToFileURL(readClientPath).href);
+const frameContract = await import(pathToFileURL(contractPath).href);
+const operationContract = await import(pathToFileURL(operationContractPath).href);
+const { requestIssuerOwnedRead } =
+  createIssuerReadClient({ ...frameContract, ...operationContract });
 const request = JSON.parse(
   '{"version":1,"kind":"read-file","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"inside.bin"}',
 );
-const frame = encodeAuthorityRequestFrame(request);
-const rawReply = await new Promise((resolve, reject) => {
-  const chunks = [];
-  let total = 0;
-  const client = net.createConnection({ path: socketPath });
-  client.setTimeout(5000);
-  client.once('connect', () => client.end(frame));
-  client.on('data', (chunk) => {
-    total += chunk.length;
-    if (total > 1024 * 1024 + 6) {
-      client.destroy(new Error('oversized authority reply'));
-      return;
-    }
-    chunks.push(Buffer.from(chunk));
-  });
-  client.once('timeout', () => client.destroy(new Error('authority reply timeout')));
-  client.once('error', reject);
-  client.once('close', (hadError) => {
-    if (!hadError) resolve(Buffer.concat(chunks, total));
-  });
-});
-const reply = decodeAuthorityReadReplyFrame(rawReply);
+const reply = await requestIssuerOwnedRead(request);
 assert.equal(reply.status, 'ok');
 if (reply.status !== 'ok') throw new Error('issuer denied canonical read');
 assert.deepEqual(reply.bytes, Buffer.from([0, 255, 0x81, 42, 74, 68, 67, 10]));

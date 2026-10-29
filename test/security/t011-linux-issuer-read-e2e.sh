@@ -211,4 +211,40 @@ PY
    "$service_uid:$service_gid:600:1" ]] || exit 1
 [[ "$(sudo -n stat -c '%u:%g:%a:%h' "$read_root/inside.bin")" == \
    "$service_uid:$service_gid:600:1" ]] || exit 1
+# A new one-shot systemd service invocation must not replay an already
+# committed requestId. The original file and SQLite ledger must survive.
+sudo -n systemctl stop jdc-authority.service
+[[ "$(sudo -n systemctl show -P ActiveState jdc-authority.socket)" == 'active' &&
+   -S "$socket_path" ]] || exit 1
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+
+const [clientPath, framePath, operationPath] = process.argv.slice(2);
+const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
+const frames = await import(pathToFileURL(framePath).href);
+const operations = await import(pathToFileURL(operationPath).href);
+const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
+const request = JSON.parse(
+  '{"version":1,"kind":"read-file","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"inside.bin"}',
+);
+const replay = await requestIssuerOwnedRead(request);
+assert.deepEqual(replay, { version: 1, status: 'denied' });
+console.log('T011_ISSUER_READ_E2E_REPLAY_REJECTED_AFTER_RESTART');
+NODE
+
+sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = db.execute(
+    "SELECT hex(epoch), hex(request) FROM replay_claims ORDER BY epoch, request"
+).fetchall()
+expected = [("0000000000000001", "11111111111141118111111111111111")]
+if rows != expected:
+    raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_LEDGER_CHANGED:{rows!r}")
+print("T011_ISSUER_READ_E2E_REPLAY_LEDGER_UNCHANGED")
+PY
+sudo -n cmp -s -- "$payload_source" "$read_root/inside.bin"
 printf '%s\n' 'T011_REAL_NODE_TO_ISSUER_READ_E2E_PASS_NONRELEASE'

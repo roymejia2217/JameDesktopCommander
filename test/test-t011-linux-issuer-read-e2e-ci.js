@@ -45,6 +45,12 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(probe, /dispatch_one_inherited_read_reply/);
   assert.match(fixture, /PolicyBytesStore/);
   assert.match(fixture, /replay_claims/);
+  // Restart the disposable issuer and reuse the same authenticated request
+  // identity. A durable claim must deny replay without reissuing file bytes.
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_REPLAY_REJECTED_AFTER_RESTART/);
+  assert.match(acceptance, /assert\.deepEqual\(replay, \{ version: 1, status: 'denied' \}\)/);
+  assert.match(acceptance, /systemctl stop jdc-authority\.service/);
+  assert.match(acceptance, /REPLAY_LEDGER_UNCHANGED/);
 
   const productionMain = await readFile('native/authority-service/src/main.rs', 'utf8');
   assert.match(productionMain, /eprintln!\("E_POLICY_UNAVAILABLE"\)/);

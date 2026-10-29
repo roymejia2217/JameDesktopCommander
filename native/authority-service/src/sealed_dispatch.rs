@@ -678,6 +678,129 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn named_kernel_authenticated_read_replies_once_with_bounded_binary_payload() {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        let outside = f.path().join("outside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(inside.join("bytes.bin"), [0, 255, 0x81, 42]).unwrap();
+        let sentinel = outside.join("never-expose.bin");
+        let outside_bytes = b"OUTSIDE_BYTES_MUST_NOT_BE_EMITTED";
+        std::fs::write(&sentinel, outside_bytes).unwrap();
+        std::fs::hard_link(&sentinel, inside.join("alias.bin")).unwrap();
+        let socket_path = f.path().join("native.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (uid, gid) = (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+        assert_ne!(uid, 0);
+        assert_ne!(gid, 0);
+        let mut grant = fixture(&inside);
+
+        fn exchange(
+            listener: &UnixListener,
+            socket: &Path,
+            grant: &mut SealedDirectoryGrant,
+            uid: u32,
+            gid: u32,
+            id: &str,
+            epoch: u64,
+            relative: &str,
+        ) -> (Result<(), DispatchDenied>, Vec<u8>) {
+            let body = format!(
+                r#"{{"version":1,"kind":"read-file","requestId":"{id}","expectedEpoch":"{epoch}","rootRef":"{ROOT}","relativePath":"{relative}"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let mut client = UnixStream::connect(socket).unwrap();
+            client.write_all(&wire).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            let result = crate::unix_accept::dispatch_one_named_read_reply(
+                listener,
+                grant,
+                uid,
+                gid,
+                Duration::from_secs(2),
+            );
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            (result, response)
+        }
+
+        let good = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            uid,
+            gid,
+            ID,
+            7,
+            "bytes.bin",
+        );
+        assert_eq!(good.0, Ok(()));
+        assert_eq!(
+            good.1,
+            [vec![1, 0, 0, 0, 0, 4], vec![0, 255, 0x81, 42]].concat()
+        );
+
+        let replay = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            uid,
+            gid,
+            ID,
+            7,
+            "bytes.bin",
+        );
+        assert_eq!(replay.0, Err(DispatchDenied));
+        assert_eq!(replay.1, [1, 1, 0, 0, 0, 0], "replay must not expose bytes");
+
+        let alias = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            uid,
+            gid,
+            "22222222-2222-4222-8222-222222222222",
+            7,
+            "alias.bin",
+        );
+        assert_eq!(alias.0, Err(DispatchDenied));
+        assert_eq!(
+            alias.1,
+            [1, 1, 0, 0, 0, 0],
+            "outside alias must not expose bytes"
+        );
+
+        let stale = exchange(
+            &listener,
+            &socket_path,
+            &mut grant,
+            uid,
+            gid,
+            "33333333-3333-4333-8333-333333333333",
+            8,
+            "bytes.bin",
+        );
+        assert_eq!(stale.0, Err(DispatchDenied));
+        assert_eq!(
+            stale.1,
+            [1, 1, 0, 0, 0, 0],
+            "stale epoch must not expose bytes"
+        );
+        assert_eq!(std::fs::read(sentinel).unwrap(), outside_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn authenticated_native_read_uses_pinned_root_with_replay_and_external_alias_denial() {
         use std::io::Write;
         use std::net::Shutdown;

@@ -84,7 +84,7 @@ impl UnissuedIssuer {
         replay_file.read_verified_snapshot(policy.epoch())?;
         // Standard SQLite unix VFS only opens after OS principal, root and
         // full replay-image validation. No arbitrary path or client epoch.
-        let replay_writer = LinuxReplayIssuerLedger::from_provisioned_service(policy.epoch())
+        let mut replay_writer = LinuxReplayIssuerLedger::from_provisioned_service(policy.epoch())
             .map_err(|_| IdentityDenied)?;
         // Policy may change while SQLite acquires locks or checks schema.
         let completed = IssuerPolicy::from_os_attested()?;

@@ -250,6 +250,22 @@ impl ReplayClaimLedger {
         Ok(count)
     }
 
+    /// Read-only live-session history check for the custodied issuer's
+    /// generic liveness gate. A valid SQLite header and unchanged inode do
+    /// not imply the committed replay identities are unchanged. This is NOT
+    /// restart-safe antirollback: the fingerprint is initialized at open.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_live_continuity(&self) -> Result<(), StoreDenied> {
+        if self.continuity_revoked {
+            return Err(StoreDenied);
+        }
+        verify_schema(&self.connection)?;
+        if session_fingerprint(&self.connection)? != self.session_digest {
+            return Err(StoreDenied);
+        }
+        Ok(())
+    }
+
     /// Return the immutable epoch captured when this ledger was opened.
     /// This is identity metadata only, never proof of OS storage custody.
     pub fn bound_epoch(&self) -> u64 {

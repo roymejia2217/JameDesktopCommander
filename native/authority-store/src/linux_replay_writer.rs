@@ -212,14 +212,14 @@ impl LinuxReplayIssuerLedger {
         )
         .map_err(|_| StoreDenied)?;
         let ledger = ReplayClaimLedger::from_existing_connection(db, epoch)?;
-        let opened = Self {
+        let mut opened = Self {
             ledger,
             directory,
             file,
             identity: (st.st_dev, st.st_ino),
             permanently_revoked: false,
         };
-        opened.revalidate()?;
+        opened.validate_custody()?;
         Ok(opened)
     }
 
@@ -255,13 +255,23 @@ impl LinuxReplayIssuerLedger {
         sidecars_absent(&self.directory)
     }
 
-    /// Validate pinned state without issuing any filesystem operation.
-    /// A prior uncertain claim cannot be reactivated by a new observation.
-    pub fn validate_custody(&self) -> Result<(), StoreDenied> {
+    /// Validate pinned state AND the exact committed live replay history.
+    /// Any custody or continuity uncertainty permanently poisons this writer,
+    /// even after another process restores the previous SQLite rows.
+    /// This remains a non-authorizing, in-session check, not an independent
+    /// administrative antirollback witness across process restarts.
+    pub fn validate_custody(&mut self) -> Result<(), StoreDenied> {
         if self.permanently_revoked {
             return Err(StoreDenied);
         }
-        self.revalidate()
+        let checked = self
+            .revalidate()
+            .and_then(|_| self.ledger.verify_live_continuity())
+            .and_then(|_| self.revalidate());
+        if checked.is_err() {
+            self.permanently_revoked = true;
+        }
+        checked
     }
 
     /// Irreversibly revoke this writer when the independent administrative
@@ -455,6 +465,121 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM replay_claims", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn issuer_custody_denies_valid_same_inode_replay_history_substitution() {
+        use std::os::unix::fs::MetadataExt;
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        let original_id = id();
+        writer.claim_once(original_id).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let before = std::fs::metadata(&path).unwrap();
+        let mut substituted_id = original_id;
+        substituted_id[0] ^= 0x42;
+        // An independently opened SQLite connection changes one *valid*
+        // UUIDv4 claim with the same epoch and total row count. The test
+        // must not obtain denial merely by corrupting schema or file header.
+        let other = Connection::open(&path).unwrap();
+        assert_eq!(
+            other
+                .execute(
+                    "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                    rusqlite::params![
+                        substituted_id.as_slice(),
+                        7u64.to_be_bytes().as_slice(),
+                        original_id.as_slice()
+                    ]
+                )
+                .unwrap(),
+            1,
+            "positive attacker fixture must actually replace the consumed identity"
+        );
+        drop(other);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "valid substitution preserves DB size"
+        );
+        let audit = Connection::open(&path).unwrap();
+        let changed: Vec<u8> = audit
+            .query_row(
+                "SELECT request FROM replay_claims WHERE epoch=?1",
+                [7u64.to_be_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(changed, substituted_id);
+        drop(audit);
+        assert!(
+            writer.validate_custody().is_err(),
+            "generic issuer liveness must not accept changed live replay history"
+        );
+        // Even repairing the original committed row may not resurrect the
+        // same issuer after it observed compromised history.
+        let repair = Connection::open(&path).unwrap();
+        assert_eq!(
+            repair
+                .execute(
+                    "UPDATE replay_claims SET request=?1 WHERE epoch=?2 AND request=?3",
+                    rusqlite::params![
+                        original_id.as_slice(),
+                        7u64.to_be_bytes().as_slice(),
+                        substituted_id.as_slice()
+                    ]
+                )
+                .unwrap(),
+            1
+        );
+        drop(repair);
+        assert!(
+            writer.validate_custody().is_err(),
+            "repair cannot restore a revoked writer"
+        );
+        assert!(
+            writer.claim_once(substituted_id).is_err(),
+            "no new claim after compromised history"
+        );
+    }
+
+    #[test]
+    fn issuer_custody_denies_valid_sqlite_schema_extension_after_open() {
+        let (_temp, dir) = fixture();
+        let path = dir.join("claims.sqlite3");
+        let mut writer = LinuxReplayIssuerLedger::open_protected_fixture(&dir, 7).unwrap();
+        writer.claim_once(id()).unwrap();
+        assert_eq!(writer.validate_custody(), Ok(()));
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch("CREATE TABLE injected (value INTEGER)")
+            .unwrap();
+        let count: i64 = external
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "schema change must preserve the valid claim fixture"
+        );
+        drop(external);
+        assert!(
+            writer.validate_custody().is_err(),
+            "live issuer must verify the exact single-table SQLite schema"
+        );
+        let repair = Connection::open(&path).unwrap();
+        repair.execute_batch("DROP TABLE injected").unwrap();
+        drop(repair);
+        assert!(
+            writer.validate_custody().is_err(),
+            "schema repair cannot revive issuer"
+        );
+        assert!(
+            writer.claim_once(id()).is_err(),
+            "revoked writer cannot claim again"
+        );
     }
 
     #[test]

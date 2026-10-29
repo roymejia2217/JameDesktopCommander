@@ -157,6 +157,28 @@ not proof of sudden-power-loss durability at every syscall, signature
 validation, an antirollback witness outside local root control, or
 authorization while MCP filesystem operations are in flight.
 
+## Canonical issuer-policy semantics before administrator publication
+
+The root-admin publisher now applies the exact issuer-v1 restricted-policy
+parser to already SHA-256-verified SQLite policy bytes before preparing a
+transition or staging a candidate. A valid SQLite generation containing
+arbitrary, noncanonical, unrestricted, duplicate-root or invalid-rootRef
+policy data is DENIED even if its epoch and digest are consistent. Each
+existing restricted recovery path checks the same semantic contract before
+completing a recorded transition. This does not open any declared path or
+mint a native filesystem capability.
+
+The ephemeral Linux acceptance shares five canonical JSON fixtures between
+the SQLite candidate generator and the independent service-side validator.
+A separate invalid, internally consistent SQLite image must be denied by the
+root-only publisher, with no staged outputs, the old image unchanged and
+the persistent publication intent still forcing service-side denial.
+Valid forward commit and all recovery scenarios remain mandatory.
+
+These checks reduce publisher/issuer semantic drift; they do not establish
+signed operator provenance, in-flight revocation linearization, external
+antirollback or full production administration.
+
 ## Administrator publisher requirements still missing
 
 The implemented root-only begin/commit protocol supplies an exclusive marker, a strictly forward image+witness transition, staged fsync/rename ordering, and denial of a failed publication. It does NOT establish policy-source signature/provenance, approved semantic authorization, administrative operator authentication beyond root kernel identity, a documented recovery operator for every crash boundary, or a state machine linearized with in-flight native filesystem operations. Concurrency against malicious root processes, crash injection after each file and directory synchronization, power-loss persistence and safe fail-closed recovery after every crash window all require independent acceptance. It cannot be deployed as a complete trusted policy issuer.

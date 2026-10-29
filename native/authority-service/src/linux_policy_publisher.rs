@@ -161,6 +161,14 @@ pub fn prepare_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied
     use jdc_authority_store::policy_bytes::PolicyBytesStore;
     let next =
         PolicyBytesStore::read_verified_serialized(next_image).map_err(|_| IdentityDenied)?;
+    // SHA-256 and exact SQLite schema alone do not certify a usable grant
+    // policy. Apply the issuer's canonical rootRef/path/mode validator before
+    // any durable intent transition, staging, or rename.
+    crate::issuer_policy::IssuerPolicy::validate_admin_candidate(
+        next.bytes(),
+        next.epoch(),
+        *next.digest(),
+    )?;
     let dir = open_admin_directory()?;
     let original = require_admin_intent(&dir)?;
     require_absent_sqlite_sidecars(&dir)?;
@@ -285,6 +293,14 @@ pub fn commit_fixed_publication(next_image: &[u8]) -> Result<(), IdentityDenied>
     use jdc_authority_store::policy_bytes::PolicyBytesStore;
     let next =
         PolicyBytesStore::read_verified_serialized(next_image).map_err(|_| IdentityDenied)?;
+    // SHA-256 and exact SQLite schema alone do not certify a usable grant
+    // policy. Apply the issuer's canonical rootRef/path/mode validator before
+    // any durable intent transition, staging, or rename.
+    crate::issuer_policy::IssuerPolicy::validate_admin_candidate(
+        next.bytes(),
+        next.epoch(),
+        *next.digest(),
+    )?;
     let dir = open_admin_directory()?;
     let original_intent = require_admin_intent(&dir)?;
     require_absent_sqlite_sidecars(&dir)?;
@@ -374,6 +390,11 @@ pub fn recover_before_policy_rename() -> Result<(), IdentityDenied> {
     let old = PolicyBytesStore::read_verified_serialized(&old_image).map_err(|_| IdentityDenied)?;
     let next =
         PolicyBytesStore::read_verified_serialized(&next_image).map_err(|_| IdentityDenied)?;
+    crate::issuer_policy::IssuerPolicy::validate_admin_candidate(
+        next.bytes(),
+        next.epoch(),
+        *next.digest(),
+    )?;
     let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
     let (next_epoch, next_digest) =
         crate::epoch_anchor_wire::parse_epoch_digest_wire(&next_witness)?;
@@ -465,6 +486,11 @@ pub fn recover_after_policy_rename() -> Result<(), IdentityDenied> {
     }
     let new_policy =
         PolicyBytesStore::read_verified_serialized(&published).map_err(|_| IdentityDenied)?;
+    crate::issuer_policy::IssuerPolicy::validate_admin_candidate(
+        new_policy.bytes(),
+        new_policy.epoch(),
+        *new_policy.digest(),
+    )?;
     let (old_epoch, old_digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&old_witness)?;
     let (next_epoch, next_digest) =
         crate::epoch_anchor_wire::parse_epoch_digest_wire(&staged_witness)?;
@@ -533,6 +559,11 @@ pub fn recover_after_witness_rename() -> Result<(), IdentityDenied> {
     }
     let policy =
         PolicyBytesStore::read_verified_serialized(&actual_image).map_err(|_| IdentityDenied)?;
+    crate::issuer_policy::IssuerPolicy::validate_admin_candidate(
+        policy.bytes(),
+        policy.epoch(),
+        *policy.digest(),
+    )?;
     let (epoch, digest) = crate::epoch_anchor_wire::parse_epoch_digest_wire(&actual_witness)?;
     if epoch != record.next_epoch
         || digest != record.next_digest

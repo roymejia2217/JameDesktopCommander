@@ -208,7 +208,10 @@ test('root-only admin publisher validates forward immutable generation and fsync
     /E_POLICY_FORWARD_PUBLISH_COMMITTED/,
     /E_POLICY_BACKWARD_PUBLISH_DENIED/,
     /commit-v2/, /policy-snapshot-v2/,
+    /T011_ADMIN_PUBLISHER_SEMANTIC_POLICY_DENIAL_PASS/,
+    /init-policy-bytes-invalid-v2/,
   ]) assert.match(script, marker);
+  assert.match(source, /IssuerPolicy::validate_admin_candidate/);
 });
 
 test('admin recovery only completes an authenticated split policy-rename state', () => {

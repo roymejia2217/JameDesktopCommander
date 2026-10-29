@@ -33,6 +33,7 @@ source_file="$(mktemp /tmp/jdc-policy-fixture.XXXXXXXX)"
 source_anchor="$(mktemp /tmp/jdc-policy-anchor.XXXXXXXX)"
 mismatch_anchor="$(mktemp /tmp/jdc-policy-mismatch.XXXXXXXX)"
 source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
+source_file_invalid_v2="$(mktemp /tmp/jdc-policy-invalid-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 source_file_v3="$(mktemp /tmp/jdc-policy-v3.XXXXXXXX)"
 source_anchor_v3="$(mktemp /tmp/jdc-policy-witness-v3.XXXXXXXX)"
@@ -44,7 +45,7 @@ cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" "$source_file_v5" "$source_anchor_v5" || code=1
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_file_invalid_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" "$source_file_v5" "$source_anchor_v5" || code=1
   exit "$code"
 }
 trap cleanup EXIT
@@ -52,6 +53,7 @@ trap cleanup EXIT
 "$fixture" write-policy-anchor "$source_anchor"
 "$fixture" write-policy-anchor-mismatch "$mismatch_anchor"
 "$fixture" init-policy-bytes-v2 "$source_file_v2"
+"$fixture" init-policy-bytes-invalid-v2 "$source_file_invalid_v2"
 "$fixture" write-policy-anchor-v2 "$source_anchor_v2"
 "$fixture" init-policy-bytes-v3 "$source_file_v3"
 "$fixture" write-policy-anchor-v3 "$source_anchor_v3"
@@ -214,6 +216,19 @@ verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$p
 # SQLite image, never a client-supplied policy path in the service.
 verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+
+# SHA-consistent SQLite must not permit publisher adoption of policy bytes
+# rejected by the issuer's actual restricted rootRef/path grammar.
+if sudo -n -- "$publisher" commit-v2 "$source_file_invalid_v2" 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_INVALID_SEMANTIC_IMAGE_ACCEPTED' >&2
+  exit 1
+fi
+[[ -f "$publish_intent" &&
+   ! -e "${directory}/.policy-next.sqlite3" &&
+   ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+[[ "$(sudo -n sha256sum -- "$policy" | cut -d' ' -f1)" == "$before" ]] || exit 1
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+printf '%s\n' 'T011_ADMIN_PUBLISHER_SEMANTIC_POLICY_DENIAL_PASS'
 
 # Stale exclusive staging file from an interrupted attempt must fail closed.
 sudo -n install -o root -g root -m 0600 -- "$source_anchor" "${directory}/.policy-next.sqlite3"

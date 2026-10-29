@@ -71,6 +71,27 @@ mod tests {
         );
         assert!(IssuerPolicy::decode_exact_for_test(duplicate.as_bytes(), 7, [1; 32]).is_err());
     }
+    #[test]
+    fn publisher_rejects_digest_consistent_but_semantically_invalid_policy() {
+        // SQLite can carry SHA-consistent bytes that the native issuer cannot
+        // interpret as an administrator-approved restricted root mapping.
+        let bad = b"approved-policy-fixture";
+        assert!(IssuerPolicy::validate_admin_candidate(bad, 2, [1; 32]).is_err());
+        let good = policy(
+            R,
+            if cfg!(windows) {
+                "C:\\safe-root"
+            } else {
+                "/safe-root"
+            },
+        );
+        assert!(IssuerPolicy::validate_admin_candidate(&good, 2, [1; 32]).is_ok());
+        let forged = String::from_utf8(good.clone())
+            .unwrap()
+            .replace("\"mode\":\"restricted\"", "\"mode\":\"unrestricted\"");
+        assert!(IssuerPolicy::validate_admin_candidate(forged.as_bytes(), 2, [1; 32]).is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn issuer_does_not_open_root_through_ntfs_junction_to_outside() {
@@ -230,6 +251,19 @@ fn root_components(path: &str) -> Result<(&str, Vec<&str>), IdentityDenied> {
     Ok((anchor, parts))
 }
 impl IssuerPolicy {
+    /// Reject a candidate policy that is SHA-consistent in SQLite but would be
+    /// rejected by the actual native issuer. This checks data semantics only;
+    /// OS-rooted publisher custody and provenance are separate requirements.
+    /// No root handles or caller privileges are created here.
+    #[cfg(any(test, target_os = "linux"))]
+    pub(crate) fn validate_admin_candidate(
+        bytes: &[u8],
+        epoch: u64,
+        digest: [u8; 32],
+    ) -> Result<(), IdentityDenied> {
+        Self::decode_verified(bytes, epoch, digest).map(|_| ())
+    }
+
     #[cfg(any(test, target_os = "linux"))]
     fn decode_verified(bytes: &[u8], epoch: u64, digest: [u8; 32]) -> Result<Self, IdentityDenied> {
         if epoch == 0 || digest == [0; 32] || bytes.is_empty() || bytes.len() > 65_536 {

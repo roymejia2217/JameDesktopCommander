@@ -618,6 +618,85 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn authenticated_native_read_uses_pinned_root_with_replay_and_external_alias_denial() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(allowed.join("nested")).unwrap();
+        let expected = b"REAL_NATIVE_HANDLE_BOUND_READ";
+        std::fs::write(allowed.join("nested/good.bin"), expected).unwrap();
+        let secret = b"DO_NOT_LEAK_OUTSIDE_OBJECT";
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, secret).unwrap();
+        std::fs::hard_link(&sentinel, allowed.join("alias.bin")).unwrap();
+        let mut grant = fixture(&allowed);
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        assert_ne!(gid, 0);
+        fn authenticate(
+            wire: &[u8],
+            uid: u32,
+            gid: u32,
+        ) -> crate::unix_session::AuthenticatedFrame {
+            let (mut client, service) = UnixStream::pair().unwrap();
+            client.write_all(wire).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &service,
+                uid,
+                gid,
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        }
+        let read_wire = |id: &str, epoch: u64, relative: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"read-file","requestId":"{id}","expectedEpoch":"{epoch}","rootRef":"{ROOT}","relativePath":"{relative}"}}"#,
+            );
+            let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+            framed.extend_from_slice(body.as_bytes());
+            framed
+        };
+        let valid = read_wire(ID, 7, "nested/good.bin");
+        let accepted = authenticate(&valid, uid, gid);
+        assert_eq!(
+            grant.execute_authenticated_read(accepted),
+            Ok(expected.to_vec())
+        );
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&valid, uid, gid)),
+            Err(DispatchDenied),
+            "a second connection must not replay the same read identity",
+        );
+        let forged = read_wire("22222222-2222-4222-8222-222222222222", 8, "nested/good.bin");
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&forged, uid, gid)),
+            Err(DispatchDenied),
+            "policy epoch mismatch must deny the read",
+        );
+        let external = read_wire("33333333-3333-4333-8333-333333333333", 7, "alias.bin");
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&external, uid, gid)),
+            Err(DispatchDenied),
+            "an outside object hard-linked inside the root must not reveal bytes",
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), secret);
+        assert_eq!(
+            std::fs::read(allowed.join("nested/good.bin")).unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn connected_kernel_peer_can_dispatch_once_only_with_sealed_root_and_matching_epoch() {
         use std::io::Write;
         use std::net::Shutdown;

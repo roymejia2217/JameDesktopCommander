@@ -218,7 +218,30 @@ async function isPathAllowed(pathToCheck: string): Promise<boolean> {
  * @returns Promise<string> The validated path
  * @throws Error if the path or its parent directories don't exist or if the path is not allowed
  */
+/**
+ * The pathname validator is legacy infrastructure, NOT an OS authorization
+ * capability. Until the native issuer is integrated, no restricted or
+ * legacy-unset filesystem request can enter this pathname-based codepath.
+ * Explicitly persisted [] (and the historical '/' sentinel) remain
+ * unrestricted; do not represent either as a security sandbox.
+ */
+async function requireLegacyUnrestrictedFilesystemMode(): Promise<void> {
+    let roots: string[] | undefined;
+    try {
+        roots = await configManager.getAllowedDirectoriesForFilesystem();
+    } catch {
+        throw new Error('Filesystem access denied: authorization policy unavailable');
+    }
+    if (roots === undefined || (roots.length > 0 && !roots.includes('/'))) {
+        throw new Error('E_POLICY_UNAVAILABLE: restricted filesystem operation requires native authority');
+    }
+}
+
 export async function validatePath(requestedPath: string): Promise<string> {
+    // This must precede any pathname resolution, I/O, or nested handler call.
+    // A later native issuer must replace this boundary, never add a pathname
+    // fallback for denied, unavailable, or stale policy.
+    await requireLegacyUnrestrictedFilesystemMode();
     const validationOperation = async (): Promise<string> => {
         // Expand home directory if present
         const expandedPath = expandHome(requestedPath);

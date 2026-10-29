@@ -94,7 +94,9 @@ function restoreEnvironment() {
 let exitCode = 0;
 try {
   await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [testDir]);
+  // Line-count compatibility runs in explicit legacy-unrestricted mode.
+  // Restricted file I/O requires a native issuer and is tested separately.
+  await configManager.setValue('allowedDirectories', []);
   exitCode = (await testLineCount()) > 0 ? 1 : 0;
 } catch (error) {
   console.error('Test error:', error);

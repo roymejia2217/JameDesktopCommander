@@ -222,6 +222,55 @@ impl UnissuedIssuer {
 mod tests {
     use super::*;
     #[test]
+    fn two_valid_replay_sqlite_handles_must_be_same_kernel_object() {
+        use std::os::unix::fs::MetadataExt;
+        let home = std::env::var_os("HOME").expect("native Linux runner provides HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let original = temp.path().join("claims.sqlite3");
+        let parked = temp.path().join("parked.sqlite3");
+        let replacement = temp.path().join("replacement.sqlite3");
+        for file in [&original, &replacement] {
+            let db = rusqlite::Connection::open(file).unwrap();
+            db.execute_batch(
+                "CREATE TABLE replay_claims (epoch BLOB NOT NULL, request BLOB NOT NULL, PRIMARY KEY (epoch, request)) WITHOUT ROWID;"
+            ).unwrap();
+        }
+        let observed = std::fs::File::open(&original).unwrap();
+        let first = observed.metadata().unwrap();
+        let same_name = std::fs::File::open(&original).unwrap().metadata().unwrap();
+        let held_id = (first.dev(), first.ino());
+        assert_eq!(
+            require_consistent_replay_pair(held_id, (same_name.dev(), same_name.ino())),
+            Ok(()),
+            "two independent opens of the unchanged SQLite inode must be admissible"
+        );
+        std::fs::rename(&original, &parked).unwrap();
+        std::fs::rename(&replacement, &original).unwrap();
+        let writer = std::fs::File::open(&original).unwrap();
+        let second = writer.metadata().unwrap();
+        let current_id = (second.dev(), second.ino());
+        assert_ne!(held_id, current_id, "real rename positive control");
+        assert_eq!(
+            require_consistent_replay_pair(held_id, current_id),
+            Err(IdentityDenied),
+            "individually valid SQLite handles cannot be bound across different inodes"
+        );
+        std::fs::rename(&original, &replacement).unwrap();
+        std::fs::rename(&parked, &original).unwrap();
+        assert_eq!(
+            require_consistent_replay_pair(held_id, current_id),
+            Err(IdentityDenied),
+            "restoring a filename does not change the identity of an already opened writer"
+        );
+        let repaired = std::fs::File::open(&original).unwrap().metadata().unwrap();
+        assert_eq!(
+            require_consistent_replay_pair(held_id, (repaired.dev(), repaired.ino())),
+            Ok(()),
+            "a newly opened same-object pair can pass identity binding"
+        );
+    }
+
+    #[test]
     fn ordinary_unprovisioned_process_cannot_bootstrap_privileged_issuer() {
         assert!(UnissuedIssuer::observe_os_attested().is_err());
     }

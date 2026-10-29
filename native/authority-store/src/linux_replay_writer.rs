@@ -212,14 +212,14 @@ impl LinuxReplayIssuerLedger {
         )
         .map_err(|_| StoreDenied)?;
         let ledger = ReplayClaimLedger::from_existing_connection(db, epoch)?;
-        let opened = Self {
+        let mut opened = Self {
             ledger,
             directory,
             file,
             identity: (st.st_dev, st.st_ino),
             permanently_revoked: false,
         };
-        opened.revalidate()?;
+        opened.validate_custody()?;
         Ok(opened)
     }
 
@@ -255,13 +255,23 @@ impl LinuxReplayIssuerLedger {
         sidecars_absent(&self.directory)
     }
 
-    /// Validate pinned state without issuing any filesystem operation.
-    /// A prior uncertain claim cannot be reactivated by a new observation.
-    pub fn validate_custody(&self) -> Result<(), StoreDenied> {
+    /// Validate pinned state AND the exact committed live replay history.
+    /// Any custody or continuity uncertainty permanently poisons this writer,
+    /// even after another process restores the previous SQLite rows.
+    /// This remains a non-authorizing, in-session check, not an independent
+    /// administrative antirollback witness across process restarts.
+    pub fn validate_custody(&mut self) -> Result<(), StoreDenied> {
         if self.permanently_revoked {
             return Err(StoreDenied);
         }
-        self.revalidate()
+        let checked = self
+            .revalidate()
+            .and_then(|_| self.ledger.verify_live_continuity())
+            .and_then(|_| self.revalidate());
+        if checked.is_err() {
+            self.permanently_revoked = true;
+        }
+        checked
     }
 
     /// Irreversibly revoke this writer when the independent administrative

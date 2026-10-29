@@ -781,6 +781,91 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn named_read_must_revalidate_pinned_root_after_io_before_reply() {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("inside");
+        let parked = f.path().join("parked");
+        std::fs::create_dir(&inside).unwrap();
+        let secret = b"PRE_REPLY_ROOT_DRIFT_MUST_NOT_LEAK";
+        std::fs::write(inside.join("secret.bin"), secret).unwrap();
+        let inode = std::fs::metadata(&inside).unwrap();
+        let json = serde_json::to_string(inside.to_str().unwrap()).unwrap();
+        let policy = crate::issuer_policy::IssuerPolicy::decode_exact_for_test(
+            format!(
+                r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{json}}}]}}"#
+            )
+            .as_bytes(),
+            7,
+            [1; 32],
+        )
+        .unwrap();
+        let mut grant = SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap();
+        grant.replay = ReplayAdmission::SyntheticTestOnly(HashSet::new());
+        let sock = f.path().join("server.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let body = format!(
+            r#"{{"version":1,"kind":"read-file","requestId":"{ID}","expectedEpoch":"7","rootRef":"{ROOT}","relativePath":"secret.bin"}}"#,
+        );
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(body.as_bytes());
+        let mut client = UnixStream::connect(&sock).unwrap();
+        client.write_all(&wire).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let mut checks = 0;
+        let result = crate::unix_accept::dispatch_one_named_read_reply(
+            &listener,
+            &mut grant,
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            Duration::from_secs(2),
+            |root| {
+                checks += 1;
+                if checks == 3 {
+                    // The original OS FD still points to a valid file while the
+                    // administrator pathname now selects a DIFFERENT inode.
+                    std::fs::rename(&inside, &parked).unwrap();
+                    std::fs::create_dir(&inside).unwrap();
+                    let substitute = std::fs::metadata(&inside).unwrap();
+                    assert_ne!(
+                        (inode.dev(), inode.ino()),
+                        (substitute.dev(), substitute.ino())
+                    );
+                }
+                root.revalidate_root_binding(&policy)
+            },
+        );
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert_eq!(
+            checks, 3,
+            "must check before admission, after authentication, and after I/O"
+        );
+        assert_eq!(result, Err(DispatchDenied));
+        assert_eq!(
+            response,
+            [1, 1, 0, 0, 0, 0],
+            "post-read policy drift cannot disclose bytes"
+        );
+        assert!(
+            !grant.active,
+            "policy drift must permanently revoke the retained capability"
+        );
+        std::fs::remove_dir(&inside).unwrap();
+        std::fs::rename(&parked, &inside).unwrap();
+        assert_eq!(grant.revalidate_root_binding(&policy), Err(DispatchDenied));
+        assert_eq!(std::fs::read(inside.join("secret.bin")).unwrap(), secret);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn authenticated_native_read_uses_pinned_root_with_replay_and_external_alias_denial() {
         use std::io::Write;
         use std::net::Shutdown;

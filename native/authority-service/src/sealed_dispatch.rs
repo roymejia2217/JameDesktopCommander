@@ -855,6 +855,12 @@ mod tests {
             "post-read policy drift cannot disclose bytes"
         );
         assert!(
+            !response
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "no portion of the protected payload may be sent after custody drift"
+        );
+        assert!(
             !grant.active,
             "policy drift must permanently revoke the retained capability"
         );

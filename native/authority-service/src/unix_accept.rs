@@ -461,6 +461,61 @@ mod tests {
     }
 
     #[test]
+    fn prepared_dispatch_routes_reply_through_single_authority_state() {
+        struct AuthorityState {
+            validations: usize,
+            executions: usize,
+            revoked: bool,
+        }
+
+        let (dir, listener) = fixture();
+        let path = dir.path().join("authority.sock");
+        let principal =
+            crate::unix_peer::PreparedMcpClient::from_current_unprivileged_os_account_for_test()
+                .unwrap();
+        let json = br#"{"version":1,"kind":"read-file","requestId":"44444444-4444-4444-8444-444444444444","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"safe.bin"}"#;
+        let mut request = (json.len() as u32).to_be_bytes().to_vec();
+        request.extend_from_slice(json);
+        let mut sender = UnixStream::connect(&path).unwrap();
+        sender.write_all(&request).unwrap();
+        sender.shutdown(Shutdown::Write).unwrap();
+
+        let mut state = AuthorityState {
+            validations: 0,
+            executions: 0,
+            revoked: false,
+        };
+        assert_eq!(
+            dispatch_one_named_prepared_read_reply(
+                &listener,
+                &mut state,
+                principal,
+                Duration::from_secs(2),
+                |authority| {
+                    authority.validations += 1;
+                    Ok(())
+                },
+                |authority, _frame| {
+                    authority.executions += 1;
+                    Ok(b"BOUND_REPLY".to_vec())
+                },
+                |authority| authority.revoked = true,
+            ),
+            Ok(()),
+        );
+
+        let mut header = [0u8; 6];
+        sender.read_exact(&mut header).unwrap();
+        assert_eq!(header, [1, 0, 0, 0, 0, 11]);
+        let mut body = [0u8; 11];
+        sender.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"BOUND_REPLY");
+        assert_eq!(state.validations, 3);
+        assert_eq!(state.executions, 1);
+        assert!(!state.revoked);
+    }
+
+    #[test]
     fn prepared_issuer_listener_accepts_genuine_peer_only_as_data() {
         let (dir, listener) = fixture();
         let path = dir.path().join("authority.sock");

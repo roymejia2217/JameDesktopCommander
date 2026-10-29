@@ -157,6 +157,44 @@ not proof of sudden-power-loss durability at every syscall, signature
 validation, an antirollback witness outside local root control, or
 authorization while MCP filesystem operations are in flight.
 
+## Canonical issuer-policy semantics before administrator publication
+
+The root-admin publisher now applies the exact issuer-v1 restricted-policy
+parser to already SHA-256-verified SQLite policy bytes before preparing a
+transition or staging a candidate. A valid SQLite generation containing
+arbitrary, noncanonical, unrestricted, duplicate-root or invalid-rootRef
+policy data is DENIED even if its epoch and digest are consistent. Each
+existing restricted recovery path checks the same semantic contract before
+completing a recorded transition. This does not open any declared path or
+mint a native filesystem capability.
+
+The ephemeral Linux acceptance shares five canonical JSON fixtures between
+the SQLite candidate generator and the independent service-side validator.
+A separate invalid, internally consistent SQLite image must be denied by the
+root-only publisher, with no staged outputs, the old image unchanged and
+the persistent publication intent still forcing service-side denial.
+Valid forward commit and all recovery scenarios remain mandatory.
+
+The root-only publisher additionally requires every declared administrator
+root to be currently openable through the issuer's existing handle-relative,
+no-follow directory traversal **before** preparing a durable transition,
+committing a new policy or finishing a forward recovery. This prevents an
+otherwise canonical policy with a missing directory or a symlink substituted
+at the declared root name from being published. The mandatory disposable
+Linux runner provisions the five independent root-owned fixture directories,
+denies missing-root and genuine symlink-root attempts with an unchanged empty
+intent and no staged images, then restores the original directory and proves
+the legitimate forward transition remains available.
+
+This is an administrative availability preflight only: it runs as root and
+does not prove the service principal can read each directory, cannot exclude
+malicious concurrent renames after validation and does not issue a capability.
+The issuer must still independently open, pin and continuously revalidate OS
+handles, while the outstanding in-flight revocation/atomicity and complete
+antirollback requirements remain P0. These checks reduce publisher/issuer
+drift; they do not establish signed operator provenance or complete production
+administration.
+
 ## Administrator publisher requirements still missing
 
 The implemented root-only begin/commit protocol supplies an exclusive marker, a strictly forward image+witness transition, staged fsync/rename ordering, and denial of a failed publication. It does NOT establish policy-source signature/provenance, approved semantic authorization, administrative operator authentication beyond root kernel identity, a documented recovery operator for every crash boundary, or a state machine linearized with in-flight native filesystem operations. Concurrency against malicious root processes, crash injection after each file and directory synchronization, power-loss persistence and safe fail-closed recovery after every crash window all require independent acceptance. It cannot be deployed as a complete trusted policy issuer.

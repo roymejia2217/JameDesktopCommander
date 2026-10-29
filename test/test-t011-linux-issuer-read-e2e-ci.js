@@ -26,8 +26,11 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --version/);
   assert.match(acceptance, /sudo -n -u jdc-mcp-client -- "\$node_binary" --input-type=module/);
   assert.doesNotMatch(acceptance, /sudo -n -u jdc-mcp-client -- node(?:\s|$)/m);
-  assert.match(acceptance, /encodeAuthorityRequestFrame/);
-  assert.match(acceptance, /decodeAuthorityReadReplyFrame/);
+  assert.match(acceptance, /requestIssuerOwnedRead/);
+  assert.doesNotMatch(acceptance, /net\.createConnection/);
+  assert.match(acceptance, /requestIssuerOwnedRead/);
+  assert.match(acceptance, /installed_read_client/);
+  assert.match(acceptance, /authority-read-client[.]mjs/);
   assert.match(acceptance, /contract_dir='\/usr\/libexec\/jdc\/read-e2e-contract'/);
   assert.match(acceptance, /authority-frame-contract\.js/);
   assert.match(acceptance, /authority-operation-contract\.js/);
@@ -40,8 +43,23 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(acceptance, /SELECT hex\(epoch\), hex\(request\) FROM replay_claims/);
   assert.match(acceptance, /jdc-authority\.service\.d\/read-e2e\.conf/);
   assert.match(probe, /dispatch_one_inherited_read_reply/);
+  assert.match(probe, /for _ in 0\.\.2/);
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS/);
+  assert.match(acceptance, /22222222-2222-4222-8222-222222222222/);
+  assert.match(acceptance, /second_payload_source/);
+  assert.match(acceptance, /inside2\.bin/);
+  assert.match(fixture, /fedcba9876543210fedcba9876543210/);
+  assert.match(acceptance, /read-root-two/);
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_UNAPPROVED_ROOT_REF_DENIED/);
+  assert.match(acceptance, /assert\.deepEqual\(unknownRootReply, \{ version: 1, status: 'denied' \}\)/);
   assert.match(fixture, /PolicyBytesStore/);
   assert.match(fixture, /replay_claims/);
+  // Restart the disposable issuer and reuse the same authenticated request
+  // identity. A durable claim must deny replay without reissuing file bytes.
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_REPLAY_REJECTED_AFTER_RESTART/);
+  assert.match(acceptance, /assert\.deepEqual\(replay, \{ version: 1, status: 'denied' \}\)/);
+  assert.match(acceptance, /systemctl stop jdc-authority\.service/);
+  assert.match(acceptance, /REPLAY_LEDGER_UNCHANGED/);
 
   const productionMain = await readFile('native/authority-service/src/main.rs', 'utf8');
   assert.match(productionMain, /eprintln!\("E_POLICY_UNAVAILABLE"\)/);

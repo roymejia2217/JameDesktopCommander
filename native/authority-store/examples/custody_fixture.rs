@@ -3,6 +3,19 @@ use jdc_authority_store::EpochStore;
 use rusqlite::Connection;
 use std::{env, path::Path, process::ExitCode};
 
+// Canonical issuer-v1 restricted policies. These are synthetic, test-only
+// administrator candidate bytes; none grants authority without OS custody.
+fn approved_policy(epoch: u64) -> &'static [u8] {
+    match epoch {
+        1 => include_bytes!("../../../test/security/fixtures/t011-admin-policy-v1.json"),
+        2 => include_bytes!("../../../test/security/fixtures/t011-admin-policy-v2.json"),
+        3 => include_bytes!("../../../test/security/fixtures/t011-admin-policy-v3.json"),
+        4 => include_bytes!("../../../test/security/fixtures/t011-admin-policy-v4.json"),
+        5 => include_bytes!("../../../test/security/fixtures/t011-admin-policy-v5.json"),
+        _ => unreachable!("test-only fixture must use an enumerated epoch"),
+    }
+}
+
 // CI-only proof of a genuine SQLite rollback journal, not a manufactured sidecar.
 fn prove_rollback_journal(path: &Path) -> Result<(), String> {
     let mut journal_name = path.as_os_str().to_os_string();
@@ -54,17 +67,18 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
         | "write-policy-anchor-v3"
         | "write-policy-anchor-v4"
         | "write-policy-anchor-v5" => {
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v5") {
-                (5, b"approved-policy-fixture-v5")
+            let epoch = if command.ends_with("-v5") {
+                5
             } else if command.ends_with("-v4") {
-                (4, b"approved-policy-fixture-v4")
+                4
             } else if command.ends_with("-v3") {
-                (3, b"approved-policy-fixture-v3")
+                3
             } else if command.ends_with("-v2") {
-                (2, b"approved-policy-fixture-v2")
+                2
             } else {
-                (1, b"approved-policy-fixture")
+                1
             };
+            let policy = approved_policy(epoch);
             let mut bytes = Vec::with_capacity(40);
             bytes.extend_from_slice(&epoch.to_be_bytes());
             bytes.extend_from_slice(
@@ -76,18 +90,26 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
         | "init-policy-bytes-v2"
         | "init-policy-bytes-v3"
         | "init-policy-bytes-v4"
-        | "init-policy-bytes-v5" => {
+        | "init-policy-bytes-v5"
+        | "init-policy-bytes-invalid-v2" => {
             use jdc_authority_store::policy_bytes::PolicyBytesStore;
-            let (epoch, policy): (u64, &[u8]) = if command.ends_with("-v5") {
-                (5, b"approved-policy-fixture-v5")
+            let epoch = if command.ends_with("-v5") {
+                5
             } else if command.ends_with("-v4") {
-                (4, b"approved-policy-fixture-v4")
+                4
             } else if command.ends_with("-v3") {
-                (3, b"approved-policy-fixture-v3")
+                3
             } else if command.ends_with("-v2") {
-                (2, b"approved-policy-fixture-v2")
+                2
             } else {
-                (1, b"approved-policy-fixture")
+                1
+            };
+            let policy = if command == "init-policy-bytes-invalid-v2" {
+                // Internally digest-consistent, but NOT an issuer-v1 policy.
+                // Only the real root-admin publisher must reject this image.
+                b"approved-policy-fixture-v2".as_slice()
+            } else {
+                approved_policy(epoch)
             };
             let conn = Connection::open(path).map_err(|e| e.to_string())?;
             conn.execute_batch(
@@ -141,7 +163,7 @@ fn execute(command: &str, path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::execute;
+    use super::{approved_policy, execute};
     use tempfile::tempdir;
 
     #[test]
@@ -154,9 +176,7 @@ mod tests {
         assert_eq!(&bytes[..8], &1u64.to_be_bytes());
         assert_eq!(
             &bytes[8..],
-            &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(
-                b"approved-policy-fixture"
-            )
+            &jdc_authority_store::policy_bytes::PolicyBytesStore::digest_exact(approved_policy(1))
         );
     }
     #[test]
@@ -171,7 +191,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy.epoch(), 5);
-        assert_eq!(policy.bytes(), b"approved-policy-fixture-v5");
+        assert_eq!(policy.bytes(), approved_policy(5));
         let wire = std::fs::read(&witness).unwrap();
         assert_eq!(wire.len(), 40);
         assert_eq!(&wire[..8], &5u64.to_be_bytes());
@@ -190,7 +210,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy.epoch(), 4);
-        assert_eq!(policy.bytes(), b"approved-policy-fixture-v4");
+        assert_eq!(policy.bytes(), approved_policy(4));
         let wire = std::fs::read(&witness).unwrap();
         assert_eq!(wire.len(), 40);
         assert_eq!(&wire[..8], &4u64.to_be_bytes());
@@ -209,7 +229,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(policy.epoch(), 3);
-        assert_eq!(policy.bytes(), b"approved-policy-fixture-v3");
+        assert_eq!(policy.bytes(), approved_policy(3));
         let wire = std::fs::read(&witness).unwrap();
         assert_eq!(wire.len(), 40);
         assert_eq!(&wire[..8], &3u64.to_be_bytes());
@@ -233,7 +253,7 @@ mod tests {
         assert_eq!(old_snapshot.epoch(), 1);
         assert_eq!(new_snapshot.epoch(), 2);
         assert_ne!(old_snapshot.digest(), new_snapshot.digest());
-        assert_eq!(new_snapshot.bytes(), b"approved-policy-fixture-v2");
+        assert_eq!(new_snapshot.bytes(), approved_policy(2));
         let bytes = std::fs::read(witness).unwrap();
         assert_eq!(bytes.len(), 40);
         assert_eq!(&bytes[..8], &2u64.to_be_bytes());
@@ -251,7 +271,7 @@ mod tests {
             jdc_authority_store::policy_bytes::PolicyBytesStore::read_verified_serialized(&data)
                 .unwrap();
         assert_eq!(observed.epoch(), 1);
-        assert_eq!(observed.bytes(), b"approved-policy-fixture");
+        assert_eq!(observed.bytes(), approved_policy(1));
     }
     #[test]
     fn actual_sqlite_rollback_journal_is_created_and_removed_without_epoch_change() {

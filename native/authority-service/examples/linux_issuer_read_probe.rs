@@ -9,9 +9,14 @@ fn run() -> Result<(), ()> {
 
     jdc_authority_service::verify_service_identity().map_err(|_| ())?;
     let mut issuer = UnissuedIssuer::observe_os_attested().map_err(|_| ())?;
-    issuer
-        .dispatch_one_inherited_read_reply(Duration::from_secs(5))
-        .map_err(|_| ())?;
+    // Two independent authenticated sessions share the same OS-attested
+    // issuer, retained root handles and durable replay ledger. The count is
+    // fixed in this disposable probe, never client- or environment-controlled.
+    for _ in 0..2 {
+        issuer
+            .dispatch_one_inherited_read_reply(Duration::from_secs(5))
+            .map_err(|_| ())?;
+    }
     println!("T011_ISSUER_READ_E2E_SERVICE_PASS_NONRELEASE");
     Ok(())
 }

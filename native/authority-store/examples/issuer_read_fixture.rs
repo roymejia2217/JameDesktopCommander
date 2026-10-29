@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use std::{env, path::Path, process::ExitCode};
 
 const POLICY_EPOCH: u64 = 1;
-const POLICY_BYTES: &[u8] = br#"{"version":1,"mode":"restricted","roots":[{"rootRef":"0123456789abcdef0123456789abcdef","absolutePath":"/var/lib/jdc-authority/read-root"}]}"#;
+const POLICY_BYTES: &[u8] = br#"{"version":1,"mode":"restricted","roots":[{"rootRef":"0123456789abcdef0123456789abcdef","absolutePath":"/var/lib/jdc-authority/read-root"},{"rootRef":"fedcba9876543210fedcba9876543210","absolutePath":"/var/lib/jdc-authority/read-root-two"}]}"#;
 
 fn init_policy(path: &Path) -> Result<[u8; 32], String> {
     let db = Connection::open(path).map_err(|e| e.to_string())?;

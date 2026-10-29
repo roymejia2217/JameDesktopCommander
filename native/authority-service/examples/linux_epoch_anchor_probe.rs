@@ -59,15 +59,30 @@ fn main() {
         || action == "policy-snapshot-v5"
     {
         let (expected_epoch, expected_bytes): (u64, &[u8]) = if action == "policy-snapshot-v5" {
-            (5, b"approved-policy-fixture-v5")
+            (
+                5,
+                include_bytes!("../../../test/security/fixtures/t011-admin-policy-v5.json"),
+            )
         } else if action == "policy-snapshot-v4" {
-            (4, b"approved-policy-fixture-v4")
+            (
+                4,
+                include_bytes!("../../../test/security/fixtures/t011-admin-policy-v4.json"),
+            )
         } else if action == "policy-snapshot-v3" {
-            (3, b"approved-policy-fixture-v3")
+            (
+                3,
+                include_bytes!("../../../test/security/fixtures/t011-admin-policy-v3.json"),
+            )
         } else if action == "policy-snapshot-v2" {
-            (2, b"approved-policy-fixture-v2")
+            (
+                2,
+                include_bytes!("../../../test/security/fixtures/t011-admin-policy-v2.json"),
+            )
         } else {
-            (1, b"approved-policy-fixture")
+            (
+                1,
+                include_bytes!("../../../test/security/fixtures/t011-admin-policy-v1.json"),
+            )
         };
         let result = observe_matching_admin_policy_snapshot();
         if result.is_ok_and(|policy| {

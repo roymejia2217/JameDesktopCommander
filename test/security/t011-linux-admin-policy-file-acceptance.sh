@@ -33,6 +33,7 @@ source_file="$(mktemp /tmp/jdc-policy-fixture.XXXXXXXX)"
 source_anchor="$(mktemp /tmp/jdc-policy-anchor.XXXXXXXX)"
 mismatch_anchor="$(mktemp /tmp/jdc-policy-mismatch.XXXXXXXX)"
 source_file_v2="$(mktemp /tmp/jdc-policy-v2.XXXXXXXX)"
+source_file_invalid_v2="$(mktemp /tmp/jdc-policy-invalid-v2.XXXXXXXX)"
 source_anchor_v2="$(mktemp /tmp/jdc-policy-witness-v2.XXXXXXXX)"
 source_file_v3="$(mktemp /tmp/jdc-policy-v3.XXXXXXXX)"
 source_anchor_v3="$(mktemp /tmp/jdc-policy-witness-v3.XXXXXXXX)"
@@ -40,18 +41,43 @@ source_file_v4="$(mktemp /tmp/jdc-policy-v4.XXXXXXXX)"
 source_anchor_v4="$(mktemp /tmp/jdc-policy-witness-v4.XXXXXXXX)"
 source_file_v5="$(mktemp /tmp/jdc-policy-v5.XXXXXXXX)"
 source_anchor_v5="$(mktemp /tmp/jdc-policy-witness-v5.XXXXXXXX)"
+# Independent root-admin approval preflight must see actual OS directories.
+# These names are CI-only, fixed and never derived from an MCP request.
+policy_roots=()
+created_policy_roots=()
+for epoch in 1 2 3 4 5; do
+  policy_roots+=("/tmp/jdc-t011-admin-policy-root-v${epoch}")
+done
 cleanup() {
   local code=$?
   sudo -n rm -f -- "$alias" "$policy" "$anchor" "$publish_intent" "${directory}/.policy-next.sqlite3" "${directory}/.policy-next-anchor" "${policy}-journal" "${policy}-wal" "${policy}-shm" || code=1
   sudo -n rmdir -- "$directory" || code=1
-  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" "$source_file_v5" "$source_anchor_v5" || code=1
+  for root in "${created_policy_roots[@]}"; do
+    if [[ -L "$root" ]]; then
+      sudo -n rm -- "$root" || code=1
+    elif [[ -d "$root" ]]; then
+      sudo -n rmdir -- "$root" || code=1
+    fi
+  done
+  rm -f -- "$source_file" "$source_anchor" "$mismatch_anchor" "$source_file_v2" "$source_file_invalid_v2" "$source_anchor_v2" "$source_file_v3" "$source_anchor_v3" "$source_file_v4" "$source_anchor_v4" "$source_file_v5" "$source_anchor_v5" || code=1
   exit "$code"
 }
 trap cleanup EXIT
+for root in "${policy_roots[@]}"; do
+  [[ ! -e "$root" && ! -L "$root" ]] || {
+    printf '%s\n' 'E_POLICY_ROOT_FIXTURE_ALREADY_EXISTS' >&2
+    exit 1
+  }
+done
+for root in "${policy_roots[@]}"; do
+  sudo -n install -d -o root -g root -m 0755 -- "$root"
+  created_policy_roots+=("$root")
+done
 "$fixture" init-policy-bytes "$source_file"
 "$fixture" write-policy-anchor "$source_anchor"
 "$fixture" write-policy-anchor-mismatch "$mismatch_anchor"
 "$fixture" init-policy-bytes-v2 "$source_file_v2"
+"$fixture" init-policy-bytes-invalid-v2 "$source_file_invalid_v2"
 "$fixture" write-policy-anchor-v2 "$source_anchor_v2"
 "$fixture" init-policy-bytes-v3 "$source_file_v3"
 "$fixture" write-policy-anchor-v3 "$source_anchor_v3"
@@ -215,6 +241,19 @@ verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$p
 verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
 verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
 
+# SHA-consistent SQLite must not permit publisher adoption of policy bytes
+# rejected by the issuer's actual restricted rootRef/path grammar.
+if sudo -n -- "$publisher" commit-v2 "$source_file_invalid_v2" 2>/dev/null; then
+  printf '%s\n' 'E_POLICY_INVALID_SEMANTIC_IMAGE_ACCEPTED' >&2
+  exit 1
+fi
+[[ -f "$publish_intent" &&
+   ! -e "${directory}/.policy-next.sqlite3" &&
+   ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+[[ "$(sudo -n sha256sum -- "$policy" | cut -d' ' -f1)" == "$before" ]] || exit 1
+verdict DENIED sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$probe" policy-snapshot-deny
+printf '%s\n' 'T011_ADMIN_PUBLISHER_SEMANTIC_POLICY_DENIAL_PASS'
+
 # Stale exclusive staging file from an interrupted attempt must fail closed.
 sudo -n install -o root -g root -m 0600 -- "$source_anchor" "${directory}/.policy-next.sqlite3"
 if sudo -n -- "$publisher" commit-v2 "$source_file_v2" 2>/dev/null; then
@@ -268,7 +307,26 @@ verdict VERIFIED_BYTES sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$p
 
 # Persist an exact forward transition BEFORE simulating the split rename.
 verdict PUBLISH_INTENT_CREATED sudo -n -- "$publisher" begin
+# Even canonical, SHA-consistent policy bytes cannot advance publication
+# if the actual root directory is missing or a no-follow symlink alias.
+sudo -n rmdir -- "${policy_roots[2]}"
+if sudo -n -- "$publisher" prepare-v3 "$source_file_v3" 2>/dev/null; then
+  printf '%s\n' 'E_PUBLISHER_MISSING_ROOT_APPROVED' >&2
+  exit 1
+fi
+[[ "$(sudo -n stat -c '%s' -- "$publish_intent")" == '0' ]] || exit 1
+sudo -n ln -s -- "${policy_roots[1]}" "${policy_roots[2]}"
+if sudo -n -- "$publisher" prepare-v3 "$source_file_v3" 2>/dev/null; then
+  printf '%s\n' 'E_PUBLISHER_SYMLINK_ROOT_APPROVED' >&2
+  exit 1
+fi
+[[ "$(sudo -n stat -c '%s' -- "$publish_intent")" == '0' &&
+   ! -e "${directory}/.policy-next.sqlite3" &&
+   ! -e "${directory}/.policy-next-anchor" ]] || exit 1
+sudo -n rm -- "${policy_roots[2]}"
+sudo -n install -d -o root -g root -m 0755 -- "${policy_roots[2]}"
 verdict PUBLISH_PREPARED sudo -n -- "$publisher" prepare-v3 "$source_file_v3"
+printf '%s\n' 'T011_ADMIN_POLICY_ROOT_OS_PREFLIGHT_PASS'
 sudo -n install -o root -g jdc-authority -m 0640 -- "$source_anchor_v3" "${directory}/.policy-next-anchor"
 if sudo -n -- "$publisher" recover-split 2>/dev/null; then
   printf '%s\n' 'E_RECOVER_STALE_POLICY_ACCEPTED' >&2

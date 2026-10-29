@@ -31,6 +31,20 @@ fn revalidate_listener_custody(
     )
 }
 
+/// Require the two independently OS-opened replay SQLite handles to refer to
+/// exactly the same kernel object. File names, headers, size and separate
+/// custody checks are insufficient when a name changes between opens.
+/// This is NOT a complete SQLite transaction/replay or restart antirollback.
+fn require_consistent_replay_pair(
+    observer: (u64, u64),
+    writer: (u64, u64),
+) -> Result<(), IdentityDenied> {
+    if observer.1 == 0 || observer != writer {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
 /// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
@@ -95,6 +109,10 @@ impl UnissuedIssuer {
             .validate_custody()
             .map_err(|_| IdentityDenied)?;
         replay_file.read_verified_snapshot(policy.epoch())?;
+        // Even two independently valid root-custodied SQLite opens cannot
+        // form a single replay authority if they refer to different inodes.
+        // Bind the pinned snapshot reader and SQLite writer at bootstrap.
+        require_consistent_replay_pair(replay_file.identity(), replay_writer.file_identity())?;
         // A root can be renamed/replaced while the writer acquires locks.
         // Never finish bootstrap with an FD that no longer represents the
         // administrator policy's current named directory.
@@ -146,10 +164,15 @@ impl UnissuedIssuer {
             if p.epoch() == self.policy_epoch
             && p.digest() == &self.policy_digest
             && self.roots.iter_mut().all(|root| root.revalidate_root_binding(p).is_ok()));
-        if self
-            .replay_file
-            .read_verified_snapshot(self.policy_epoch)
-            .is_err()
+        if require_consistent_replay_pair(
+            self.replay_file.identity(),
+            self.replay_writer.file_identity(),
+        )
+        .is_err()
+            || self
+                .replay_file
+                .read_verified_snapshot(self.policy_epoch)
+                .is_err()
             || self.replay_writer.validate_custody().is_err()
             || !roots_match
         {
@@ -221,6 +244,71 @@ impl UnissuedIssuer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn two_valid_replay_sqlite_handles_must_be_same_kernel_object() {
+        use std::os::unix::fs::MetadataExt;
+        let home = std::env::var_os("HOME").expect("native Linux runner provides HOME");
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let original = temp.path().join("claims.sqlite3");
+        let parked = temp.path().join("parked.sqlite3");
+        let replacement = temp.path().join("replacement.sqlite3");
+        for file in [&original, &replacement] {
+            let db = rusqlite::Connection::open(file).unwrap();
+            db.execute_batch(concat!(
+                "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;",
+                "CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), ",
+                "request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), ",
+                "PRIMARY KEY(epoch,request)) WITHOUT ROWID"
+            ))
+            .unwrap();
+        }
+        // Both files must pass the actual read-only replay-image validator;
+        // otherwise the denial could be caused by invalid SQLite content.
+        for file in [&original, &replacement] {
+            assert_eq!(
+                jdc_authority_store::replay_ledger::ReplayClaimLedger::inspect_serialized_snapshot(
+                    &std::fs::read(file).unwrap(),
+                    7
+                ),
+                Ok(0),
+                "attacker replacement is a valid empty replay SQLite image"
+            );
+        }
+        let observed = std::fs::File::open(&original).unwrap();
+        let first = observed.metadata().unwrap();
+        let same_name = std::fs::File::open(&original).unwrap().metadata().unwrap();
+        let held_id = (first.dev(), first.ino());
+        assert_eq!(
+            require_consistent_replay_pair(held_id, (same_name.dev(), same_name.ino())),
+            Ok(()),
+            "two independent opens of the unchanged SQLite inode must be admissible"
+        );
+        std::fs::rename(&original, &parked).unwrap();
+        std::fs::rename(&replacement, &original).unwrap();
+        let writer = std::fs::File::open(&original).unwrap();
+        let second = writer.metadata().unwrap();
+        let current_id = (second.dev(), second.ino());
+        assert_ne!(held_id, current_id, "real rename positive control");
+        assert_eq!(
+            require_consistent_replay_pair(held_id, current_id),
+            Err(IdentityDenied),
+            "individually valid SQLite handles cannot be bound across different inodes"
+        );
+        std::fs::rename(&original, &replacement).unwrap();
+        std::fs::rename(&parked, &original).unwrap();
+        assert_eq!(
+            require_consistent_replay_pair(held_id, current_id),
+            Err(IdentityDenied),
+            "restoring a filename does not change the identity of an already opened writer"
+        );
+        let repaired = std::fs::File::open(&original).unwrap().metadata().unwrap();
+        assert_eq!(
+            require_consistent_replay_pair(held_id, (repaired.dev(), repaired.ino())),
+            Ok(()),
+            "a newly opened same-object pair can pass identity binding"
+        );
+    }
+
     #[test]
     fn ordinary_unprovisioned_process_cannot_bootstrap_privileged_issuer() {
         assert!(UnissuedIssuer::observe_os_attested().is_err());

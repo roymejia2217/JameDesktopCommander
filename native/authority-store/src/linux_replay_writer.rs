@@ -255,6 +255,13 @@ impl LinuxReplayIssuerLedger {
         sidecars_absent(&self.directory)
     }
 
+    /// Identity of the independently OS-checked SQLite file handle.
+    /// Metadata only: no claim, grant, policy authorization or open FD escapes.
+    /// The issuer must bind this to its separate pinned replay observer.
+    pub fn file_identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
     /// Validate pinned state AND the exact committed live replay history.
     /// Any custody or continuity uncertainty permanently poisons this writer,
     /// even after another process restores the previous SQLite rows.

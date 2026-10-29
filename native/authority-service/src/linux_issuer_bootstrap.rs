@@ -141,12 +141,20 @@ impl UnissuedIssuer {
                 // authority account or its MCP client. Verify its ancestry
                 // and the socket node's exact user/group/mode on BOTH sides
                 // of the potentially blocking read.
-                crate::unix_activation::inspect_root_custodied_named_listener(
+                let custody = crate::unix_activation::inspect_root_custodied_named_listener(
                     listener.as_fd(),
                     named,
                     unsafe { libc::geteuid() },
                     principal.expected_gid(),
-                )
+                    &mut self.revoked,
+                );
+                if custody.is_err() {
+                    // A revoked issuer must also close the persistent writer
+                    // and invalidate its native root grants; repairing the
+                    // socket cannot silently reactivate the old session.
+                    self.revoke();
+                }
+                custody
             },
         )
     }

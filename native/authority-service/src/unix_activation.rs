@@ -192,8 +192,9 @@ fn inspect_custodied_named_listener(
     Ok(())
 }
 
-/// Session-level socket-custody latch. A provisional passthrough makes the
-/// loss-and-repair regression observable before applying the fail-closed fix.
+/// Fail-closed session-level custody latch. A privileged namespace drift
+/// permanently invalidates this issuer, even if the node is later repaired.
+/// Client frame parsing failures do NOT set this latch.
 fn inspect_latched_custodied_named_listener(
     fd: BorrowedFd<'_>,
     expected_path: &Path,
@@ -205,13 +206,17 @@ fn inspect_latched_custodied_named_listener(
     if *revoked {
         return Err(IdentityDenied);
     }
-    inspect_custodied_named_listener(
+    let checked = inspect_custodied_named_listener(
         fd,
         expected_path,
         expected_socket_uid,
         expected_socket_gid,
         protected_dir_uid,
-    )
+    );
+    if checked.is_err() {
+        *revoked = true;
+    }
+    checked
 }
 
 /// Production-only acceptance: the entire socket namespace must be rooted
@@ -221,13 +226,15 @@ pub(crate) fn inspect_root_custodied_named_listener(
     expected_path: &Path,
     expected_socket_uid: libc::uid_t,
     expected_socket_gid: libc::gid_t,
+    revoked: &mut bool,
 ) -> Result<(), IdentityDenied> {
-    inspect_custodied_named_listener(
+    inspect_latched_custodied_named_listener(
         fd,
         expected_path,
         expected_socket_uid,
         expected_socket_gid,
         0,
+        revoked,
     )
 }
 

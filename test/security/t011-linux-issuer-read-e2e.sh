@@ -48,6 +48,7 @@ client_gid="$(id -g jdc-mcp-client)"
 admin_dir='/etc/jdc-authority'
 state_dir='/var/lib/jdc-authority'
 read_root="$state_dir/read-root"
+read_root_two="$state_dir/read-root-two"
 socket_dir='/run/jdc-authority-ipc'
 socket_path="$socket_dir/authority.sock"
 service_unit='/run/systemd/system/jdc-authority.service'
@@ -76,7 +77,8 @@ state_preexisting=0
 if [[ -d "$state_dir" ]]; then
   state_preexisting=1
   [[ "$(stat -c '%u:%g:%a' "$state_dir")" == "$service_uid:$service_gid:700" ]] || exit 1
-  [[ ! -e "$state_dir/claims.sqlite3" && ! -e "$read_root" ]] || exit 1
+  [[ ! -e "$state_dir/claims.sqlite3" && ! -e "$read_root" &&
+     ! -e "$read_root_two" ]] || exit 1
 else
   sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$state_dir"
 fi
@@ -100,7 +102,7 @@ cleanup() {
   sudo -n rm -rf -- "$dropin_dir" "$contract_dir" || code=1
   sudo -n rm -f -- "$service_unit" "$socket_unit" "$installed_probe" || code=1
   sudo -n systemctl daemon-reload || code=1
-  sudo -n rm -rf -- "$admin_dir" "$read_root" || code=1
+  sudo -n rm -rf -- "$admin_dir" "$read_root" "$read_root_two" || code=1
   sudo -n rm -f -- "$state_dir/claims.sqlite3" "$state_dir/claims.sqlite3-journal" \
     "$state_dir/claims.sqlite3-wal" "$state_dir/claims.sqlite3-shm" || code=1
   if [[ "$state_preexisting" -eq 0 ]]; then
@@ -128,7 +130,8 @@ sudo -n install -o root -g jdc-authority -m 0640 -- "$anchor_source" "$admin_dir
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$replay_source" "$state_dir/claims.sqlite3"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/inside.bin"
-sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$second_payload_source" "$read_root/inside2.bin"
+sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root_two"
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$second_payload_source" "$read_root_two/inside2.bin"
 sudo -n install -D -o root -g root -m 0755 -- "$probe" "$installed_probe"
 sudo -n install -d -o root -g root -m 0755 -- "$contract_dir"
 sudo -n install -o root -g root -m 0644 -- "$contract_source" "$installed_contract"
@@ -190,6 +193,7 @@ const secondRequest = {
   ...request,
   requestId: '22222222-2222-4222-8222-222222222222',
   relativePath: 'inside2.bin',
+  rootRef: 'fedcba9876543210fedcba9876543210',
 };
 const secondReply = await requestIssuerOwnedRead(secondRequest);
 assert.equal(secondReply.status, 'ok', 'second sequential issuer read denied');
@@ -232,8 +236,36 @@ PY
    "$service_uid:$service_gid:600:1" ]] || exit 1
 [[ "$(sudo -n stat -c '%u:%g:%a:%h' "$read_root/inside.bin")" == \
    "$service_uid:$service_gid:600:1" ]] || exit 1
-# A new one-shot systemd service invocation must not replay an already
-# committed requestId. The original file and SQLite ledger must survive.
+# The independently root-provisioned policy contains exactly two roots.
+# A syntactically valid but UNAPPROVED third rootRef must be denied before any
+# replay identity is consumed or outside filesystem bytes can be disclosed.
+# A fresh service activation after two successful reads tests the real broker.
+sudo -n systemctl stop jdc-authority.service
+[[ "$(sudo -n systemctl show -P ActiveState jdc-authority.socket)" == 'active' &&
+   -S "$socket_path" ]] || exit 1
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+
+const [clientPath, framePath, operationPath] = process.argv.slice(2);
+const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
+const frames = await import(pathToFileURL(framePath).href);
+const operations = await import(pathToFileURL(operationPath).href);
+const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
+const unknownRootReply = await requestIssuerOwnedRead({
+  version: 1,
+  kind: 'read-file',
+  requestId: '33333333-3333-4333-8333-333333333333',
+  expectedEpoch: '1',
+  rootRef: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+  relativePath: 'inside.bin',
+});
+assert.deepEqual(unknownRootReply, { version: 1, status: 'denied' });
+console.log('T011_ISSUER_READ_E2E_UNAPPROVED_ROOT_REF_DENIED');
+NODE
+
+# A new one-shot systemd service invocation must also reject replay of an
+# already committed requestId. The original files and SQLite ledger survive.
 sudo -n systemctl stop jdc-authority.service
 [[ "$(sudo -n systemctl show -P ActiveState jdc-authority.socket)" == 'active' &&
    -S "$socket_path" ]] || exit 1
@@ -271,5 +303,5 @@ if rows != expected:
 print("T011_ISSUER_READ_E2E_REPLAY_LEDGER_UNCHANGED")
 PY
 sudo -n cmp -s -- "$payload_source" "$read_root/inside.bin"
-sudo -n cmp -s -- "$second_payload_source" "$read_root/inside2.bin"
+sudo -n cmp -s -- "$second_payload_source" "$read_root_two/inside2.bin"
 printf '%s\n' 'T011_REAL_NODE_TO_ISSUER_READ_E2E_PASS_NONRELEASE'

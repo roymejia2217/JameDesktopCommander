@@ -48,6 +48,10 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(acceptance, /22222222-2222-4222-8222-222222222222/);
   assert.match(acceptance, /second_payload_source/);
   assert.match(acceptance, /inside2\.bin/);
+  assert.match(fixture, /fedcba9876543210fedcba9876543210/);
+  assert.match(acceptance, /read-root-two/);
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_UNAPPROVED_ROOT_REF_DENIED/);
+  assert.match(acceptance, /assert\.deepEqual\(unknownRootReply, \{ version: 1, status: 'denied' \}\)/);
   assert.match(fixture, /PolicyBytesStore/);
   assert.match(fixture, /replay_claims/);
   // Restart the disposable issuer and reuse the same authenticated request

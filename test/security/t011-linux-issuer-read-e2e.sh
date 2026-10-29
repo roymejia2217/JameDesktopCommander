@@ -87,7 +87,10 @@ policy_source="$private/policy.sqlite3"
 anchor_source="$private/policy-anchor"
 replay_source="$private/claims.sqlite3"
 payload_source="$private/inside.bin"
+second_payload_source="$private/second.bin"
 printf '\x00\xff\x81\x2aJDC\n' > "$payload_source"
+
+printf '\x02\x00\x43\x2aSECOND\n' > "$second_payload_source"
 
 cleanup() {
   local code=$?
@@ -125,6 +128,7 @@ sudo -n install -o root -g jdc-authority -m 0640 -- "$anchor_source" "$admin_dir
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$replay_source" "$state_dir/claims.sqlite3"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/inside.bin"
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$second_payload_source" "$read_root/inside2.bin"
 sudo -n install -D -o root -g root -m 0755 -- "$probe" "$installed_probe"
 sudo -n install -d -o root -g root -m 0755 -- "$contract_dir"
 sudo -n install -o root -g root -m 0644 -- "$contract_source" "$installed_contract"
@@ -180,6 +184,20 @@ assert.equal(reply.status, 'ok');
 if (reply.status !== 'ok') throw new Error('issuer denied canonical read');
 assert.deepEqual(reply.bytes, Buffer.from([0, 255, 0x81, 42, 74, 68, 67, 10]));
 console.log('T011_NODE_MCP_CLIENT_RECEIVED_EXACT_BINARY_READ_REPLY');
+// Same broker process, retained native root and authenticated OS client,
+// but a different canonical read request and independently named file.
+const secondRequest = {
+  ...request,
+  requestId: '22222222-2222-4222-8222-222222222222',
+  relativePath: 'inside2.bin',
+};
+const secondReply = await requestIssuerOwnedRead(secondRequest);
+assert.equal(secondReply.status, 'ok', 'second sequential issuer read denied');
+assert.deepEqual(
+  secondReply.bytes,
+  Buffer.concat([Buffer.from([2, 0, 0x43, 0x2a]), Buffer.from('SECOND\n')]),
+);
+console.log('T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS');
 NODE
 
 sudo -n journalctl --sync
@@ -201,7 +219,10 @@ db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 rows = db.execute(
     "SELECT hex(epoch), hex(request) FROM replay_claims ORDER BY epoch, request"
 ).fetchall()
-expected = [("0000000000000001", "11111111111141118111111111111111")]
+expected = [
+    ("0000000000000001", "11111111111141118111111111111111"),
+    ("0000000000000001", "22222222222242228222222222222222"),
+]
 if rows != expected:
     raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_NOT_DURABLE:{rows!r}")
 print("T011_ISSUER_READ_E2E_DURABLE_REPLAY_CLAIM_PASS")
@@ -241,10 +262,14 @@ db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 rows = db.execute(
     "SELECT hex(epoch), hex(request) FROM replay_claims ORDER BY epoch, request"
 ).fetchall()
-expected = [("0000000000000001", "11111111111141118111111111111111")]
+expected = [
+    ("0000000000000001", "11111111111141118111111111111111"),
+    ("0000000000000001", "22222222222242228222222222222222"),
+]
 if rows != expected:
     raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_LEDGER_CHANGED:{rows!r}")
 print("T011_ISSUER_READ_E2E_REPLAY_LEDGER_UNCHANGED")
 PY
 sudo -n cmp -s -- "$payload_source" "$read_root/inside.bin"
+sudo -n cmp -s -- "$second_payload_source" "$read_root/inside2.bin"
 printf '%s\n' 'T011_REAL_NODE_TO_ISSUER_READ_E2E_PASS_NONRELEASE'

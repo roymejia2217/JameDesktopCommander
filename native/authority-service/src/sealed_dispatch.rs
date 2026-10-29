@@ -203,6 +203,27 @@ impl SealedDirectoryGrant {
         self.execute_read_impl(&frame.into_wire())
     }
 
+    /// Issuer-owned replay path: the caller must already hold a kernel-
+    /// authenticated frame and supplies the single durable replay claim.
+    /// Raw request bytes never become a production entry point.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn execute_authenticated_read_with_external_claim(
+        &mut self,
+        frame: crate::unix_session::AuthenticatedFrame,
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.execute_read_with_external_claim_impl(&frame.into_wire(), claim)
+    }
+
+    #[cfg(test)]
+    fn execute_read_with_external_claim(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.execute_read_with_external_claim_impl(wire, claim)
+    }
+
     /// Raw-input dispatch exists strictly for isolated adversarial unit tests.
     #[cfg(test)]
     fn execute_c4d(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
@@ -241,9 +262,7 @@ impl SealedDirectoryGrant {
         request_epoch: u64,
         request_id: [u8; 16],
     ) -> Result<(), DispatchDenied> {
-        if root_ref != self.root_ref || request_epoch != self.expected_epoch {
-            return Err(DispatchDenied);
-        }
+        self.require_bound_identity(root_ref, request_epoch)?;
         // A ledger write/validation failure is indistinguishable from storage
         // rollback or corruption at this boundary. In a durable session it
         // permanently revokes the grant rather than implicitly re-admitting
@@ -253,6 +272,18 @@ impl SealedDirectoryGrant {
                 self.replay = ReplayAdmission::Unavailable;
                 self.active = false;
             }
+            return Err(DispatchDenied);
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn require_bound_identity(
+        &self,
+        root_ref: &str,
+        request_epoch: u64,
+    ) -> Result<(), DispatchDenied> {
+        if root_ref != self.root_ref || request_epoch != self.expected_epoch {
             return Err(DispatchDenied);
         }
         Ok(())
@@ -284,11 +315,33 @@ impl SealedDirectoryGrant {
             request.expected_epoch(),
             request.request_id_bytes(),
         )?;
+        self.read_bound_file(request.relative_path())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn execute_read_with_external_claim_impl(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.ensure_live_generation()?;
+        let request =
+            crate::canonical_request::decode_read_file_frame(wire).map_err(|_| DispatchDenied)?;
+        self.require_bound_identity(request.root_ref(), request.expected_epoch())?;
+        if claim(request.request_id_bytes()).is_err() {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        self.read_bound_file(request.relative_path())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn read_bound_file(&self, relative_path: &str) -> Result<Vec<u8>, DispatchDenied> {
         // The previously implemented bounded file reader uses only the sealed
         // OS handle and rejects observed multi-link files. This is *not* a
         // proof against concurrent link creation; #148 remains P0.
         self.rooted
-            .read_bounded_file(request.relative_path())
+            .read_bounded_file(relative_path)
             .map_err(|_| DispatchDenied)
     }
     pub fn revoke(&mut self) {
@@ -321,6 +374,46 @@ mod tests {
             replay: ReplayAdmission::SyntheticTestOnly(HashSet::new()),
             active: true,
         }
+    }
+
+    #[test]
+    fn externally_claimed_read_uses_one_authority_claim_and_revokes_on_claim_failure() {
+        let f = tempfile::tempdir().unwrap();
+        let expected = b"ISSUER_OWNED_REPLAY";
+        std::fs::write(f.path().join("inside.bin"), expected).unwrap();
+        let request = "44444444-4444-4444-8444-444444444444";
+        let body = format!(
+            r#"{{"version":1,"kind":"read-file","requestId":"{request}","expectedEpoch":"7","rootRef":"{ROOT}","relativePath":"inside.bin"}}"#,
+        );
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(body.as_bytes());
+
+        let mut grant = fixture(f.path());
+        grant.replay = ReplayAdmission::Unavailable;
+        let mut claimed = Vec::new();
+        assert_eq!(
+            grant.execute_read_with_external_claim(&wire, |id| {
+                claimed.push(id);
+                Ok(())
+            }),
+            Ok(expected.to_vec()),
+        );
+        assert_eq!(
+            claimed.len(),
+            1,
+            "exactly one durable authority claim is required"
+        );
+
+        let mut denied = fixture(f.path());
+        denied.replay = ReplayAdmission::Unavailable;
+        assert_eq!(
+            denied.execute_read_with_external_claim(&wire, |_| Err(DispatchDenied)),
+            Err(DispatchDenied),
+        );
+        assert!(
+            !denied.active,
+            "uncertain durable claim must revoke the grant"
+        );
     }
     #[cfg(target_os = "linux")]
     #[test]

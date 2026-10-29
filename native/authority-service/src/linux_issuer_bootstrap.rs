@@ -95,6 +95,13 @@ impl UnissuedIssuer {
             .validate_custody()
             .map_err(|_| IdentityDenied)?;
         replay_file.read_verified_snapshot(policy.epoch())?;
+        // A root can be renamed/replaced while the writer acquires locks.
+        // Never finish bootstrap with an FD that no longer represents the
+        // administrator policy's current named directory.
+        for root in &mut roots {
+            root.revalidate_root_binding(&completed)
+                .map_err(|_| IdentityDenied)?;
+        }
         Ok(Self {
             roots,
             replay_file,
@@ -131,14 +138,20 @@ impl UnissuedIssuer {
             return Err(IdentityDenied);
         }
         let observation = IssuerPolicy::from_os_attested();
+        // Compare each retained root FD to a fresh, policy-selected OS root
+        // handle. A renamed/replaced directory is no longer an issued root.
+        // Observation alone cannot guarantee immunity to concurrent rename;
+        // durable authorization and operation linearization remain P0.
+        let roots_match = matches!(observation, Ok(ref p)
+            if p.epoch() == self.policy_epoch
+            && p.digest() == &self.policy_digest
+            && self.roots.iter_mut().all(|root| root.revalidate_root_binding(p).is_ok()));
         if self
             .replay_file
             .read_verified_snapshot(self.policy_epoch)
             .is_err()
             || self.replay_writer.validate_custody().is_err()
-            || !matches!(observation, Ok(ref p)
-                if p.epoch() == self.policy_epoch
-                && p.digest() == &self.policy_digest)
+            || !roots_match
         {
             self.revoke();
             return Err(IdentityDenied);

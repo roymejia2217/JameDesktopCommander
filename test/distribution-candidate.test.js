@@ -212,6 +212,31 @@ test('TAR transport retains hidden dependency files and native Linux executable 
   });
 });
 
+test('Node-only TAR roundtrip keeps native capability absent and rejects post-extraction injection', async () => {
+  await withFixture(async options => {
+    const manifest = await buildCandidate(options);
+    assert.equal(manifest.nativeCapabilityAddon, undefined);
+    assert.ok(!manifest.files.some(item => item.path.startsWith('native/')));
+    await assert.rejects(lstat(join(options.destination, 'native')), { code: 'ENOENT' });
+
+    const root = dirname(options.destination);
+    const original = join(root, 'original-node-only.tar');
+    const downloaded = join(root, 'downloaded-node-only.tar');
+    const extracted = join(root, 'extracted-node-only');
+    await createCandidateArchive(options.destination, original);
+    await copyFile(original, downloaded);
+    await restoreCandidateArchive(original, downloaded, extracted);
+    assert.deepEqual(await verifyCandidate({ ...options, destination: extracted }), manifest);
+    await assert.rejects(lstat(join(extracted, 'native')), { code: 'ENOENT' });
+
+    await mkdir(join(extracted, 'native'));
+    await writeFile(join(extracted, 'native', 'jdc-capability-probe.node'), Buffer.alloc(4096));
+    await assert.rejects(verifyCandidate({ ...options, destination: extracted }),
+      /Unapproved candidate root directory/,
+      'injected native binary must be rejected independently of manifest hash');
+  });
+});
+
 test('altered downloaded TAR is rejected before extraction', async () => {
   await withFixture(async options => {
     await buildCandidate(options);

@@ -17,7 +17,7 @@ concurrency:
 env:
   HUSKY: '0'
   PUPPETEER_SKIP_DOWNLOAD: '1'
-  JDC_CANDIDATE_INCLUDE_NATIVE: '1'
+  JDC_CANDIDATE_INCLUDE_NATIVE: '0'
 
 jobs:
   portable-candidate:
@@ -67,7 +67,7 @@ jobs:
         run: node --test test/test-filesystem-policy-fail-closed.js
 
       - name: Run packaging security regression tests
-        run: node --test test/distribution-candidate.test.js
+        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
@@ -78,16 +78,16 @@ jobs:
       - name: Verify committed native dependency lock
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
 
-      # The FFI class and its adversarial probes are retained in research PRs
-      # #131/#147 only. Candidate packaging may build the deny-only addon,
-      # but cannot claim that restricted filesystem capabilities are ready.
+      # Retain native denial and FFI-negative checks as CI gates, but never
+      # stage a native addon into a portable candidate while #124 is unresolved.
+      # The broker uses a separate authenticated IPC design, not a JS class.
       - name: Compile deny-only native addon from locked source
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 
       - name: Verify deny-only native addon surface before staging
         run: node --test test/security/capability-default-surface.test.cjs
 
-      - name: Stage Node runtime and native capability with hashed manifest
+      - name: Stage Node runtime without native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build
 
       - name: Independently verify staged bytes and provenance

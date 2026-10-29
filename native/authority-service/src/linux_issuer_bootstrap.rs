@@ -31,6 +31,20 @@ fn revalidate_listener_custody(
     )
 }
 
+/// Require the two independently OS-opened replay SQLite handles to refer to
+/// exactly the same kernel object. File names, headers, size and separate
+/// custody checks are insufficient when a name changes between opens.
+/// This is NOT a complete SQLite transaction/replay or restart antirollback.
+fn require_consistent_replay_pair(
+    observer: (u64, u64),
+    writer: (u64, u64),
+) -> Result<(), IdentityDenied> {
+    if observer.1 == 0 || observer != writer {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
 /// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
@@ -95,6 +109,10 @@ impl UnissuedIssuer {
             .validate_custody()
             .map_err(|_| IdentityDenied)?;
         replay_file.read_verified_snapshot(policy.epoch())?;
+        // Even two independently valid root-custodied SQLite opens cannot
+        // form a single replay authority if they refer to different inodes.
+        // Bind the pinned snapshot reader and SQLite writer at bootstrap.
+        require_consistent_replay_pair(replay_file.identity(), replay_writer.file_identity())?;
         // A root can be renamed/replaced while the writer acquires locks.
         // Never finish bootstrap with an FD that no longer represents the
         // administrator policy's current named directory.
@@ -146,10 +164,15 @@ impl UnissuedIssuer {
             if p.epoch() == self.policy_epoch
             && p.digest() == &self.policy_digest
             && self.roots.iter_mut().all(|root| root.revalidate_root_binding(p).is_ok()));
-        if self
-            .replay_file
-            .read_verified_snapshot(self.policy_epoch)
-            .is_err()
+        if require_consistent_replay_pair(
+            self.replay_file.identity(),
+            self.replay_writer.file_identity(),
+        )
+        .is_err()
+            || self
+                .replay_file
+                .read_verified_snapshot(self.policy_epoch)
+                .is_err()
             || self.replay_writer.validate_custody().is_err()
             || !roots_match
         {
@@ -232,8 +255,23 @@ mod tests {
         for file in [&original, &replacement] {
             let db = rusqlite::Connection::open(file).unwrap();
             db.execute_batch(
-                "CREATE TABLE replay_claims (epoch BLOB NOT NULL, request BLOB NOT NULL, PRIMARY KEY (epoch, request)) WITHOUT ROWID;"
+                "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;
+                 CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8),
+                 request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16),
+                 PRIMARY KEY(epoch,request)) WITHOUT ROWID;"
             ).unwrap();
+        }
+        // Both files must pass the actual read-only replay-image validator;
+        // otherwise the denial could be caused by invalid SQLite content.
+        for file in [&original, &replacement] {
+            assert_eq!(
+                jdc_authority_store::replay_ledger::ReplayClaimLedger::inspect_serialized_snapshot(
+                    &std::fs::read(file).unwrap(),
+                    7
+                ),
+                Ok(0),
+                "attacker replacement is a valid empty replay SQLite image"
+            );
         }
         let observed = std::fs::File::open(&original).unwrap();
         let first = observed.metadata().unwrap();

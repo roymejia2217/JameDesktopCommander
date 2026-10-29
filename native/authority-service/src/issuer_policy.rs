@@ -32,6 +32,19 @@ mod tests {
         assert!(binding.open_root(R).is_ok());
     }
     #[test]
+    fn admin_candidate_root_preflight_rejects_missing_root_and_preserves_existing() {
+        let f = tempfile::tempdir().unwrap();
+        let allowed = f.path().join("allowed");
+        let missing = f.path().join("missing");
+        fs::create_dir(&allowed).unwrap();
+        let valid = policy(R, allowed.to_str().unwrap());
+        let invalid = policy(R, missing.to_str().unwrap());
+        assert!(IssuerPolicy::validate_admin_existing_roots(&valid, 7, [1; 32]).is_ok());
+        assert!(IssuerPolicy::validate_admin_existing_roots(&invalid, 7, [1; 32]).is_err());
+        assert!(allowed.is_dir());
+        assert!(!missing.exists());
+    }
+    #[test]
     fn untrusted_or_malformed_policy_cannot_bind_any_os_root() {
         let f = tempfile::tempdir().unwrap();
         let allowed = f.path().join("allowed");
@@ -255,13 +268,31 @@ impl IssuerPolicy {
     /// rejected by the actual native issuer. This checks data semantics only;
     /// OS-rooted publisher custody and provenance are separate requirements.
     /// No root handles or caller privileges are created here.
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn validate_admin_candidate(
         bytes: &[u8],
         epoch: u64,
         digest: [u8; 32],
     ) -> Result<(), IdentityDenied> {
         Self::decode_verified(bytes, epoch, digest).map(|_| ())
+    }
+
+    /// Administrator-side *preflight*, never a grant: every declared root
+    /// must currently be openable through the same no-follow OS-handle
+    /// traversal used by the issuer. These handles are dropped immediately.
+    /// The issuer MUST independently pin/revalidate them at bootstrap and
+    /// before/after I/O; this check cannot linearize concurrent renames.
+    #[cfg(any(test, target_os = "linux"))]
+    pub(crate) fn validate_admin_existing_roots(
+        bytes: &[u8],
+        epoch: u64,
+        digest: [u8; 32],
+    ) -> Result<(), IdentityDenied> {
+        let policy = Self::decode_verified(bytes, epoch, digest)?;
+        for root in &policy.roots {
+            policy.open_root(&root.root_ref)?;
+        }
+        Ok(())
     }
 
     #[cfg(any(test, target_os = "linux"))]

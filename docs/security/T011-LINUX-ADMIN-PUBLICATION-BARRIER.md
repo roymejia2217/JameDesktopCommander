@@ -175,9 +175,25 @@ root-only publisher, with no staged outputs, the old image unchanged and
 the persistent publication intent still forcing service-side denial.
 Valid forward commit and all recovery scenarios remain mandatory.
 
-These checks reduce publisher/issuer semantic drift; they do not establish
-signed operator provenance, in-flight revocation linearization, external
-antirollback or full production administration.
+The root-only publisher additionally requires every declared administrator
+root to be currently openable through the issuer's existing handle-relative,
+no-follow directory traversal **before** preparing a durable transition,
+committing a new policy or finishing a forward recovery. This prevents an
+otherwise canonical policy with a missing directory or a symlink substituted
+at the declared root name from being published. The mandatory disposable
+Linux runner provisions the five independent root-owned fixture directories,
+denies missing-root and genuine symlink-root attempts with an unchanged empty
+intent and no staged images, then restores the original directory and proves
+the legitimate forward transition remains available.
+
+This is an administrative availability preflight only: it runs as root and
+does not prove the service principal can read each directory, cannot exclude
+malicious concurrent renames after validation and does not issue a capability.
+The issuer must still independently open, pin and continuously revalidate OS
+handles, while the outstanding in-flight revocation/atomicity and complete
+antirollback requirements remain P0. These checks reduce publisher/issuer
+drift; they do not establish signed operator provenance or complete production
+administration.
 
 ## Administrator publisher requirements still missing
 

@@ -195,7 +195,7 @@ fn inspect_custodied_named_listener(
 /// Fail-closed session-level custody latch. A privileged namespace drift
 /// permanently invalidates this issuer, even if the node is later repaired.
 /// Client frame parsing failures do NOT set this latch.
-fn inspect_latched_custodied_named_listener(
+pub(crate) fn inspect_latched_custodied_named_listener(
     fd: BorrowedFd<'_>,
     expected_path: &Path,
     expected_socket_uid: libc::uid_t,
@@ -217,25 +217,6 @@ fn inspect_latched_custodied_named_listener(
         *revoked = true;
     }
     checked
-}
-
-/// Production-only acceptance: the entire socket namespace must be rooted
-/// under a root-owned 0755 parent, with declared service/client UID/GID.
-pub(crate) fn inspect_root_custodied_named_listener(
-    fd: BorrowedFd<'_>,
-    expected_path: &Path,
-    expected_socket_uid: libc::uid_t,
-    expected_socket_gid: libc::gid_t,
-    revoked: &mut bool,
-) -> Result<(), IdentityDenied> {
-    inspect_latched_custodied_named_listener(
-        fd,
-        expected_path,
-        expected_socket_uid,
-        expected_socket_gid,
-        0,
-        revoked,
-    )
 }
 
 /// Convert one already-owned kernel listening FD to a long-lived Rust

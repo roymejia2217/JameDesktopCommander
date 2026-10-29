@@ -9,6 +9,28 @@ use crate::{
 use jdc_authority_store::linux_replay_writer::LinuxReplayIssuerLedger;
 use std::os::fd::AsFd;
 
+/// Central socket liveness check shared by generic issuer revalidation.
+/// Production supplies only its retained systemd FD, fixed endpoint and
+/// kernel/NSS identities. The parent UID argument exists for real Linux
+/// unprivileged test sockets; production always passes the root owner (0).
+fn revalidate_listener_custody(
+    listener: &std::os::unix::net::UnixListener,
+    expected_path: &std::path::Path,
+    expected_service_uid: libc::uid_t,
+    expected_client_gid: libc::gid_t,
+    protected_parent_uid: libc::uid_t,
+    revoked: &mut bool,
+) -> Result<(), IdentityDenied> {
+    crate::unix_activation::inspect_latched_custodied_named_listener(
+        listener.as_fd(),
+        expected_path,
+        expected_service_uid,
+        expected_client_gid,
+        protected_parent_uid,
+        revoked,
+    )
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
 /// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
@@ -91,6 +113,23 @@ impl UnissuedIssuer {
         if self.revoked {
             return Err(IdentityDenied);
         }
+        // A generic liveness decision must not omit the retained kernel
+        // listener's root-managed namespace merely because no IPC client is
+        // currently being accepted. Repaired custody cannot revive this issuer.
+        const ENDPOINT: &str = "/run/jdc-authority-ipc/authority.sock";
+        if revalidate_listener_custody(
+            &self.inherited_listener,
+            std::path::Path::new(ENDPOINT),
+            unsafe { libc::geteuid() },
+            self.expected_client.expected_gid(),
+            0,
+            &mut self.revoked,
+        )
+        .is_err()
+        {
+            self.revoke();
+            return Err(IdentityDenied);
+        }
         let observation = IssuerPolicy::from_os_attested();
         if self
             .replay_file
@@ -123,27 +162,10 @@ impl UnissuedIssuer {
             principal,
             named,
             deadline,
-            || {
-                self.revalidate()?;
-                // systemd's root-owned directory is not writable by the
-                // authority account or its MCP client. Verify its ancestry
-                // and the socket node's exact user/group/mode on BOTH sides
-                // of the potentially blocking read.
-                let custody = crate::unix_activation::inspect_root_custodied_named_listener(
-                    listener.as_fd(),
-                    named,
-                    unsafe { libc::geteuid() },
-                    principal.expected_gid(),
-                    &mut self.revoked,
-                );
-                if custody.is_err() {
-                    // A revoked issuer must also close the persistent writer
-                    // and invalidate its native root grants; repairing the
-                    // socket cannot silently reactivate the old session.
-                    self.revoke();
-                }
-                custody
-            },
+            // The generic issuer check now verifies the SAME retained kernel
+            // listener custody before and after bounded IPC frame receipt,
+            // together with replay state and protected administrator policy.
+            || self.revalidate(),
         )
     }
 

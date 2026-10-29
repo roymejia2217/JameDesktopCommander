@@ -149,9 +149,45 @@ impl CanonicalCreateDirectory {
     }
 }
 
+/// Canonical read data reuses the same strict fields and single UUIDv4
+/// replay identity as create-directory. Parsing does not grant authority.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct CanonicalReadFile(CanonicalCreateDirectory);
+
+#[cfg(any(target_os = "linux", test))]
+impl CanonicalReadFile {
+    pub(crate) fn request_id_bytes(&self) -> [u8; 16] {
+        self.0.request_id_bytes()
+    }
+    pub(crate) fn expected_epoch(&self) -> u64 {
+        self.0.expected_epoch()
+    }
+    pub(crate) fn root_ref(&self) -> &str {
+        self.0.root_ref()
+    }
+    pub(crate) fn relative_path(&self) -> &str {
+        self.0.relative_path()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WireKind {
+    CreateDirectory,
+    ReadFile,
+}
+
 /// Compatibility contract: syntax acceptance alone never grants authority.
 pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
-    decode_create_directory_frame(frame).map(|_| ())
+    decode_typed_frame(frame).map(|_| ())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn decode_read_file_frame(frame: &[u8]) -> Result<CanonicalReadFile, FrameDenied> {
+    let (request, kind) = decode_typed_frame(frame)?;
+    if kind != WireKind::ReadFile {
+        return Err(FrameDenied);
+    }
+    Ok(CanonicalReadFile(request))
 }
 
 /// Decode one canonical v1 frame into immutable protocol data, not a grant.
@@ -159,6 +195,14 @@ pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
 pub fn decode_create_directory_frame(
     frame: &[u8],
 ) -> Result<CanonicalCreateDirectory, FrameDenied> {
+    let (request, kind) = decode_typed_frame(frame)?;
+    if kind != WireKind::CreateDirectory {
+        return Err(FrameDenied);
+    }
+    Ok(request)
+}
+
+fn decode_typed_frame(frame: &[u8]) -> Result<(CanonicalCreateDirectory, WireKind), FrameDenied> {
     if frame.len() < 6 || frame.len() > MAX_BYTES + 4 {
         return Err(FrameDenied);
     }
@@ -168,13 +212,17 @@ pub fn decode_create_directory_frame(
     }
     let json = &frame[4..];
     let req: Request = serde_json::from_slice(json).map_err(|_| FrameDenied)?;
+    let kind = match req.kind.as_str() {
+        "create-directory" => WireKind::CreateDirectory,
+        "read-file" => WireKind::ReadFile,
+        _ => return Err(FrameDenied),
+    };
     let request_id_bytes = uuid_v4_bytes(&req.request_id).ok_or(FrameDenied)?;
     if serde_json::to_vec(&req)
         .map_err(|_| FrameDenied)?
         .as_slice()
         != json
         || req.version != 1
-        || req.kind != "create-directory"
         || !epoch(&req.expected_epoch)
         || req.root_ref.len() != 32
         || !req.root_ref.bytes().all(lower_hex)
@@ -182,13 +230,16 @@ pub fn decode_create_directory_frame(
     {
         return Err(FrameDenied);
     }
-    Ok(CanonicalCreateDirectory {
-        request_id: req.request_id,
-        request_id_bytes,
-        expected_epoch: req.expected_epoch.parse::<u64>().map_err(|_| FrameDenied)?,
-        root_ref: req.root_ref,
-        relative_path: req.relative_path,
-    })
+    Ok((
+        CanonicalCreateDirectory {
+            request_id: req.request_id,
+            request_id_bytes,
+            expected_epoch: req.expected_epoch.parse::<u64>().map_err(|_| FrameDenied)?,
+            root_ref: req.root_ref,
+            relative_path: req.relative_path,
+        },
+        kind,
+    ))
 }
 
 #[cfg(test)]
@@ -206,6 +257,40 @@ mod tests {
         out.extend_from_slice(body);
         out
     }
+    #[test]
+    fn canonical_read_is_typed_and_cannot_be_misrouted_as_mkdir() {
+        let body = payload("nested/inside.bin").replace("create-directory", "read-file");
+        let valid = frame(body.as_bytes());
+        assert_eq!(validate_request_frame(&valid), Ok(()));
+        let read = decode_read_file_frame(&valid).unwrap();
+        assert_eq!(
+            read.request_id_bytes(),
+            [
+                0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x41, 0x11, 0x81, 0x11, 0x11, 0x11, 0x11, 0x11,
+                0x11, 0x11
+            ]
+        );
+        assert_eq!(read.expected_epoch(), u64::MAX);
+        assert_eq!(read.root_ref(), ROOT);
+        assert_eq!(read.relative_path(), "nested/inside.bin");
+        assert_eq!(decode_create_directory_frame(&valid), Err(FrameDenied));
+        assert_eq!(
+            decode_read_file_frame(&frame(payload("nested/inside.bin").as_bytes())).err(),
+            Some(FrameDenied)
+        );
+        for invalid in [
+            body.replace("read-file", "read"),
+            body.replace("nested/inside.bin", "../outside"),
+            body.replace("\"version\":1", "\"version\":1.0"),
+            format!("{body} "),
+        ] {
+            assert_eq!(
+                validate_request_frame(&frame(invalid.as_bytes())),
+                Err(FrameDenied)
+            );
+        }
+    }
+
     #[test]
     fn decoded_request_preserves_all_canonical_fields_without_policy_grant() {
         let wire = frame(payload("project/nuevo").as_bytes());

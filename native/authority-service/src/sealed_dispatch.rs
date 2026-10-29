@@ -192,15 +192,34 @@ impl SealedDirectoryGrant {
         self.execute_c4d_impl(&frame.into_wire())
     }
 
+    /// Linux-only, no production issuer: authenticated kernel frame to an
+    /// existing pinned OS handle. This returns bounded data inside the crate;
+    /// no service response protocol, exposed grant or MCP bridge exists yet.
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "non-release read dispatch has no issuer or response transport"
+        )
+    )]
+    pub(crate) fn execute_authenticated_read(
+        &mut self,
+        frame: crate::unix_session::AuthenticatedFrame,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        self.execute_read_impl(&frame.into_wire())
+    }
+
     /// Raw-input dispatch exists strictly for isolated adversarial unit tests.
     #[cfg(test)]
     fn execute_c4d(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
         self.execute_c4d_impl(wire)
     }
 
-    /// Validate C4d data, rootRef, epoch and one-shot request identity.
+    /// Revalidate current issuer generation before spending replay or I/O.
+    /// Shared between supported native operation kinds to prevent divergence.
     #[cfg(any(target_os = "linux", test))]
-    fn execute_c4d_impl(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
+    fn ensure_live_generation(&mut self) -> Result<(), DispatchDenied> {
         if !self.active || self.expected_epoch == 0 {
             return Err(DispatchDenied);
         }
@@ -217,25 +236,66 @@ impl SealedDirectoryGrant {
                 return Err(DispatchDenied);
             }
         }
-        let request = decode_create_directory_frame(wire).map_err(|_| DispatchDenied)?;
-        if request.root_ref() != self.root_ref || request.expected_epoch() != self.expected_epoch {
+        Ok(())
+    }
+
+    /// Bind authenticated canonical request fields to the sealed grant.
+    /// A malformed root/epoch must never spend a valid replay UUID.
+    #[cfg(any(target_os = "linux", test))]
+    fn consume_bound_identity(
+        &mut self,
+        root_ref: &str,
+        request_epoch: u64,
+        request_id: [u8; 16],
+    ) -> Result<(), DispatchDenied> {
+        if root_ref != self.root_ref || request_epoch != self.expected_epoch {
             return Err(DispatchDenied);
         }
         // A ledger write/validation failure is indistinguishable from storage
         // rollback or corruption at this boundary. In a durable session it
         // permanently revokes the grant rather than implicitly re-admitting
         // when the same path begins working again.
-        if self.replay.consume(request.request_id_bytes()).is_err() {
+        if self.replay.consume(request_id).is_err() {
             if matches!(self.replay, ReplayAdmission::Durable(_)) {
                 self.replay = ReplayAdmission::Unavailable;
                 self.active = false;
             }
             return Err(DispatchDenied);
         }
-        // Consume the request ID before I/O: a failed/partial I/O is not
-        // silently retried against a changed filesystem namespace.
+        Ok(())
+    }
+
+    /// Validate the request, spend its replay identity, then perform one
+    /// handle-only directory operation. No pathname fallback.
+    #[cfg(any(target_os = "linux", test))]
+    fn execute_c4d_impl(&mut self, wire: &[u8]) -> Result<(), DispatchDenied> {
+        self.ensure_live_generation()?;
+        let request = decode_create_directory_frame(wire).map_err(|_| DispatchDenied)?;
+        self.consume_bound_identity(
+            request.root_ref(),
+            request.expected_epoch(),
+            request.request_id_bytes(),
+        )?;
         self.rooted
             .create_descendant(request.relative_path())
+            .map_err(|_| DispatchDenied)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_read_impl(&mut self, wire: &[u8]) -> Result<Vec<u8>, DispatchDenied> {
+        self.ensure_live_generation()?;
+        let request =
+            crate::canonical_request::decode_read_file_frame(wire).map_err(|_| DispatchDenied)?;
+        self.consume_bound_identity(
+            request.root_ref(),
+            request.expected_epoch(),
+            request.request_id_bytes(),
+        )?;
+        // The previously implemented bounded file reader uses only the sealed
+        // OS handle and rejects observed multi-link files. This is *not* a
+        // proof against concurrent link creation; #148 remains P0.
+        self.rooted
+            .read_bounded_file(request.relative_path())
             .map_err(|_| DispatchDenied)
     }
     pub fn revoke(&mut self) {
@@ -614,6 +674,166 @@ mod tests {
         );
         assert!(!allowed.join("changed").exists());
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"UNMODIFIED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authenticated_native_read_uses_pinned_root_with_replay_and_external_alias_denial() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(allowed.join("nested")).unwrap();
+        let expected = b"REAL_NATIVE_HANDLE_BOUND_READ";
+        std::fs::write(allowed.join("nested/good.bin"), expected).unwrap();
+        let secret = b"DO_NOT_LEAK_OUTSIDE_OBJECT";
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, secret).unwrap();
+        std::fs::hard_link(&sentinel, allowed.join("alias.bin")).unwrap();
+        let mut grant = fixture(&allowed);
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        assert_ne!(gid, 0);
+        fn authenticate(
+            wire: &[u8],
+            uid: u32,
+            gid: u32,
+        ) -> crate::unix_session::AuthenticatedFrame {
+            let (mut client, service) = UnixStream::pair().unwrap();
+            client.write_all(wire).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &service,
+                uid,
+                gid,
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        }
+        let read_wire = |id: &str, epoch: u64, relative: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"read-file","requestId":"{id}","expectedEpoch":"{epoch}","rootRef":"{ROOT}","relativePath":"{relative}"}}"#,
+            );
+            let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+            framed.extend_from_slice(body.as_bytes());
+            framed
+        };
+        let valid = read_wire(ID, 7, "nested/good.bin");
+        let accepted = authenticate(&valid, uid, gid);
+        assert_eq!(
+            grant.execute_authenticated_read(accepted),
+            Ok(expected.to_vec())
+        );
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&valid, uid, gid)),
+            Err(DispatchDenied),
+            "a second connection must not replay the same read identity",
+        );
+        let forged = read_wire("22222222-2222-4222-8222-222222222222", 8, "nested/good.bin");
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&forged, uid, gid)),
+            Err(DispatchDenied),
+            "policy epoch mismatch must deny the read",
+        );
+        let external = read_wire("33333333-3333-4333-8333-333333333333", 7, "alias.bin");
+        assert_eq!(
+            grant.execute_authenticated_read(authenticate(&external, uid, gid)),
+            Err(DispatchDenied),
+            "an outside object hard-linked inside the root must not reveal bytes",
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), secret);
+        assert_eq!(
+            std::fs::read(allowed.join("nested/good.bin")).unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[test]
+    fn authenticated_read_consumes_durable_sqlite_identity_across_restart_and_operation_kind() {
+        use jdc_authority_store::replay_ledger::ReplayClaimLedger;
+        use rusqlite::{Connection, OpenFlags};
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let f = tempfile::tempdir().unwrap();
+        let allowed = f.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let protected = b"PERSISTENT_REPLAY_PREVENTS_DUPLICATE_READ";
+        std::fs::write(allowed.join("good.bin"), protected).unwrap();
+        let db_path = f.path().join("claims.sqlite3");
+        let db = Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "PRAGMA application_id=0x4A44434C; PRAGMA user_version=1;
+             CREATE TABLE replay_claims (epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), request BLOB NOT NULL CHECK(typeof(request)='blob' AND length(request)=16), PRIMARY KEY(epoch,request)) WITHOUT ROWID"
+        ).unwrap();
+        drop(db);
+        let open = || {
+            let db =
+                Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+            ReplayClaimLedger::from_offline_fixture(db, 7).unwrap()
+        };
+        let mut grant = fixture(&allowed);
+        grant.replay = ReplayAdmission::Durable(open());
+        let body = format!(
+            r#"{{"version":1,"kind":"read-file","requestId":"{ID}","expectedEpoch":"7","rootRef":"{ROOT}","relativePath":"good.bin"}}"#,
+        );
+        let mut read_wire = (body.len() as u32).to_be_bytes().to_vec();
+        read_wire.extend_from_slice(body.as_bytes());
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.write_all(&read_wire).unwrap();
+        sender.shutdown(Shutdown::Write).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        assert_ne!(uid, 0);
+        let frame = crate::unix_session::read_authenticated_frame(
+            &receiver,
+            uid,
+            gid,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            grant.execute_authenticated_read(frame),
+            Ok(protected.to_vec())
+        );
+        drop(grant);
+        // Reopen an independent SQLite session; a consumed read UUID cannot
+        // be reused for a different *mutating* operation.
+        let mut restart = fixture(&allowed);
+        restart.replay = ReplayAdmission::Durable(open());
+        assert_eq!(
+            restart.execute_c4d(&wire(ROOT, 7, ID, "replayed-mkdir")),
+            Err(DispatchDenied),
+        );
+        assert!(!allowed.join("replayed-mkdir").exists());
+        assert!(
+            !restart.active,
+            "durable replay denial must revoke the grant"
+        );
+        drop(restart);
+        let mut fresh = fixture(&allowed);
+        fresh.replay = ReplayAdmission::Durable(open());
+        assert_eq!(
+            fresh.execute_c4d(&wire(
+                ROOT,
+                7,
+                "22222222-2222-4222-8222-222222222222",
+                "fresh-mkdir"
+            )),
+            Ok(()),
+        );
+        assert!(allowed.join("fresh-mkdir").exists());
+        assert_eq!(std::fs::read(allowed.join("good.bin")).unwrap(), protected);
     }
 
     #[cfg(target_os = "linux")]

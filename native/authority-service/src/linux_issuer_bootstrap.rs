@@ -11,6 +11,13 @@ use std::os::fd::AsFd;
 
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Nothing exposes those handles or approves MCP operations.
+/// A consumer must NOT admit an arbitrary caller-supplied UnixStream bypassing
+/// the one retained systemd listener and its pre/post IPC custody checks.
+///
+/// ```compile_fail
+/// use jdc_authority_service::linux_issuer_bootstrap::UnissuedIssuer;
+/// let _unauthorized_stream_admission = UnissuedIssuer::inspect_client_frame;
+/// ```
 pub struct UnissuedIssuer {
     roots: Vec<SealedDirectoryGrant>,
     replay_file: ObservedReplayFile,
@@ -99,25 +106,6 @@ impl UnissuedIssuer {
         }
         Ok(())
     }
-    /// Authenticated client-frame observation, never an execution grant.
-    /// The expected identity came only from fixed NSS at service bootstrap.
-    pub fn inspect_client_frame(
-        &mut self,
-        stream: &std::os::unix::net::UnixStream,
-        deadline: std::time::Duration,
-    ) -> Result<(), IdentityDenied> {
-        self.revalidate()?;
-        let observed = crate::unix_session::read_prepared_client_frame(
-            stream,
-            &self.expected_client,
-            deadline,
-        );
-        // Receipt of an authenticated frame is not evidence that the root
-        // administrator kept the same epoch throughout a blocked socket read.
-        self.revalidate()?;
-        observed.map(|_| ())
-    }
-
     /// One genuine named AF_UNIX listener, with a fixed NSS client identity
     /// and a second protected-policy observation after bounded frame receipt.
     /// This does not establish systemd's provenance for the listener, nor

@@ -13,16 +13,13 @@ use windows_sys::Win32::{
     Security::{
         AclSizeInformation,
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsValidSid,
-        IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
-        ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        EqualSid, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsWellKnownSid,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     },
     Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
-// Win32 ACCESS_ALLOWED_ACE_TYPE is the documented ACE_HEADER.AceType value 0.
-const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
 const GENERIC_ALL: u32 = 0x1000_0000;
@@ -153,16 +150,9 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
     if code != 0 || sd.is_null() || owner.is_null() || dacl.is_null() {
         return Err(IdentityDenied);
     }
-    // SAFETY: all three pointers are from the live descriptor.
-    if unsafe { IsValidSid(owner) } == 0 || unsafe { IsValidAcl(dacl) } == 0 {
-        return Err(IdentityDenied);
-    }
-    // A service-owned state directory could modify its own DACL regardless of
-    // granted rights. Require independent SYSTEM/Administrators ownership.
-    if !matches!(
-        classify_sid(owner, service_sid),
-        Principal::LocalSystem | Principal::Administrators
-    ) {
+    // The ACL pointer comes directly from the same live OS descriptor.
+    // SID fields are copied only after verified descriptor-relative bounds.
+    if unsafe { IsValidAcl(dacl) } == 0 {
         return Err(IdentityDenied);
     }
     let (mut control, mut revision) = (0u16, 0u32);
@@ -184,39 +174,25 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
     {
         return Err(IdentityDenied);
     }
-    let mut summaries = Vec::with_capacity(3);
-    for i in 0..3 {
-        let mut raw: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut raw) } == 0 || raw.is_null() {
-            return Err(IdentityDenied);
-        }
-        // SAFETY: GetAce returns an ACE contained in the valid kernel-provided ACL.
-        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
-        let sid_offset = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        let ace_size = header.AceSize as usize;
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
-            || ace_size < sid_offset + 8
-            || ace_size > acl_info.AclBytesInUse as usize
-        {
-            return Err(IdentityDenied);
-        }
-        // For a standard allowed ACE, SID begins at SidStart. Bound its length
-        // against AceSize *before* passing a pointer to the Win32 SID APIs.
-        let sid = unsafe { raw.cast::<u8>().add(sid_offset) };
-        let sub_count = unsafe { *sid.add(1) } as usize;
-        if sub_count > 15 || 8 + 4 * sub_count > ace_size - sid_offset {
-            return Err(IdentityDenied);
-        }
-        if unsafe { IsValidSid(sid.cast()) } == 0 {
-            return Err(IdentityDenied);
-        }
-        let allowed = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
-        summaries.push(AceSummary {
-            principal: classify_sid(sid.cast(), service_sid),
-            mask: allowed.Mask,
-            flags: header.AceFlags,
-        });
+    let copied =
+        unsafe { crate::windows_acl_aces::observe_three_aces(sd, owner, dacl, &acl_info) }?;
+    // A service-owned state directory could rewrite its own DACL. Require
+    // independently administered SYSTEM/Administrators ownership.
+    if !matches!(
+        classify_sid(copied.owner_sid.as_ptr().cast_mut().cast(), service_sid),
+        Principal::LocalSystem | Principal::Administrators
+    ) {
+        return Err(IdentityDenied);
     }
+    let summaries: Vec<AceSummary> = copied
+        .aces
+        .iter()
+        .map(|ace| AceSummary {
+            principal: classify_sid(ace.sid.as_ptr().cast_mut().cast(), service_sid),
+            mask: ace.mask,
+            flags: ace.flags,
+        })
+        .collect();
     validate_ace_set(&summaries)
 }
 

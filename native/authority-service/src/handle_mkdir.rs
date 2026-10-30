@@ -454,6 +454,35 @@ mod tests {
         assert_eq!(std::fs::read(&alias).unwrap(), secret);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn handle_bounded_read_refuses_kernel_mount_crossing_with_exdev() {
+        use std::os::unix::fs::MetadataExt;
+
+        // A real mounted /proc is available on the GitHub-hosted Linux runner.
+        // The regular-file positive control rules out mere path/permission
+        // rejection, and nlink=1 rules out a hardlink-only explanation.
+        let original = std::fs::read("/proc/version").expect("kernel proc fixture");
+        assert!(!original.is_empty());
+        let metadata = std::fs::metadata("/proc/version").unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.nlink(), 1);
+        assert_ne!(
+            std::fs::metadata("/").unwrap().dev(),
+            metadata.dev(),
+            "the fixture must cross a real mounted filesystem"
+        );
+
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
+        );
+        let denied = root
+            .read_bounded_file("proc/version")
+            .expect_err("read must not cross a mount even if the target has one link");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert_eq!(std::fs::read("/proc/version").unwrap(), original);
+    }
+
     #[test]
     fn handle_bounded_read_rejects_oversize_and_traversal_without_exposing_bytes() {
         let fixture = tempfile::tempdir().unwrap();

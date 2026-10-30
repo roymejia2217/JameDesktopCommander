@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
-import { validatePath } from './tools/filesystem.js';
+import { requireUnrestrictedLegacyFilesystem, validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
@@ -64,6 +64,9 @@ export interface SearchSessionOptions {
     totalResults: number;
     runtime: number;
   }> {
+    // A configured pathname is not object-bound authority for a child process.
+    // Deny before session allocation, path validation or spawning ripgrep.
+    await requireUnrestrictedLegacyFilesystem('start_search');
     const sessionId = `search_${++this.sessionCounter}_${Date.now()}`;
     
     // Validate path first
@@ -1007,6 +1010,18 @@ let cleanupInterval: NodeJS.Timeout | null = null;
 /**
  * Start cleanup interval - now runs on fixed schedule
  */
+/**
+ * Release the search maintenance timer when the owning test server shuts down.
+ * This never authorizes a search and does not terminate active searches:
+ * callers must terminate their sessions first. Safe for repeated shutdown.
+ */
+export function stopSearchManagerCleanup(): void {
+  if (cleanupInterval !== null) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+}
+
 function startCleanupIfNeeded(): void {
   if (!cleanupInterval) {
     cleanupInterval = setInterval(() => {

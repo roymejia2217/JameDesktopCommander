@@ -131,7 +131,7 @@ async function getAllowedDirs(): Promise<string[]> {
  * Without a reviewed object-isolating backend, only explicitly unrestricted
  * policy may use the legacy pathname-based filesystem operations.
  */
-async function requireUnrestrictedLegacyFilesystem(operation: string): Promise<void> {
+export async function requireUnrestrictedLegacyFilesystem(operation: string): Promise<void> {
     let roots: string[] | undefined;
     try {
         roots = await configManager.getAllowedDirectoriesForFilesystem();
@@ -813,6 +813,9 @@ export async function moveFile(sourcePath: string, destinationPath: string): Pro
 }
 
 export async function searchFiles(rootPath: string, pattern: string): Promise<string[]> {
+    // This guard must be OUTSIDE the ripgrep fallback catch: an unavailable
+    // native authority cannot permit a recursive ambient fs.readdir fallback.
+    await requireUnrestrictedLegacyFilesystem('search_files');
     // Use the new search manager for better performance
     // This provides a temporary compatibility layer until we fully migrate to search sessions
     const { searchManager } = await import('../search-manager.js');

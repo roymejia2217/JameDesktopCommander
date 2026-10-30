@@ -337,6 +337,19 @@ try {
   await assert.rejects(lstat(legacyMoveSource), { code: 'ENOENT' });
   assert.equal(await readFile(legacyMoveTarget, 'utf8'), 'UNRESTRICTED_MOVE_BYTES');
 
+  // The packaged MCP handler must preserve actual unrestricted ripgrep
+  // functionality. The test does not treat an error-only response as success.
+  const normalSearch = await callFixtureTool('start_search', {
+    path: working, pattern: 'move-target.txt', searchType: 'files',
+  });
+  assert.notEqual(normalSearch.isError, true,
+    'Explicit unrestricted MCP search must remain functional');
+  assert.match(toolText(normalSearch), /Started file search session:/);
+  const searchId = toolText(normalSearch).match(/Started file search session: (search_\d+_\d+)/)?.[1];
+  assert.ok(searchId, 'Search must provide a valid session handle');
+  const stoppedSearch = await callFixtureTool('stop_search', { sessionId: searchId });
+  assert.notEqual(stoppedSearch.isError, true);
+
   // T009: allowedDirectories is an application-level authorization policy.
   // All writes are restricted to disposable fixture paths, never host files.
   const allowedRoot = join(working, 'allowed');
@@ -367,6 +380,17 @@ try {
   assert.match(toolText(allowedWrite), /E_POLICY_UNAVAILABLE/);
   assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
     'Denied in-root write modified bytes');
+
+  // Under a restricted policy, search must not delegate a root pathname
+  // to ripgrep or any alternate ambient readdir implementation.
+  const forbiddenSearch = await callFixtureTool('start_search', {
+    path: allowedRoot, pattern: 'inside-initial', searchType: 'content',
+  });
+  assert.equal(forbiddenSearch.isError, true,
+    'Restricted MCP search unexpectedly obtained ambient process authority');
+  assert.match(toolText(forbiddenSearch), /E_POLICY_UNAVAILABLE/);
+  assert.ok(!toolText(forbiddenSearch).includes('inside-initial'),
+    'Denied MCP search exposed file bytes');
 
   // A configured directory may itself be a symlink/junction alias.
   // The legacy handler must still deny because alias custody is unproven.

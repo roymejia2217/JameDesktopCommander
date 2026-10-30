@@ -85,7 +85,8 @@ async function setupEdgeCases() {
   console.log(`${colors.blue}Setting up edge case tests...${colors.reset}`);
   
   const originalConfig = await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
+  // Edge-case search behavior is tested in explicit unrestricted legacy mode.
+  await configManager.setValue('allowedDirectories', []);
   
   await fs.mkdir(EDGE_CASE_TEST_DIR, { recursive: true });
   
@@ -377,7 +378,11 @@ async function testLargeContextLines() {
  */
 async function testPathTraversalSecurity() {
   console.log(`${colors.yellow}Testing path traversal security...${colors.reset}`);
-  
+
+  // An intentionally restricted policy is necessary for this denial case.
+  // Restore unrestricted search semantics for all other edge-case tests.
+  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
+  try {
   // Test with path traversal attempts
   try {
     const result = await handleStartSearch({
@@ -399,6 +404,9 @@ async function testPathTraversalSecurity() {
   }
   
   console.log(`${colors.green}✓ Path traversal security test passed${colors.reset}`);
+  } finally {
+    await configManager.setValue('allowedDirectories', []);
+  }
 }
 
 /**

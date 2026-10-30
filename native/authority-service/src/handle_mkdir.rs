@@ -1,6 +1,8 @@
 //! Internal C4d handle-only directory creation slice, **not a broker**.
 //! There is no pathname bootstrap, IPC exposure or authorization in this module.
 //! The caller must supply an OS-attested, already-open directory capability.
+#[cfg(target_os = "linux")]
+use cap_fs_ext::DirExt;
 use cap_std::fs::{Dir, OpenOptions};
 use std::io::{self, Read, Write};
 

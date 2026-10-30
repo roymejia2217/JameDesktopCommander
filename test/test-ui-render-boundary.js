@@ -117,7 +117,9 @@ await client.connect(transport);
 try {
   const allowed = await client.callTool({
     name: 'set_config_value',
-    arguments: { key: 'allowedDirectories', value: [isolatedHome], origin: 'llm' },
+    // This UI delivery test explicitly exercises legacy unrestricted preview.
+    // Restricted preview must deny until its object-bound adapter exists.
+    arguments: { key: 'allowedDirectories', value: [], origin: 'llm' },
   });
   assert.ok(!allowed.isError, 'isolated test directory should be allowed');
 

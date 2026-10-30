@@ -378,10 +378,10 @@ sudo -n systemctl stop jdc-authority.service
 sudo -n umount -- "$inside_bind_alias"
 ! findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null
 
-# Once the mount is removed, the exact same relative pathname refers to the
-# legitimate in-root placeholder. The spent request ID must NEVER become
-# valid after this namespace change, even with a new systemd service process.
-# A new authenticated ID must be able to read the legitimate bytes normally.
+# Once the mount is removed, the same path refers to a legitimate file.
+# One fresh service activation must first accept a NEW request ID, then reject
+# the spent ID (even though the path is now safe), then revoke the grant for
+# subsequent requests. This avoids artificial restart-rate-limit bypasses.
 sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
@@ -390,28 +390,8 @@ const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
 const frames = await import(pathToFileURL(framePath).href);
 const operations = await import(pathToFileURL(operationPath).href);
 const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
-const attempted = {
-  version: 1, kind: 'read-file',
-  requestId: '44444444-4444-4444-8444-444444444444',
-  expectedEpoch: '1', rootRef: '0123456789abcdef0123456789abcdef',
-  relativePath: 'mounted-alias.bin',
-};
-const replay = await requestIssuerOwnedRead(attempted);
-assert.deepEqual(replay, { version: 1, status: 'denied' });
-console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_DENIED_AFTER_UNMOUNT');
-NODE
-# The Rust dispatcher deliberately revokes the current sealed grant on any
-# durable replay-claim failure. Recovery requires a NEW service activation;
-# trying a fresh ID in that revoked process would be an invalid positive test.
-sudo -n systemctl stop jdc-authority.service
-sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
-import assert from 'node:assert/strict';
-import { pathToFileURL } from 'node:url';
-const [clientPath, framePath, operationPath] = process.argv.slice(2);
-const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
-const frames = await import(pathToFileURL(framePath).href);
-const operations = await import(pathToFileURL(operationPath).href);
-const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
+// Positive control before spending a replay ID: the same pathname is now
+// a genuine in-root file and must be readable under this fresh issuer grant.
 const recovery = await requestIssuerOwnedRead({
   version: 1, kind: 'read-file',
   requestId: '55555555-5555-4555-8555-555555555555',
@@ -423,6 +403,23 @@ if (recovery.status !== 'ok') throw new Error('recovery read unavailable');
 assert.deepEqual(recovery.bytes,
   Buffer.from([2, 0, 0x43, 0x2a, 83, 69, 67, 79, 78, 68, 10]));
 console.log('T011_SAME_DEVICE_BIND_ALIAS_FRESH_READ_RECOVERS');
+const attempted = {
+  version: 1, kind: 'read-file',
+  requestId: '44444444-4444-4444-8444-444444444444',
+  expectedEpoch: '1', rootRef: '0123456789abcdef0123456789abcdef',
+  relativePath: 'mounted-alias.bin',
+};
+const replay = await requestIssuerOwnedRead(attempted);
+assert.deepEqual(replay, { version: 1, status: 'denied' });
+console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_DENIED_AFTER_UNMOUNT');
+// The replay failure must revoke the sealed grant of THIS issuer activation.
+// A new request ID cannot bypass revocation within the same OS process.
+const afterReplay = await requestIssuerOwnedRead({
+  ...attempted,
+  requestId: '66666666-6666-4666-8666-666666666666',
+});
+assert.deepEqual(afterReplay, { version: 1, status: 'denied' });
+console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_REVOKES_GRANT');
 NODE
 sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
 import sqlite3

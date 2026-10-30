@@ -94,7 +94,8 @@ function restoreEnvironment() {
 let exitCode = 0;
 try {
   await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [testDir]);
+  // This test covers line counting in explicitly unrestricted legacy mode.
+  await configManager.setValue('allowedDirectories', []);
   exitCode = (await testLineCount()) > 0 ? 1 : 0;
 } catch (error) {
   console.error('Test error:', error);

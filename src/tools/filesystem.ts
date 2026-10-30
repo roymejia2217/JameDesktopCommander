@@ -126,6 +126,23 @@ async function getAllowedDirs(): Promise<string[]> {
     }
 }
 
+/**
+ * T011-C nonshipping admission: configured roots are NOT a native grant.
+ * Without a reviewed object-isolating backend, only explicitly unrestricted
+ * policy may use the legacy pathname-based filesystem operations.
+ */
+async function requireUnrestrictedLegacyFilesystem(operation: string): Promise<void> {
+    let roots: string[] | undefined;
+    try {
+        roots = await configManager.getAllowedDirectoriesForFilesystem();
+    } catch {
+        throw new Error('Filesystem access denied: E_POLICY_UNAVAILABLE: authorization policy unavailable');
+    }
+    if (!Array.isArray(roots) || (roots.length > 0 && !roots.includes('/'))) {
+        throw new Error(`E_POLICY_UNAVAILABLE: ${operation} requires native filesystem authority`);
+    }
+}
+
 // Preserve path case when enforcing allowedDirectories. On case-sensitive
 // filesystems, case-folding would authorize a different sibling directory.
 function normalizePath(p: string): string {
@@ -433,6 +450,7 @@ export async function readFileFromDisk(
         throw new Error('Invalid file path provided');
     }
 
+    await requireUnrestrictedLegacyFilesystem('read_file');
     // Get default length from config if not provided
     if (length === undefined) {
         length = await getDefaultReadLength();
@@ -583,6 +601,7 @@ export async function readFile(
  * @returns File content without status headers, with preserved line endings
  */
 export async function readFileInternal(filePath: string, offset: number = 0, length?: number): Promise<string> {
+    await requireUnrestrictedLegacyFilesystem('internal read');
     // Get default length from config if not provided
     if (length === undefined) {
         length = await getDefaultReadLength();
@@ -628,6 +647,7 @@ export async function readFileInternal(filePath: string, offset: number = 0, len
 }
 
 export async function writeFile(filePath: string, content: string, mode: 'rewrite' | 'append' = 'rewrite'): Promise<void> {
+    await requireUnrestrictedLegacyFilesystem('write_file');
     const validPath = await validatePath(filePath);
 
     // Get file extension for telemetry
@@ -666,6 +686,7 @@ export async function readMultipleFiles(paths: string[]): Promise<MultiFileResul
     return Promise.all(
         paths.map(async (filePath: string) => {
             try {
+                await requireUnrestrictedLegacyFilesystem('read_multiple_files');
                 const validPath = await validatePath(filePath);
                 const fileResult = await readFile(validPath);
                 // Handle content conversion properly for images vs text
@@ -705,25 +726,9 @@ export async function readMultipleFiles(paths: string[]): Promise<MultiFileResul
 }
 
 export async function createDirectory(dirPath: string): Promise<void> {
-    // T011-C: The legacy validatePath()+fs.mkdir() is not a restricted
-    // authorization boundary. A native grant MUST be minted by the
-    // independently protected broker; Node must never fabricate rootRef or
-    // expectedEpoch from a config digest, and no fallback is permitted.
-    let configuredRoots: string[] | undefined;
-    try {
-        // This stable API enforces persisted-policy read failure semantics.
-        // A disk-observed experimental policy candidate is never an
-        // authority; it is not consulted by production handlers.
-        configuredRoots = await configManager.getAllowedDirectoriesForFilesystem();
-    } catch {
-        throw new Error('E_POLICY_UNAVAILABLE: filesystem authorization policy cannot be loaded');
-    }
-    if (configuredRoots === undefined ||
-        (configuredRoots.length > 0 && !configuredRoots.includes('/'))) {
-        // No privileged issuer, authenticated IPC, or durable replay ledger
-        // exists yet. This entire restricted/legacy-unset path denies.
-        throw new Error('E_POLICY_UNAVAILABLE: restricted directory creation requires native authority');
-    }
+    // Same policy admission as other legacy pathname operations. It cannot
+    // mint a native grant or turn an unknown policy into unrestricted access.
+    await requireUnrestrictedLegacyFilesystem('create_directory');
     // This preserves ONLY the legacy policy's *explicitly unrestricted* mode.
     // Do not describe this path as confined or protected by T011.
     const validPath = await validatePath(dirPath);

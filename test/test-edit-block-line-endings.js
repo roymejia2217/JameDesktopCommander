@@ -112,8 +112,9 @@ async function testLFLineEndings() {
   console.log('\nTest 1: LF line endings (Unix/Linux)');
   
   try {
-    // Allow access to test directory
-    await configManager.setValue('allowedDirectories', [TEST_DIR]);
+    // Exercise the explicit legacy unrestricted editor. Restricted-mode editing
+    // is denied until a native object-bound adapter exists (T011/#139).
+    await configManager.setValue('allowedDirectories', []);
     
     // Replace a line using LF line endings in search string
     const result = await handleEditBlock({

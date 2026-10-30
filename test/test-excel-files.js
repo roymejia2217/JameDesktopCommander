@@ -55,8 +55,9 @@ async function setup() {
   // Save original config to restore later
   const originalConfig = await configManager.getConfig();
 
-  // Set allowed directories to include our test directory
-  await configManager.setValue('allowedDirectories', [TEST_DIR]);
+  // Exercise the legacy unrestricted Excel adapter; the restricted adapter
+  // is not authorized until object-bound Office I/O is implemented (#139).
+  await configManager.setValue('allowedDirectories', []);
   console.log(`✓ Setup: set allowed directories`);
 
   return originalConfig;

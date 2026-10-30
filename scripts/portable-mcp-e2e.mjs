@@ -350,6 +350,16 @@ try {
   const stoppedSearch = await callFixtureTool('stop_search', { sessionId: searchId });
   assert.notEqual(stoppedSearch.isError, true);
 
+  // Keep a second, real packaged MCP session across the policy transition.
+  // A session ID minted under unrestricted policy must not remain a grant.
+  const continuation = await callFixtureTool('start_search', {
+    path: working, pattern: 'move-target.txt', searchType: 'files',
+  });
+  assert.notEqual(continuation.isError, true);
+  const continuationId =
+    toolText(continuation).match(/Started file search session: (search_\d+_\d+)/)?.[1];
+  assert.ok(continuationId, 'Positive search must provide a revocable session');
+
   // T009: allowedDirectories is an application-level authorization policy.
   // All writes are restricted to disposable fixture paths, never host files.
   const allowedRoot = join(working, 'allowed');
@@ -365,6 +375,21 @@ try {
     key: 'allowedDirectories', value: [allowedRoot],
   });
   assert.notEqual(configured.isError, true, 'Could not enable the restricted file policy');
+
+  // T011/#139: observed policy revocation denies even an already-created
+  // search session, including its buffered results and session metadata.
+  const revokedResults = await callFixtureTool('get_more_search_results', {
+    sessionId: continuationId, offset: 0, length: 25,
+  });
+  assert.equal(revokedResults.isError, true, 'Pre-restriction search session leaked results');
+  assert.match(toolText(revokedResults), /E_POLICY_UNAVAILABLE/);
+  assert.ok(!toolText(revokedResults).includes('move-target.txt'),
+    'Revoked session exposed a previously matched filename');
+  const revokedListing = await callFixtureTool('list_searches', {});
+  assert.equal(revokedListing.isError, true, 'Pre-restriction search metadata leaked');
+  assert.match(toolText(revokedListing), /E_POLICY_UNAVAILABLE/);
+  assert.ok(!toolText(revokedListing).includes('move-target.txt'),
+    'Revoked search listing exposed the former pattern');
 
   // T011/#139: A configured root is NOT a native grant. Until the reviewed
   // broker is bound, even in-root legacy reads/writes must fail closed.

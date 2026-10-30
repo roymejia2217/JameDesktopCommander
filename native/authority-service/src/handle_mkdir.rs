@@ -380,15 +380,28 @@ impl RootedDirectory {
                 "E_PATH_DENIED",
             ));
         }
+        #[cfg(target_os = "linux")]
+        let root_mount = mounted_object_id(&self.root)?;
         let mut child: Option<Dir> = None;
         for component in relative.split('/') {
+            // The parent is either the original pinned root or a previously
+            // opened directory whose kernel mount identity matched it.
+            // Never create a descendant through a foreign mounted directory.
             let parent = child.as_ref().unwrap_or(&self.root);
             match parent.create_dir(component) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(err),
             }
-            child = Some(parent.open_dir(component)?);
+            #[cfg(target_os = "linux")]
+            let opened = parent.open_dir_nofollow(component)?;
+            #[cfg(not(target_os = "linux"))]
+            let opened = parent.open_dir(component)?;
+            #[cfg(target_os = "linux")]
+            if mounted_object_id(&opened)? != root_mount {
+                return Err(io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            child = Some(opened);
         }
         Ok(())
     }
@@ -502,6 +515,72 @@ mod tests {
         assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
         assert_eq!(std::fs::read(&victim).unwrap(), secret);
         assert_eq!(std::fs::read(&alias).unwrap(), secret);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires disposable GitHub-hosted writable directory bind mount"]
+    fn descendant_mkdir_refuses_real_same_device_bind_mount() {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::PathBuf;
+        let fixture = PathBuf::from(
+            std::env::var_os("JDC_T011_MKDIR_MOUNT_FIXTURE")
+                .expect("mandatory real bind-mount fixture was not supplied"),
+        );
+        let allowed = fixture.join("allowed");
+        let outside = fixture.join("outside");
+        let inside_alias = allowed.join("alias");
+        assert_eq!(
+            std::fs::metadata(&inside_alias).unwrap().ino(),
+            std::fs::metadata(&outside).unwrap().ino(),
+            "alias and outside must name the identical directory object",
+        );
+        assert_eq!(
+            std::fs::metadata(&allowed).unwrap().dev(),
+            std::fs::metadata(&outside).unwrap().dev(),
+            "same-device writable bind mount is mandatory",
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let imported = root.root.open_dir_nofollow("alias").unwrap();
+        assert_ne!(
+            mounted_object_id(&root.root).unwrap(),
+            mounted_object_id(&imported).unwrap(),
+            "actual mount identity must differ despite equal st_dev",
+        );
+        let target = outside.join("jdc-escaped-directory");
+        assert!(!target.exists());
+        let denied = root
+            .create_descendant("alias/jdc-escaped-directory")
+            .expect_err("native mkdir must never create under the outside bind mount");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert!(!target.exists(), "outside filesystem object was mutated");
+        root.create_descendant("legitimate/nested").unwrap();
+        assert!(allowed.join("legitimate/nested").is_dir());
+        assert!(!outside.join("legitimate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descendant_mkdir_refuses_kernel_submount_before_creation() {
+        use std::os::unix::fs::MetadataExt;
+        // Real procfs mount: both / and /proc are accessible, but mutation
+        // must be rejected specifically as a mount crossing, NOT merely
+        // because procfs happens to refuse this new directory.
+        let root_meta = std::fs::metadata("/").unwrap();
+        let proc_meta = std::fs::metadata("/proc").unwrap();
+        assert_ne!(root_meta.dev(), proc_meta.dev());
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
+        );
+        let forbidden = "/proc/jdc-t011-mount-crossing-must-not-exist";
+        assert!(!std::path::Path::new(forbidden).exists());
+        let denied = cap
+            .create_descendant("proc/jdc-t011-mount-crossing-must-not-exist")
+            .expect_err("nested mkdir must reject a kernel submount before mutation");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert!(!std::path::Path::new(forbidden).exists());
     }
 
     #[cfg(target_os = "linux")]

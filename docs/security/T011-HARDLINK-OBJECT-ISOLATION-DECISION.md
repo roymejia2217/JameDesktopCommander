@@ -88,6 +88,21 @@ The nonshipping native probe uses `cap_std::fs::Dir` and
 has **not** been wired into production MCP handlers. The evidence disproves
 its claimed O property; it does not demonstrate a shipped handler exploit.
 
+### Non-release opened-object post-read guard (#148)
+
+The experimental native bounded read now rechecks the link count on the
+**same opened file object** after consuming a bounded number of bytes and
+before releasing any of them. A deterministic real OS-thread test adds an
+exterior hard link after the initial handle-based preflight, proves identical
+file identity, requires typed denial, and checks that exterior bytes are
+unchanged. A legitimate single-link read succeeds after removing the alias.
+
+This closes that specific interleaving, **not invariant O**. A link created
+after the final snapshot or removed before it can escape detection. Nor does
+this prove principal-isolated storage, policy revocation, or end-to-end MCP
+handler routing; the four original #147 adversarial cases remain required.
+No production capability, native addon, or release eligibility is enabled.
+
 ## 3. Platform constraints and unresolved assumptions
 
 | Dimension | Linux | Windows |

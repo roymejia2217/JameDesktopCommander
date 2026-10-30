@@ -56,10 +56,16 @@ for (const mode of ['restricted', 'unset', 'unavailable']) {
       assert.equal(results.length, 1);
       assert.match(results[0].error, /E_POLICY_UNAVAILABLE/);
       assert.equal(results[0].content, undefined);
-      const response = await handleReadFile({ path: localFile });
-      assert.equal(response.isError, true);
-      assert.match(response.content[0].text, /E_POLICY_UNAVAILABLE/);
-      assert.doesNotMatch(JSON.stringify(response), /INSIDE_SECRET_1403/);
+      // Direct handler calls propagate errors; the MCP dispatcher converts
+      // them to isError tool results. Do not mistake a thrown denial for a leak.
+      await assert.rejects(
+        handleReadFile({ path: localFile }),
+        (error) => {
+          assert.match(error.message, /E_POLICY_UNAVAILABLE/);
+          assert.doesNotMatch(error.message, /INSIDE_SECRET_1403/);
+          return true;
+        },
+      );
       assert.equal(await readFile(localFile, 'utf8'), 'INSIDE_SECRET_1403');
     });
   });

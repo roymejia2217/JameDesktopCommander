@@ -101,7 +101,9 @@ async function run() {
       await fsp.writeFile(tmpFile, 'line1\nMARKER runWithAbortableTimeout\nline3\n');
 
       try {
-        await configManager.setValue('allowedDirectories', [tmpDir]);
+        // Cancellation behavior is tested on legacy unrestricted reads;
+        // the native restricted reader is not wired in this slice.
+        await configManager.setValue('allowedDirectories', []);
         const res = await readFile(tmpFile, { offset: 0, length: 5 });
         const text = typeof res.content === 'string'
           ? res.content

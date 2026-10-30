@@ -46,6 +46,12 @@ jobs:
       - name: Prove OS service identity preflight and fail-closed startup
         run: cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml
 
+      - name: Install official Rustfmt for pinned Rust toolchain
+        run: rustup component add --toolchain 1.91.1 rustfmt
+
+      - name: Verify native authority service Rustfmt (pinned toolchain)
+        run: cargo +1.91.1 fmt --manifest-path native/authority-service/Cargo.toml --all -- --check
+
       - name: Compile isolated deny-only Windows SCM entry point
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml
@@ -59,6 +65,12 @@ jobs:
 
       - name: Prove isolated SQLite epoch transactions and replay limitation
         run: cargo +1.91.1 test --locked --manifest-path native/authority-store/Cargo.toml
+
+      - name: Prove real SQLite rollback journal lifecycle on Windows and Linux
+        run: cargo +1.91.1 test --locked --example custody_fixture --manifest-path native/authority-store/Cargo.toml
+
+      - name: Prove the unprivileged hardlink attack fixture has a working positive control
+        run: cargo +1.91.1 test --locked --example custody_attacker --manifest-path native/authority-store/Cargo.toml
 
       - name: Check SQLite epoch backend without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-store/Cargo.toml -- -D warnings
@@ -97,9 +109,14 @@ jobs:
           systemd-sysusers --dry-run "$sysusers_file"
           test -z "$(getent passwd jdc-authority || :)"
           test -z "$(getent group jdc-authority || :)"
+          test -z "$(getent passwd jdc-mcp-client || :)"
+          test -z "$(getent group jdc-mcp-client || :)"
           sudo systemd-sysusers "$sysusers_file"
           test "$(id -u jdc-authority)" -gt 0
           test "$(id -g jdc-authority)" -gt 0
+          test "$(id -u jdc-mcp-client)" -gt 0
+          test "$(id -u jdc-mcp-client)" != "$(id -u jdc-authority)"
+          test "$(id -gn jdc-mcp-client)" = jdc-mcp-client
           sudo install -D -m 0755 native/authority-service/target/debug/jdc-authority-service /usr/libexec/jdc/jdc-authority-service
           systemd-analyze verify "$unit_file"
 
@@ -107,9 +124,29 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
 
+      - name: Lint official systemd FD3 activation acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-systemd-fd3-acceptance.sh && bash -n test/security/t011-systemd-fd3-acceptance.sh
+
+      - name: Prove official systemd tool passes the exact named FD3 on Linux
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-systemd-fd3-acceptance.sh
+
+      - name: Test IPC example identity rejection on actual Linux kernel
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 test --locked --examples --manifest-path native/authority-service/Cargo.toml
+
       - name: Build test-only transactional store fixture on Linux
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml
+
+      - name: Lint connected Linux IPC peer acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-linux-ipc-peer-acceptance.sh && bash -n test/security/t011-linux-ipc-peer-acceptance.sh
+
+      - name: Prove connected IPC identity across real Linux principals
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-linux-ipc-peer-acceptance.sh
 
       - name: Lint Linux cross-principal acceptance fixture
         if: matrix.target == 'linux-x64'
@@ -119,6 +156,22 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-linux-custody-acceptance.sh
 
+      - name: Lint Linux protected epoch witness acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-linux-epoch-anchor-acceptance.sh && bash -n test/security/t011-linux-epoch-anchor-acceptance.sh
+
+      - name: Prove root-admin epoch witness under actual Linux service credentials
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-linux-epoch-anchor-acceptance.sh
+
+      - name: Lint Linux admin-owned policy-file custody acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-linux-admin-policy-file-acceptance.sh && bash -n test/security/t011-linux-admin-policy-file-acceptance.sh
+
+      - name: Prove admin-owned policy-file inode custody under Linux service identity
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-linux-admin-policy-file-acceptance.sh
+
       - name: Lint systemd real-lifecycle acceptance
         if: matrix.target == 'linux-x64'
         run: shellcheck --severity=warning test/security/t011-systemd-lifecycle-acceptance.sh && bash -n test/security/t011-systemd-lifecycle-acceptance.sh
@@ -126,6 +179,14 @@ jobs:
       - name: Prove Linux systemd service fails closed under its actual OS identity
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-systemd-lifecycle-acceptance.sh
+
+      - name: Lint managed Linux socket custody acceptance
+        if: matrix.target == 'linux-x64'
+        run: shellcheck --severity=warning test/security/t011-systemd-socket-custody-acceptance.sh && bash -n test/security/t011-systemd-socket-custody-acceptance.sh
+
+      - name: Prove root-managed systemd AF_UNIX socket access and removal
+        if: matrix.target == 'linux-x64'
+        run: bash test/security/t011-systemd-socket-custody-acceptance.sh
 
       - name: Parse Windows SCM deny-only acceptance script
         if: matrix.target == 'win32-x64'
@@ -139,6 +200,48 @@ jobs:
       - name: Prove Windows SCM virtual account denies startup under its real token
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
+
+      - name: Verify SCM probe verdict separation under Rust unit tests
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --example windows_state_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Build disposable debug-only SCM policy-state observation probe
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --example windows_state_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Parse disposable Windows SCM policy-state acceptance
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-state-scm-positive.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove true SCM-restricted token admits only protected state DACL
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-state-scm-positive.ps1
+
+      - name: Verify read-only Windows Registry epoch contract under Rust tests
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml windows_epoch_anchor::tests
+
+      - name: Build disposable debug-only SCM Registry epoch probe
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --example windows_epoch_scm_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Parse disposable Windows Registry epoch acceptance
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-registry-epoch-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Prove actual SCM read-only Registry watermark and snapshot rejection
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-registry-epoch-acceptance.ps1
 
       - name: Build test-only Windows custody fixtures
         if: matrix.target == 'win32-x64'
@@ -165,6 +268,21 @@ jobs:
         with:
           node-version: 22.19.0
 
+      - name: Enforce experimental systemd socket declaration on Node 22
+        run: node --test test/security/t011-systemd-socket-contract.test.mjs
+
+      - name: Build test-only native C4d parity probe
+        run: cargo +1.91.1 build --locked --example c4d_probe --manifest-path native/authority-service/Cargo.toml
+
+      - name: Install locked Node dependencies for C4d parity
+        run: npm ci --fund=false
+
+      - name: Compile the original TypeScript C4d validator
+        run: npm run build
+
+      - name: Compare exact C4d request admission between Node 22 and native Rust
+        run: node --test test/security/c4d-native-parity.test.mjs
+
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 22
         run: node --test test/security/capability-lock-consistency.test.cjs
 
@@ -175,6 +293,9 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
+
+      - name: Compare exact C4d request admission between Node 24 and native Rust
+        run: node --test test/security/c4d-native-parity.test.mjs
 
       - name: Assert byte-for-byte reproducible Cargo.lock on Node 24
         run: node --test test/security/capability-lock-consistency.test.cjs

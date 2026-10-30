@@ -5,7 +5,7 @@ import { validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
-import PizZip from 'pizzip';
+import { openValidatedDocxSearchArchive } from './utils/files/docx.js';
 
 export interface SearchResult {
   file: string;
@@ -556,8 +556,7 @@ export interface SearchSessionOptions {
       if (maxResults && results.length >= maxResults) break;
 
       try {
-        const buf = await fs.readFile(filePath);
-        const zip = new PizZip(buf);
+        const zip = await openValidatedDocxSearchArchive(filePath);
 
         // Search all XML parts that can contain text
         const xmlParts = ['word/document.xml', 'word/header1.xml', 'word/header2.xml',

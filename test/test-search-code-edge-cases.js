@@ -85,7 +85,8 @@ async function setupEdgeCases() {
   console.log(`${colors.blue}Setting up edge case tests...${colors.reset}`);
   
   const originalConfig = await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
+  // Edge-case search behavior is tested in explicit unrestricted legacy mode.
+  await configManager.setValue('allowedDirectories', []);
   
   await fs.mkdir(EDGE_CASE_TEST_DIR, { recursive: true });
   

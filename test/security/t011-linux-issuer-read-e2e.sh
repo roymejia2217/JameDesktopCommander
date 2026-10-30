@@ -278,9 +278,11 @@ assert.deepEqual(unknownRootReply, { version: 1, status: 'denied' });
 console.log('T011_ISSUER_READ_E2E_UNAPPROVED_ROOT_REF_DENIED');
 NODE
 
-# A new one-shot systemd service invocation must also reject replay of an
-# already committed requestId. The original files and SQLite ledger survive.
-sudo -n systemctl stop jdc-authority.service
+# This is already the *new* systemd service activated after the two
+# positive reads. A foreign rootRef denial does not revoke the valid grant,
+# so test a committed request ID within this same new service. This preserves
+# the restart/replay proof without gratuitous extra activations that would
+# trigger systemd's normal StartLimitBurst. Replay failure itself revokes.
 [[ "$(sudo -n systemctl show -P ActiveState jdc-authority.socket)" == 'active' &&
    -S "$socket_path" ]] || exit 1
 sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'

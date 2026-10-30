@@ -175,6 +175,16 @@ impl RootedDirectory {
     /// Observed multi-link objects DENY; concurrent new links remain a P0 gap.
     /// The byte budget is enforced before allocation and during the read.
     pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
+        self.read_bounded_file_with_mid_read_hook(relative, || {})
+    }
+
+    // Internal deterministic hook for the real concurrent hard-link test.
+    // Never exposed to the issuer, broker or MCP interface.
+    fn read_bounded_file_with_mid_read_hook(
+        &self,
+        relative: &str,
+        after_preflight: impl FnOnce(),
+    ) -> io::Result<Vec<u8>> {
         const MAX_READ_BYTES: u64 = 1024 * 1024;
         if !safe_relative_path(relative) {
             return Err(io::Error::new(
@@ -242,6 +252,7 @@ impl RootedDirectory {
                 "E_READ_SIZE_DENIED",
             ));
         }
+        after_preflight();
         let mut bounded = file.take(MAX_READ_BYTES + 1);
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         bounded.read_to_end(&mut bytes)?;
@@ -249,6 +260,15 @@ impl RootedDirectory {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "E_READ_SIZE_DENIED",
+            ));
+        }
+        // Recheck the same opened object after reading, before releasing data.
+        // Defense-in-depth only: aliases added after this snapshot remain P0.
+        let after_read = bounded.get_ref().metadata()?;
+        if !after_read.is_file() || cap_fs_ext::MetadataExt::nlink(&after_read) != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SHARED_OBJECT",
             ));
         }
         Ok(bytes)
@@ -515,6 +535,42 @@ mod tests {
         assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
         assert_eq!(std::fs::read(&victim).unwrap(), secret);
         assert_eq!(std::fs::read(&alias).unwrap(), secret);
+    }
+
+    #[test]
+    fn concurrent_hardlink_after_read_preflight_denies_all_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let internal = allowed.join("private.bin");
+        let outside_alias = outside.join("new-alias.bin");
+        let expected = b"NO_BYTES_AFTER_CROSS_ROOT_ALIAS";
+        std::fs::write(&internal, expected).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let denial = rooted
+            .read_bounded_file_with_mid_read_hook("private.bin", || {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            std::fs::hard_link(&internal, &outside_alias)
+                                .expect("actual concurrent hard-link creation must succeed");
+                        })
+                        .join()
+                        .expect("attacker thread must finish");
+                });
+                assert!(same_file::is_same_file(&internal, &outside_alias).unwrap());
+            })
+            .expect_err("new outside hardlink must prevent returning bytes");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
+        assert_eq!(std::fs::read(&outside_alias).unwrap(), expected);
+        assert_eq!(std::fs::read(&internal).unwrap(), expected);
+        std::fs::remove_file(&outside_alias).unwrap();
+        assert_eq!(rooted.read_bounded_file("private.bin").unwrap(), expected);
     }
 
     #[cfg(target_os = "linux")]

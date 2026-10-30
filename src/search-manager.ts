@@ -310,6 +310,23 @@ export interface SearchSessionOptions {
   }
 
   /**
+   * Retire all legacy searches after observing that ambient filesystem
+   * authority is no longer available. A stopped child is not sufficient:
+   * the buffered results and search patterns must also become unreachable.
+   *
+   * This is request-time fail-closed containment, NOT an atomic policy-epoch
+   * revocation guarantee for in-flight OS reads.
+   */
+  revokeLegacySearchSessions(): void {
+    for (const session of this.sessions.values()) {
+      if (!session.process.killed) session.process.kill('SIGTERM');
+      session.results.length = 0;
+      session.buffer = '';
+    }
+    this.sessions.clear();
+  }
+
+  /**
    * Get list of active search sessions (like list_sessions)
    */
   listSearchSessions(): Array<{

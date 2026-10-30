@@ -120,6 +120,70 @@ test('real intermediate directory swap after pathname checkpoint cannot escape c
   });
 });
 
+// Unlike a symlink, a hard link points to the same file object. Path-relative
+// resolution alone cannot tell whether another name exists outside the root.
+// These adversarial tests are intentionally strict: restricted-mode reads and
+// modifications must deny aliases instead of leaking/changing outside bytes.
+function installCrossRootHardLink(allowed, sentinel, original) {
+  const relative = 'linked-outside-sentinel.bin';
+  const alias = path.join(allowed, relative);
+  fs.linkSync(sentinel, alias);
+  const sourceInfo = fs.statSync(sentinel);
+  const aliasInfo = fs.statSync(alias);
+  // A runner unable to install and verify the attack must fail this test.
+  assert.ok(sourceInfo.nlink >= 2, 'Hard-link alias setup did not increase link count');
+  assert.equal(sourceInfo.dev, aliasInfo.dev, 'Hard-link alias must share a device');
+  assert.equal(sourceInfo.ino, aliasInfo.ino, 'Hard-link alias must share file identity');
+  assert.deepEqual(fs.readFileSync(alias), original, 'Hard-link alias was not installed');
+  return relative;
+}
+
+test('native restricted read must reject a cross-root hard-link alias', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    assert.throws(() => cap.readBytes(relative),
+      'A root-relative hard-link alias must not reveal outside file bytes');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native restricted rewrite must not change outside bytes via a hard-link alias', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    assert.throws(() => cap.writeBytes(relative, Buffer.from([0x1a, 0x2b]), 'rewrite'),
+      'A root-relative hard-link alias must not rewrite an outside file');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('native restricted append must not change outside bytes via a hard-link alias', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const relative = installCrossRootHardLink(allowed, sentinel, original);
+    assert.throws(() => cap.writeBytes(relative, Buffer.from([0x3c, 0x4d]), 'append'),
+      'A root-relative hard-link alias must not append to an outside file');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
+test('final-component replacement with a hard link after an in-root checkpoint is denied', () => {
+  withIsolatedRoot(({ cap, allowed, sentinel, original }) => {
+    const name = 'linked-outside-sentinel.bin';
+    const legitimate = path.join(allowed, name);
+    const benign = Buffer.from([0x21, 0x22]);
+    fs.writeFileSync(legitimate, benign);
+    // Confirm legitimate in-root access before the attacker-controlled change.
+    assert.deepEqual(cap.readBytes(name), benign);
+
+    // Deterministic sequential interleaving: replace the final filename
+    // after the checkpoint, before a native destructive write.
+    fs.unlinkSync(legitimate);
+    assert.equal(installCrossRootHardLink(allowed, sentinel, original), name);
+    assert.throws(() => cap.writeBytes(name, Buffer.from([0xa0, 0xb1]), 'rewrite'),
+      'Replacing an authorized final name with a hard link must not affect outside bytes');
+    assert.deepEqual(fs.readFileSync(sentinel), original);
+  });
+});
+
 test('closed handle fails for all added directory operations', () => {
   withIsolatedRoot(({ cap }) => {
     cap.close();

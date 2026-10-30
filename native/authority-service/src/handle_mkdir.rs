@@ -1,6 +1,8 @@
 //! Internal C4d handle-only directory creation slice, **not a broker**.
 //! There is no pathname bootstrap, IPC exposure or authorization in this module.
 //! The caller must supply an OS-attested, already-open directory capability.
+#[cfg(target_os = "linux")]
+use cap_fs_ext::DirExt;
 use cap_std::fs::{Dir, OpenOptions};
 use std::io::{self, Read, Write};
 
@@ -106,6 +108,23 @@ fn validate_single_child(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Linux kernel mount identity from the already-open file descriptor.
+/// An unsupported statx/mount-id capability DENIES rather than guessing based
+/// on st_dev (bind mounts can share a device), pathnames or /proc parsing.
+#[cfg(target_os = "linux")]
+fn mounted_object_id<F: std::os::fd::AsFd>(opened: &F) -> io::Result<u64> {
+    use rustix::fs::{statx, AtFlags, StatxFlags};
+    let observed =
+        statx(opened, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).map_err(io::Error::from)?;
+    if (observed.stx_mask & StatxFlags::MNT_ID.bits()) == 0 || observed.stx_mnt_id == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_READ_MOUNT_ID_UNAVAILABLE",
+        ));
+    }
+    Ok(observed.stx_mnt_id)
+}
+
 impl RootedDirectory {
     /// Only a trusted bootstrap may supply the already-open and policy-pinned
     /// directory. This constructor does no filesystem name lookup.
@@ -148,9 +167,13 @@ impl RootedDirectory {
 
     /// Bounded, handle-relative byte read for an already preopened native root.
     /// This method does not authenticate policy, a peer, or storage provenance.
+    /// On Linux, parent and final handles are opened without following
+    /// symlinks. The kernel's statx mount identity is checked on EVERY opened
+    /// component against the root handle before any bytes are read. Unlike
+    /// dev/ino, mount IDs also distinguish same-device bind mounts.
+    /// Unsupported mount ID reporting DENIES; no ambient pathname fallback.
     /// Observed multi-link objects DENY; concurrent new links remain a P0 gap.
-    /// No ambient pathname is ever reopened, and the byte budget is enforced
-    /// both before allocation and during reads if the file grows concurrently.
+    /// The byte budget is enforced before allocation and during the read.
     pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
         const MAX_READ_BYTES: u64 = 1024 * 1024;
         if !safe_relative_path(relative) {
@@ -159,12 +182,23 @@ impl RootedDirectory {
                 "E_READ_PATH_DENIED",
             ));
         }
+        #[cfg(target_os = "linux")]
+        let root_mount = mounted_object_id(&self.root)?;
         let mut components = relative.split('/').peekable();
         let mut opened: Option<Dir> = None;
+        let mut final_file = None;
         while let Some(component) = components.next() {
             let parent = opened.as_ref().unwrap_or(&self.root);
             if components.peek().is_some() {
-                opened = Some(parent.open_dir(component)?);
+                #[cfg(target_os = "linux")]
+                let child = parent.open_dir_nofollow(component)?;
+                #[cfg(not(target_os = "linux"))]
+                let child = parent.open_dir(component)?;
+                #[cfg(target_os = "linux")]
+                if mounted_object_id(&child)? != root_mount {
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
+                }
+                opened = Some(child);
             } else {
                 if !parent.symlink_metadata(component)?.is_file() {
                     return Err(io::Error::new(
@@ -172,36 +206,52 @@ impl RootedDirectory {
                         "E_READ_NONREGULAR",
                     ));
                 }
+                #[cfg(target_os = "linux")]
+                let file = {
+                    use rustix::fs::{openat, Mode, OFlags};
+                    let fd = openat(
+                        parent,
+                        component,
+                        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                        Mode::empty(),
+                    )
+                    .map_err(io::Error::from)?;
+                    cap_std::fs::File::from_std(std::fs::File::from(fd))
+                };
+                #[cfg(not(target_os = "linux"))]
                 let file = parent.open(component)?;
-                let metadata = file.metadata()?;
-                if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SHARED_OBJECT",
-                    ));
+                #[cfg(target_os = "linux")]
+                if mounted_object_id(&file)? != root_mount {
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
                 }
-                if metadata.len() > MAX_READ_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SIZE_DENIED",
-                    ));
-                }
-                let mut bounded = file.take(MAX_READ_BYTES + 1);
-                let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                bounded.read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_READ_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SIZE_DENIED",
-                    ));
-                }
-                return Ok(bytes);
+                final_file = Some(file);
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "E_READ_PATH_DENIED",
-        ))
+        let file = final_file
+            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "E_READ_PATH_DENIED"))?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SHARED_OBJECT",
+            ));
+        }
+        if metadata.len() > MAX_READ_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SIZE_DENIED",
+            ));
+        }
+        let mut bounded = file.take(MAX_READ_BYTES + 1);
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        bounded.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_READ_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SIZE_DENIED",
+            ));
+        }
+        Ok(bytes)
     }
 
     /// Strict create-only, bounded data write under an already-open root.
@@ -452,6 +502,35 @@ mod tests {
         assert_eq!(denial.to_string(), "E_READ_SHARED_OBJECT");
         assert_eq!(std::fs::read(&victim).unwrap(), secret);
         assert_eq!(std::fs::read(&alias).unwrap(), secret);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn handle_bounded_read_refuses_kernel_mount_crossing_with_exdev() {
+        use std::os::unix::fs::MetadataExt;
+
+        // A real mounted /proc is available on the GitHub-hosted Linux runner.
+        // The regular-file positive control rules out mere path/permission
+        // rejection, and nlink=1 rules out a hardlink-only explanation.
+        let original = std::fs::read("/proc/version").expect("kernel proc fixture");
+        assert!(!original.is_empty());
+        let metadata = std::fs::metadata("/proc/version").unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.nlink(), 1);
+        assert_ne!(
+            std::fs::metadata("/").unwrap().dev(),
+            metadata.dev(),
+            "the fixture must cross a real mounted filesystem"
+        );
+
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
+        );
+        let denied = root
+            .read_bounded_file("proc/version")
+            .expect_err("read must not cross a mount even if the target has one link");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert_eq!(std::fs::read("/proc/version").unwrap(), original);
     }
 
     #[test]

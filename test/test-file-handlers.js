@@ -58,7 +58,9 @@ async function setup() {
   console.log(`✓ Setup: created test directory: ${TEST_DIR}`);
 
   const originalConfig = await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [TEST_DIR]);
+  // Legacy file-format handlers require explicit unrestricted test policy.
+  // Restricted path access has separate T011 denial acceptance tests.
+  await configManager.setValue('allowedDirectories', []);
 
   return originalConfig;
 }

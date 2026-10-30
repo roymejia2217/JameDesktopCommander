@@ -319,7 +319,24 @@ try {
   assert.ok(toolText(finalRead).includes(rewritten.trim()), 'Rewritten content missing from read result');
   assert.ok(toolText(finalRead).includes(appended.trim()), 'Appended content missing from read result');
 
-  // T009: allowedDirectories is an application-level authorization policy.
+  // Explicit unrestricted-mode MCP positives for metadata, list and move.
+  // Use disposable files only; no native confinement claim is made.
+  const positiveSource = join(working, 'positive-move-source.txt');
+  const positiveTarget = join(working, 'positive-move-target.txt');
+  await writeFile(positiveSource, 'POSITIVE_MOVE_BYTES');
+  const positiveInfo = await callFixtureTool('get_file_info', { path: positiveSource });
+  assert.notEqual(positiveInfo.isError, true, 'Legacy unrestricted metadata must work');
+  const positiveList = await callFixtureTool('list_directory', { path: working, depth: 1 });
+  assert.notEqual(positiveList.isError, true, 'Legacy unrestricted directory list must work');
+  assert.ok(toolText(positiveList).includes('positive-move-source.txt'));
+  const positiveMove = await callFixtureTool('move_file', {
+    source: positiveSource, destination: positiveTarget,
+  });
+  assert.notEqual(positiveMove.isError, true, 'Legacy unrestricted move must work');
+  await assert.rejects(lstat(positiveSource), { code: 'ENOENT' });
+  assert.equal(await readFile(positiveTarget, 'utf8'), 'POSITIVE_MOVE_BYTES');
+
+  // T011: a configured root is NOT a native file-object grant.
   // All writes are restricted to disposable fixture paths, never host files.
   const allowedRoot = join(working, 'allowed');
   const deniedRoot = join(working, 'allowed-sibling');
@@ -349,6 +366,24 @@ try {
   assert.match(toolText(allowedWrite), /E_POLICY_UNAVAILABLE/);
   assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
     'Denied in-root write modified bytes');
+
+  // The same authority gate must cover indirect metadata, enumeration and
+  // namespace mutation. Exercise the PACKAGED MCP handlers on both OSs.
+  const forbiddenMoveTarget = join(allowedRoot, 'unexpected-move.txt');
+  for (const [name, args] of [
+    ['get_file_info', { path: allowedFile }],
+    ['list_directory', { path: allowedRoot, depth: 1 }],
+    ['render_workspace', { path: allowedRoot }],
+    ['move_file', { source: allowedFile, destination: forbiddenMoveTarget }],
+  ]) {
+    const denied = await callFixtureTool(name, args);
+    assert.equal(denied.isError, true, 'Restricted MCP tool admitted: ' + name);
+    assert.match(toolText(denied), /E_POLICY_UNAVAILABLE/);
+    assert.ok(!toolText(denied).includes('INSIDE_PRIVATE_148_139'));
+  }
+  await assert.rejects(lstat(forbiddenMoveTarget), { code: 'ENOENT' });
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
+    'Denied restricted move modified source bytes');
 
   // A configured directory may itself be a symlink/junction alias.
   // The legacy handler must still deny because alias custody is unproven.
@@ -428,7 +463,7 @@ try {
     freshMcpChallengeCalls: 2,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
     modeOmissionRejected: true,
-    legacyUnrestrictedPositiveChecks: 3,
+    legacyUnrestrictedPositiveChecks: 6,
     restrictedAdmissionDenials: 3,
     accessPositiveChecks: 0,
     unresolvedAllowlistDenied: true,

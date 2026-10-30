@@ -106,6 +106,23 @@ fn validate_single_child(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Linux kernel mount identity from the already-open file descriptor.
+/// An unsupported statx/mount-id capability DENIES rather than guessing based
+/// on st_dev (bind mounts can share a device), pathnames or /proc parsing.
+#[cfg(target_os = "linux")]
+fn mounted_object_id<F: std::os::fd::AsFd>(opened: &F) -> io::Result<u64> {
+    use rustix::fs::{statx, AtFlags, StatxFlags};
+    let observed =
+        statx(opened, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).map_err(io::Error::from)?;
+    if (observed.stx_mask & StatxFlags::MNT_ID.bits()) == 0 || observed.stx_mnt_id == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_READ_MOUNT_ID_UNAVAILABLE",
+        ));
+    }
+    Ok(observed.stx_mnt_id)
+}
+
 impl RootedDirectory {
     /// Only a trusted bootstrap may supply the already-open and policy-pinned
     /// directory. This constructor does no filesystem name lookup.
@@ -148,9 +165,11 @@ impl RootedDirectory {
 
     /// Bounded, handle-relative byte read for an already preopened native root.
     /// This method does not authenticate policy, a peer, or storage provenance.
-    /// On Linux, the kernel atomically refuses ANY mount or symlink crossing
-    /// during this single root-FD-relative open. No fallback to path-based
-    /// traversal if openat2 is unavailable or returns a denial.
+    /// On Linux, parent and final handles are opened without following
+    /// symlinks. The kernel's statx mount identity is checked on EVERY opened
+    /// component against the root handle before any bytes are read. Unlike
+    /// dev/ino, mount IDs also distinguish same-device bind mounts.
+    /// Unsupported mount ID reporting DENIES; no ambient pathname fallback.
     /// Observed multi-link objects DENY; concurrent new links remain a P0 gap.
     /// The byte budget is enforced before allocation and during the read.
     pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
@@ -162,44 +181,52 @@ impl RootedDirectory {
             ));
         }
         #[cfg(target_os = "linux")]
-        let file = {
-            use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
-            let fd = openat2(
-                &self.root,
-                relative,
-                OFlags::RDONLY | OFlags::CLOEXEC,
-                Mode::empty(),
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-            )
-            .map_err(io::Error::from)?;
-            cap_std::fs::File::from_std(std::fs::File::from(fd))
-        };
-
-        // Windows retains the existing handle-relative traversal until a
-        // separately reviewed OS reparse/mount-boundary policy is available.
-        #[cfg(not(target_os = "linux"))]
-        let file = {
-            let mut components = relative.split('/').peekable();
-            let mut opened: Option<Dir> = None;
-            let mut final_file = None;
-            while let Some(component) = components.next() {
-                let parent = opened.as_ref().unwrap_or(&self.root);
-                if components.peek().is_some() {
-                    opened = Some(parent.open_dir(component)?);
-                } else {
-                    if !parent.symlink_metadata(component)?.is_file() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "E_READ_NONREGULAR",
-                        ));
-                    }
-                    final_file = Some(parent.open(component)?);
+        let root_mount = mounted_object_id(&self.root)?;
+        let mut components = relative.split('/').peekable();
+        let mut opened: Option<Dir> = None;
+        let mut final_file = None;
+        while let Some(component) = components.next() {
+            let parent = opened.as_ref().unwrap_or(&self.root);
+            if components.peek().is_some() {
+                #[cfg(target_os = "linux")]
+                let child = parent.open_dir_nofollow(component)?;
+                #[cfg(not(target_os = "linux"))]
+                let child = parent.open_dir(component)?;
+                #[cfg(target_os = "linux")]
+                if mounted_object_id(&child)? != root_mount {
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
                 }
+                opened = Some(child);
+            } else {
+                if !parent.symlink_metadata(component)?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_READ_NONREGULAR",
+                    ));
+                }
+                #[cfg(target_os = "linux")]
+                let file = {
+                    use rustix::fs::{openat, Mode, OFlags};
+                    let fd = openat(
+                        parent,
+                        component,
+                        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                        Mode::empty(),
+                    )
+                    .map_err(io::Error::from)?;
+                    cap_std::fs::File::from_std(std::fs::File::from(fd))
+                };
+                #[cfg(not(target_os = "linux"))]
+                let file = parent.open(component)?;
+                #[cfg(target_os = "linux")]
+                if mounted_object_id(&file)? != root_mount {
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
+                }
+                final_file = Some(file);
             }
-            final_file.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::PermissionDenied, "E_READ_PATH_DENIED")
-            })?
-        };
+        }
+        let file = final_file
+            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "E_READ_PATH_DENIED"))?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
             return Err(io::Error::new(

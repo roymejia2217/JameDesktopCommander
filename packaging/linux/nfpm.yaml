@@ -21,6 +21,7 @@ contents:
   - src: ${JDC_INSTALLER_SOURCE}/
     dst: /opt/jame-desktop-commander
     type: tree
+    expand: true
   - src: ./packaging/linux/jdc
     dst: /usr/bin/jdc
     file_info:

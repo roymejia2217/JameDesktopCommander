@@ -52,7 +52,8 @@ test('Debian package uses declarative nFPM, not custom dpkg assembly', async () 
   const launch = await readFile(resolve(root,'packaging/linux/jdc'),'utf8');
   assert.match(config, /name: jame-desktop-commander/);
   assert.match(config, /version: \$\{JDC_INSTALLER_VERSION\}/);
-  assert.match(config, /type: tree/);
+  assert.match(config, /type: tree\s+expand: true/,
+    'nFPM requires explicit environment expansion for candidate source paths');
   assert.match(config, /dst: \/opt\/jame-desktop-commander/);
   assert.match(config, /dst: \/usr\/bin\/jdc/);
   assert.doesNotMatch(config, /scripts:|postinstall:|systemctl|curl .*\| *sh/);

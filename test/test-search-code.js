@@ -92,7 +92,9 @@ async function setup() {
   const originalConfig = await configManager.getConfig();
   
   // Set allowed directories to include test directory
-  await configManager.setValue('allowedDirectories', [TEST_DIR]);
+  // This suite validates search semantics in explicitly unrestricted legacy mode.
+  // Restricted ripgrep authorization is covered by T011-specific negative tests.
+  await configManager.setValue('allowedDirectories', []);
   
   // Create test directory structure
   await fs.mkdir(TEST_DIR, { recursive: true });

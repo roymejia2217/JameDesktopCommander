@@ -368,13 +368,60 @@ import sqlite3
 import sys
 with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as db:
     count = db.execute("SELECT count(*) FROM replay_claims").fetchone()[0]
-if count != 2:
-    raise SystemExit(f"E_ISSUER_READ_E2E_DENIED_ALIAS_CONSUMED_REPLAY:{count}")
-print("T011_SAME_DEVICE_BIND_ALIAS_REPLAY_UNCHANGED")
+if count != 3:
+    raise SystemExit(f"E_ISSUER_READ_E2E_DENIED_ALIAS_CLAIM_NOT_DURABLE:{count}")
+print("T011_SAME_DEVICE_BIND_ALIAS_DENIED_CLAIM_DURABLE")
 PY
 sudo -n systemctl stop jdc-authority.service
 sudo -n umount -- "$inside_bind_alias"
 ! findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null
+
+# Once the mount is removed, the exact same relative pathname refers to the
+# legitimate in-root placeholder. The spent request ID must NEVER become
+# valid after this namespace change, even with a new systemd service process.
+# A new authenticated ID must be able to read the legitimate bytes normally.
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const [clientPath, framePath, operationPath] = process.argv.slice(2);
+const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
+const frames = await import(pathToFileURL(framePath).href);
+const operations = await import(pathToFileURL(operationPath).href);
+const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
+const attempted = {
+  version: 1, kind: 'read-file',
+  requestId: '44444444-4444-4444-8444-444444444444',
+  expectedEpoch: '1', rootRef: '0123456789abcdef0123456789abcdef',
+  relativePath: 'mounted-alias.bin',
+};
+const replay = await requestIssuerOwnedRead(attempted);
+assert.deepEqual(replay, { version: 1, status: 'denied' });
+console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_DENIED_AFTER_UNMOUNT');
+const recovery = await requestIssuerOwnedRead({
+  ...attempted,
+  requestId: '55555555-5555-4555-8555-555555555555',
+});
+assert.equal(recovery.status, 'ok', 'legitimate post-unmount read failed');
+if (recovery.status !== 'ok') throw new Error('recovery read unavailable');
+assert.deepEqual(recovery.bytes,
+  Buffer.from([2, 0, 0x43, 0x2a, 83, 69, 67, 79, 78, 68, 10]));
+console.log('T011_SAME_DEVICE_BIND_ALIAS_FRESH_READ_RECOVERS');
+NODE
+sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as db:
+    rows = db.execute("SELECT hex(request) FROM replay_claims ORDER BY request").fetchall()
+expected = [
+    ("11111111111141118111111111111111",),
+    ("22222222222242228222222222222222",),
+    ("44444444444444448444444444444444",),
+    ("55555555555545558555555555555555",),
+]
+if rows != expected:
+    raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_CLAIM_DRIFT:{rows!r}")
+print("T011_SAME_DEVICE_BIND_ALIAS_REPLAY_RESTART_COHERENCE_PASS")
+PY
 sudo -n cmp -s -- "$payload_source" "$read_root/inside.bin"
 sudo -n cmp -s -- "$second_payload_source" "$read_root_two/inside2.bin"
 printf '%s\n' 'T011_REAL_NODE_TO_ISSUER_READ_E2E_PASS_NONRELEASE'

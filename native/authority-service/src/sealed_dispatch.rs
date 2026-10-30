@@ -347,7 +347,14 @@ impl SealedDirectoryGrant {
         // proof against concurrent link creation; #148 remains P0.
         self.rooted
             .read_bounded_file(relative_path)
-            .map_err(|_| DispatchDenied)
+            .map_err(|error| {
+                // Temporary CI diagnostic: errno only, never requested paths or
+                // file contents. The security result remains a strict denial.
+                #[cfg(all(target_os = "linux", debug_assertions))]
+                eprintln!("T011_ISSUER_READ_IO_ERRNO={:?}", error.raw_os_error());
+                let _ = error;
+                DispatchDenied
+            })
     }
     pub fn revoke(&mut self) {
         self.active = false;

@@ -179,7 +179,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $version = (node -p "require('./package.json').version").Trim()
-          $setup = Join-Path $env:RUNNER_TEMP "jdc-installer-output/UNPUBLISHED-JDC-$version-win32-x64-Setup.exe"
+          $setup = Join-Path $env:RUNNER_TEMP "jdc-installer-output/UNPUBLISHED-jdc-installer-win32-x64.exe"
           if (!(Test-Path -LiteralPath $setup)) { throw 'Windows installer missing' }
           $target = Join-Path $env:RUNNER_TEMP 'isolated-installer-acceptance'
           $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
@@ -212,7 +212,7 @@ jobs:
           tar -xzf "$package" -C "$RUNNER_TEMP/nfpm-2.48.0"
           "$RUNNER_TEMP/nfpm-2.48.0/nfpm" package --config packaging/linux/nfpm.yaml \
             --packager deb \
-            --target "$JDC_INSTALLER_OUTPUT/UNPUBLISHED-jame-desktop-commander_${JDC_INSTALLER_VERSION}_amd64.deb"
+            --target "$JDC_INSTALLER_OUTPUT/UNPUBLISHED-jdc-installer-linux-x64.deb"
 
       - name: Verify Debian install and remove
         if: matrix.target == 'linux-x64'
@@ -220,7 +220,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          deb="$RUNNER_TEMP/jdc-installer-output/UNPUBLISHED-jame-desktop-commander_${version}_amd64.deb"
+          deb="$RUNNER_TEMP/jdc-installer-output/UNPUBLISHED-jdc-installer-linux-x64.deb"
           test "$(dpkg-deb --field "$deb" Architecture)" = 'amd64'
           test "$(dpkg-deb --field "$deb" Version)" = "${version}-1"
           dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/runtime/node' >/dev/null
@@ -236,7 +236,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: UNPUBLISHED-jdc-installer-${{ matrix.target }}
-          path: ${{ runner.temp }}/jdc-installer-output/*
+          path: ${{ runner.temp }}/jdc-installer-output/UNPUBLISHED-jdc-installer-${{ matrix.target }}.${{ matrix.target == 'win32-x64' && 'exe' || 'deb' }}
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

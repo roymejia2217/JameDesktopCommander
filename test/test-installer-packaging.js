@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, join } from 'node:path';
 import { validateInstallerInput } from '../scripts/validate-installer-input.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -77,4 +79,24 @@ test('Release Please retains exclusive gated release versioning', async () => {
   assert.match(workflow, /googleapis\/release-please-action@/);
   for (const issue of [124,139,148]) assert.match(workflow, new RegExp('\\b'+issue+'\\b'));
   assert.match(workflow, /JDC_PRODUCTION_RELEASE_APPROVED/);
+});
+test('Windows CLI accepts equivalent absolute source paths with forward slashes', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jdc-installer-cli-'));
+  try {
+    const values = valid();
+    await writeFile(join(dir, 'package.json'), JSON.stringify(values.pkg));
+    await writeFile(join(dir, 'candidate-manifest.json'), JSON.stringify(values.manifest));
+    const command = spawnSync(process.execPath, [
+      resolve(root, 'scripts/validate-installer-input.mjs'),
+      dir.replaceAll('\\', '/'),
+      'win32-x64',
+      values.expectedCommit,
+    ], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(command.status, 0, command.stderr);
+    assert.match(command.stdout, /"result":"PASS"/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

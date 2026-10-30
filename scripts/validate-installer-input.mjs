@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { resolve, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const VALID_TARGETS = new Set(['win32-x64','linux-x64']);
@@ -41,10 +41,12 @@ export function validateInstallerInput({ pkg, manifest, target, expectedCommit }
 
 async function main() {
   const [source, target, sourceCommit] = process.argv.slice(2);
-  assert.ok(source && resolve(source) === source, 'Use absolute candidate directory');
+  assert.ok(source && isAbsolute(source), 'Use absolute candidate directory');
+  assert.ok(!source.split(/[\\/]/).includes('..'), 'Parent traversal denied');
+  const normalizedSource = resolve(source);
   const [pkg, manifest] = await Promise.all([
-    readFile(join(source,'package.json'),'utf8').then(JSON.parse),
-    readFile(join(source,'candidate-manifest.json'),'utf8').then(JSON.parse),
+    readFile(join(normalizedSource,'package.json'),'utf8').then(JSON.parse),
+    readFile(join(normalizedSource,'candidate-manifest.json'),'utf8').then(JSON.parse),
   ]);
   const result = validateInstallerInput({
     pkg, manifest, target, expectedCommit: sourceCommit,

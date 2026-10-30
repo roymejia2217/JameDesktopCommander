@@ -19,6 +19,7 @@ attacker_uid="$(id -u nobody)"
 base="$(mktemp -d /tmp/jdc-t011-storage.XXXXXXXX)"
 isolated="$base/service-volume"
 attacker="$base/attacker-owned"
+bind_alias=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
 sudo -n chown nobody:"$(id -gn nobody)" "$attacker"
@@ -26,8 +27,17 @@ sudo -n chmod 0700 "$attacker"
 cleanup() {
   local code=$?
   trap - EXIT
+  if [[ -n "$bind_alias" ]] && mountpoint -q "$bind_alias"; then
+    sudo -n umount -- "$bind_alias" || code=1
+  fi
   if mountpoint -q "$isolated"; then
     sudo -n umount -- "$isolated" || code=1
+  fi
+  if [[ -n "$bind_alias" ]] && mountpoint -q "$bind_alias"; then
+    echo 'E_STORAGE_CLEANUP_BIND_MOUNT_ACTIVE' >&2; exit 1
+  fi
+  if mountpoint -q "$isolated"; then
+    echo 'E_STORAGE_CLEANUP_VOLUME_ACTIVE' >&2; exit 1
   fi
   [[ "$base" == /tmp/jdc-t011-storage.* ]] || exit 1
   sudo -n rm -rf -- "$base" || code=1
@@ -70,6 +80,30 @@ fi
 [[ ! -e "$isolated/attacker.bin" && ! -e "$isolated/admin-attempt.bin" &&
    ! -e "$attacker/reverse.bin" ]] || exit 1
 echo 'T011_STORAGE_CROSS_VOLUME_HARDLINK_DENIED'
+# Separate filesystems do not prove object provenance when an administrator
+# can import a foreign inode through a bind mount. This is a privileged
+# counterexample, NOT an unprivileged attacker bypass or product acceptance.
+sudo -n -u nobody -- chmod 0644 "$outside_file"
+if sudo -n -u jdc-authority -- cat "$outside_file" >/dev/null 2>&1; then
+  echo 'E_STORAGE_SERVICE_CAN_READ_PRIVATE_OUTSIDE_PATH' >&2; exit 1
+fi
+bind_alias="$isolated/admin-import.bin"
+sudo -n -u jdc-authority -- sh -c ': > "$1"' sh "$bind_alias"
+sudo -n mount --bind "$outside_file" "$bind_alias"
+mountpoint -q "$bind_alias" || {
+  echo 'E_STORAGE_BIND_MOUNT_NOT_ESTABLISHED' >&2; exit 1;
+}
+[[ "$(sudo -n stat -c %d:%i "$outside_file")" == "$(sudo -n stat -c %d:%i "$bind_alias")" ]] || {
+  echo 'E_STORAGE_BIND_ALIAS_OBJECT_IDENTITY_MISMATCH' >&2; exit 1;
+}
+[[ "$(sudo -n -u jdc-authority -- cat "$bind_alias")" == OUTSIDE_DOMAIN_SENTINEL_UNCHANGED ]] || {
+  echo 'E_STORAGE_BIND_ALIAS_SERVICE_CANNOT_READ_EXTERIOR' >&2; exit 1;
+}
+echo 'T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE'
+sudo -n umount -- "$bind_alias"
+if mountpoint -q "$bind_alias"; then
+  echo 'E_STORAGE_BIND_ALIAS_REMAINS_MOUNTED' >&2; exit 1
+fi
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
 [[ "$(sudo -n -u jdc-authority -- cat "$service_file")" == SERVICE_DOMAIN_BYTES ]]
 echo 'T011_STORAGE_EXTERIOR_BYTES_UNCHANGED'

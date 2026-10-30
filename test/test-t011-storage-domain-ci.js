@@ -46,3 +46,14 @@ test('CI principals and native probe argument binding preserve positive controls
   assert.match(w, /function Require-UserSuccess\([^\n]*\$probeArgs\)/);
   assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs\)/);
 });
+
+test('Linux administrator bind mount exposes a real outside object, not a second hard link', () => {
+  const l = fs.readFileSync(linux, 'utf8');
+  assert.match(l, /sudo -n mount --bind "\$outside_file" "\$bind_alias"/);
+  assert.match(l, /sudo -n -u jdc-authority -- cat "\$outside_file"/);
+  assert.match(l, /sudo -n -u jdc-authority -- cat "\$bind_alias"/);
+  assert.match(l, /sudo -n stat -c %d:%i "\$bind_alias"/);
+  assert.match(l, /mountpoint -q "\$bind_alias"/);
+  assert.match(l, /sudo -n umount -- "\$bind_alias"/);
+  assert.match(l, /T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE/);
+});

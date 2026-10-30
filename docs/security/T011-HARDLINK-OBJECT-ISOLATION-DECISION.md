@@ -130,6 +130,34 @@ The required object invariant O and the four original PR #147 RED cases
 remain open until the deployment model and real SDK/portable flows
 independently enforce these conditions.
 
+### Administrator-controlled Linux bind aliases (non-release negative proof)
+
+The disposable Linux native CI acceptance also requires a **real privileged
+file bind mount** from an exterior attacker-owned filesystem into the dedicated
+`tmpfs` service domain. The exterior directory is private (0700), so the
+`jdc-authority` principal cannot traverse the original exterior pathname.
+The file itself is made readable (0644) for this discriminating test. A
+privileged administrator then bind-mounts that file over an ordinary file in
+the isolated service root. The fixture must verify a real mountpoint, the
+**same kernel device/inode object** at both names, successful read through the
+imported alias by the service principal, a denied direct exterior-path read,
+successful unmount, and an unchanged exterior SHA-256. Failed setup is FAIL,
+not a mock denial, skip, or authorization success.
+
+This is an intentionally **negative security observation**: a privileged
+mount administrator can defeat object-isolation assumptions that rely on
+separate device identities alone. It does **not** show that an unprivileged
+attacker has `CAP_SYS_ADMIN`, that actual production native handlers accept
+mount-boundary traversal, or that invariant O is enforced. Candidate A
+requires a separately approved, OS-attested mount namespace and mount-authority
+custody model, including startup and in-flight changes, and Windows
+reparse/mount-point parity before any release claim. The test is disposable,
+runs only on the GitHub-hosted Linux native acceptance job, and does not
+install or enable a service on the user's Windows host.
+
+Kernel semantics: [mount(2) MS_BIND](https://man7.org/linux/man-pages/man2/mount.2.html)
+and [mount(8) bind mount](https://man7.org/linux/man-pages/man8/mount.8.html).
+
 ## 3. Platform constraints and unresolved assumptions
 
 | Dimension | Linux | Windows |

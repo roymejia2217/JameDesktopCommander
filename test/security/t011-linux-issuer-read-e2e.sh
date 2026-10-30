@@ -97,11 +97,6 @@ printf '\x02\x00\x43\x2aSECOND\n' > "$second_payload_source"
 cleanup() {
   local code=$?
   trap - EXIT
-  if [[ "$code" -ne 0 ]]; then
-    # Temporary E2E-only diagnostics for failed native read; fixture has no
-    # user secrets. Do not hide the original failure or relax its assertions.
-    sudo -n journalctl -b -u jdc-authority.service -n 45 --no-pager --output=cat >&2 || :
-  fi
   sudo -n systemctl stop jdc-authority.socket jdc-authority.service >/dev/null 2>&1 || :
   sudo -n systemctl reset-failed jdc-authority.service >/dev/null 2>&1 || :
   sudo -n rm -rf -- "$dropin_dir" "$contract_dir" || code=1

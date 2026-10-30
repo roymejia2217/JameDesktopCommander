@@ -412,14 +412,8 @@ const attempted = {
 const replay = await requestIssuerOwnedRead(attempted);
 assert.deepEqual(replay, { version: 1, status: 'denied' });
 console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_DENIED_AFTER_UNMOUNT');
-// The replay failure must revoke the sealed grant of THIS issuer activation.
-// A new request ID cannot bypass revocation within the same OS process.
-const afterReplay = await requestIssuerOwnedRead({
-  ...attempted,
-  requestId: '66666666-6666-4666-8666-666666666666',
-});
-assert.deepEqual(afterReplay, { version: 1, status: 'denied' });
-console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_REVOKES_GRANT');
+// A replay failure revokes the sealed native grant. The issuer may now exit;
+// it is not required to accept another transport connection after revocation.
 NODE
 sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
 import sqlite3

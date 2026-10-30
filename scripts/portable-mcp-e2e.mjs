@@ -345,7 +345,7 @@ try {
   assert.notEqual(normalSearch.isError, true,
     'Explicit unrestricted MCP search must remain functional');
   assert.match(toolText(normalSearch), /Started file search session:/);
-  const searchId = toolText(normalSearch).match(/Started file search session: (search_\\d+_\\d+)/)?.[1];
+  const searchId = toolText(normalSearch).match(/Started file search session: (search_\d+_\d+)/)?.[1];
   assert.ok(searchId, 'Search must provide a valid session handle');
   const stoppedSearch = await callFixtureTool('stop_search', { sessionId: searchId });
   assert.notEqual(stoppedSearch.isError, true);
@@ -389,7 +389,7 @@ try {
   assert.equal(forbiddenSearch.isError, true,
     'Restricted MCP search unexpectedly obtained ambient process authority');
   assert.match(toolText(forbiddenSearch), /E_POLICY_UNAVAILABLE/);
-  assert.ok(!toolText(forbiddenSearch).includes('inside-initial\\n'),
+  assert.ok(!toolText(forbiddenSearch).includes('inside-initial'),
     'Denied MCP search exposed file bytes');
 
   // A configured directory may itself be a symlink/junction alias.

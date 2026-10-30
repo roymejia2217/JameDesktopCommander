@@ -117,6 +117,38 @@ async function resolveTrustedExecutable(executable: string): Promise<string> {
   }
 }
 
+// A verified client binary must never consume an attacker-writable profile.
+// Inspect the canonical directory *and every ancestor*, not just the leaf:
+// an untrusted parent can replace the entire profile tree before activation.
+// Root-owned sticky parents (for example /tmp) are supported, but not when
+// the profile directory itself is writable by a different principal.
+// These point-in-time checks do not defeat same-UID changes; the official
+// tunnel client must still authenticate the selected profile independently.
+async function resolveTrustedProfileDirectory(profileDir: string): Promise<string> {
+  try {
+    const canonical = await realpath(profileDir);
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error('Missing Linux identity');
+    let current = canonical;
+    for (;;) {
+      const info = await lstat(current);
+      const rootOwnedStickyAncestor = current !== canonical && info.uid === 0 &&
+        (info.mode & 0o1000) !== 0;
+      if (!info.isDirectory() || info.isSymbolicLink() ||
+          (info.uid !== 0 && info.uid !== uid) ||
+          ((info.mode & 0o022) !== 0 && !rootOwnedStickyAncestor)) {
+        throw new Error('Unsafe tunnel profile component');
+      }
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+    return canonical;
+  } catch {
+    throw new Error('Linux tunnel profile directory custody cannot be verified.');
+  }
+}
+
 function unitPath(home: string): string {
   return path.join(safePath(home), '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
 }
@@ -152,7 +184,11 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   if (executable !== recordedExecutable) {
     throw new Error('Linux tunnel executable registration changed.');
   }
-  return { executable, profileDir: safePath(match[2]), profile: match[3] };
+  const profileDir = await resolveTrustedProfileDirectory(safePath(match[2]));
+  if (profileDir !== match[2]) {
+    throw new Error('Linux tunnel registered profile directory changed.');
+  }
+  return { executable, profileDir, profile: match[3] };
 }
 
 // systemd merges manager-selected fragments and drop-ins across its entire
@@ -313,7 +349,7 @@ export async function runLinuxTunnelCommand(
   if (action === 'install' || action === 'doctor') {
     const parsed = parseOptions(options);
     const executable = await resolveTrustedExecutable(parsed.executable);
-    const profileDir = await realpath(parsed.profileDir);
+    const profileDir = await resolveTrustedProfileDirectory(parsed.profileDir);
     if (!(await stat(profileDir)).isDirectory()) throw new Error('Tunnel profile directory unavailable.');
     await run(executable, ['doctor', '--profile-dir', profileDir, '--profile', parsed.profile, '--explain']);
     // A read-only JDC preflight must never create a unit or change its state.
@@ -386,7 +422,7 @@ export async function runLinuxTunnelCommand(
         // registered at install time. Resolve links before comparing path
         // components; a text prefix test accepts sibling directories, while
         // a lexical-only check misses links escaping the registered root.
-        const canonicalProfileDir = await realpath(registration.profileDir);
+        const canonicalProfileDir = await resolveTrustedProfileDirectory(registration.profileDir);
         if (canonicalProfileDir !== registration.profileDir) {
           throw new Error('Tunnel registered profile directory changed.');
         }

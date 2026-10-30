@@ -519,6 +519,50 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires disposable GitHub-hosted writable directory bind mount"]
+    fn descendant_mkdir_refuses_real_same_device_bind_mount() {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::PathBuf;
+        let fixture = PathBuf::from(
+            std::env::var_os("JDC_T011_MKDIR_MOUNT_FIXTURE")
+                .expect("mandatory real bind-mount fixture was not supplied"),
+        );
+        let allowed = fixture.join("allowed");
+        let outside = fixture.join("outside");
+        let inside_alias = allowed.join("alias");
+        assert_eq!(
+            std::fs::metadata(&inside_alias).unwrap().ino(),
+            std::fs::metadata(&outside).unwrap().ino(),
+            "alias and outside must name the identical directory object",
+        );
+        assert_eq!(
+            std::fs::metadata(&allowed).unwrap().dev(),
+            std::fs::metadata(&outside).unwrap().dev(),
+            "same-device writable bind mount is mandatory",
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let imported = root.root.open_dir_nofollow("alias").unwrap();
+        assert_ne!(
+            mounted_object_id(&root.root).unwrap(),
+            mounted_object_id(&imported).unwrap(),
+            "actual mount identity must differ despite equal st_dev",
+        );
+        let target = outside.join("jdc-escaped-directory");
+        assert!(!target.exists());
+        let denied = root
+            .create_descendant("alias/jdc-escaped-directory")
+            .expect_err("native mkdir must never create under the outside bind mount");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert!(!target.exists(), "outside filesystem object was mutated");
+        root.create_descendant("legitimate/nested").unwrap();
+        assert!(allowed.join("legitimate/nested").is_dir());
+        assert!(!outside.join("legitimate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn descendant_mkdir_refuses_kernel_submount_before_creation() {
         use std::os::unix::fs::MetadataExt;
         // Real procfs mount: both / and /proc are accessible, but mutation

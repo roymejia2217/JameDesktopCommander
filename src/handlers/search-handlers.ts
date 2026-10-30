@@ -1,4 +1,5 @@
 import { searchManager } from '../search-manager.js';
+import { requireUnrestrictedLegacyFilesystem } from '../tools/filesystem.js';
 import {
   StartSearchArgsSchema,
   GetMoreSearchResultsArgsSchema,
@@ -6,6 +7,22 @@ import {
 } from '../tools/schemas.js';
 import { ServerResult } from '../types.js';
 import { capture } from '../utils/capture.js';
+
+/**
+ * A session minted under legacy unrestricted policy is not a permanent grant.
+ * Recheck at every MCP result/metadata disclosure boundary. If the persisted
+ * policy is restricted, missing or unavailable, retire the old child processes
+ * AND buffered results before returning an error. This cannot replace native
+ * operation-lifetime policy pinning (#139/#148).
+ */
+async function requireLegacySearchContinuation(operation: string): Promise<void> {
+  try {
+    await requireUnrestrictedLegacyFilesystem(operation);
+  } catch (error) {
+    searchManager.revokeLegacySearchSessions();
+    throw error;
+  }
+}
 
 /**
  * Handle start_search command
@@ -92,6 +109,7 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
   }
 
   try {
+    await requireLegacySearchContinuation('get_more_search_results');
     const results = searchManager.readSearchResults(
       parsed.data.sessionId,
       parsed.data.offset,
@@ -219,6 +237,7 @@ export async function handleStopSearch(args: unknown): Promise<ServerResult> {
  */
 export async function handleListSearches(): Promise<ServerResult> {
   try {
+    await requireLegacySearchContinuation('list_searches');
     const sessions = searchManager.listSearchSessions();
     
     if (sessions.length === 0) {

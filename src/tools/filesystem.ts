@@ -736,6 +736,7 @@ export async function createDirectory(dirPath: string): Promise<void> {
 }
 
 export async function listDirectory(dirPath: string, depth: number = 2): Promise<string[]> {
+    await requireUnrestrictedLegacyFilesystem('list_directory');
     const validPath = await validatePath(dirPath);
     const results: string[] = [];
 
@@ -804,6 +805,9 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
 }
 
 export async function moveFile(sourcePath: string, destinationPath: string): Promise<void> {
+    // Both parents require one reviewed native transaction when restricted.
+    // Never validate a source and then rename through ambient path authority.
+    await requireUnrestrictedLegacyFilesystem('move_file');
     const validSourcePath = await validatePath(sourcePath);
     const validDestPath = await validatePath(destinationPath);
     await fs.rename(validSourcePath, validDestPath);
@@ -934,6 +938,8 @@ async function searchFilesNodeJS(rootPath: string, pattern: string): Promise<str
 }
 
 export async function getFileInfo(filePath: string): Promise<Record<string, any>> {
+    // Metadata loaders may also reopen file content (e.g. Office/PDF).
+    await requireUnrestrictedLegacyFilesystem('get_file_info');
     const validPath = await validatePath(filePath);
 
     // Get fs.stat as a fallback for any missing fields

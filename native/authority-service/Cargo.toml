@@ -33,7 +33,7 @@ path = "src/windows_scm.rs"
 libc = "=0.2.190"
 jdc-authority-store = { path = "../authority-store" }
 # Official, version-pinned capget(2) wrapper for Linux thread credentials.
-rustix = { version = "=1.1.5", features = ["thread"] }
+rustix = { version = "=1.1.5", features = ["thread", "fs"] }
 # Established Rust implementation of the systemd LISTEN_FDS/FNAMES contract.
 sd-notify = { version = "=0.5.0", default-features = false }
 

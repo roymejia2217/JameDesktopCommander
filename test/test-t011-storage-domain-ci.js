@@ -57,3 +57,19 @@ test('Linux administrator bind mount exposes a real outside object, not a second
   assert.match(l, /sudo -n umount -- "\$bind_alias"/);
   assert.match(l, /T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE/);
 });
+
+test('Linux openat2 uses root FD and NO_XDEV to deny a genuine file bind-mount alias', () => {
+  const probe = path.join(repo, 'native/authority-service/examples/linux_openat2_mount_probe.rs');
+  assert.ok(fs.existsSync(probe), 'missing real kernel openat2 probe');
+  const src = fs.readFileSync(probe, 'utf8');
+  const l = fs.readFileSync(linux, 'utf8');
+  assert.match(src, /rustix::fs::\{openat2,/);
+  assert.match(src, /ResolveFlags::NO_XDEV/);
+  assert.match(src, /ResolveFlags::BENEATH/);
+  assert.match(src, /libc::EXDEV/);
+  assert.match(l, /linux_openat2_mount_probe/);
+  assert.match(l, /service\.bin allow/);
+  assert.match(l, /admin-import\.bin deny-exdev/);
+  assert.match(l, /stat -c %h "\$outside_file"/);
+  assert.match(l, /T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE/);
+});

@@ -158,6 +158,30 @@ install or enable a service on the user's Windows host.
 Kernel semantics: [mount(2) MS_BIND](https://man7.org/linux/man-pages/man2/mount.2.html)
 and [mount(8) bind mount](https://man7.org/linux/man-pages/man8/mount.8.html).
 
+### Kernel NO_XDEV resolution test (non-release, Linux only)
+
+The native service's **test-only** `linux_openat2_mount_probe` example uses the
+existing pinned `rustix` wrapper and a preopened permitted directory FD to
+compare two real kernel operations under `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
+| RESOLVE_NO_XDEV`: a legitimate single-mount file must return the precise
+authorized bytes; the administrator-imported file bind alias must return
+`EXDEV` (not `EACCES`, `ENOENT`, an unrelated failure, or a fake denial).
+Both the exterior name and its imported bind alias retain a hard-link count
+of **one**: an `nlink == 1` postcheck cannot identify this form of alias.
+An absent or unsupported `openat2` operation is FAIL, with no path fallback.
+
+This is **conditional evidence for a Linux lookup primitive**, not approval
+to route production MCP reads. NO_XDEV applies to a specific rooted path
+resolution and does not authenticate where the root FD came from, prove
+mount namespace custody against a privileged adversary, prevent preexisting
+same-mount aliases, or cover writes and post-open operations. The eventual
+protocol must enforce the same primitive, ownership and revocation properties
+at the real handler boundary, including Windows parity. The test/example
+is never packaged into the portable candidate or deployed as a service.
+
+Official API semantics:
+[Linux openat2(2) RESOLVE_NO_XDEV](https://man7.org/linux/man-pages/man2/openat2.2.html).
+
 ## 3. Platform constraints and unresolved assumptions
 
 | Dimension | Linux | Windows |

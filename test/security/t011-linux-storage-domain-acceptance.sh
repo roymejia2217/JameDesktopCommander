@@ -101,6 +101,22 @@ findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/n
   echo 'E_STORAGE_BIND_ALIAS_SERVICE_CANNOT_READ_EXTERIOR' >&2; exit 1;
 }
 echo 'T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE'
+# The bind alias is another mount path, not a hard link. A link-count
+# postcheck alone therefore cannot distinguish this imported file object.
+[[ "$(sudo -n stat -c %h "$outside_file")" == 1 &&
+   "$(sudo -n stat -c %h "$bind_alias")" == 1 ]] || {
+  echo 'E_STORAGE_BIND_ALIAS_UNEXPECTED_LINK_COUNT' >&2; exit 1;
+}
+# Exercise the kernel's openat2 NO_XDEV policy on an FD for the *already
+# opened* authorized directory. Verify a real positive read and EXDEV for
+# the imported alias. Never accept unrelated permission failures as EXDEV.
+probe_path="$(realpath -e native/authority-service/target/debug/examples/linux_openat2_mount_probe)"
+[[ -x "$probe_path" ]] || {
+  echo 'E_STORAGE_OPENAT2_PROBE_MISSING' >&2; exit 1;
+}
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" service.bin allow
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" admin-import.bin deny-exdev
+echo 'T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE'
 sudo -n umount -- "$bind_alias"
 if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
   echo 'E_STORAGE_BIND_ALIAS_REMAINS_MOUNTED' >&2; exit 1

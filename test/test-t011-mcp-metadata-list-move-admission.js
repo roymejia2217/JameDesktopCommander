@@ -46,23 +46,37 @@ async function fixture(mode, execute) {
 }
 
 for (const mode of ['restricted', 'unset', 'unavailable']) {
-  test(`T011 #139 ${mode} denies metadata, enumeration, rename and UI workspace`, async () => {
-    await fixture(mode, async ({ allowed, source, destination }) => {
+  test(`T011 #139 ${mode}: metadata denied before reading object metadata`, async () => {
+    await fixture(mode, async ({ source }) => {
       await assert.rejects(getFileInfo(source), /E_POLICY_UNAVAILABLE/);
+      const response = await handleGetFileInfo({ path: source });
+      assert.equal(response.isError, true);
+      assert.match(response.content[0].text, /E_POLICY_UNAVAILABLE/);
+      assert.doesNotMatch(JSON.stringify(response), /INTERNAL_SENSITIVE_MARKER/);
+    });
+  });
+
+  test(`T011 #139 ${mode}: enumeration and directory workspace denied`, async () => {
+    await fixture(mode, async ({ allowed }) => {
       await assert.rejects(listDirectory(allowed, 2), /E_POLICY_UNAVAILABLE/);
-      await assert.rejects(moveFile(source, destination), /E_POLICY_UNAVAILABLE/);
       for (const [handler, args] of [
-        [handleGetFileInfo, { path: source }],
         [handleListDirectory, { path: allowed, depth: 2 }],
-        [handleMoveFile, { source, destination }],
         [handleRenderWorkspace, { path: allowed, depth: 1 }],
       ]) {
         const response = await handler(args);
-        assert.equal(response.isError, true, 'Restricted handler returned success');
+        assert.equal(response.isError, true);
         assert.match(response.content[0].text, /E_POLICY_UNAVAILABLE/);
-        assert.doesNotMatch(JSON.stringify(response), /INTERNAL_SENSITIVE_MARKER/);
-        assert.doesNotMatch(JSON.stringify(response), /external-sentinel.txt/);
+        assert.doesNotMatch(JSON.stringify(response), /internal.txt|external-sentinel.txt/);
       }
+    });
+  });
+
+  test(`T011 #139 ${mode}: rename denied without source or target mutation`, async () => {
+    await fixture(mode, async ({ source, destination }) => {
+      await assert.rejects(moveFile(source, destination), /E_POLICY_UNAVAILABLE/);
+      const response = await handleMoveFile({ source, destination });
+      assert.equal(response.isError, true);
+      assert.match(response.content[0].text, /E_POLICY_UNAVAILABLE/);
       assert.equal(await readFile(source, 'utf8'), 'INTERNAL_SENSITIVE_MARKER');
       await assert.rejects(stat(destination), { code: 'ENOENT' });
     });

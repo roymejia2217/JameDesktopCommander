@@ -379,7 +379,8 @@ try {
     const denied = await callFixtureTool(name, args);
     assert.equal(denied.isError, true, 'Restricted MCP tool admitted: ' + name);
     assert.match(toolText(denied), /E_POLICY_UNAVAILABLE/);
-    assert.ok(!toolText(denied).includes('INSIDE_PRIVATE_148_139'));
+    assert.ok(!toolText(denied).includes('inside-initial'),
+      'Denied MCP result exposed protected file bytes');
   }
   await assert.rejects(lstat(forbiddenMoveTarget), { code: 'ENOENT' });
   assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',

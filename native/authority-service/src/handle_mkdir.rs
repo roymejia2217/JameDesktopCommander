@@ -148,9 +148,11 @@ impl RootedDirectory {
 
     /// Bounded, handle-relative byte read for an already preopened native root.
     /// This method does not authenticate policy, a peer, or storage provenance.
+    /// On Linux, the kernel atomically refuses ANY mount or symlink crossing
+    /// during this single root-FD-relative open. No fallback to path-based
+    /// traversal if openat2 is unavailable or returns a denial.
     /// Observed multi-link objects DENY; concurrent new links remain a P0 gap.
-    /// No ambient pathname is ever reopened, and the byte budget is enforced
-    /// both before allocation and during reads if the file grows concurrently.
+    /// The byte budget is enforced before allocation and during the read.
     pub fn read_bounded_file(&self, relative: &str) -> io::Result<Vec<u8>> {
         const MAX_READ_BYTES: u64 = 1024 * 1024;
         if !safe_relative_path(relative) {
@@ -159,49 +161,68 @@ impl RootedDirectory {
                 "E_READ_PATH_DENIED",
             ));
         }
-        let mut components = relative.split('/').peekable();
-        let mut opened: Option<Dir> = None;
-        while let Some(component) = components.next() {
-            let parent = opened.as_ref().unwrap_or(&self.root);
-            if components.peek().is_some() {
-                opened = Some(parent.open_dir(component)?);
-            } else {
-                if !parent.symlink_metadata(component)?.is_file() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_NONREGULAR",
-                    ));
+        #[cfg(target_os = "linux")]
+        let file = {
+            use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+            let fd = openat2(
+                &self.root,
+                relative,
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+            )
+            .map_err(io::Error::from)?;
+            cap_std::fs::File::from_std(std::fs::File::from(fd))
+        };
+
+        // Windows retains the existing handle-relative traversal until a
+        // separately reviewed OS reparse/mount-boundary policy is available.
+        #[cfg(not(target_os = "linux"))]
+        let file = {
+            let mut components = relative.split('/').peekable();
+            let mut opened: Option<Dir> = None;
+            let mut final_file = None;
+            while let Some(component) = components.next() {
+                let parent = opened.as_ref().unwrap_or(&self.root);
+                if components.peek().is_some() {
+                    opened = Some(parent.open_dir(component)?);
+                } else {
+                    if !parent.symlink_metadata(component)?.is_file() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "E_READ_NONREGULAR",
+                        ));
+                    }
+                    final_file = Some(parent.open(component)?);
                 }
-                let file = parent.open(component)?;
-                let metadata = file.metadata()?;
-                if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SHARED_OBJECT",
-                    ));
-                }
-                if metadata.len() > MAX_READ_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SIZE_DENIED",
-                    ));
-                }
-                let mut bounded = file.take(MAX_READ_BYTES + 1);
-                let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                bounded.read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_READ_BYTES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "E_READ_SIZE_DENIED",
-                    ));
-                }
-                return Ok(bytes);
             }
+            final_file.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::PermissionDenied, "E_READ_PATH_DENIED")
+            })?
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || cap_fs_ext::MetadataExt::nlink(&metadata) != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SHARED_OBJECT",
+            ));
         }
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "E_READ_PATH_DENIED",
-        ))
+        if metadata.len() > MAX_READ_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SIZE_DENIED",
+            ));
+        }
+        let mut bounded = file.take(MAX_READ_BYTES + 1);
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        bounded.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_READ_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_READ_SIZE_DENIED",
+            ));
+        }
+        Ok(bytes)
     }
 
     /// Strict create-only, bounded data write under an already-open root.

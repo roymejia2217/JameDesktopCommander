@@ -28,13 +28,13 @@ const verify = (data) => verifyReleaseIdentity({ ...data, expectedRepository });
 test('accepts consistent owner-controlled npm package identity and release version', () => {
   assert.equal(verify(base()), true);
 });
-test('rejects current upstream-owned metadata despite green CI', () => {
+test('rejects current private JDC metadata until registry publication is explicitly verified', () => {
   const real = {
     pkg: JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')),
     server: JSON.parse(readFileSync(new URL('../server.json', import.meta.url), 'utf8')),
     manifest: JSON.parse(readFileSync(new URL('../.release-please-manifest.json', import.meta.url), 'utf8')),
   };
-  assert.throws(() => verify(real), /E_RELEASE_IDENTITY_/);
+  assert.throws(() => verify(real), /E_RELEASE_IDENTITY_REGISTRY_NOT_PUBLISHABLE/);
 });
 test('rejects upstream npm scope and wrong repo even if branding is edited', () => {
   const own = base();

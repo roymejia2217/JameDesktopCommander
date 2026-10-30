@@ -17,7 +17,7 @@ assert.equal(
 );
 
 const { configManager } = await import('../dist/config-manager.js');
-const { searchManager } = await import('../dist/search-manager.js');
+const { searchManager, stopSearchManagerCleanup } = await import('../dist/search-manager.js');
 const { searchFiles } = await import('../dist/tools/filesystem.js');
 const { handleStartSearch } = await import('../dist/handlers/search-handlers.js');
 
@@ -41,9 +41,14 @@ async function fixture(mode, run) {
     assert.equal(await readFile(outside, 'utf8'), 'EXTERNAL_BYTES_UNCHANGED');
   } finally {
     configManager.getAllowedDirectoriesForFilesystem = original;
+    // The legacy search manager starts a five-minute interval after spawn.
+    // On an expected RED failure, kill child sessions and stop that interval,
+    // otherwise the Node test worker may never exit despite test failures.
     for (const session of searchManager.listSearchSessions()) {
       if (!before.has(session.id)) searchManager.terminateSearch(session.id);
     }
+    stopSearchManagerCleanup();
+    searchManager.sessions?.clear?.();
     await rm(root, { recursive: true, force: true });
   }
 }

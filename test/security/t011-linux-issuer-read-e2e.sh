@@ -49,6 +49,10 @@ admin_dir='/etc/jdc-authority'
 state_dir='/var/lib/jdc-authority'
 read_root="$state_dir/read-root"
 read_root_two="$state_dir/read-root-two"
+# A privileged, disposable fixture checks same-device bind-mount aliases.
+# Never assume that a link count of one or equal st_dev establishes isolation.
+outside_bind_file="$state_dir/outside-bind.bin"
+inside_bind_alias="$read_root/mounted-alias.bin"
 socket_dir='/run/jdc-authority-ipc'
 socket_path="$socket_dir/authority.sock"
 service_unit='/run/systemd/system/jdc-authority.service'
@@ -78,7 +82,7 @@ if [[ -d "$state_dir" ]]; then
   state_preexisting=1
   [[ "$(stat -c '%u:%g:%a' "$state_dir")" == "$service_uid:$service_gid:700" ]] || exit 1
   [[ ! -e "$state_dir/claims.sqlite3" && ! -e "$read_root" &&
-     ! -e "$read_root_two" ]] || exit 1
+     ! -e "$read_root_two" && ! -e "$outside_bind_file" ]] || exit 1
 else
   sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$state_dir"
 fi
@@ -98,10 +102,20 @@ cleanup() {
   local code=$?
   trap - EXIT
   sudo -n systemctl stop jdc-authority.socket jdc-authority.service >/dev/null 2>&1 || :
+  # Never recursively remove an authorized root while a file bind mount
+  # remains active. A failed unmount is a hard fixture cleanup error.
+  if findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null 2>&1; then
+    sudo -n umount -- "$inside_bind_alias" || code=1
+  fi
+  if findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null 2>&1; then
+    printf '%s\n' 'E_ISSUER_READ_E2E_BIND_ALIAS_UNMOUNT_FAILED' >&2
+    exit 1
+  fi
   sudo -n systemctl reset-failed jdc-authority.service >/dev/null 2>&1 || :
   sudo -n rm -rf -- "$dropin_dir" "$contract_dir" || code=1
   sudo -n rm -f -- "$service_unit" "$socket_unit" "$installed_probe" || code=1
   sudo -n systemctl daemon-reload || code=1
+  sudo -n rm -f -- "$outside_bind_file" || code=1
   sudo -n rm -rf -- "$admin_dir" "$read_root" "$read_root_two" || code=1
   sudo -n rm -f -- "$state_dir/claims.sqlite3" "$state_dir/claims.sqlite3-journal" \
     "$state_dir/claims.sqlite3-wal" "$state_dir/claims.sqlite3-shm" || code=1
@@ -302,6 +316,65 @@ if rows != expected:
     raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_LEDGER_CHANGED:{rows!r}")
 print("T011_ISSUER_READ_E2E_REPLAY_LEDGER_UNCHANGED")
 PY
+# Same-filesystem object alias, mounted by an administrator after the
+# original valid reads. It must not be accepted merely because st_dev matches
+# or the outside file has only one hard link. The service is activated *after*
+# the bind mount, so it observes the real mount in its isolated namespace.
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$outside_bind_file"
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$second_payload_source" "$inside_bind_alias"
+[[ "$(sudo -n stat -c '%h' "$outside_bind_file")" == '1' &&
+   "$(sudo -n stat -c '%d' "$outside_bind_file")" == "$(sudo -n stat -c '%d' "$inside_bind_alias")" ]] || {
+  printf '%s\n' 'E_ISSUER_READ_E2E_SAME_DEVICE_BIND_PRECONDITION' >&2
+  exit 1
+}
+outside_bind_sha="$(sudo -n sha256sum -- "$outside_bind_file" | cut -d ' ' -f 1)"
+sudo -n systemctl stop jdc-authority.service
+sudo -n mount --bind -- "$outside_bind_file" "$inside_bind_alias"
+findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null || {
+  printf '%s\n' 'E_ISSUER_READ_E2E_BIND_MOUNT_NOT_ACTIVE' >&2
+  exit 1
+}
+sudo -n -u jdc-authority -- cmp -s -- "$outside_bind_file" "$inside_bind_alias"
+[[ "$(sudo -n stat -c '%d:%h' "$inside_bind_alias")" == \
+   "$(sudo -n stat -c '%d:%h' "$outside_bind_file")" ]] || exit 1
+printf '%s\n' 'T011_SAME_DEVICE_BIND_ALIAS_ATTACK_PRECONDITIONS_PASS'
+
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const [clientPath, framePath, operationPath] = process.argv.slice(2);
+const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
+const frames = await import(pathToFileURL(framePath).href);
+const operations = await import(pathToFileURL(operationPath).href);
+const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
+const attemptedAlias = await requestIssuerOwnedRead({
+  version: 1,
+  kind: 'read-file',
+  requestId: '44444444-4444-4444-8444-444444444444',
+  expectedEpoch: '1',
+  rootRef: '0123456789abcdef0123456789abcdef',
+  relativePath: 'mounted-alias.bin',
+});
+assert.deepEqual(attemptedAlias, { version: 1, status: 'denied' });
+console.log('T011_SAME_DEVICE_BIND_ALIAS_NATIVE_READ_DENIED');
+NODE
+
+[[ "$(sudo -n sha256sum -- "$outside_bind_file" | cut -d ' ' -f 1)" == "$outside_bind_sha" ]] || {
+  printf '%s\n' 'E_ISSUER_READ_E2E_EXTERIOR_BYTES_CHANGED' >&2
+  exit 1
+}
+sudo -n -u jdc-authority -- python3 - "$state_dir/claims.sqlite3" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as db:
+    count = db.execute("SELECT count(*) FROM replay_claims").fetchone()[0]
+if count != 2:
+    raise SystemExit(f"E_ISSUER_READ_E2E_DENIED_ALIAS_CONSUMED_REPLAY:{count}")
+print("T011_SAME_DEVICE_BIND_ALIAS_REPLAY_UNCHANGED")
+PY
+sudo -n systemctl stop jdc-authority.service
+sudo -n umount -- "$inside_bind_alias"
+! findmnt -rn --kernel --mountpoint "$inside_bind_alias" >/dev/null
 sudo -n cmp -s -- "$payload_source" "$read_root/inside.bin"
 sudo -n cmp -s -- "$second_payload_source" "$read_root_two/inside2.bin"
 printf '%s\n' 'T011_REAL_NODE_TO_ISSUER_READ_E2E_PASS_NONRELEASE'

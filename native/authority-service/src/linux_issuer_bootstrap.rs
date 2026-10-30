@@ -69,6 +69,29 @@ fn execute_claimed_read_on_roots(
     selected.execute_authenticated_read_with_external_claim(frame, claim)
 }
 
+/// Bind an authenticated listing frame to an issuer-retained root, its
+/// witnessed policy epoch and one durable replay claim. The result is
+/// serialized only after bounded handle-relative enumeration succeeds.
+/// This is an internal research operation, never a Node-side path grant.
+fn execute_claimed_list_on_roots(
+    roots: &mut [SealedDirectoryGrant],
+    policy_epoch: u64,
+    frame: AuthenticatedFrame,
+    claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+) -> Result<Vec<u8>, DispatchDenied> {
+    let request = crate::canonical_request::decode_list_directory_frame(frame.wire())
+        .map_err(|_| DispatchDenied)?;
+    if request.expected_epoch() != policy_epoch {
+        return Err(DispatchDenied);
+    }
+    let selected = roots
+        .iter_mut()
+        .find(|root| root.matches_bound_identity(request.root_ref(), request.expected_epoch()))
+        .ok_or(DispatchDenied)?;
+    let entries = selected.execute_authenticated_list_with_external_claim(frame, claim)?;
+    serde_json::to_vec(&entries).map_err(|_| DispatchDenied)
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Handles and replay authority never escape this object. Its
 /// non-release read dispatcher accepts only the retained systemd listener and
@@ -223,6 +246,22 @@ impl UnissuedIssuer {
         })
     }
 
+    fn execute_claimed_list(
+        &mut self,
+        frame: AuthenticatedFrame,
+    ) -> Result<Vec<u8>, DispatchDenied> {
+        if self.revoked {
+            return Err(DispatchDenied);
+        }
+        let epoch = self.policy_epoch;
+        let (roots, replay_writer) = (&mut self.roots, &mut self.replay_writer);
+        execute_claimed_list_on_roots(roots, epoch, frame, |request_id| {
+            replay_writer
+                .claim_once(request_id)
+                .map_err(|_| DispatchDenied)
+        })
+    }
+
     /// Non-release integration boundary. It only uses the listener retained
     /// from systemd activation and the fixed bootstrap-prepared MCP principal;
     /// no caller can inject a root handle, replay store, UID/GID or pathname.
@@ -243,6 +282,30 @@ impl UnissuedIssuer {
             deadline,
             |issuer| issuer.revalidate().map_err(|_| DispatchDenied),
             |issuer, frame| issuer.execute_claimed_read(frame),
+            |issuer| issuer.revoke(),
+        )
+    }
+
+    /// Experimental authenticated listing response using the exact retained
+    /// systemd listener, protected issuer epoch and OS-pinned root handles.
+    /// The response is bounded JSON bytes of accepted entry names; the
+    /// production binary still never calls this non-release method.
+    pub fn dispatch_one_inherited_list_reply(
+        &mut self,
+        deadline: std::time::Duration,
+    ) -> Result<(), DispatchDenied> {
+        let listener = self
+            .inherited_listener
+            .try_clone()
+            .map_err(|_| DispatchDenied)?;
+        let principal = self.expected_client;
+        crate::unix_accept::dispatch_one_named_prepared_read_reply(
+            &listener,
+            self,
+            principal,
+            deadline,
+            |issuer| issuer.revalidate().map_err(|_| DispatchDenied),
+            |issuer, frame| issuer.execute_claimed_list(frame),
             |issuer| issuer.revoke(),
         )
     }
@@ -373,6 +436,70 @@ mod tests {
             Ok(()),
             "a newly opened same-object pair can pass identity binding"
         );
+    }
+
+    #[test]
+    fn linux_issuer_root_selection_claims_once_for_bounded_listing() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        const ROOT: &str = "0123456789abcdef0123456789abcdef";
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let home = std::env::var_os("HOME").unwrap();
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let allowed = temp.path().join("allowed");
+        let nested = allowed.join("nested");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(nested.join("z.txt"), b"Z").unwrap();
+        std::fs::write(nested.join("a.txt"), b"A").unwrap();
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"OUTSIDE_UNCHANGED").unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap(),
+        );
+        let policy =
+            IssuerPolicy::decode_exact_for_test(policy_bytes.as_bytes(), 7, [1; 32]).unwrap();
+        let mut roots = vec![SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap()];
+        let frame = |root: &str, epoch: u64| {
+            let body = format!(
+                r#"{{"version":1,"kind":"list-directory","requestId":"{ID}","expectedEpoch":"{epoch}","rootRef":"{root}","relativePath":"nested"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&wire).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &receiver,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        };
+        let mut claims = 0;
+        let accepted = execute_claimed_list_on_roots(&mut roots, 7, frame(ROOT, 7), |_| {
+            claims += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(accepted, br#"["a.txt","z.txt"]"#);
+        for (root, epoch) in [(ROOT, 8), ("00000000000000000000000000000000", 7)] {
+            assert_eq!(
+                execute_claimed_list_on_roots(&mut roots, 7, frame(root, epoch), |_| {
+                    claims += 1;
+                    Ok(())
+                }),
+                Err(DispatchDenied),
+            );
+        }
+        assert_eq!(claims, 1);
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"OUTSIDE_UNCHANGED");
     }
 
     #[test]

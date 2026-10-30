@@ -110,9 +110,18 @@ echo 'T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE'
 # Exercise the kernel's openat2 NO_XDEV policy on an FD for the *already
 # opened* authorized directory. Verify a real positive read and EXDEV for
 # the imported alias. Never accept unrelated permission failures as EXDEV.
-probe_path="$(realpath -e native/authority-service/target/debug/examples/linux_openat2_mount_probe)"
-[[ -x "$probe_path" ]] || {
+probe_source="$(realpath -e native/authority-service/target/debug/examples/linux_openat2_mount_probe)"
+[[ -f "$probe_source" && -x "$probe_source" ]] || {
   echo 'E_STORAGE_OPENAT2_PROBE_MISSING' >&2; exit 1;
+}
+# The fixture service identity cannot necessarily traverse a CI checkout.
+# Install the exact compiled probe inside its own isolated, service-owned
+# volume and require byte-for-byte provenance before executing it.
+probe_path="$isolated/linux_openat2_mount_probe"
+sudo -n install -o jdc-authority -g jdc-authority -m 0500 -- "$probe_source" "$probe_path"
+probe_hash="$(sha256sum "$probe_source" | cut -d ' ' -f1)"
+[[ "$(sudo -n sha256sum "$probe_path" | cut -d ' ' -f1)" == "$probe_hash" ]] || {
+  echo 'E_STORAGE_OPENAT2_PROBE_HASH_MISMATCH' >&2; exit 1;
 }
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" service.bin allow
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" admin-import.bin deny-exdev

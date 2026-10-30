@@ -68,6 +68,8 @@ test('Linux openat2 uses root FD and NO_XDEV to deny a genuine file bind-mount a
   assert.match(src, /ResolveFlags::BENEATH/);
   assert.match(src, /libc::EXDEV/);
   assert.match(l, /linux_openat2_mount_probe/);
+  assert.match(l, /sudo -n install -o jdc-authority -g jdc-authority -m 0500/);
+  assert.match(l, /sha256sum "\$probe_path"/);
   assert.match(l, /service\.bin allow/);
   assert.match(l, /admin-import\.bin deny-exdev/);
   assert.match(l, /stat -c %h "\$outside_file"/);

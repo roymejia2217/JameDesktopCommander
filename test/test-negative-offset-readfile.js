@@ -31,8 +31,9 @@ async function setup() {
   // Save original config to restore later
   const originalConfig = await configManager.getConfig();
   
-  // Set allowed directories to include test directory
-  await configManager.setValue('allowedDirectories', [__dirname]);
+  // Offset semantics apply to the explicit legacy unrestricted reader;
+  // restricted reads must be routed through future object-bound authority.
+  await configManager.setValue('allowedDirectories', []);
   
   // Create test file with numbered lines for easy verification
   const testLines = [];

@@ -7,6 +7,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux ||
   exit 1
 fi
 command -v mountpoint >/dev/null
+command -v findmnt >/dev/null
 command -v setpriv >/dev/null
 getent passwd jdc-authority >/dev/null
 getent passwd nobody >/dev/null
@@ -27,13 +28,13 @@ sudo -n chmod 0700 "$attacker"
 cleanup() {
   local code=$?
   trap - EXIT
-  if [[ -n "$bind_alias" ]] && mountpoint -q "$bind_alias"; then
+  if [[ -n "$bind_alias" ]] && findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
     sudo -n umount -- "$bind_alias" || code=1
   fi
   if mountpoint -q "$isolated"; then
     sudo -n umount -- "$isolated" || code=1
   fi
-  if [[ -n "$bind_alias" ]] && mountpoint -q "$bind_alias"; then
+  if [[ -n "$bind_alias" ]] && findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
     echo 'E_STORAGE_CLEANUP_BIND_MOUNT_ACTIVE' >&2; exit 1
   fi
   if mountpoint -q "$isolated"; then
@@ -90,7 +91,7 @@ fi
 bind_alias="$isolated/admin-import.bin"
 sudo -n -u jdc-authority -- sh -c ': > "$1"' sh "$bind_alias"
 sudo -n mount --bind "$outside_file" "$bind_alias"
-mountpoint -q "$bind_alias" || {
+findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null || {
   echo 'E_STORAGE_BIND_MOUNT_NOT_ESTABLISHED' >&2; exit 1;
 }
 [[ "$(sudo -n stat -c %d:%i "$outside_file")" == "$(sudo -n stat -c %d:%i "$bind_alias")" ]] || {
@@ -101,7 +102,7 @@ mountpoint -q "$bind_alias" || {
 }
 echo 'T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE'
 sudo -n umount -- "$bind_alias"
-if mountpoint -q "$bind_alias"; then
+if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
   echo 'E_STORAGE_BIND_ALIAS_REMAINS_MOUNTED' >&2; exit 1
 fi
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1

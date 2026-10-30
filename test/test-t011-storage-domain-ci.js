@@ -53,7 +53,7 @@ test('Linux administrator bind mount exposes a real outside object, not a second
   assert.match(l, /sudo -n -u jdc-authority -- cat "\$outside_file"/);
   assert.match(l, /sudo -n -u jdc-authority -- cat "\$bind_alias"/);
   assert.match(l, /sudo -n stat -c %d:%i "\$bind_alias"/);
-  assert.match(l, /mountpoint -q "\$bind_alias"/);
+  assert.match(l, /findmnt --kernel --mountpoint "\$bind_alias"/);
   assert.match(l, /sudo -n umount -- "\$bind_alias"/);
   assert.match(l, /T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE/);
 });

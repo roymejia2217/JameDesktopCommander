@@ -215,6 +215,27 @@ impl SealedDirectoryGrant {
         self.execute_read_with_external_claim_impl(&frame.into_wire(), claim)
     }
 
+    /// A kernel-authenticated listing frame is not a grant by itself.
+    /// The issuer must supply a protected durable replay claim and retain
+    /// the root/epoch lifetime; no public Node/IPC path can call this.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn execute_authenticated_list_with_external_claim(
+        &mut self,
+        frame: crate::unix_session::AuthenticatedFrame,
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<String>, DispatchDenied> {
+        self.execute_list_with_external_claim_impl(&frame.into_wire(), claim)
+    }
+
+    #[cfg(test)]
+    fn execute_list_with_external_claim(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<String>, DispatchDenied> {
+        self.execute_list_with_external_claim_impl(wire, claim)
+    }
+
     #[cfg(test)]
     fn execute_read_with_external_claim(
         &mut self,
@@ -323,6 +344,29 @@ impl SealedDirectoryGrant {
         self.read_bound_file(request.relative_path())
     }
 
+    /// Reuse the exact issuer/epoch/replay path used for bounded native
+    /// reads. A listing cannot spend an arbitrary client-provided epoch or
+    /// bypass a failed protected replay claim. Native storage provenance
+    /// remains governed by #148; this does not enable a service grant.
+    #[cfg(any(target_os = "linux", test))]
+    fn execute_list_with_external_claim_impl(
+        &mut self,
+        wire: &[u8],
+        claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+    ) -> Result<Vec<String>, DispatchDenied> {
+        self.ensure_live_generation()?;
+        let request = crate::canonical_request::decode_list_directory_frame(wire)
+            .map_err(|_| DispatchDenied)?;
+        self.require_bound_identity(request.root_ref(), request.expected_epoch())?;
+        if claim(request.request_id_bytes()).is_err() {
+            self.revoke();
+            return Err(DispatchDenied);
+        }
+        self.rooted
+            .list_bounded_entries(request.relative_path())
+            .map_err(|_| DispatchDenied)
+    }
+
     #[cfg(any(target_os = "linux", test))]
     fn execute_read_with_external_claim_impl(
         &mut self,
@@ -379,6 +423,65 @@ mod tests {
             replay: ReplayAdmission::SyntheticTestOnly(HashSet::new()),
             active: true,
         }
+    }
+
+    #[test]
+    fn replay_claimed_native_listing_requires_bound_root_epoch_and_one_claim() {
+        let f = tempfile::tempdir().unwrap();
+        let inside = f.path().join("allowed");
+        let nested = inside.join("nested");
+        let outside = f.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(nested.join("z.txt"), b"Z").unwrap();
+        std::fs::write(nested.join("a.txt"), b"A").unwrap();
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"EXTERNAL_BYTES_UNCHANGED").unwrap();
+        let wire = |root: &str, epoch: u64, path: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"list-directory","requestId":"{ID}","expectedEpoch":"{epoch}","rootRef":"{root}","relativePath":"{path}"}}"#
+            );
+            let mut out = (body.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(body.as_bytes());
+            out
+        };
+        let mut grant = fixture(&inside);
+        grant.replay = ReplayAdmission::Unavailable;
+        let mut claims = 0;
+        assert_eq!(
+            grant.execute_list_with_external_claim(&wire(ROOT, 7, "nested"), |_| {
+                claims += 1;
+                Ok(())
+            }),
+            Ok(vec!["a.txt".to_string(), "z.txt".to_string()]),
+        );
+        assert_eq!(claims, 1);
+        for wrong in [
+            wire(ROOT, 8, "nested"),
+            wire("00000000000000000000000000000000", 7, "nested"),
+            wire(ROOT, 7, "../outside"),
+        ] {
+            assert_eq!(
+                grant.execute_list_with_external_claim(&wrong, |_| {
+                    claims += 1;
+                    Ok(())
+                }),
+                Err(DispatchDenied),
+            );
+        }
+        assert_eq!(claims, 1, "invalid requests cannot spend replay claims");
+        let mut denied = fixture(&inside);
+        assert_eq!(
+            denied.execute_list_with_external_claim(&wire(ROOT, 7, "nested"), |_| Err(
+                DispatchDenied
+            )),
+            Err(DispatchDenied),
+        );
+        assert!(!denied.active, "failed durable claim revokes native grant");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"EXTERNAL_BYTES_UNCHANGED"
+        );
     }
 
     #[test]

@@ -170,10 +170,31 @@ impl CanonicalReadFile {
     }
 }
 
+/// Canonical bounded listing request, never a filesystem grant.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct CanonicalListDirectory(CanonicalCreateDirectory);
+
+#[cfg(any(target_os = "linux", test))]
+impl CanonicalListDirectory {
+    pub(crate) fn request_id_bytes(&self) -> [u8; 16] {
+        self.0.request_id_bytes()
+    }
+    pub(crate) fn expected_epoch(&self) -> u64 {
+        self.0.expected_epoch()
+    }
+    pub(crate) fn root_ref(&self) -> &str {
+        self.0.root_ref()
+    }
+    pub(crate) fn relative_path(&self) -> &str {
+        self.0.relative_path()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WireKind {
     CreateDirectory,
     ReadFile,
+    ListDirectory,
 }
 
 /// Compatibility contract: syntax acceptance alone never grants authority.
@@ -188,6 +209,19 @@ pub(crate) fn decode_read_file_frame(frame: &[u8]) -> Result<CanonicalReadFile, 
         return Err(FrameDenied);
     }
     Ok(CanonicalReadFile(request))
+}
+
+/// Decode a strictly typed listing request. Accepted syntax confers no right
+/// to enumerate files without independently verified OS broker authority.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn decode_list_directory_frame(
+    frame: &[u8],
+) -> Result<CanonicalListDirectory, FrameDenied> {
+    let (request, kind) = decode_typed_frame(frame)?;
+    if kind != WireKind::ListDirectory {
+        return Err(FrameDenied);
+    }
+    Ok(CanonicalListDirectory(request))
 }
 
 /// Decode one canonical v1 frame into immutable protocol data, not a grant.
@@ -215,6 +249,7 @@ fn decode_typed_frame(frame: &[u8]) -> Result<(CanonicalCreateDirectory, WireKin
     let kind = match req.kind.as_str() {
         "create-directory" => WireKind::CreateDirectory,
         "read-file" => WireKind::ReadFile,
+        "list-directory" => WireKind::ListDirectory,
         _ => return Err(FrameDenied),
     };
     let request_id_bytes = uuid_v4_bytes(&req.request_id).ok_or(FrameDenied)?;
@@ -257,6 +292,33 @@ mod tests {
         out.extend_from_slice(body);
         out
     }
+    #[test]
+    fn canonical_native_list_is_typed_and_replay_bound_without_grant() {
+        let body = payload("inside/nested").replace("create-directory", "list-directory");
+        let wire = frame(body.as_bytes());
+        let list = decode_list_directory_frame(&wire).unwrap();
+        assert_eq!(list.relative_path(), "inside/nested");
+        assert_eq!(list.root_ref(), ROOT);
+        assert_eq!(list.expected_epoch(), u64::MAX);
+        assert_eq!(
+            list.request_id_bytes(),
+            [
+                0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x41, 0x11, 0x81, 0x11, 0x11, 0x11, 0x11, 0x11,
+                0x11, 0x11
+            ],
+        );
+        assert_eq!(validate_request_frame(&wire), Ok(()));
+        assert!(decode_create_directory_frame(&wire).is_err());
+        assert!(decode_read_file_frame(&wire).is_err());
+        for invalid in [
+            body.replace("inside/nested", "../outside"),
+            body.replace("list-directory", "list"),
+            format!("{body} "),
+        ] {
+            assert!(decode_list_directory_frame(&frame(invalid.as_bytes())).is_err());
+        }
+    }
+
     #[test]
     fn canonical_read_is_typed_and_cannot_be_misrouted_as_mkdir() {
         let body = payload("nested/inside.bin").replace("create-directory", "read-file");

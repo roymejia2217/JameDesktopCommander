@@ -397,9 +397,24 @@ const attempted = {
 const replay = await requestIssuerOwnedRead(attempted);
 assert.deepEqual(replay, { version: 1, status: 'denied' });
 console.log('T011_SAME_DEVICE_BIND_ALIAS_REPLAY_DENIED_AFTER_UNMOUNT');
+NODE
+# The Rust dispatcher deliberately revokes the current sealed grant on any
+# durable replay-claim failure. Recovery requires a NEW service activation;
+# trying a fresh ID in that revoked process would be an invalid positive test.
+sudo -n systemctl stop jdc-authority.service
+sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const [clientPath, framePath, operationPath] = process.argv.slice(2);
+const { createIssuerReadClient } = await import(pathToFileURL(clientPath).href);
+const frames = await import(pathToFileURL(framePath).href);
+const operations = await import(pathToFileURL(operationPath).href);
+const { requestIssuerOwnedRead } = createIssuerReadClient({ ...frames, ...operations });
 const recovery = await requestIssuerOwnedRead({
-  ...attempted,
+  version: 1, kind: 'read-file',
   requestId: '55555555-5555-4555-8555-555555555555',
+  expectedEpoch: '1', rootRef: '0123456789abcdef0123456789abcdef',
+  relativePath: 'mounted-alias.bin',
 });
 assert.equal(recovery.status, 'ok', 'legitimate post-unmount read failed');
 if (recovery.status !== 'ok') throw new Error('recovery read unavailable');

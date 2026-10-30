@@ -136,7 +136,7 @@ async function requireUnrestrictedLegacyFilesystem(operation: string): Promise<v
     try {
         roots = await configManager.getAllowedDirectoriesForFilesystem();
     } catch {
-        throw new Error('E_POLICY_UNAVAILABLE: filesystem policy could not be loaded');
+        throw new Error('Filesystem access denied: E_POLICY_UNAVAILABLE: authorization policy unavailable');
     }
     if (!Array.isArray(roots) || (roots.length > 0 && !roots.includes('/'))) {
         throw new Error(`E_POLICY_UNAVAILABLE: ${operation} requires native filesystem authority`);

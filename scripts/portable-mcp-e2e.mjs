@@ -335,16 +335,23 @@ try {
   });
   assert.notEqual(configured.isError, true, 'Could not enable the restricted file policy');
 
+  // T011/#139: A configured root is NOT a native grant. Until the reviewed
+  // broker is bound, even in-root legacy reads/writes must fail closed.
   const allowedRead = await callFixtureTool('read_file', { path: allowedFile });
-  assert.notEqual(allowedRead.isError, true, 'Policy denied an explicitly allowed file');
+  assert.equal(allowedRead.isError, true,
+    'Restricted file read was admitted without native authority');
+  assert.match(toolText(allowedRead), /E_POLICY_UNAVAILABLE/);
   const allowedWrite = await callFixtureTool('write_file', {
     path: allowedFile, content: 'inside-updated\n', mode: 'rewrite',
   });
-  assert.notEqual(allowedWrite.isError, true, 'Policy denied an explicitly allowed write');
-  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-updated\n');
+  assert.equal(allowedWrite.isError, true,
+    'Restricted file write was admitted without native authority');
+  assert.match(toolText(allowedWrite), /E_POLICY_UNAVAILABLE/);
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n',
+    'Denied in-root write modified bytes');
 
   // A configured directory may itself be a symlink/junction alias.
-  // Compare its canonical target against the already canonical file path.
+  // The legacy handler must still deny because alias custody is unproven.
   const allowedAlias = join(working, 'allowed-alias');
   await symlink(allowedRoot, allowedAlias, process.platform === 'win32' ? 'junction' : 'dir');
   const aliasConfigured = await callFixtureTool('set_config_value', {
@@ -352,8 +359,9 @@ try {
   });
   assert.notEqual(aliasConfigured.isError, true, 'Cannot configure allowed directory alias');
   const aliasRead = await callFixtureTool('read_file', { path: allowedFile });
-  assert.notEqual(aliasRead.isError, true, 'Canonical allowed directory alias denied valid access');
-  assert.ok(toolText(aliasRead).includes('inside-updated'), 'Alias returned wrong contents');
+  assert.equal(aliasRead.isError, true, 'Alias unexpectedly bypassed native authority admission');
+  assert.match(toolText(aliasRead), /E_POLICY_UNAVAILABLE/);
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n');
 
   const missingConfigured = await callFixtureTool('set_config_value', {
     key: 'allowedDirectories', value: [join(working, 'nonexistent-allowed-root')],
@@ -419,7 +427,10 @@ try {
     resourcesRead: read.contents.length, promptCount: prompts.length,
     freshMcpChallengeCalls: 2,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
-    modeOmissionRejected: true, accessPositiveChecks: 3,
+    modeOmissionRejected: true,
+    legacyUnrestrictedPositiveChecks: 3,
+    restrictedAdmissionDenials: 3,
+    accessPositiveChecks: 0,
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,
     outsideBytesPreserved: true, packagedWorkspaceChecks: 3,

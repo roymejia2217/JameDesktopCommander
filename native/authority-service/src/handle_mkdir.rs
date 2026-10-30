@@ -506,6 +506,28 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn descendant_mkdir_refuses_kernel_submount_before_creation() {
+        use std::os::unix::fs::MetadataExt;
+        // Real procfs mount: both / and /proc are accessible, but mutation
+        // must be rejected specifically as a mount crossing, NOT merely
+        // because procfs happens to refuse this new directory.
+        let root_meta = std::fs::metadata("/").unwrap();
+        let proc_meta = std::fs::metadata("/proc").unwrap();
+        assert_ne!(root_meta.dev(), proc_meta.dev());
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
+        );
+        let forbidden = "/proc/jdc-t011-mount-crossing-must-not-exist";
+        assert!(!std::path::Path::new(forbidden).exists());
+        let denied = cap
+            .create_descendant("proc/jdc-t011-mount-crossing-must-not-exist")
+            .expect_err("nested mkdir must reject a kernel submount before mutation");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert!(!std::path::Path::new(forbidden).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn handle_bounded_read_refuses_kernel_mount_crossing_with_exdev() {
         use std::os::unix::fs::MetadataExt;
 

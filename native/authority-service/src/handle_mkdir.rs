@@ -380,15 +380,28 @@ impl RootedDirectory {
                 "E_PATH_DENIED",
             ));
         }
+        #[cfg(target_os = "linux")]
+        let root_mount = mounted_object_id(&self.root)?;
         let mut child: Option<Dir> = None;
         for component in relative.split('/') {
+            // The parent is either the original pinned root or a previously
+            // opened directory whose kernel mount identity matched it.
+            // Never create a descendant through a foreign mounted directory.
             let parent = child.as_ref().unwrap_or(&self.root);
             match parent.create_dir(component) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(err),
             }
-            child = Some(parent.open_dir(component)?);
+            #[cfg(target_os = "linux")]
+            let opened = parent.open_dir_nofollow(component)?;
+            #[cfg(not(target_os = "linux"))]
+            let opened = parent.open_dir(component)?;
+            #[cfg(target_os = "linux")]
+            if mounted_object_id(&opened)? != root_mount {
+                return Err(io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            child = Some(opened);
         }
         Ok(())
     }

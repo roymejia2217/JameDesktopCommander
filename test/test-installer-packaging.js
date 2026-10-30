@@ -67,6 +67,8 @@ test('existing candidate workflow builds EXE and DEB without publishing release'
   assert.match(workflow, /Verify installer provenance/);
   assert.match(workflow, /Compile Inno Setup installer candidate/);
   assert.match(workflow, /Build nFPM Debian installer candidate/);
+  assert.doesNotMatch(workflow, /export JDC_INSTALLER_VERSION=\\?"\\?\$\(/,
+    'nFPM version assignment must not mask a failing Node command');
   assert.match(workflow, /Verify Windows installer install and uninstall/);
   assert.match(workflow, /Verify Debian install and remove/);
   assert.match(workflow, /upload-artifact@/);

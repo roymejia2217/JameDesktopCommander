@@ -202,7 +202,8 @@ jobs:
           JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
         run: |
           set -euo pipefail
-          export JDC_INSTALLER_VERSION="$(node -p "require('./package.json').version")"
+          JDC_INSTALLER_VERSION="$(node -p "require('./package.json').version")"
+          export JDC_INSTALLER_VERSION
           mkdir -p "$RUNNER_TEMP/nfpm-2.48.0" "$JDC_INSTALLER_OUTPUT"
           package="$RUNNER_TEMP/nfpm-2.48.0/nfpm.tar.gz"
           curl --fail --location --retry 3 --max-time 90 \

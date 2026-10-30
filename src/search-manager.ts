@@ -1007,6 +1007,18 @@ let cleanupInterval: NodeJS.Timeout | null = null;
 /**
  * Start cleanup interval - now runs on fixed schedule
  */
+/**
+ * Release the search maintenance timer when the owning test server shuts down.
+ * This never authorizes a search and does not terminate active searches:
+ * callers must terminate their sessions first. Safe for repeated shutdown.
+ */
+export function stopSearchManagerCleanup(): void {
+  if (cleanupInterval !== null) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+}
+
 function startCleanupIfNeeded(): void {
   if (!cleanupInterval) {
     cleanupInterval = setInterval(() => {

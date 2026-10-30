@@ -46,10 +46,10 @@ service_file="$isolated/service.bin"
 outside_file="$attacker/outside.bin"
 sudo -n -u jdc-authority -- sh -c 'printf SERVICE_DOMAIN_BYTES > "$1"' sh "$service_file"
 sudo -n -u nobody -- sh -c 'printf OUTSIDE_DOMAIN_SENTINEL_UNCHANGED > "$1"' sh "$outside_file"
-outside_hash="$(sha256sum "$outside_file" | cut -d ' ' -f1)"
+outside_hash="$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)"
 # The attack principal MUST succeed at a same-device hard link first.
 sudo -n -u nobody -- ln -- "$outside_file" "$attacker/positive-link.bin"
-[[ "$(stat -c %d:%i "$outside_file")" == "$(stat -c %d:%i "$attacker/positive-link.bin")" ]] || exit 1
+[[ "$(sudo -n stat -c %d:%i "$outside_file")" == "$(sudo -n stat -c %d:%i "$attacker/positive-link.bin")" ]] || exit 1
 sudo -n -u nobody -- rm -- "$attacker/positive-link.bin"
 echo 'T011_STORAGE_SAME_VOLUME_HARDLINK_PASS'
 # An unprivileged attacker must not enter the service-owned domain.
@@ -70,7 +70,7 @@ fi
 [[ ! -e "$isolated/attacker.bin" && ! -e "$isolated/admin-attempt.bin" &&
    ! -e "$attacker/reverse.bin" ]] || exit 1
 echo 'T011_STORAGE_CROSS_VOLUME_HARDLINK_DENIED'
-[[ "$(sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
 [[ "$(sudo -n -u jdc-authority -- cat "$service_file")" == SERVICE_DOMAIN_BYTES ]]
 echo 'T011_STORAGE_EXTERIOR_BYTES_UNCHANGED'
 echo 'T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE'

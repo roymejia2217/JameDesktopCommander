@@ -34,3 +34,15 @@ test('positive same-volume hardlink, genuine cross-volume rejection, byte preser
   assert.match(w, /diskpart\.exe/);
   assert.match(w, /New-LocalUser/);
 });
+
+test('CI principals and native probe argument binding preserve positive controls', () => {
+  const l = fs.readFileSync(linux, 'utf8');
+  const w = fs.readFileSync(windows, 'utf8');
+  assert.match(l, /sudo -n -u nobody -- sha256sum "\$outside_file"/);
+  assert.match(l, /sudo -n stat -c %d:%i "\$outside_file"/);
+  assert.doesNotMatch(w, /\[string\[\]\]\s*\$args\b/);
+  assert.match(w, /function Invoke-CIUser\([^\n]*\$probeArgs\)/);
+  assert.match(w, /-ArgumentList \$probeArgs\b/);
+  assert.match(w, /function Require-UserSuccess\([^\n]*\$probeArgs\)/);
+  assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs\)/);
+});

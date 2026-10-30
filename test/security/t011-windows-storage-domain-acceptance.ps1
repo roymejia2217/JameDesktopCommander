@@ -54,16 +54,16 @@ function Set-CustodyAcl([string] $path, [array] $extra) {
         throw 'E_STORAGE_ACL_INHERITANCE_STILL_ON'
     }
 }
-function Invoke-CIUser([pscredential] $who, [string] $bin, [string[]] $args) {
-    $process = Start-Process -FilePath $bin -Credential $who -ArgumentList $args -WorkingDirectory $root -PassThru -Wait
+function Invoke-CIUser([pscredential] $who, [string] $bin, [string[]] $probeArgs) {
+    $process = Start-Process -FilePath $bin -Credential $who -ArgumentList $probeArgs -WorkingDirectory $root -PassThru -Wait
     if ($null -eq $process.ExitCode) { throw 'E_STORAGE_MISSING_PROCESS_VERDICT' }
     return [int]$process.ExitCode
 }
-function Require-UserSuccess([string] $label, [pscredential] $who, [string] $bin, [string[]] $args) {
-    if ((Invoke-CIUser $who $bin $args) -ne 0) { throw "E_STORAGE_POSITIVE_FAILED_$label" }
+function Require-UserSuccess([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
+    if ((Invoke-CIUser $who $bin $probeArgs) -ne 0) { throw "E_STORAGE_POSITIVE_FAILED_$label" }
 }
-function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $args) {
-    if ((Invoke-CIUser $who $bin $args) -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
+function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
+    if ((Invoke-CIUser $who $bin $probeArgs) -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
 }
 function Invoke-DiskPart([string] $content) {
     $instructions = Join-Path $env:RUNNER_TEMP "JDC-148-$guid.diskpart.txt"

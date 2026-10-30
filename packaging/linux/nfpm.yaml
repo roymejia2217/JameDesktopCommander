@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+# Release Please owns the version: CI exports JDC_INSTALLER_VERSION from package.json.
+# The candidate source must pass validate-installer-input.mjs before packaging.
+name: jame-desktop-commander
+arch: amd64
+platform: linux
+version: ${JDC_INSTALLER_VERSION}
+release: 1
+section: utils
+priority: optional
+maintainer: JameDesktopCommander maintainers <noreply@github.com>
+description: JameDesktopCommander MCP runtime, without privileged native broker
+vendor: JameDesktopCommander
+homepage: https://github.com/roymejia2217/JameDesktopCommander
+license: MIT
+depends:
+  - libc6 (>= 2.39)
+  - libstdc++6
+  - libgcc-s1
+contents:
+  - src: ${JDC_INSTALLER_SOURCE}/
+    dst: /opt/jame-desktop-commander
+    type: tree
+    expand: true
+  - src: ./packaging/linux/jdc
+    dst: /usr/bin/jdc
+    file_info:
+      mode: 0755

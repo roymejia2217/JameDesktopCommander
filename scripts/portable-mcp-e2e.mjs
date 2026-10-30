@@ -319,6 +319,24 @@ try {
   assert.ok(toolText(finalRead).includes(rewritten.trim()), 'Rewritten content missing from read result');
   assert.ok(toolText(finalRead).includes(appended.trim()), 'Appended content missing from read result');
 
+  // Exercise the real packaged MCP SDK handlers in explicit unrestricted
+  // mode before installing a restricted policy. Direct-function tests alone
+  // cannot prove that tool dispatch preserves the same contract.
+  const legacyInfo = await callFixtureTool('get_file_info', { path: fixture });
+  assert.notEqual(legacyInfo.isError, true, 'Legacy unrestricted metadata denied');
+  const legacyList = await callFixtureTool('list_directory', { path: working, depth: 1 });
+  assert.notEqual(legacyList.isError, true, 'Legacy unrestricted listing denied');
+  assert.ok(toolText(legacyList).includes('portable-mcp-fixture.txt'));
+  const legacyMoveSource = join(working, 'move-source.txt');
+  const legacyMoveTarget = join(working, 'move-target.txt');
+  await writeFile(legacyMoveSource, 'UNRESTRICTED_MOVE_BYTES');
+  const legacyMove = await callFixtureTool('move_file', {
+    source: legacyMoveSource, destination: legacyMoveTarget,
+  });
+  assert.notEqual(legacyMove.isError, true, 'Legacy unrestricted rename denied');
+  await assert.rejects(lstat(legacyMoveSource), { code: 'ENOENT' });
+  assert.equal(await readFile(legacyMoveTarget, 'utf8'), 'UNRESTRICTED_MOVE_BYTES');
+
   // T009: allowedDirectories is an application-level authorization policy.
   // All writes are restricted to disposable fixture paths, never host files.
   const allowedRoot = join(working, 'allowed');
@@ -381,6 +399,23 @@ try {
   }
   await assertDenied('read_file', { path: deniedFile });
 
+  // #139: Under restricted policy no native issuer has granted these
+  // legacy pathname-based metadata, enumeration, or rename operations.
+  for (const [name, args] of [
+    ['get_file_info', { path: allowedFile }],
+    ['list_directory', { path: allowedRoot, depth: 1 }],
+    ['move_file', { source: allowedFile, destination: join(allowedRoot, 'renamed.txt') }],
+    ['render_workspace', { path: allowedRoot, depth: 1 }],
+  ]) {
+    const result = await callFixtureTool(name, args);
+    assert.equal(result.isError, true, 'Unbound restricted MCP operation succeeded: ' + name);
+    assert.match(toolText(result), /E_POLICY_UNAVAILABLE/);
+    assert.ok(!toolText(result).includes('inside-initial'),
+      'Restricted denial leaked in-root file contents');
+  }
+  assert.equal(await readFile(allowedFile, 'utf8'), 'inside-initial\n');
+  await assert.rejects(lstat(join(allowedRoot, 'renamed.txt')), { code: 'ENOENT' });
+
   const deniedWorkspace = await bounded('MCP restricted workspace denial',
     () => callFixtureTool('render_workspace', { path: deniedFile }));
   assert.equal(deniedWorkspace.isError, true,
@@ -428,8 +463,8 @@ try {
     freshMcpChallengeCalls: 2,
     isolatedWorkingDirectory: true, fileToolChecks: 6,
     modeOmissionRejected: true,
-    legacyUnrestrictedPositiveChecks: 3,
-    restrictedAdmissionDenials: 3,
+    legacyUnrestrictedPositiveChecks: 6,
+    restrictedAdmissionDenials: 7,
     accessPositiveChecks: 0,
     unresolvedAllowlistDenied: true,
     accessNegativeChecks: process.platform === 'linux' ? 7 : 5,

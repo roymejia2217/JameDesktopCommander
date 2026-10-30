@@ -736,6 +736,7 @@ export async function createDirectory(dirPath: string): Promise<void> {
 }
 
 export async function listDirectory(dirPath: string, depth: number = 2): Promise<string[]> {
+    await requireUnrestrictedLegacyFilesystem('list_directory');
     const validPath = await validatePath(dirPath);
     const results: string[] = [];
 
@@ -804,6 +805,8 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
 }
 
 export async function moveFile(sourcePath: string, destinationPath: string): Promise<void> {
+    // Neither parent is bound to native authority; deny before any rename.
+    await requireUnrestrictedLegacyFilesystem('move_file');
     const validSourcePath = await validatePath(sourcePath);
     const validDestPath = await validatePath(destinationPath);
     await fs.rename(validSourcePath, validDestPath);
@@ -934,6 +937,8 @@ async function searchFilesNodeJS(rootPath: string, pattern: string): Promise<str
 }
 
 export async function getFileInfo(filePath: string): Promise<Record<string, any>> {
+    // Metadata and specialized info handlers can reopen arbitrary objects.
+    await requireUnrestrictedLegacyFilesystem('get_file_info');
     const validPath = await validatePath(filePath);
 
     // Get fs.stat as a fallback for any missing fields

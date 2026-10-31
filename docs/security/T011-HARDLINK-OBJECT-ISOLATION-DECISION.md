@@ -288,6 +288,37 @@ object-source commit contract or continued fail-closed exclusion. No
 production stage capability is issued and no `create_new_file` API becomes available to normal
 builds. The original #147 object-isolation requirements remain blocked.
 
+**Windows handle-based publication feasibility (2026-10-31, PR #236,
+test-only):** official `SetFileInformationByHandle(FileRenameInfo)` can
+rename the **already-open source file object**, rather than look up the
+staged source path again. The initial real NTFS fixture failed with
+`ERROR_ACCESS_DENIED (5)` without explicit `DELETE` access; after
+requesting that right, using a destination filename relative to an
+open directory handle failed with `ERROR_INVALID_PARAMETER (87)`.
+A strictly isolated test-only variant using an **absolute target path**
+and `RootDirectory = NULL` then succeeded: when an OS thread renamed
+the original staged file away and installed a different attacker file
+under the original name, the destination was the same kernel file object
+as the **original open file handle**, not the attacker alias. A separate
+real-NTFS race with the destination occupied by a hard link returned an
+error, preserving exact original/exterior bytes and same-file identity.
+
+**These results are not sufficient for release:** the demonstrated working
+form requires an ambient absolute target pathname and does not establish
+destination confinement under a preopened root directory. The relative
+root-handle form was **rejected by the tested Windows API invocation**,
+not shown safe. The Rust Win32 call and its pointer buffer exist solely
+within `cfg(test)`; no shipping authority, file mutation endpoint or
+new Windows privilege was enabled. Linux `linkat(AT_EMPTY_PATH)` can
+address an open source descriptor, but its general capability requirement
+`CAP_DAC_READ_SEARCH` violates the intended unprivileged service
+contract; an `O_TMPFILE`/procfs alternative has distinct mount and
+privilege prerequisites and requires independent native acceptance.
+The next eligible implementation must prove a fully root-relative,
+handle-bound and no-overwrite operation on both platforms **without**
+adding privilege or ambient-path fallback. Until then deny-only remains
+mandatory.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

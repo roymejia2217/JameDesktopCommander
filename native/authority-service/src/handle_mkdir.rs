@@ -1466,6 +1466,156 @@ mod tests {
         assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
     }
 
+    #[cfg(windows)]
+    fn windows_test_publish_from_open_handle_no_replace(
+        source: &std::fs::File,
+        destination: &std::path::Path,
+    ) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+        };
+        if !destination.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "test destination must be absolute",
+            ));
+        }
+        let wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let bytes = wide
+            .len()
+            .checked_mul(2)
+            .and_then(|n| header.checked_add(n))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "name too long"))?;
+        let size = u32::try_from(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name too long"))?;
+        let words = bytes.div_ceil(std::mem::size_of::<u64>());
+        let mut buffer = vec![0u64; words];
+        // SAFETY: u64 buffer alignment is at least FILE_RENAME_INFO's HANDLE
+        // alignment, exact byte length includes UTF-16 filename payload, and
+        // the buffer remains allocated through the synchronous Win32 call.
+        unsafe {
+            let data = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            (*data).Anonymous.ReplaceIfExists = false;
+            (*data).RootDirectory = std::ptr::null_mut();
+            (*data).FileNameLength = u32::try_from(wide.len() * 2).unwrap();
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*data).FileName.as_mut_ptr(), wide.len());
+            if SetFileInformationByHandle(source.as_raw_handle(), FileRenameInfo, data.cast(), size)
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_handle_rename_publishes_original_inode_after_source_name_swap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage = fixture.path().join("stage");
+        let outside = fixture.path().join("outside");
+        for dir in [&allowed, &stage, &outside] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let source_name = stage.join("random-stage.bin");
+        let displaced_original = outside.join("original.bin");
+        let injected_alias = outside.join("injected-alias.bin");
+        let destination = allowed.join("published.bin");
+        let original = b"ACTUAL_OPEN_FILE_OBJECT";
+        let injected = b"ATTACKER_SUBSTITUTE_FILE";
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&source_name)
+            .unwrap();
+        opened.write_all(original).unwrap();
+        opened.sync_all().unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::rename(&source_name, &displaced_original)
+                        .expect("attacker moved source entry after sync");
+                    std::fs::write(&source_name, injected)
+                        .expect("attacker installed a different inode");
+                    std::fs::hard_link(&source_name, &injected_alias)
+                        .expect("attacker retained proof of injected inode");
+                })
+                .join()
+                .unwrap();
+        });
+        assert!(same_file::is_same_file(&source_name, &injected_alias).unwrap());
+        assert!(
+            same_file::Handle::from_path(&displaced_original).unwrap()
+                == same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap()
+        );
+        windows_test_publish_from_open_handle_no_replace(&opened, &destination)
+            .expect("publish the original opened file object, never the swapped source name");
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert!(
+            same_file::Handle::from_path(&destination).unwrap()
+                == same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap()
+        );
+        assert!(!same_file::is_same_file(&destination, &injected_alias).unwrap());
+        assert_eq!(std::fs::read(&source_name).unwrap(), injected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_handle_rename_rejects_raced_existing_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("stage.bin");
+        let dest = fixture.path().join("published.bin");
+        let outside = fixture.path().join("outside.bin");
+        let sentinel = b"OUTSIDE_ORIGINAL_MUST_SURVIVE";
+        std::fs::write(&outside, sentinel).unwrap();
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&source)
+            .unwrap();
+        opened.write_all(b"VALID_COMPLETE_PAYLOAD").unwrap();
+        opened.sync_all().unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::hard_link(&outside, &dest)
+                        .expect("attacker must occupy target with real hard link");
+                })
+                .join()
+                .unwrap();
+        });
+        let refusal = windows_test_publish_from_open_handle_no_replace(&opened, &dest)
+            .expect_err("existing destination must not be overwritten");
+        assert!(
+            matches!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+            ),
+            "unexpected native collision error: {refusal}"
+        );
+        assert!(same_file::is_same_file(&outside, &dest).unwrap());
+        assert_eq!(std::fs::read(&outside).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&dest).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&source).unwrap(), b"VALID_COMPLETE_PAYLOAD");
+    }
+
     #[test]
     fn test_only_staged_create_proves_source_name_swap_publishes_attacker_inode_nonrelease() {
         let fixture = tempfile::tempdir().unwrap();

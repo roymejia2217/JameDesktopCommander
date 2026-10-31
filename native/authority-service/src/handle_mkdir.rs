@@ -672,6 +672,19 @@ mod tests {
     use super::*;
     use cap_std::ambient_authority;
 
+    fn random_stage_token() -> String {
+        // A stage identifier is a security-relevant name, even in tests.
+        // Do not teach the fixtures to rely on a hard-coded crypto value.
+        let mut entropy = [0u8; 16];
+        getrandom::fill(&mut entropy).expect("OS CSPRNG must be available");
+        use std::fmt::Write as _;
+        let mut encoded = String::with_capacity(32);
+        for byte in entropy {
+            write!(&mut encoded, "{byte:02x}").expect("writing into String");
+        }
+        encoded
+    }
+
     #[test]
     fn legitimate_single_child_creation_is_relative_to_the_opened_root() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1366,7 +1379,8 @@ mod tests {
             std::fs::create_dir(directory).unwrap();
         }
         let destination = allowed.join("new.bin");
-        let stage_name = ".jdc-create-stage-0123456789abcdef0123456789abcdef";
+        let token = random_stage_token();
+        let stage_name = format!(".jdc-create-stage-{token}");
         let stage_path = private_stage.join(stage_name);
         let external_alias = outside.join("prepublish-alias.bin");
         let payload = b"COMPLETE_BEFORE_PUBLISH";
@@ -1380,7 +1394,7 @@ mod tests {
             .create_new_file_staged_with_prepublish_hook(
                 &staging,
                 "new.bin",
-                "0123456789abcdef0123456789abcdef",
+                &token,
                 payload,
                 || {
                     // Attacker runs after the staged writer finished syncing,
@@ -1417,6 +1431,7 @@ mod tests {
         let exterior = outside.join("victim.bin");
         let sentinel = b"EXTERIOR_BYTES_MUST_SURVIVE";
         std::fs::write(&exterior, sentinel).unwrap();
+        let token = random_stage_token();
         let rooted = RootedDirectory::from_preopened(
             Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
         );
@@ -1426,7 +1441,7 @@ mod tests {
         let result = rooted.create_new_file_staged_with_prepublish_hook(
             &staging,
             "new.bin",
-            "0123456789abcdef0123456789abcdef",
+            &token,
             b"NEVER_OVERWRITE",
             || {
                 std::thread::scope(|threads| {
@@ -1458,8 +1473,8 @@ mod tests {
             std::fs::create_dir(directory).unwrap();
         }
         let destination = allowed.join("new.bin");
-        let source_stage =
-            unprotected_stage.join(".jdc-create-stage-0123456789abcdef0123456789abcdef");
+        let token = random_stage_token();
+        let source_stage = unprotected_stage.join(format!(".jdc-create-stage-{token}"));
         let attacker_alias = outside.join("attacker-stage-link.bin");
         let payload = b"STAGING_CUSTODY_IS_A_REQUIRED_SECURITY_CONDITION";
         let rooted = RootedDirectory::from_preopened(
@@ -1474,7 +1489,7 @@ mod tests {
             .create_new_file_staged_with_prepublish_hook(
                 &staging,
                 "new.bin",
-                "0123456789abcdef0123456789abcdef",
+                &token,
                 payload,
                 || {
                     std::thread::scope(|threads| {

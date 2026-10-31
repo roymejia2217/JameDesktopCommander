@@ -106,15 +106,25 @@ export function createIssuerReadClient({
     if (result.status !== 'ok') return result;
     try {
       const entries = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.bytes));
-      if (!Array.isArray(entries) || entries.length > 256 ||
-          entries.some((name, i) => typeof name !== 'string' ||
-            name.length === 0 ||
-            (i > 0 && entries[i - 1] >= name))) {
+      if (!Array.isArray(entries) || entries.length > 256) {
         throw Error('invalid listing');
       }
+      let previousNameBytes;
       for (const name of entries) {
+        if (typeof name !== 'string' || name.length === 0 ||
+            Buffer.from(name, 'utf8').toString('utf8') !== name) {
+          throw Error('invalid Unicode listing entry');
+        }
         parseListDirectoryRequest({ ...request, relativePath: name });
         if (name.includes('/')) throw Error('nested listing entry');
+        // Rust's String::sort_unstable orders by UTF-8, while JavaScript
+        // string comparison uses UTF-16. Use the sender's exact byte order
+        // and still reject duplicate, reversed, and malformed entry names.
+        const nameBytes = Buffer.from(name, 'utf8');
+        if (previousNameBytes && Buffer.compare(previousNameBytes, nameBytes) >= 0) {
+          throw Error('unsorted listing');
+        }
+        previousNameBytes = nameBytes;
       }
       return Object.freeze({
         version: 1, status: 'ok', entries: Object.freeze(entries),

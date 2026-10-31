@@ -149,3 +149,84 @@ test('shared authority transport validates typed directory listing without grant
     error => error instanceof AuthorityReadTransportError && error.code === 'E_AUTHORITY_REQUEST_INVALID',
   );
 });
+
+test('issuer list accepts real Rust UTF-8 name order across BMP and astral characters', async t => {
+  // Rust String::sort_unstable orders UTF-8 bytes; JavaScript's >= orders
+  // UTF-16 code units. These disagree for U+E000 and U+1F600.
+  const nativeOrder = ['\uE000.txt', '\u{1F600}.txt'];
+  assert.ok(Buffer.compare(Buffer.from(nativeOrder[0]), Buffer.from(nativeOrder[1])) < 0);
+  assert.ok(nativeOrder[0] > nativeOrder[1], 'fixture must distinguish UTF-16 ordering');
+
+  const address = await serve(t, socket => {
+    const chunks = [];
+    let replied = false;
+    socket.on('data', chunk => {
+      if (replied) return;
+      chunks.push(chunk);
+      const frame = Buffer.concat(chunks);
+      if (frame.length < 4 || frame.length < frame.readUInt32BE(0) + 4) return;
+      const body = JSON.parse(frame.subarray(4).toString('utf8'));
+      assert.equal(body.kind, 'list-directory');
+      replied = true;
+      socket.end(reply(Buffer.from(JSON.stringify(nativeOrder), 'utf8')));
+    });
+  });
+  const client = createIssuerReadClient({
+    encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame,
+    MAX_AUTHORITY_READ_PAYLOAD_BYTES, parseReadFileRequest, parseListDirectoryRequest,
+  });
+  const listing = { ...request, kind: 'list-directory', relativePath: 'nested' };
+  assert.deepEqual(
+    await client.exchangeAuthorityListFrame(net.createConnection(address), listing, 1000),
+    { version: 1, status: 'ok', entries: nativeOrder },
+  );
+});
+
+test('issuer list rejects UTF-8-reversed names even when UTF-16 order increases', async t => {
+  const invalidNativeOrder = ['\u{1F600}.txt', '\uE000.txt'];
+  assert.ok(Buffer.compare(Buffer.from(invalidNativeOrder[0]),
+    Buffer.from(invalidNativeOrder[1])) > 0);
+  assert.ok(invalidNativeOrder[0] < invalidNativeOrder[1],
+    'fixture must look sorted under the wrong UTF-16 comparator');
+
+  const address = await serve(t, socket => {
+    let replied = false;
+    socket.on('data', () => {
+      if (replied) return;
+      replied = true;
+      socket.end(reply(Buffer.from(JSON.stringify(invalidNativeOrder), 'utf8')));
+    });
+  });
+  const client = createIssuerReadClient({
+    encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame,
+    MAX_AUTHORITY_READ_PAYLOAD_BYTES, parseReadFileRequest, parseListDirectoryRequest,
+  });
+  const listing = { ...request, kind: 'list-directory', relativePath: 'nested' };
+  await assert.rejects(
+    client.exchangeAuthorityListFrame(net.createConnection(address), listing, 1000),
+    error => error instanceof AuthorityReadTransportError &&
+      error.code === 'E_AUTHORITY_REPLY_INVALID',
+  );
+});
+
+test('issuer list rejects lone UTF-16 surrogates even when JSON escapes them', async t => {
+  const malformed = ['a.txt', 'broken\uD800.txt'];
+  const address = await serve(t, socket => {
+    let replied = false;
+    socket.on('data', () => {
+      if (replied) return;
+      replied = true;
+      socket.end(reply(Buffer.from(JSON.stringify(malformed), 'utf8')));
+    });
+  });
+  const client = createIssuerReadClient({
+    encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame,
+    MAX_AUTHORITY_READ_PAYLOAD_BYTES, parseReadFileRequest, parseListDirectoryRequest,
+  });
+  const listing = { ...request, kind: 'list-directory', relativePath: 'nested' };
+  await assert.rejects(
+    client.exchangeAuthorityListFrame(net.createConnection(address), listing, 1000),
+    error => error instanceof AuthorityReadTransportError &&
+      error.code === 'E_AUTHORITY_REPLY_INVALID',
+  );
+});

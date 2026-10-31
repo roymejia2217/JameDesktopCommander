@@ -229,7 +229,7 @@ mod tests {
             Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
         );
         rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "target.bin",
                 "0123456789abcdef0123456789abcdef",

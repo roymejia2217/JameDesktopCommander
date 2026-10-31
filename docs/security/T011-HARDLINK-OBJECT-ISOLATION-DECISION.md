@@ -171,19 +171,69 @@ integrity has no evidentiary value for the originally requested protection.
 | Search / external processors | Never hand an ambient pathname to `ripgrep` or a document library and assume a native capability applies. Use safely acquired bytes/handles or typed unsupported response |
 | Policy changes / process failure | Hold immutable policy and native object lifetime throughout the operation. Revocation, wrong-architecture addon, cancellation or unavailable backend must not enable pathname fallback |
 
-**Observed staged-replacement review gap (2026-10-30, not fixed):**
-`RootedDirectory::replace_existing_file_staged` checks the opened destination
-file's link count before it creates and syncs the protected staging file. It
-later renames onto a destination **name**, without atomically comparing that
-name to the previously observed file object at commit time. Another process
-could change the entry or its hard-link topology between those steps. This is
-a code-level audit finding, **not** a demonstrated exploit or proof of safe
-replacement. A later `nlink` recheck alone would not linearize ownership.
-The real-kernel concurrent tests must verify the attacker transition occurred,
-the original and destination object identities, exact outside sentinel bytes,
-staging cleanup on denial and the final visible result on both native OSes.
-Do not enable the experimental replacement or relax the four original RED
-scenarios pending an independently reviewed object-custody contract.
+**Staged-replacement race evidence and residual gap (2026-10-31):**
+`RootedDirectory::replace_existing_file_staged` originally checked the
+opened destination file's link count before preparing its private staging
+file and later renamed onto the destination **name**. Two deterministic
+Windows real-kernel OS-thread tests proved distinct policy failures (unexpected
+`Ok(())` where the restricted operation had to DENY): (1) creation of an
+outside hard link after the original preflight and staged-file sync; and
+(2) moving the original single-link file aside and substituting an outside
+object under the original destination name while the opened original handle
+remained valid. These are measured RED cases, not hypothetical races.
+
+The experimental non-shipping PR #234 adds a link-count recheck through the
+**same opened original handle**, then compares that handle with a fresh
+**pinned-parent-relative opened handle** of the final destination name.
+In the two measured interleavings the implementation now returns
+`E_REPLACE_SHARED_OBJECT` or `E_REPLACE_OBJECT_CHANGED`, respectively,
+preserving exact original/exterior bytes and removing the private staging
+file. Native Windows and Linux CI passed at code HEAD `2b3f424`;
+this later documentation correction does not change the native implementation.
+
+**Unresolved, production-blocking:** both observations still precede
+`rename`; an attacker who can mutate the destination namespace between
+the final identity check and commit can invalidate the decision. Neither
+`nlink == 1` nor `same-file` comparison proves the origin of the object or
+provides an atomic compare-and-replace. A privileged bind mount remains a
+demonstrated Linux counterexample to storage separation without a defended
+mount/principal model.
+
+**Conservative no-release boundary (2026-10-31, PR #234):** the
+staged-replacement method and the protected staging capability now compile
+**only under Rust `cfg(test)`**. The test-visible method returns
+`E_REPLACE_ATOMICITY_UNPROVEN` before any staging write or destination
+mutation. Its former handle-relative replacement algorithm remains private
+to the native OS fixture tests via an explicitly named
+`replace_existing_file_staged_fixture` entry point, so genuine positive and
+adversarial cases continue to execute without exposing a callable replacement
+method in normal builds. A Rust `compile_fail` doctest verifies the public
+method is absent in the normal library artifact. This does **not** establish
+invariant O or authorize any read/write/rename route.
+
+**Create-only publication counterexample (2026-10-31, PR #234):** a separate
+real Windows OS thread created a hard link outside the permitted root after
+the experimental `create_new_file` opened a zero-length destination but
+**before** the writer emitted bytes. The opened handle remained valid, the
+writer returned success, and the outside alias received the entire payload.
+The earlier create-only competition test (both threads racing to create the
+**same name**) did not cover this second interleaving. The evidence is retained
+as an explicitly unsafe test-only **negative counterexample**: the fixture
+must prove the alias was created at zero length, refers to the same kernel
+object and receives the bytes. It must **never** be mistaken for an accepted
+security behavior. The ordinary-build `create_new_file` API is now also
+absent under `cfg(test)`; the test-visible method returns
+`E_CREATE_ONLY_CUSTODY_UNPROVEN` before any creation. Existing positive and
+adversarial tests call the separate `create_new_file_fixture` implementation,
+and a normal-library `compile_fail` doctest verifies the gate. This is a
+deliberate feature exclusion, not a proof that create-only is safe under an
+attacker-writable namespace. A future approved implementation must make the
+entire write complete **before** publishing the new inode and prove
+private-staging, no-overwrite publication and principal custody on both
+operating systems.
+
+#148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
+contract and the original #147 scenarios prove invariant O on both OSes.
 
 **Execution order and acceptance, all mandatory:**
 

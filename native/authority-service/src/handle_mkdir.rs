@@ -3,8 +3,12 @@
 //! The caller must supply an OS-attested, already-open directory capability.
 #[cfg(target_os = "linux")]
 use cap_fs_ext::DirExt;
-use cap_std::fs::{Dir, OpenOptions};
-use std::io::{self, Read, Write};
+use cap_std::fs::Dir;
+#[cfg(test)]
+use cap_std::fs::OpenOptions;
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 
 use crate::canonical_request::safe_relative_path;
 
@@ -17,6 +21,16 @@ use crate::canonical_request::safe_relative_path;
 /// use jdc_authority_service::handle_mkdir::RootedDirectory;
 /// let unapproved = Dir::open_ambient_dir(".", ambient_authority()).unwrap();
 /// let _forged = RootedDirectory::from_preopened(unapproved);
+/// ```
+/// Unproven staged replacement is not even compiled into a normal library:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::RootedDirectory;
+/// let _ = RootedDirectory::replace_existing_file_staged;
+/// ```
+/// Unsafe create-only writes are similarly absent in non-test builds:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::RootedDirectory;
+/// let _ = RootedDirectory::create_new_file;
 /// ```
 pub struct RootedDirectory {
     root: Dir,
@@ -45,10 +59,12 @@ pub struct RootedDirectory {
 /// use jdc_authority_service::handle_mkdir::ProtectedStagingDirectory;
 /// let _stage = ProtectedStagingDirectory::from_provisioned_linux_state();
 /// ```
+#[cfg(test)]
 pub struct ProtectedStagingDirectory {
     root: Dir,
 }
 
+#[cfg(test)]
 impl ProtectedStagingDirectory {
     /// Windows bootstrap consumes a preopened directory handle; the OS token,
     /// protected DACL and service SID are checked before accepting it.
@@ -335,12 +351,35 @@ impl RootedDirectory {
         Ok(names)
     }
 
-    /// Strict create-only, bounded data write under an already-open root.
-    /// Never opens or truncates existing files, including external hardlink
-    /// aliases; no ambient paths or symlink-following path revalidation.
-    /// Not atomic visibility and not an authenticated/published broker API.
-    pub fn create_new_file(&self, relative: &str, bytes: &[u8]) -> io::Result<()> {
+    /// Conservative non-release gate: create-only writes to an attacker-
+    /// writable directory are unsafe before filesystem object custody is
+    /// proven. Never open or publish a file through this test-only public API.
+    #[cfg(test)]
+    pub fn create_new_file(&self, _relative: &str, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_CREATE_ONLY_CUSTODY_UNPROVEN",
+        ))
+    }
+
+    // Genuine OS-positive/negative fixtures are preserved without exporting
+    // a callable creation method in an ordinary library or service build.
+    #[cfg(test)]
+    fn create_new_file_fixture(&self, relative: &str, bytes: &[u8]) -> io::Result<()> {
+        self.create_new_file_with_post_create_hook(relative, bytes, || {})
+    }
+
+    // Test-only hook for proving the actual post-create / prewrite race.
+    // This algorithm is UNSAFE in a directory writable by another principal.
+    #[cfg(test)]
+    fn create_new_file_with_post_create_hook(
+        &self,
+        relative: &str,
+        bytes: &[u8],
+        after_create: impl FnOnce(),
+    ) -> io::Result<()> {
         const MAX_CREATE_BYTES: usize = 1024 * 1024;
+        let mut after_create = Some(after_create);
         if !safe_relative_path(relative) || bytes.len() > MAX_CREATE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -358,6 +397,7 @@ impl RootedDirectory {
                 let mut options = OpenOptions::new();
                 options.write(true).create_new(true);
                 let mut file = parent.open_with(component, &options)?;
+                after_create.take().expect("new file opened once")();
                 file.write_all(bytes)?;
                 file.sync_all()?;
             }
@@ -365,18 +405,53 @@ impl RootedDirectory {
         Ok(())
     }
 
-    /// Experimental **replace-by-new-inode** semantics. Never opens the old
-    /// final inode for writing, which matters for cross-root hardlink aliases.
-    /// A future broker must prove separate-principal staging custody, same-volume
-    /// rename, destination state under races and crash recovery. In particular,
-    /// the destination might disappear between metadata and rename; this is NOT
-    /// yet an atomic compare-and-replace contract. There is no MCP grant here.
+    /// Conservative non-release fallback: without OS-enforced exclusive
+    /// custody or an atomic expected-object commit, replacement is UNAVAILABLE.
+    /// Reject before inspecting paths, creating staging files or changing bytes.
+    /// The experimental algorithm remains compiled only for Rust unit tests.
+    #[cfg(test)]
     pub fn replace_existing_file_staged(
+        &self,
+        _staging: &ProtectedStagingDirectory,
+        _relative: &str,
+        _stage_nonce: &str,
+        _bytes: &[u8],
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_REPLACE_ATOMICITY_UNPROVEN",
+        ))
+    }
+
+    // Preserve positive and adversarial native OS fixtures while public
+    // replacement is permanently deny-only until a reviewed custody design.
+    #[cfg(test)]
+    pub(crate) fn replace_existing_file_staged_fixture(
         &self,
         staging: &ProtectedStagingDirectory,
         relative: &str,
         stage_nonce: &str,
         bytes: &[u8],
+    ) -> io::Result<()> {
+        self.replace_existing_file_staged_with_precommit_hook(
+            staging,
+            relative,
+            stage_nonce,
+            bytes,
+            || {},
+        )
+    }
+
+    // Test-only deterministic race injection: NEVER compiled into native
+    // service or addon production/library artifact without cfg(test).
+    #[cfg(test)]
+    fn replace_existing_file_staged_with_precommit_hook(
+        &self,
+        staging: &ProtectedStagingDirectory,
+        relative: &str,
+        stage_nonce: &str,
+        bytes: &[u8],
+        before_commit: impl FnOnce(),
     ) -> io::Result<()> {
         const MAX_BYTES: usize = 1024 * 1024;
         let valid_nonce = stage_nonce.len() == 32
@@ -426,6 +501,48 @@ impl RootedDirectory {
                     return Err(err);
                 }
                 drop(fresh);
+                before_commit();
+                // The initial opened-handle observation can become stale while
+                // the replacement is being synchronized. Reject a now-shared
+                // original object before changing any destination entry.
+                // This narrows one interleaving; it is NOT an atomic compare-
+                // and-replace or a proof against subsequent aliases.
+                let still_private = existing
+                    .metadata()
+                    .map(|observed| {
+                        observed.is_file() && cap_fs_ext::MetadataExt::nlink(&observed) == 1
+                    })
+                    .unwrap_or(false);
+                if !still_private {
+                    let _ = staging.root.remove_file(&stage);
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_SHARED_OBJECT",
+                    ));
+                }
+                // The last directory *name* can point to a different object
+                // even though the original opened handle remains private.
+                // Compare independent OS handles, acquired relative to the
+                // same pinned directory. Do not reopen an ambient path.
+                // This still does NOT couple the comparison atomically to
+                // the subsequent rename operation.
+                let still_same_destination = (|| -> io::Result<bool> {
+                    let now_named = parent.open(component)?;
+                    if !now_named.metadata()?.is_file() {
+                        return Ok(false);
+                    }
+                    let original = same_file::Handle::from_file(existing.try_clone()?.into_std())?;
+                    let current = same_file::Handle::from_file(now_named.into_std())?;
+                    Ok(original == current)
+                })()
+                .unwrap_or(false);
+                if !still_same_destination {
+                    let _ = staging.root.remove_file(&stage);
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_OBJECT_CHANGED",
+                    ));
+                }
                 let replaced = staging.root.rename(&stage, parent, component);
                 if replaced.is_err() {
                     let _ = staging.root.remove_file(&stage);
@@ -616,7 +733,7 @@ mod tests {
             Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
         );
         rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -819,6 +936,155 @@ mod tests {
     }
 
     #[test]
+    fn public_staged_replacement_denies_without_atomic_object_custody_before_any_write() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage_dir = fixture.path().join("private-stage");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+        let destination = allowed.join("file.bin");
+        let original = b"EXISTING_BYTES_MUST_REMAIN";
+        std::fs::write(&destination, original).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        let denial = rooted
+            .replace_existing_file_staged(
+                &staging,
+                "file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"UNPROVEN_REPLACEMENT_MUST_NOT_COMMIT",
+            )
+            .expect_err("public replacement cannot commit without atomic object custody proof");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_ATOMICITY_UNPROVEN");
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_replacement_denies_destination_name_swapped_to_outside_object() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        let stage_dir = fixture.path().join("private-stage");
+        for directory in [&allowed, &outside, &stage_dir] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let target = allowed.join("file.bin");
+        let parked = allowed.join("parked-original.bin");
+        let outside_object = outside.join("outside-object.bin");
+        let original = b"ORIGINAL_AUTHORIZED_BYTES";
+        let sentinel = b"OUTSIDE_SENTINEL_MUST_STAY";
+        std::fs::write(&target, original).unwrap();
+        std::fs::write(&outside_object, sentinel).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+
+        let result = rooted.replace_existing_file_staged_with_precommit_hook(
+            &staging,
+            "file.bin",
+            "0123456789abcdef0123456789abcdef",
+            b"NEW_BYTES_NOT_AUTHORIZED_AFTER_SWAP",
+            || {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            // The original *opened* handle stays a single-link
+                            // regular file, while the destination name is replaced
+                            // by an independently owned object from outside.
+                            std::fs::rename(&target, &parked)
+                                .expect("actual original rename must succeed");
+                            std::fs::hard_link(&outside_object, &target)
+                                .expect("actual attacker alias must succeed");
+                        })
+                        .join()
+                        .expect("attacker OS thread must run");
+                });
+                assert!(same_file::is_same_file(&target, &outside_object).unwrap());
+                assert_eq!(std::fs::read(&parked).unwrap(), original);
+                assert_eq!(
+                    cap_fs_ext::MetadataExt::nlink(
+                        &rooted.root.symlink_metadata("parked-original.bin").unwrap()
+                    ),
+                    1
+                );
+            },
+        );
+        let denial =
+            result.expect_err("a changed destination object must never be silently overwritten");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_OBJECT_CHANGED");
+        assert_eq!(std::fs::read(&parked).unwrap(), original);
+        assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&outside_object).unwrap(), sentinel);
+        assert!(same_file::is_same_file(&target, &outside_object).unwrap());
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_replacement_denies_hardlink_added_after_preflight_before_commit() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        let private_stage = fixture.path().join("private-stage");
+        for directory in [&allowed, &outside, &private_stage] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let internal = allowed.join("file.bin");
+        let external_alias = outside.join("external-alias.bin");
+        let original = b"KEEP_ORIGINAL_OBJECT_BYTES";
+        std::fs::write(&internal, original).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+
+        let denial = rooted
+            .replace_existing_file_staged_with_precommit_hook(
+                &staging,
+                "file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"SHOULD_NOT_COMMIT",
+                || {
+                    // The real kernel sees the alias appear only after the
+                    // opened handle passed the first nlink==1 check and the
+                    // private replacement bytes were staged and synchronized.
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                std::fs::hard_link(&internal, &external_alias)
+                                    .expect("OS attacker hardlink must succeed");
+                            })
+                            .join()
+                            .expect("attacker thread must run");
+                    });
+                    assert!(same_file::is_same_file(&internal, &external_alias).unwrap());
+                    assert_eq!(std::fs::read(&external_alias).unwrap(), original);
+                },
+            )
+            .expect_err("a new exterior alias before commit must abort replacement");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_SHARED_OBJECT");
+        assert_eq!(std::fs::read(&internal).unwrap(), original);
+        assert_eq!(std::fs::read(&external_alias).unwrap(), original);
+        assert_eq!(
+            std::fs::read_dir(&private_stage).unwrap().count(),
+            0,
+            "failed commit must clean only its own protected staging file",
+        );
+    }
+
+    #[test]
     fn staged_replacement_must_reject_known_shared_inode_before_any_staging_write() {
         let fixture = tempfile::tempdir().unwrap();
         let allowed = fixture.path().join("allowed");
@@ -846,7 +1112,7 @@ mod tests {
             root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
         };
         let denial = rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -889,7 +1155,7 @@ mod tests {
             root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
         };
         rooted
-            .replace_existing_file_staged(&staging, "target.bin", nonce, b"NEW_IN_ROOT")
+            .replace_existing_file_staged_fixture(&staging, "target.bin", nonce, b"NEW_IN_ROOT")
             .expect("private stage must be independent of destination namespace");
         assert_eq!(std::fs::read(&victim).unwrap(), protected_bytes);
         assert_eq!(std::fs::read(&hostile_stage).unwrap(), protected_bytes);
@@ -918,7 +1184,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(&staging, "file.bin", nonce, b"WRONG",)
+            .replace_existing_file_staged_fixture(&staging, "file.bin", nonce, b"WRONG",)
             .is_err());
         assert_eq!(
             std::fs::read(allowed.join("file.bin")).unwrap(),
@@ -958,7 +1224,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "junction/file.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -990,7 +1256,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias/file.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -1022,10 +1288,68 @@ mod tests {
             "0000",
         ] {
             assert!(rooted
-                .replace_existing_file_staged(&staging, "file.bin", invalid, b"CHANGE")
+                .replace_existing_file_staged_fixture(&staging, "file.bin", invalid, b"CHANGE")
                 .is_err());
             assert_eq!(std::fs::read(allowed.join("file.bin")).unwrap(), b"SAFE");
         }
+    }
+
+    #[test]
+    fn experimental_create_only_fixture_proves_postcreate_alias_receives_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let inside = allowed.join("new.bin");
+        let exterior_alias = outside.join("linked-while-open.bin");
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let payload = b"BYTES_NEVER_AUTHORIZED_OUTSIDE_ROOT";
+        let result = rooted.create_new_file_with_post_create_hook("new.bin", payload, || {
+            std::thread::scope(|threads| {
+                threads
+                    .spawn(|| {
+                        std::fs::hard_link(&inside, &exterior_alias)
+                            .expect("attacker OS thread must create an actual hardlink");
+                    })
+                    .join()
+                    .expect("attacker thread must finish");
+            });
+            assert!(same_file::is_same_file(&inside, &exterior_alias).unwrap());
+            assert_eq!(
+                std::fs::metadata(&exterior_alias).unwrap().len(),
+                0,
+                "alias must be inserted after file creation but before any bytes are written"
+            );
+        });
+        result.expect("negative-control fixture must demonstrate the unsafe write");
+        assert!(
+            same_file::is_same_file(&inside, &exterior_alias).unwrap(),
+            "outside link must be the same newly created inode"
+        );
+        assert_eq!(
+            std::fs::read(&exterior_alias).unwrap(),
+            payload,
+            "NEGATIVE SECURITY EVIDENCE: ordinary create-only writes mutated an exterior alias"
+        );
+    }
+
+    #[test]
+    fn public_create_only_without_exclusive_custody_denies_before_creating_any_file() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let denied = rooted
+            .create_new_file("new.bin", b"NO_PUBLIC_CREATE_WITHOUT_CUSTODY")
+            .expect_err("unverified destination directory must never publish a file");
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denied.to_string(), "E_CREATE_ONLY_CUSTODY_UNPROVEN");
+        assert_eq!(std::fs::read_dir(&allowed).unwrap().count(), 0);
     }
 
     #[test]
@@ -1043,7 +1367,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(cap
-            .create_new_file("alias.bin", b"MALICIOUS_OVERWRITE")
+            .create_new_file_fixture("alias.bin", b"MALICIOUS_OVERWRITE")
             .is_err());
         assert_eq!(
             std::fs::read(&original).unwrap(),
@@ -1055,14 +1379,14 @@ mod tests {
         );
 
         std::fs::create_dir(root.join("nested")).unwrap();
-        cap.create_new_file("nested/genuine.bin", &[0, 1, 2, 255])
+        cap.create_new_file_fixture("nested/genuine.bin", &[0, 1, 2, 255])
             .unwrap();
         assert_eq!(
             std::fs::read(root.join("nested/genuine.bin")).unwrap(),
             [0, 1, 2, 255]
         );
         assert!(cap
-            .create_new_file("nested/genuine.bin", b"REWRITE")
+            .create_new_file_fixture("nested/genuine.bin", b"REWRITE")
             .is_err());
         assert_eq!(
             std::fs::read(root.join("nested/genuine.bin")).unwrap(),
@@ -1099,7 +1423,7 @@ mod tests {
                 let writer = threads.spawn(|| {
                     writer_gate.wait();
                     capability
-                        .create_new_file(&alias_name, writer_bytes)
+                        .create_new_file_fixture(&alias_name, writer_bytes)
                         .is_ok()
                 });
                 let attacker = threads.spawn(|| {
@@ -1136,7 +1460,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(capability
-            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .create_new_file_fixture("alias/forbidden.bin", b"ATTACK")
             .is_err());
         assert!(!outside.join("forbidden.bin").exists());
         assert_eq!(
@@ -1167,7 +1491,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(capability
-            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .create_new_file_fixture("alias/forbidden.bin", b"ATTACK")
             .is_err());
         assert!(!outside.join("forbidden.bin").exists());
         assert_eq!(
@@ -1195,13 +1519,13 @@ mod tests {
             "missing/child",
         ] {
             assert!(
-                cap.create_new_file(path, b"data").is_err(),
+                cap.create_new_file_fixture(path, b"data").is_err(),
                 "unexpected creation for {path}"
             );
         }
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());
         assert!(cap
-            .create_new_file("too-large.bin", &vec![1; 1_048_577])
+            .create_new_file_fixture("too-large.bin", &vec![1; 1_048_577])
             .is_err());
         assert!(!root.join("too-large.bin").exists());
     }

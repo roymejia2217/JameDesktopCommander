@@ -17,7 +17,7 @@ concurrency:
 env:
   HUSKY: '0'
   PUPPETEER_SKIP_DOWNLOAD: '1'
-  JDC_CANDIDATE_INCLUDE_NATIVE: '1'
+  JDC_CANDIDATE_INCLUDE_NATIVE: '0'
 
 jobs:
   portable-candidate:
@@ -67,7 +67,7 @@ jobs:
         run: node --test test/test-filesystem-policy-fail-closed.js
 
       - name: Run packaging security regression tests
-        run: node --test test/distribution-candidate.test.js
+        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
@@ -78,16 +78,16 @@ jobs:
       - name: Verify committed native dependency lock
         run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
 
-      # The FFI class and its adversarial probes are retained in research PRs
-      # #131/#147 only. Candidate packaging may build the deny-only addon,
-      # but cannot claim that restricted filesystem capabilities are ready.
+      # Retain native denial and FFI-negative checks as CI gates, but never
+      # stage a native addon into a portable candidate while #124 is unresolved.
+      # The broker uses a separate authenticated IPC design, not a JS class.
       - name: Compile deny-only native addon from locked source
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
 
       - name: Verify deny-only native addon surface before staging
         run: node --test test/security/capability-default-surface.test.cjs
 
-      - name: Stage Node runtime and native capability with hashed manifest
+      - name: Stage Node runtime without native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build
 
       - name: Independently verify staged bytes and provenance
@@ -144,3 +144,100 @@ jobs:
           set -euo pipefail
           sudo loginctl disable-linger "$(id -un)"
 
+      - name: Verify installer provenance
+        run: node scripts/validate-installer-input.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}" "${{ matrix.target }}" "${{ env.JDC_CANDIDATE_SOURCE_SHA }}"
+
+      # Builds are non-release candidates. Release Please alone controls
+      # release versions/tags; no workflow here may publish or sign artifacts.
+      - name: Compile Inno Setup installer candidate
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        env:
+          JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-win32-x64
+          JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_INSTALLER_VERSION = (node -p "require('./package.json').version").Trim()
+          $tools = Join-Path $env:RUNNER_TEMP 'inno-pinned'
+          New-Item -ItemType Directory -Path $tools -Force | Out-Null
+          $pkg = Join-Path $tools 'tools.innosetup.6.7.3.nupkg'
+          Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/tools.innosetup/6.7.3/tools.innosetup.6.7.3.nupkg' -OutFile $pkg
+          $expected = 'F780898E402FF80612CC8D9FCB8C6E02932BD1CB4C900FFDAA31F9341CFB49F4'
+          if ((Get-FileHash -LiteralPath $pkg -Algorithm SHA256).Hash -ne $expected) { throw 'Inno compiler digest mismatch' }
+          $zip = Join-Path $tools 'tools.zip'
+          Copy-Item -LiteralPath $pkg -Destination $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tools 'compiler')
+          $compiler = Join-Path $tools 'compiler/tools/ISCC.exe'
+          if ((Get-AuthenticodeSignature -LiteralPath $compiler).Status -ne 'Valid') { throw 'Inno compiler signature invalid' }
+          New-Item -ItemType Directory -Path $env:JDC_INSTALLER_OUTPUT -Force | Out-Null
+          & $compiler /Qp 'packaging/windows/JameDesktopCommander.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
+
+      - name: Verify Windows installer install and uninstall
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (node -p "require('./package.json').version").Trim()
+          $setup = Join-Path $env:RUNNER_TEMP "jdc-installer-output/UNPUBLISHED-jdc-installer-win32-x64.exe"
+          if (!(Test-Path -LiteralPath $setup)) { throw 'Windows installer missing' }
+          $target = Join-Path $env:RUNNER_TEMP 'isolated-installer-acceptance'
+          $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Windows install failed: $($result.ExitCode)" }
+          $runtime = Join-Path $target 'runtime/node.exe'
+          if (!(Test-Path -LiteralPath $runtime)) { throw 'Installed runtime missing' }
+          & $runtime --version
+          if ($LASTEXITCODE -ne 0) { throw 'Installed Node execution failed' }
+          if (!(Test-Path (Join-Path $target 'dist/index.js'))) { throw 'Installed MCP entrypoint missing' }
+          $uninstall = Get-ChildItem -LiteralPath $target -Filter 'unins*.exe' -File | Select-Object -First 1
+          if (!$uninstall) { throw 'Expected Inno uninstall executable missing' }
+          $result = Start-Process -FilePath $uninstall.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Windows uninstall failed: $($result.ExitCode)" }
+
+      - name: Build nFPM Debian installer candidate
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        env:
+          JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-linux-x64
+          JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
+        run: |
+          set -euo pipefail
+          JDC_INSTALLER_VERSION="$(node -p "require('./package.json').version")"
+          export JDC_INSTALLER_VERSION
+          mkdir -p "$RUNNER_TEMP/nfpm-2.48.0" "$JDC_INSTALLER_OUTPUT"
+          package="$RUNNER_TEMP/nfpm-2.48.0/nfpm.tar.gz"
+          curl --fail --location --retry 3 --max-time 90 \
+            --output "$package" \
+            'https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz'
+          echo '6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  '"$package" | sha256sum --check --status
+          tar -xzf "$package" -C "$RUNNER_TEMP/nfpm-2.48.0"
+          "$RUNNER_TEMP/nfpm-2.48.0/nfpm" package --config packaging/linux/nfpm.yaml \
+            --packager deb \
+            --target "$JDC_INSTALLER_OUTPUT/UNPUBLISHED-jdc-installer-linux-x64.deb"
+
+      - name: Verify Debian install and remove
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          deb="$RUNNER_TEMP/jdc-installer-output/UNPUBLISHED-jdc-installer-linux-x64.deb"
+          test "$(dpkg-deb --field "$deb" Architecture)" = 'amd64'
+          test "$(dpkg-deb --field "$deb" Version)" = "${version}-1"
+          dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/runtime/node' >/dev/null
+          dpkg-deb --contents "$deb" | grep -F '/usr/bin/jdc' >/dev/null
+          sudo dpkg -i "$deb"
+          test -x /opt/jame-desktop-commander/runtime/node
+          /opt/jame-desktop-commander/runtime/node --version
+          test -x /usr/bin/jdc
+          sudo dpkg -r jame-desktop-commander
+          test ! -e /usr/bin/jdc
+
+      - name: Retain unpublished installer candidates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: UNPUBLISHED-jdc-installer-${{ matrix.target }}
+          path: ${{ runner.temp }}/jdc-installer-output/UNPUBLISHED-jdc-installer-${{ matrix.target }}.${{ matrix.target == 'win32-x64' && 'exe' || 'deb' }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

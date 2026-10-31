@@ -492,6 +492,15 @@ mod tests {
             )
             .unwrap()
         };
+        // Exercise an actual SQLite UNIQUE replay constraint, rather than
+        // simulating a durable-store failure with a preselected Err value.
+        let sqlite = rusqlite::Connection::open(fixture.path().join("claims.sqlite3")).unwrap();
+        sqlite
+            .execute_batch(
+                "CREATE TABLE replay_claims (request BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID",
+            )
+            .unwrap();
+        let mut claim_attempts = 0usize;
         // Malformed/unsupported requests do not spend replay or revoke a
         // healthy issuer. Do not let unauthenticated noise become a DoS latch.
         assert_eq!(
@@ -513,35 +522,60 @@ mod tests {
                 &mut roots,
                 7,
                 frame("read-file", SECOND, "11111111-1111-4111-8111-111111111111"),
-                |_| Ok(()),
+                |id| {
+                    claim_attempts += 1;
+                    sqlite
+                        .execute("INSERT INTO replay_claims (request) VALUES (?1)", [&id[..]])
+                        .map(|_| ())
+                        .map_err(|_| DispatchDenied)
+                },
             ),
             Ok(b"B".to_vec()),
         );
-        let mut failed_claims = 0;
+        assert_eq!(claim_attempts, 1);
+        // Reusing the same authenticated request identity against a DIFFERENT
+        // root must hit SQLite's actual UNIQUE constraint and poison ALL roots.
         assert_eq!(
             execute_claimed_readonly_on_roots(
                 &mut roots,
                 7,
-                frame("read-file", FIRST, "22222222-2222-4222-8222-222222222222"),
-                |_| {
-                    failed_claims += 1;
+                frame("read-file", FIRST, "11111111-1111-4111-8111-111111111111"),
+                |id| {
+                    claim_attempts += 1;
+                    let error = sqlite
+                        .execute("INSERT INTO replay_claims (request) VALUES (?1)", [&id[..]])
+                        .expect_err("duplicate durable request identity must fail in SQLite");
+                    assert_eq!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::ConstraintViolation),
+                    );
                     Err(DispatchDenied)
                 },
             ),
             Err(DispatchDenied),
-            "persistent replay failure must not expose any payload",
+            "SQLite duplicate replay failure must not expose any payload",
         );
-        assert_eq!(failed_claims, 1);
+        assert_eq!(claim_attempts, 2);
         assert_eq!(
             execute_claimed_readonly_on_roots(
                 &mut roots,
                 7,
                 frame("read-file", SECOND, "33333333-3333-4333-8333-333333333333"),
-                |_| Ok(()),
+                |_| panic!("globally revoked issuer must never spend replay again"),
             ),
             Err(DispatchDenied),
             "revocation must reach every root, even if the ledger later appears healthy",
         );
+        assert_eq!(claim_attempts, 2);
+        let rows: i64 = sqlite
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "failed requests cannot change durable replay state"
+        );
+        assert_eq!(std::fs::read(allowed_a.join("inside.bin")).unwrap(), b"A");
+        assert_eq!(std::fs::read(allowed_b.join("inside.bin")).unwrap(), b"B");
     }
 
     #[test]

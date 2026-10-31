@@ -211,6 +211,27 @@ method in normal builds. A Rust `compile_fail` doctest verifies the public
 method is absent in the normal library artifact. This does **not** establish
 invariant O or authorize any read/write/rename route.
 
+**Create-only publication counterexample (2026-10-31, PR #234):** a separate
+real Windows OS thread created a hard link outside the permitted root after
+the experimental `create_new_file` opened a zero-length destination but
+**before** the writer emitted bytes. The opened handle remained valid, the
+writer returned success, and the outside alias received the entire payload.
+The earlier create-only competition test (both threads racing to create the
+**same name**) did not cover this second interleaving. The evidence is retained
+as an explicitly unsafe test-only **negative counterexample**: the fixture
+must prove the alias was created at zero length, refers to the same kernel
+object and receives the bytes. It must **never** be mistaken for an accepted
+security behavior. The ordinary-build `create_new_file` API is now also
+absent under `cfg(test)`; the test-visible method returns
+`E_CREATE_ONLY_CUSTODY_UNPROVEN` before any creation. Existing positive and
+adversarial tests call the separate `create_new_file_fixture` implementation,
+and a normal-library `compile_fail` doctest verifies the gate. This is a
+deliberate feature exclusion, not a proof that create-only is safe under an
+attacker-writable namespace. A future approved implementation must make the
+entire write complete **before** publishing the new inode and prove
+private-staging, no-overwrite publication and principal custody on both
+operating systems.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

@@ -3,8 +3,12 @@
 //! The caller must supply an OS-attested, already-open directory capability.
 #[cfg(target_os = "linux")]
 use cap_fs_ext::DirExt;
-use cap_std::fs::{Dir, OpenOptions};
-use std::io::{self, Read, Write};
+use cap_std::fs::Dir;
+#[cfg(test)]
+use cap_std::fs::OpenOptions;
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 
 use crate::canonical_request::safe_relative_path;
 
@@ -22,6 +26,11 @@ use crate::canonical_request::safe_relative_path;
 /// ```compile_fail
 /// use jdc_authority_service::handle_mkdir::RootedDirectory;
 /// let _ = RootedDirectory::replace_existing_file_staged;
+/// ```
+/// Unsafe create-only writes are similarly absent in non-test builds:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::RootedDirectory;
+/// let _ = RootedDirectory::create_new_file;
 /// ```
 pub struct RootedDirectory {
     root: Dir,
@@ -342,12 +351,35 @@ impl RootedDirectory {
         Ok(names)
     }
 
-    /// Strict create-only, bounded data write under an already-open root.
-    /// Never opens or truncates existing files, including external hardlink
-    /// aliases; no ambient paths or symlink-following path revalidation.
-    /// Not atomic visibility and not an authenticated/published broker API.
-    pub fn create_new_file(&self, relative: &str, bytes: &[u8]) -> io::Result<()> {
+    /// Conservative non-release gate: create-only writes to an attacker-
+    /// writable directory are unsafe before filesystem object custody is
+    /// proven. Never open or publish a file through this test-only public API.
+    #[cfg(test)]
+    pub fn create_new_file(&self, _relative: &str, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_CREATE_ONLY_CUSTODY_UNPROVEN",
+        ))
+    }
+
+    // Genuine OS-positive/negative fixtures are preserved without exporting
+    // a callable creation method in an ordinary library or service build.
+    #[cfg(test)]
+    fn create_new_file_fixture(&self, relative: &str, bytes: &[u8]) -> io::Result<()> {
+        self.create_new_file_with_post_create_hook(relative, bytes, || {})
+    }
+
+    // Test-only hook for proving the actual post-create / prewrite race.
+    // This algorithm is UNSAFE in a directory writable by another principal.
+    #[cfg(test)]
+    fn create_new_file_with_post_create_hook(
+        &self,
+        relative: &str,
+        bytes: &[u8],
+        after_create: impl FnOnce(),
+    ) -> io::Result<()> {
         const MAX_CREATE_BYTES: usize = 1024 * 1024;
+        let mut after_create = Some(after_create);
         if !safe_relative_path(relative) || bytes.len() > MAX_CREATE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -365,6 +397,7 @@ impl RootedDirectory {
                 let mut options = OpenOptions::new();
                 options.write(true).create_new(true);
                 let mut file = parent.open_with(component, &options)?;
+                after_create.take().expect("new file opened once")();
                 file.write_all(bytes)?;
                 file.sync_all()?;
             }
@@ -1262,6 +1295,64 @@ mod tests {
     }
 
     #[test]
+    fn experimental_create_only_fixture_proves_postcreate_alias_receives_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let inside = allowed.join("new.bin");
+        let exterior_alias = outside.join("linked-while-open.bin");
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let payload = b"BYTES_NEVER_AUTHORIZED_OUTSIDE_ROOT";
+        let result = rooted.create_new_file_with_post_create_hook("new.bin", payload, || {
+            std::thread::scope(|threads| {
+                threads
+                    .spawn(|| {
+                        std::fs::hard_link(&inside, &exterior_alias)
+                            .expect("attacker OS thread must create an actual hardlink");
+                    })
+                    .join()
+                    .expect("attacker thread must finish");
+            });
+            assert!(same_file::is_same_file(&inside, &exterior_alias).unwrap());
+            assert_eq!(
+                std::fs::metadata(&exterior_alias).unwrap().len(),
+                0,
+                "alias must be inserted after file creation but before any bytes are written"
+            );
+        });
+        result.expect("negative-control fixture must demonstrate the unsafe write");
+        assert!(
+            same_file::is_same_file(&inside, &exterior_alias).unwrap(),
+            "outside link must be the same newly created inode"
+        );
+        assert_eq!(
+            std::fs::read(&exterior_alias).unwrap(),
+            payload,
+            "NEGATIVE SECURITY EVIDENCE: ordinary create-only writes mutated an exterior alias"
+        );
+    }
+
+    #[test]
+    fn public_create_only_without_exclusive_custody_denies_before_creating_any_file() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let denied = rooted
+            .create_new_file("new.bin", b"NO_PUBLIC_CREATE_WITHOUT_CUSTODY")
+            .expect_err("unverified destination directory must never publish a file");
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denied.to_string(), "E_CREATE_ONLY_CUSTODY_UNPROVEN");
+        assert_eq!(std::fs::read_dir(&allowed).unwrap().count(), 0);
+    }
+
+    #[test]
     fn create_only_file_denies_external_hardlink_alias_without_changing_outside_bytes() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().join("allowed");
@@ -1276,7 +1367,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(cap
-            .create_new_file("alias.bin", b"MALICIOUS_OVERWRITE")
+            .create_new_file_fixture("alias.bin", b"MALICIOUS_OVERWRITE")
             .is_err());
         assert_eq!(
             std::fs::read(&original).unwrap(),
@@ -1288,14 +1379,14 @@ mod tests {
         );
 
         std::fs::create_dir(root.join("nested")).unwrap();
-        cap.create_new_file("nested/genuine.bin", &[0, 1, 2, 255])
+        cap.create_new_file_fixture("nested/genuine.bin", &[0, 1, 2, 255])
             .unwrap();
         assert_eq!(
             std::fs::read(root.join("nested/genuine.bin")).unwrap(),
             [0, 1, 2, 255]
         );
         assert!(cap
-            .create_new_file("nested/genuine.bin", b"REWRITE")
+            .create_new_file_fixture("nested/genuine.bin", b"REWRITE")
             .is_err());
         assert_eq!(
             std::fs::read(root.join("nested/genuine.bin")).unwrap(),
@@ -1332,7 +1423,7 @@ mod tests {
                 let writer = threads.spawn(|| {
                     writer_gate.wait();
                     capability
-                        .create_new_file(&alias_name, writer_bytes)
+                        .create_new_file_fixture(&alias_name, writer_bytes)
                         .is_ok()
                 });
                 let attacker = threads.spawn(|| {
@@ -1369,7 +1460,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(capability
-            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .create_new_file_fixture("alias/forbidden.bin", b"ATTACK")
             .is_err());
         assert!(!outside.join("forbidden.bin").exists());
         assert_eq!(
@@ -1400,7 +1491,7 @@ mod tests {
             Dir::open_ambient_dir(&root, ambient_authority()).unwrap(),
         );
         assert!(capability
-            .create_new_file("alias/forbidden.bin", b"ATTACK")
+            .create_new_file_fixture("alias/forbidden.bin", b"ATTACK")
             .is_err());
         assert!(!outside.join("forbidden.bin").exists());
         assert_eq!(
@@ -1428,13 +1519,13 @@ mod tests {
             "missing/child",
         ] {
             assert!(
-                cap.create_new_file(path, b"data").is_err(),
+                cap.create_new_file_fixture(path, b"data").is_err(),
                 "unexpected creation for {path}"
             );
         }
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());
         assert!(cap
-            .create_new_file("too-large.bin", &vec![1; 1_048_577])
+            .create_new_file_fixture("too-large.bin", &vec![1; 1_048_577])
             .is_err());
         assert!(!root.join("too-large.bin").exists());
     }

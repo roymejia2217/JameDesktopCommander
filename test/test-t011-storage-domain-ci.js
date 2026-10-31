@@ -75,3 +75,14 @@ test('Linux openat2 uses root FD and NO_XDEV to deny a genuine file bind-mount a
   assert.match(l, /stat -c %h "\$outside_file"/);
   assert.match(l, /T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE/);
 });
+
+// A failed hard-link operation is not enough: administrative cross-volume
+// controls must identify the Windows kernel's ERROR_NOT_SAME_DEVICE (17).
+test('Windows admin cross-volume denials must prove the exact OS error', () => {
+  const script = fs.readFileSync(windows, 'utf8');
+  const probe = fs.readFileSync(path.join(repo,
+    'native/authority-store/examples/custody_attacker.rs'), 'utf8');
+  assert.match(script, /E_HARDLINK_OS_ERROR_17/);
+  assert.match(script, /RedirectStandardError/);
+  assert.match(probe, /E_HARDLINK_OS_ERROR_/);
+});

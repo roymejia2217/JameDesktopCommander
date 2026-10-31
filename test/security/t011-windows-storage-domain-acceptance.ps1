@@ -65,6 +65,21 @@ function Require-UserSuccess([string] $label, [pscredential] $who, [string] $bin
 function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
     if ((Invoke-CIUser $who $bin $probeArgs) -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
 }
+function Require-AdminCrossVolumeDenial([string] $label, [string] $from, [string] $to) {
+    $stderrFile = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-$label.stderr"
+    try {
+        $attempt = Start-Process -FilePath $probe -ArgumentList @('hardlink', $from, $to) -WorkingDirectory $root -Wait -PassThru -RedirectStandardError $stderrFile
+        if ($null -eq $attempt.ExitCode -or $attempt.ExitCode -eq 0) {
+            throw "E_STORAGE_ADMIN_CROSS_VOLUME_HARDLINK_ALLOWED_$label"
+        }
+        $errorCode = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction Stop).Trim()
+        if ($errorCode -cne 'E_HARDLINK_OS_ERROR_17') {
+            throw "E_STORAGE_WRONG_CROSS_VOLUME_ERROR_$label"
+        }
+    } finally {
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
+}
 function Invoke-DiskPart([string] $content) {
     $instructions = Join-Path $env:RUNNER_TEMP "JDC-148-$guid.diskpart.txt"
     [System.IO.File]::WriteAllText($instructions,
@@ -140,16 +155,10 @@ exit
     Require-UserDenial 'ATTACKER_CANNOT_READ_SERVICE' $attacker.Credential $probe @('read', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_APPEND_SERVICE' $attacker.Credential $probe @('append', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_LINK_IN_VOLUME' $attacker.Credential $probe @('hardlink', $serviceFile, (Join-Path $volume 'attacker-internal.bin'))
-    # Administrative identity has full control of both volumes. Its
-    # failure therefore demonstrates the kernel cross-volume boundary.
-    $adminAttempt = Start-Process -FilePath $probe -ArgumentList @('hardlink', $outsideFile, (Join-Path $volume 'admin-attempt.bin')) -WorkingDirectory $root -Wait -PassThru
-    if ($adminAttempt.ExitCode -eq 0) {
-        throw 'E_STORAGE_ADMIN_CROSS_VOLUME_HARDLINK_ALLOWED'
-    }
-    $reverseAttempt = Start-Process -FilePath $probe -ArgumentList @('hardlink', $serviceFile, (Join-Path $outside 'reverse.bin')) -WorkingDirectory $root -Wait -PassThru
-    if ($reverseAttempt.ExitCode -eq 0) {
-        throw 'E_STORAGE_REVERSE_HARDLINK_ALLOWED'
-    }
+    # Even an administrator with positive same-volume hardlink rights must
+    # receive the kernel's exact cross-device denial, not an unrelated error.
+    Require-AdminCrossVolumeDenial 'outside-to-service' $outsideFile (Join-Path $volume 'admin-attempt.bin')
+    Require-AdminCrossVolumeDenial 'service-to-outside' $serviceFile (Join-Path $outside 'reverse.bin')
     if ((Test-Path (Join-Path $volume 'attacker.bin')) -or
         (Test-Path (Join-Path $volume 'admin-attempt.bin')) -or
         (Test-Path (Join-Path $volume 'attacker-internal.bin')) -or

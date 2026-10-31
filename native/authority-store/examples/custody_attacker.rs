@@ -101,9 +101,16 @@ fn main() -> ExitCode {
     let Some(mode) = mode.to_str() else {
         return ExitCode::FAILURE;
     };
-    if attempt(mode, Path::new(&db), Path::new(&aux)).is_ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    match attempt(mode, Path::new(&db), Path::new(&aux)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // A generic failure is not evidence of a filesystem boundary.
+            // Report only the OS code (no paths) so hosted acceptance can
+            // require ERROR_NOT_SAME_DEVICE instead of unrelated ACL errors.
+            if mode == "hardlink" {
+                eprintln!("E_HARDLINK_OS_ERROR_{}", error.raw_os_error().unwrap_or(-1));
+            }
+            ExitCode::FAILURE
+        }
     }
 }

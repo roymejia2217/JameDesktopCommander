@@ -64,3 +64,43 @@ test('real admitted MCP socket client must demonstrate systemd activation still 
   assert.match(acceptance, /NRestarts/,
     'failing startup must not cause an automatic privileged restart');
 });
+
+test('socket denial evidence fallback binds a missing journal invocation tag to the latest OS process', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  for (const required of [
+    'ExecMainPID',
+    'ExecMainStartTimestampMonotonic',
+    '_PID=$exec_pid',
+    '_UID=$service_uid',
+    '_GID=$service_gid',
+    '_SYSTEMD_UNIT=$service_name',
+    '__MONOTONIC_TIMESTAMP',
+    'E_POLICY_UNAVAILABLE',
+    'E_IDENTITY_REQUIRED',
+  ]) assert.ok(acceptance.includes(required),
+    'missing fail-closed correlated denial evidence: ' + required);
+});
+
+test('real Linux acceptance independently checks denial by PID and bounded execution window', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /--argjson maximum "\$exec_exited_us"/,
+    'journal acceptance must reject events after the current service process exits');
+  assert.match(acceptance, /\.__MONOTONIC_TIMESTAMP \| tonumber\) <= \$maximum/,
+    'a reused PID or later event is not evidence for this invocation');
+  assert.match(acceptance, /if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"\$pid_journal"/,
+    'native acceptance must exercise and REQUIRE process-correlated denial even when the journal invocation tag exists');
+  assert.match(acceptance, /T011_SOCKET_DENIAL_CORRELATED_BY_SYSTEMD_PID_NONRELEASE/,
+    'the native runner must report positive OS process correlation separately');
+});
+
+test('OS PID journal correlation rejects an explicit different invocation ID', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /--arg invocation "\$after_invocation"/,
+    'the current systemd invocation ID must be supplied to the journal filter');
+  assert.match(acceptance,
+    /\._SYSTEMD_INVOCATION_ID == null or \._SYSTEMD_INVOCATION_ID == \$invocation/,
+    'absence of a journal tag may fall back to PID, but an explicit mismatched tag must deny');
+});

@@ -12,12 +12,14 @@ if [[ "${GITHUB_ACTIONS:-}" != 'true' ||
   exit 1
 fi
 sudo -n true
+command -v jq >/dev/null
 getent passwd jdc-authority >/dev/null
 getent passwd jdc-mcp-client >/dev/null
 getent group jdc-mcp-client >/dev/null
 getent passwd nobody >/dev/null
 
 service_uid="$(id -u jdc-authority)"
+service_gid="$(id -g jdc-authority)"
 client_uid="$(id -u jdc-mcp-client)"
 client_gid="$(id -g jdc-mcp-client)"
 if [[ "$client_uid" -eq "$service_uid" || "$client_uid" -eq 0 ||
@@ -210,6 +212,43 @@ fi
 sudo -n journalctl --sync
 invocation_journal="$(sudo -n journalctl -b -u "$service_name" \
   "_SYSTEMD_INVOCATION_ID=$after_invocation" --no-pager --output=cat)"
+# journald can omit _SYSTEMD_INVOCATION_ID on a short-lived stdout
+# stream. Independently validate the last OS process even when the direct
+# invocation tag exists. Neither an older PID nor a later reused-PID event
+# is acceptable: the message must fall within the current process lifetime.
+# Both forms must bind the denial to the same systemd-managed service.
+exec_pid="$(sudo -n systemctl show -P ExecMainPID "$service_name")"
+exec_started_us="$(sudo -n systemctl show -P ExecMainStartTimestampMonotonic "$service_name")"
+exec_exited_us="$(sudo -n systemctl show -P ExecMainExitTimestampMonotonic "$service_name")"
+if [[ ! "$exec_pid" =~ ^[1-9][0-9]*$ ||
+      ! "$exec_started_us" =~ ^[1-9][0-9]*$ ||
+      ! "$exec_exited_us" =~ ^[1-9][0-9]*$ ]] ||
+   (( exec_exited_us < exec_started_us )); then
+  printf '%s\n' 'E_SOCKET_LATEST_PROCESS_IDENTITY_UNAVAILABLE' >&2
+  exit 1
+fi
+process_journal="$(sudo -n journalctl -b \
+  "_PID=$exec_pid" "_UID=$service_uid" "_GID=$service_gid" \
+  "_SYSTEMD_UNIT=$service_name" \
+  "SYSLOG_IDENTIFIER=jdc-authority-service" --no-pager --output=json)"
+pid_journal="$(jq -r --argjson minimum "$exec_started_us" \
+  --argjson maximum "$exec_exited_us" --arg invocation "$after_invocation" '
+  select(.__MONOTONIC_TIMESTAMP != null and
+         (._SYSTEMD_INVOCATION_ID == null or ._SYSTEMD_INVOCATION_ID == $invocation) and
+         ((.__MONOTONIC_TIMESTAMP | tonumber) >= $minimum) and
+         ((.__MONOTONIC_TIMESTAMP | tonumber) <= $maximum) and
+         (.MESSAGE == "E_POLICY_UNAVAILABLE" or
+          .MESSAGE == "E_IDENTITY_REQUIRED")) | .MESSAGE
+' <<< "$process_journal")"
+if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"$pid_journal" ||
+   grep -Fq 'E_IDENTITY_REQUIRED' <<<"$pid_journal"; then
+  printf '%s\n' 'E_SOCKET_CURRENT_PROCESS_DENIAL_UNPROVEN' >&2
+  exit 1
+fi
+printf '%s\n' 'T011_SOCKET_DENIAL_CORRELATED_BY_SYSTEMD_PID_NONRELEASE'
+if [[ -z "$invocation_journal" ]]; then
+  invocation_journal="$pid_journal"
+fi
 if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"$invocation_journal" ||
    grep -Fq 'E_IDENTITY_REQUIRED' <<<"$invocation_journal"; then
   # This remains a mandatory FAIL. Preserve exact invocation diagnostics

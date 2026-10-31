@@ -15,7 +15,7 @@
  * 3. Unify the editRange() signature to handle both text search/replace and structured edits
  */
 
-import { getDefaultEditorMetadata, readFile, writeFile, readFileInternal, validatePath } from './filesystem.js';
+import { getDefaultEditorMetadata, readFile, writeFile, readFileInternal, validatePath, requireUnrestrictedLegacyFilesystem } from './filesystem.js';
 import fs from 'fs/promises';
 import { ServerResult } from '../types.js';
 import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
@@ -422,6 +422,9 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
     let validatedPath: string;
     let handler: Awaited<ReturnType<typeof import('../utils/files/factory.js').getFileHandler>>;
     try {
+        // Specialized handlers may write directly; reject restricted legacy paths
+        // before resolving a file handler or allowing any format-specific I/O.
+        await requireUnrestrictedLegacyFilesystem('edit_block');
         validatedPath = await validatePath(parsed.file_path);
         const { getFileHandler } = await import('../utils/files/factory.js');
         handler = await getFileHandler(validatedPath);

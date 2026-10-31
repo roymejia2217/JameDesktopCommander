@@ -464,6 +464,29 @@ impl RootedDirectory {
                         "E_REPLACE_SHARED_OBJECT",
                     ));
                 }
+                // The last directory *name* can point to a different object
+                // even though the original opened handle remains private.
+                // Compare independent OS handles, acquired relative to the
+                // same pinned directory. Do not reopen an ambient path.
+                // This still does NOT couple the comparison atomically to
+                // the subsequent rename operation.
+                let still_same_destination = (|| -> io::Result<bool> {
+                    let now_named = parent.open(component)?;
+                    if !now_named.metadata()?.is_file() {
+                        return Ok(false);
+                    }
+                    let original = same_file::Handle::from_file(existing.try_clone()?.into_std())?;
+                    let current = same_file::Handle::from_file(now_named.into_std())?;
+                    Ok(original == current)
+                })()
+                .unwrap_or(false);
+                if !still_same_destination {
+                    let _ = staging.root.remove_file(&stage);
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_OBJECT_CHANGED",
+                    ));
+                }
                 let replaced = staging.root.rename(&stage, parent, component);
                 if replaced.is_err() {
                     let _ = staging.root.remove_file(&stage);
@@ -854,6 +877,70 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read(&outside_file).unwrap(), b"UNTOUCHED_SECRET");
+    }
+
+    #[test]
+    fn staged_replacement_denies_destination_name_swapped_to_outside_object() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        let stage_dir = fixture.path().join("private-stage");
+        for directory in [&allowed, &outside, &stage_dir] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let target = allowed.join("file.bin");
+        let parked = allowed.join("parked-original.bin");
+        let outside_object = outside.join("outside-object.bin");
+        let original = b"ORIGINAL_AUTHORIZED_BYTES";
+        let sentinel = b"OUTSIDE_SENTINEL_MUST_STAY";
+        std::fs::write(&target, original).unwrap();
+        std::fs::write(&outside_object, sentinel).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+
+        let result = rooted.replace_existing_file_staged_with_precommit_hook(
+            &staging,
+            "file.bin",
+            "0123456789abcdef0123456789abcdef",
+            b"NEW_BYTES_NOT_AUTHORIZED_AFTER_SWAP",
+            || {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            // The original *opened* handle stays a single-link
+                            // regular file, while the destination name is replaced
+                            // by an independently owned object from outside.
+                            std::fs::rename(&target, &parked)
+                                .expect("actual original rename must succeed");
+                            std::fs::hard_link(&outside_object, &target)
+                                .expect("actual attacker alias must succeed");
+                        })
+                        .join()
+                        .expect("attacker OS thread must run");
+                });
+                assert!(same_file::is_same_file(&target, &outside_object).unwrap());
+                assert_eq!(std::fs::read(&parked).unwrap(), original);
+                assert_eq!(
+                    cap_fs_ext::MetadataExt::nlink(
+                        &rooted.root.symlink_metadata("parked-original.bin").unwrap()
+                    ),
+                    1
+                );
+            },
+        );
+        let denial =
+            result.expect_err("a changed destination object must never be silently overwritten");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_OBJECT_CHANGED");
+        assert_eq!(std::fs::read(&parked).unwrap(), original);
+        assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&outside_object).unwrap(), sentinel);
+        assert!(same_file::is_same_file(&target, &outside_object).unwrap());
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
     }
 
     #[test]

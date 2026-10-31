@@ -14,7 +14,7 @@ fn run() -> Result<(), ()> {
     // fixed in this disposable probe, never client- or environment-controlled.
     for _ in 0..2 {
         issuer
-            .dispatch_one_inherited_read_reply(Duration::from_secs(5))
+            .dispatch_one_inherited_readonly_reply(Duration::from_secs(5))
             .map_err(|_| ())?;
     }
     println!("T011_ISSUER_READ_E2E_SERVICE_PASS_NONRELEASE");

@@ -197,6 +197,26 @@ enum WireKind {
     ListDirectory,
 }
 
+/// Internal dispatch selector. Decoding is structural only and never grants
+/// the caller access to a root. Mutations require a separate authority path.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadOnlyOperation {
+    ReadFile,
+    ListDirectory,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn decode_readonly_operation_frame(
+    frame: &[u8],
+) -> Result<ReadOnlyOperation, FrameDenied> {
+    match decode_typed_frame(frame)?.1 {
+        WireKind::ReadFile => Ok(ReadOnlyOperation::ReadFile),
+        WireKind::ListDirectory => Ok(ReadOnlyOperation::ListDirectory),
+        WireKind::CreateDirectory => Err(FrameDenied),
+    }
+}
+
 /// Compatibility contract: syntax acceptance alone never grants authority.
 pub fn validate_request_frame(frame: &[u8]) -> Result<(), FrameDenied> {
     decode_typed_frame(frame).map(|_| ())
@@ -292,6 +312,39 @@ mod tests {
         out.extend_from_slice(body);
         out
     }
+    #[test]
+    fn issuer_read_router_denies_mutations_and_rejects_noncanonical_kinds() {
+        let read = frame(
+            payload("inside.bin")
+                .replace("create-directory", "read-file")
+                .as_bytes(),
+        );
+        let list = frame(
+            payload("nested")
+                .replace("create-directory", "list-directory")
+                .as_bytes(),
+        );
+        let create = frame(payload("new-child").as_bytes());
+        assert_eq!(
+            decode_readonly_operation_frame(&read),
+            Ok(ReadOnlyOperation::ReadFile),
+        );
+        assert_eq!(
+            decode_readonly_operation_frame(&list),
+            Ok(ReadOnlyOperation::ListDirectory),
+        );
+        assert_eq!(decode_readonly_operation_frame(&create), Err(FrameDenied));
+        for candidate in [
+            payload("inside.bin").replace("create-directory", "read"),
+            payload("../outside").replace("create-directory", "read-file"),
+        ] {
+            assert_eq!(
+                decode_readonly_operation_frame(&frame(candidate.as_bytes())),
+                Err(FrameDenied),
+            );
+        }
+    }
+
     #[test]
     fn canonical_native_list_is_typed_and_replay_bound_without_grant() {
         let body = payload("inside/nested").replace("create-directory", "list-directory");

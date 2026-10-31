@@ -346,3 +346,28 @@ test('root-admin epoch witness is exercised under actual NNP service and foreign
   assert.match(script, /E_ANCHOR_CANONICAL_BYTES_CHANGED/);
   assert.doesNotMatch(script, /expect_verdict MATCH sudo -n -u jdc-authority -- "\$probe"/);
 });
+
+test('Linux prepublication staging custody is proven by real service/attacker identities', () => {
+  const script = fs.readFileSync(path.join(repo,
+    'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  for (const proof of [
+    'T011_STAGE_LINUX_CUSTODY_PASS_NONRELEASE',
+    'STAGE_ATTACKER_CAN_READ',
+    'STAGE_ATTACKER_CAN_HARDLINK',
+    'STAGE_OWNER_LINK_IDENTITY',
+    'STAGE_BYTES_CHANGED',
+    'sudo -n -u jdc-authority',
+    'sudo -n -u nobody',
+  ]) assert.ok(script.includes(proof), 'Missing genuine Linux custody evidence: ' + proof);
+});
+
+test('Linux staging principal proof executes a real positive link and independent forbidden operations', () => {
+  const script = fs.readFileSync(path.join(repo, 'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  for (const proof of [
+    /sudo -n -u jdc-authority -- mktemp "\$fixture_dir\/\.jdc-stage\.XXXXXXXX"/,
+    /sudo -n -u jdc-authority -- ln -- "\$stage_file" "\$owner_stage_link"/,
+    /expect_denied STAGE_ATTACKER_CAN_HARDLINK sudo -n -u nobody -- ln -- "\$stage_file" "\$stage_exterior_alias"/,
+    /expect_denied STAGE_ATTACKER_CAN_READ sudo -n -u nobody -- cat -- "\$stage_file"/,
+    /sudo -n -u jdc-authority -- sha256sum "\$stage_file"/,
+  ]) assert.match(script, proof);
+});

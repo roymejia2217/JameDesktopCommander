@@ -15,6 +15,7 @@ cap-fs-ext = "=4.0.3" # OS metadata from the already-open file handle.
 # Compare OS file handles only inside the non-shipping experimental fixtures.
 same-file = "=1.0.6"
 tempfile = "=3.23.0"
+getrandom = "=0.3.4" # OS entropy for test-only, non-hardcoded stage identifiers.
 rusqlite = { version = "=0.37.0", default-features = false, features = ["bundled"] }
 jdc-authority-store = { path = "../authority-store", features = ["offline-fixture"] }
 

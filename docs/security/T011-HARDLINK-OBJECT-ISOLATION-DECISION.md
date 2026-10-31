@@ -232,6 +232,93 @@ entire write complete **before** publishing the new inode and prove
 private-staging, no-overwrite publication and principal custody on both
 operating systems.
 
+**Test-only no-overwrite publication study (2026-10-31, subsequent to PR
+#234):** a separate native Rust fixture creates and syncs the full payload
+in a staging directory, then uses `cap-std::Dir::hard_link` between **two
+preopened directory handles** to create the final destination name. A
+deterministic OS-thread test proves the destination is absent until after
+full staging sync; another installs a real outside hardlink under that
+destination name before publication, verifies the no-overwrite link fails,
+and preserves the outside bytes and alias identity. The staging name is
+cleaned after the publication attempt. **This is not a production API**:
+the entire fixture exists only in `cfg(test)`, and the public methods
+remain excluded from ordinary builds.
+
+A third OS-thread fixture demonstrates the **missing custody proof**:
+when the temporary directory is accessible to the attacker's principal,
+an outside hardlink can be created to the already-written staging inode,
+exposing its full contents **before** destination publication. This is
+recorded as an explicitly **negative security counterexample**, not
+evidence of confidentiality. A complete design still needs separate
+principal/ACL and filesystem attestation, same-volume/cross-volume
+acceptance, no-overwrite collision semantics, crash/cancellation recovery
+and review of all original #147 attacks before any operation may ship.
+
+**Distinct-principal prepublication staging proof (2026-10-31, hosted
+acceptance extension):** the existing Linux and Windows custody acceptance
+scripts now test a separate unpublished staging file under the already
+protected state directory. On Linux, the service principal
+`jdc-authority` must create the file and successfully form a same-volume
+hard link to its own object, with kernel device/inode identity checked.
+The independent `nobody` identity must fail to read, link, append,
+remove or create another entry in that protected directory. On Windows,
+two independent disposable unprivileged SIDs test equivalent owner
+positive link/same-object and attacker read/link/write/unlink/create
+denials under an inheritance-disabled NTFS DACL. Both scripts check exact
+content digests before and after the attempts, require no attacker alias,
+and remove the temporary staging name. The scripts require disposable
+hosted CI; they are never executed on the installed user host.
+
+**Scope of this proof:** the real tests demonstrate separation under the
+specific CI principals and ACL/mode state, not immunity to an attacker
+already sharing the service UID/SID, elevated privileges, inherited
+handles or a changed parent/mount topology. The same-principal stage
+leak counterexample above remains valid. A **fourth** native OS-thread
+counterexample separately proves source-name substitution after full staging
+sync but before publication: an attacker with write access to the staging
+namespace renames the approved inode aside, installs a distinct attacker
+inode under the original staging filename, and retains its own hardlink.
+The test-only publisher succeeds and binds the destination name to the
+attacker's inode, not to the completed writer inode. The exact bytes and
+kernel same-file identities are asserted independently. This is **negative
+security evidence**, never proof that publication is safe under same-principal
+access. An inode identity precheck before publication would remain racy;
+production requires independently defended staging custody and an atomic
+object-source commit contract or continued fail-closed exclusion. No
+production stage capability is issued and no `create_new_file` API becomes available to normal
+builds. The original #147 object-isolation requirements remain blocked.
+
+**Windows handle-based publication feasibility (2026-10-31, PR #236,
+test-only):** official `SetFileInformationByHandle(FileRenameInfo)` can
+rename the **already-open source file object**, rather than look up the
+staged source path again. The initial real NTFS fixture failed with
+`ERROR_ACCESS_DENIED (5)` without explicit `DELETE` access; after
+requesting that right, using a destination filename relative to an
+open directory handle failed with `ERROR_INVALID_PARAMETER (87)`.
+A strictly isolated test-only variant using an **absolute target path**
+and `RootDirectory = NULL` then succeeded: when an OS thread renamed
+the original staged file away and installed a different attacker file
+under the original name, the destination was the same kernel file object
+as the **original open file handle**, not the attacker alias. A separate
+real-NTFS race with the destination occupied by a hard link returned an
+error, preserving exact original/exterior bytes and same-file identity.
+
+**These results are not sufficient for release:** the demonstrated working
+form requires an ambient absolute target pathname and does not establish
+destination confinement under a preopened root directory. The relative
+root-handle form was **rejected by the tested Windows API invocation**,
+not shown safe. The Rust Win32 call and its pointer buffer exist solely
+within `cfg(test)`; no shipping authority, file mutation endpoint or
+new Windows privilege was enabled. Linux `linkat(AT_EMPTY_PATH)` can
+address an open source descriptor, but its general capability requirement
+`CAP_DAC_READ_SEARCH` violates the intended unprivileged service
+contract; an `O_TMPFILE`/procfs alternative has distinct mount and
+privilege prerequisites and requires independent native acceptance.
+The next eligible implementation must prove a fully root-relative,
+handle-bound and no-overwrite operation on both platforms **without**
+adding privilege or ambient-path fallback. Until then deny-only remains
+mandatory.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

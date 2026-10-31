@@ -362,6 +362,71 @@ impl RootedDirectory {
         ))
     }
 
+    // RESEARCH ONLY. A private, already-verified same-volume stage would be
+    // essential for real security; this method does NOT attest that custody.
+    // Write/sync first, then publish with a no-overwrite hardlink relative
+    // to pinned source/destination Dir handles. No post-publication writes.
+    // Even AFTER sync, a same-principal attacker can rename the stage inode
+    // away and install a different inode at this name. A subsequent hard_link
+    // publishes attacker bytes; NO atomic expected-source object proof exists.
+    // This is a negative research fixture, never shipping authority.
+    #[cfg(test)]
+    fn create_new_file_staged_with_prepublish_hook(
+        &self,
+        staging: &ProtectedStagingDirectory,
+        relative: &str,
+        nonce: &str,
+        bytes: &[u8],
+        before_publish: impl FnOnce(),
+    ) -> io::Result<()> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        let valid_nonce = nonce.len() == 32
+            && nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !safe_relative_path(relative) || !valid_nonce || bytes.len() > MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_STAGED_CREATE_DENIED",
+            ));
+        }
+        let stage = format!(".jdc-create-stage-{nonce}");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut writer = staging.root.open_with(&stage, &options)?;
+        if let Err(err) = writer.write_all(bytes).and_then(|_| writer.sync_all()) {
+            drop(writer);
+            let _ = staging.root.remove_file(&stage);
+            return Err(err);
+        }
+        drop(writer);
+
+        let publication = (|| -> io::Result<()> {
+            let mut components = relative.split('/').peekable();
+            let mut opened: Option<Dir> = None;
+            while let Some(component) = components.next() {
+                let parent = opened.as_ref().unwrap_or(&self.root);
+                if components.peek().is_some() {
+                    opened = Some(parent.open_dir(component)?);
+                } else {
+                    before_publish();
+                    return staging.root.hard_link(&stage, parent, component);
+                }
+            }
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_STAGED_CREATE_DENIED",
+            ))
+        })();
+        // Once published, the new destination shares the fully synced inode.
+        // Removing our stage name does not modify any published bytes.
+        let cleanup = staging.root.remove_file(&stage);
+        match publication {
+            Ok(()) => cleanup,
+            Err(err) => Err(err),
+        }
+    }
+
     // Genuine OS-positive/negative fixtures are preserved without exporting
     // a callable creation method in an ordinary library or service build.
     #[cfg(test)]
@@ -609,6 +674,19 @@ impl RootedDirectory {
 mod tests {
     use super::*;
     use cap_std::ambient_authority;
+
+    fn random_stage_token() -> String {
+        // A stage identifier is a security-relevant name, even in tests.
+        // Do not teach the fixtures to rely on a hard-coded crypto value.
+        let mut entropy = [0u8; 16];
+        getrandom::fill(&mut entropy).expect("OS CSPRNG must be available");
+        use std::fmt::Write as _;
+        let mut encoded = String::with_capacity(32);
+        for byte in entropy {
+            write!(&mut encoded, "{byte:02x}").expect("writing into String");
+        }
+        encoded
+    }
 
     #[test]
     fn legitimate_single_child_creation_is_relative_to_the_opened_root() {
@@ -1292,6 +1370,374 @@ mod tests {
                 .is_err());
             assert_eq!(std::fs::read(allowed.join("file.bin")).unwrap(), b"SAFE");
         }
+    }
+
+    #[test]
+    fn test_only_staged_create_writes_full_bytes_before_destination_publication() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let private_stage = fixture.path().join("private-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &private_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let token = random_stage_token();
+        let stage_name = format!(".jdc-create-stage-{token}");
+        let stage_path = private_stage.join(stage_name);
+        let external_alias = outside.join("prepublish-alias.bin");
+        let payload = b"COMPLETE_BEFORE_PUBLISH";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        rooted
+            .create_new_file_staged_with_prepublish_hook(
+                &staging,
+                "new.bin",
+                &token,
+                payload,
+                || {
+                    // Attacker runs after the staged writer finished syncing,
+                    // but before the destination becomes visible.
+                    std::thread::scope(|threads| {
+                        threads
+                            .spawn(|| {
+                                assert!(std::fs::hard_link(&destination, &external_alias).is_err());
+                            })
+                            .join()
+                            .unwrap();
+                    });
+                    assert!(!destination.exists());
+                    assert_eq!(std::fs::read(&stage_path).unwrap(), payload);
+                    assert!(!external_alias.exists());
+                },
+            )
+            .expect("test-only same-volume staged publish");
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        assert!(!stage_path.exists(), "private staging name must be removed");
+        assert!(!external_alias.exists());
+    }
+
+    #[test]
+    fn test_only_staged_create_denies_raced_occupied_destination_without_clobber() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let private_stage = fixture.path().join("private-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &private_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let exterior = outside.join("victim.bin");
+        let sentinel = b"EXTERIOR_BYTES_MUST_SURVIVE";
+        std::fs::write(&exterior, sentinel).unwrap();
+        let token = random_stage_token();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        let result = rooted.create_new_file_staged_with_prepublish_hook(
+            &staging,
+            "new.bin",
+            &token,
+            b"NEVER_OVERWRITE",
+            || {
+                std::thread::scope(|threads| {
+                    threads
+                        .spawn(|| {
+                            std::fs::hard_link(&exterior, &destination)
+                                .expect("attacker must install genuine exterior alias")
+                        })
+                        .join()
+                        .unwrap();
+                });
+                assert!(same_file::is_same_file(&destination, &exterior).unwrap());
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(same_file::is_same_file(&destination, &exterior).unwrap());
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&exterior).unwrap(), sentinel);
+        assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    fn windows_test_publish_from_open_handle_no_replace(
+        source: &std::fs::File,
+        destination: &std::path::Path,
+    ) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+        };
+        if !destination.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "test destination must be absolute",
+            ));
+        }
+        let wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let bytes = wide
+            .len()
+            .checked_mul(2)
+            .and_then(|n| header.checked_add(n))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "name too long"))?;
+        let size = u32::try_from(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name too long"))?;
+        let words = bytes.div_ceil(std::mem::size_of::<u64>());
+        let mut buffer = vec![0u64; words];
+        // SAFETY: u64 buffer alignment is at least FILE_RENAME_INFO's HANDLE
+        // alignment, exact byte length includes UTF-16 filename payload, and
+        // the buffer remains allocated through the synchronous Win32 call.
+        unsafe {
+            let data = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            (*data).Anonymous.ReplaceIfExists = false;
+            (*data).RootDirectory = std::ptr::null_mut();
+            (*data).FileNameLength = u32::try_from(wide.len() * 2).unwrap();
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*data).FileName.as_mut_ptr(), wide.len());
+            if SetFileInformationByHandle(source.as_raw_handle(), FileRenameInfo, data.cast(), size)
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_handle_rename_publishes_original_inode_after_source_name_swap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage = fixture.path().join("stage");
+        let outside = fixture.path().join("outside");
+        for dir in [&allowed, &stage, &outside] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let source_name = stage.join("random-stage.bin");
+        let displaced_original = outside.join("original.bin");
+        let injected_alias = outside.join("injected-alias.bin");
+        let destination = allowed.join("published.bin");
+        let original = b"ACTUAL_OPEN_FILE_OBJECT";
+        let injected = b"ATTACKER_SUBSTITUTE_FILE";
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&source_name)
+            .unwrap();
+        opened.write_all(original).unwrap();
+        opened.sync_all().unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::rename(&source_name, &displaced_original)
+                        .expect("attacker moved source entry after sync");
+                    std::fs::write(&source_name, injected)
+                        .expect("attacker installed a different inode");
+                    std::fs::hard_link(&source_name, &injected_alias)
+                        .expect("attacker retained proof of injected inode");
+                })
+                .join()
+                .unwrap();
+        });
+        assert!(same_file::is_same_file(&source_name, &injected_alias).unwrap());
+        assert!(
+            same_file::Handle::from_path(&displaced_original).unwrap()
+                == same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap()
+        );
+        windows_test_publish_from_open_handle_no_replace(&opened, &destination)
+            .expect("publish the original opened file object, never the swapped source name");
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert!(
+            same_file::Handle::from_path(&destination).unwrap()
+                == same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap()
+        );
+        assert!(!same_file::is_same_file(&destination, &injected_alias).unwrap());
+        assert_eq!(std::fs::read(&source_name).unwrap(), injected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_handle_rename_rejects_raced_existing_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("stage.bin");
+        let dest = fixture.path().join("published.bin");
+        let outside = fixture.path().join("outside.bin");
+        let sentinel = b"OUTSIDE_ORIGINAL_MUST_SURVIVE";
+        std::fs::write(&outside, sentinel).unwrap();
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&source)
+            .unwrap();
+        opened.write_all(b"VALID_COMPLETE_PAYLOAD").unwrap();
+        opened.sync_all().unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::hard_link(&outside, &dest)
+                        .expect("attacker must occupy target with real hard link");
+                })
+                .join()
+                .unwrap();
+        });
+        let refusal = windows_test_publish_from_open_handle_no_replace(&opened, &dest)
+            .expect_err("existing destination must not be overwritten");
+        assert!(
+            matches!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+            ),
+            "unexpected native collision error: {refusal}"
+        );
+        assert!(same_file::is_same_file(&outside, &dest).unwrap());
+        assert_eq!(std::fs::read(&outside).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&dest).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&source).unwrap(), b"VALID_COMPLETE_PAYLOAD");
+    }
+
+    #[test]
+    fn test_only_staged_create_proves_source_name_swap_publishes_attacker_inode_nonrelease() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let shared_stage = fixture.path().join("attacker-writable-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &shared_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let token = random_stage_token();
+        let stage_path = shared_stage.join(format!(".jdc-create-stage-{token}"));
+        let displaced_original = outside.join("stolen-stage-original.bin");
+        let attacker_injected_alias = outside.join("attacker-injected-hardlink.bin");
+        let authorized_payload = b"AUTHENTIC_WRITER_BYTES";
+        let injected_payload = b"ATTACKER_SUBSTITUTED_INODE_BYTES";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&shared_stage, ambient_authority()).unwrap(),
+        };
+        let result = rooted.create_new_file_staged_with_prepublish_hook(
+            &staging,
+            "new.bin",
+            &token,
+            authorized_payload,
+            || {
+                std::thread::scope(|threads| {
+                    threads
+                        .spawn(|| {
+                            std::fs::rename(&stage_path, &displaced_original)
+                                .expect("attacker must take original staged inode");
+                            std::fs::write(&stage_path, injected_payload).expect(
+                                "attacker must install distinct source inode under same name",
+                            );
+                            std::fs::hard_link(&stage_path, &attacker_injected_alias)
+                                .expect("attacker must retain kernel identity of injected inode");
+                        })
+                        .join()
+                        .expect("attacker thread");
+                });
+                assert!(!destination.exists());
+                assert_eq!(
+                    std::fs::read(&displaced_original).unwrap(),
+                    authorized_payload
+                );
+                assert_eq!(std::fs::read(&stage_path).unwrap(), injected_payload);
+                assert!(!same_file::is_same_file(&stage_path, &displaced_original).unwrap());
+            },
+        );
+        result.expect("NEGATIVE CONTROL: unguarded name lookup publishes attacker-owned source");
+        assert_eq!(std::fs::read(&destination).unwrap(), injected_payload);
+        assert_eq!(
+            std::fs::read(&displaced_original).unwrap(),
+            authorized_payload
+        );
+        assert!(
+            same_file::is_same_file(&destination, &attacker_injected_alias).unwrap(),
+            "NEGATIVE SECURITY EVIDENCE: published inode belongs to attacker"
+        );
+        assert!(
+            !same_file::is_same_file(&destination, &displaced_original).unwrap(),
+            "publication must not be confused with the originally written inode"
+        );
+        assert!(
+            !stage_path.exists(),
+            "test-only fixture cleaned attacker-swapped stage name"
+        );
+    }
+
+    #[test]
+    fn test_only_staged_create_proves_unprotected_stage_exposes_full_bytes_before_publish() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let unprotected_stage = fixture.path().join("unprotected-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &unprotected_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let token = random_stage_token();
+        let source_stage = unprotected_stage.join(format!(".jdc-create-stage-{token}"));
+        let attacker_alias = outside.join("attacker-stage-link.bin");
+        let payload = b"STAGING_CUSTODY_IS_A_REQUIRED_SECURITY_CONDITION";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            // Constructor here is test-only: it has NOT attested an OS
+            // principal, and another same-identity process can link this file.
+            root: Dir::open_ambient_dir(&unprotected_stage, ambient_authority()).unwrap(),
+        };
+        rooted
+            .create_new_file_staged_with_prepublish_hook(
+                &staging,
+                "new.bin",
+                &token,
+                payload,
+                || {
+                    std::thread::scope(|threads| {
+                        threads
+                            .spawn(|| {
+                                std::fs::hard_link(&source_stage, &attacker_alias)
+                                    .expect("fixture proves staging directory is accessible");
+                            })
+                            .join()
+                            .unwrap();
+                    });
+                    assert!(!destination.exists());
+                    assert!(same_file::is_same_file(&source_stage, &attacker_alias).unwrap());
+                    assert_eq!(
+                        std::fs::read(&attacker_alias).unwrap(),
+                        payload,
+                        "NEGATIVE SECURITY EVIDENCE: bytes are exposed without stage custody"
+                    );
+                },
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&attacker_alias).unwrap(), payload);
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        assert!(!source_stage.exists());
     }
 
     #[test]

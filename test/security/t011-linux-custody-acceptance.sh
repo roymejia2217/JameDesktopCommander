@@ -175,6 +175,40 @@ if [[ -e "${canary}.protected-alias" ]] ||
   exit 1
 fi
 
+# Test the actual prepublication staging namespace, not merely SQLite
+# state. A same-volume owner positive link MUST work before an attacker
+# denial can establish separate-principal custody of this stage object.
+# The file remains unpublished throughout the proof.
+stage_file="$(sudo -n -u jdc-authority -- mktemp "$fixture_dir/.jdc-stage.XXXXXXXX")"
+sudo -n -u jdc-authority -- sh -c 'printf %s STAGED_PRIVATE_BYTES > "$1"' sh "$stage_file"
+stage_hash="$(sudo -n -u jdc-authority -- sha256sum "$stage_file" | cut -d ' ' -f1)"
+owner_stage_link="${stage_file}.owner-link"
+sudo -n -u jdc-authority -- ln -- "$stage_file" "$owner_stage_link"
+stage_object_id="$(sudo -n -u jdc-authority -- stat -c '%d:%i' -- "$stage_file")"
+owner_link_id="$(sudo -n -u jdc-authority -- stat -c '%d:%i' -- "$owner_stage_link")"
+if [[ "$stage_object_id" != "$owner_link_id" ]]; then
+  printf '%s\n' 'E_CUSTODY_STAGE_OWNER_LINK_IDENTITY' >&2
+  exit 1
+fi
+echo 'STAGE_OWNER_LINK_IDENTITY_PROVEN'
+sudo -n -u jdc-authority -- rm -- "$owner_stage_link"
+stage_exterior_alias="${canary}.stage-alias"
+expect_denied STAGE_ATTACKER_CAN_READ sudo -n -u nobody -- cat -- "$stage_file"
+expect_denied STAGE_ATTACKER_CAN_HARDLINK sudo -n -u nobody -- ln -- "$stage_file" "$stage_exterior_alias"
+expect_denied STAGE_ATTACKER_CAN_APPEND sudo -n -u nobody -- sh -c 'printf X >> "$1"' sh "$stage_file"
+expect_denied STAGE_ATTACKER_CAN_REMOVE sudo -n -u nobody -- rm -- "$stage_file"
+expect_denied STAGE_ATTACKER_CAN_CREATE sudo -n -u nobody -- touch -- "${stage_file}.forged"
+if [[ -e "$stage_exterior_alias" || -e "${stage_file}.forged" ]]; then
+  printf '%s\n' 'E_CUSTODY_STAGE_ALIAS_APPEARED' >&2
+  exit 1
+fi
+if [[ "$(sudo -n -u jdc-authority -- sha256sum "$stage_file" | cut -d ' ' -f1)" != "$stage_hash" ]]; then
+  printf '%s\n' 'E_CUSTODY_STAGE_BYTES_CHANGED' >&2
+  exit 1
+fi
+sudo -n -u jdc-authority -- rm -- "$stage_file"
+echo 'T011_STAGE_LINUX_CUSTODY_PASS_NONRELEASE'
+
 actual_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 if [[ "$actual_hash" != "$expected_hash" ]]; then
   printf '%s\n' 'E_CUSTODY_UNAUTHORIZED_BYTES_CHANGED' >&2

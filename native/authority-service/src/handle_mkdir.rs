@@ -274,6 +274,67 @@ impl RootedDirectory {
         Ok(bytes)
     }
 
+    /// Bounded, handle-relative enumeration for a policy-pinned directory.
+    /// This is a native primitive only, NOT an issuer, IPC grant or MCP route.
+    /// No ambient pathname reopen, partial listing on quota failure, or
+    /// symlink entry disclosure. #148 provenance remains a release blocker.
+    pub fn list_bounded_entries(&self, relative: &str) -> io::Result<Vec<String>> {
+        const MAX_ENTRIES: usize = 256;
+        if !safe_relative_path(relative) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_LIST_PATH_DENIED",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        let root_mount = mounted_object_id(&self.root)?;
+        let mut child: Option<Dir> = None;
+        for component in relative.split('/') {
+            let parent = child.as_ref().unwrap_or(&self.root);
+            #[cfg(target_os = "linux")]
+            let opened = parent.open_dir_nofollow(component)?;
+            #[cfg(not(target_os = "linux"))]
+            let opened = parent.open_dir(component)?;
+            #[cfg(target_os = "linux")]
+            if mounted_object_id(&opened)? != root_mount {
+                return Err(io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            child = Some(opened);
+        }
+        let directory = child
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "E_LIST_PATH_DENIED"))?;
+        let mut names = Vec::new();
+        for entry in directory.read_dir(".")? {
+            let entry = entry?;
+            if entry.file_type()?.is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "E_LIST_UNSAFE_ENTRY",
+                ));
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "E_LIST_NONUTF8"))?;
+            if !safe_relative_path(&name) || name.contains('/') {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "E_LIST_UNSAFE_ENTRY",
+                ));
+            }
+            if names.len() == MAX_ENTRIES {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "E_LIST_BUDGET_EXCEEDED",
+                ));
+            }
+            names.push(name);
+        }
+        names.sort_unstable();
+        Ok(names)
+    }
+
     /// Strict create-only, bounded data write under an already-open root.
     /// Never opens or truncates existing files, including external hardlink
     /// aliases; no ambient paths or symlink-following path revalidation.
@@ -447,6 +508,68 @@ mod tests {
         assert!(root_path.join("genuine_child").is_dir());
         assert!(!outside.join("genuine_child").exists());
         assert_eq!(std::fs::read(&marker).unwrap(), b"ORIGINAL_OUTSIDE_BYTES");
+    }
+
+    #[test]
+    fn bounded_native_listing_uses_only_pinned_root_and_rejects_ambiguous_inputs() {
+        let fixture = tempfile::tempdir().unwrap();
+        let inside = fixture.path().join("allowed");
+        let child = inside.join("child");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(child.join("z.txt"), b"INSIDE_Z").unwrap();
+        std::fs::write(child.join("a.txt"), b"INSIDE_A").unwrap();
+        std::fs::write(outside.join("sentinel.txt"), b"OUTSIDE_UNCHANGED").unwrap();
+        let capability = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&inside, ambient_authority()).unwrap(),
+        );
+        assert_eq!(
+            capability.list_bounded_entries("child").unwrap(),
+            vec!["a.txt", "z.txt"],
+        );
+        for invalid in ["../outside", "/outside", "child/../outside", ".", ""] {
+            assert!(capability.list_bounded_entries(invalid).is_err());
+        }
+        for index in 0..257 {
+            std::fs::write(child.join(format!("overflow-{index:03}.txt")), b"X").unwrap();
+        }
+        assert!(capability.list_bounded_entries("child").is_err());
+        assert_eq!(
+            std::fs::read(outside.join("sentinel.txt")).unwrap(),
+            b"OUTSIDE_UNCHANGED",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_native_listing_denies_ntfs_junction_into_outside_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("outside-secret.txt");
+        std::fs::write(&sentinel, b"OUTSIDE_SENSITIVE_BYTES").unwrap();
+        let alias = allowed.join("alias");
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&outside)
+            .output()
+            .expect("Windows native NTFS junction fixture");
+        assert!(output.status.success(), "junction fixture: {output:?}");
+        let opened = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        assert!(
+            opened.list_bounded_entries("alias").is_err(),
+            "a junction to external storage must never be listed",
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"OUTSIDE_SENSITIVE_BYTES"
+        );
     }
 
     #[test]

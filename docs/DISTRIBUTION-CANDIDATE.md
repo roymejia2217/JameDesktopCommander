@@ -64,8 +64,9 @@ case-insensitive path collisions, validates all manifest entries and
 recomputes the entire inventory. Nothing is checked merely by pathname.
 It rejects source/runner mismatch, missing or extra files, and any changed
 byte. \`node_modules/.bin\` command symlinks are not part of the runtime
-payload. A candidate must remain \`private: true\` and keep existing
-upstream ownership metadata until rebranding is separately reviewed.
+payload. A candidate must remain \`private: true\` and carry JDC-owned private
+repository metadata. This does not prove npm registry namespace ownership or
+authorize a public package entry.
 
 The smoke gate runs the **packaged** Node executable, checks the packaged
 entrypoint's JavaScript syntax, locates the bundled ripgrep from within
@@ -88,11 +89,12 @@ that native ripgrep to establish architecture-level executability.
   installation, user state migration, recovery after network loss,
   uninstallation, signed binaries, least-privilege tool execution and
   rollback still require **dedicated acceptance**.
-- The existing \`@wonderwhy-er/desktop-commander\` and
+- The inherited original \`@wonderwhy-er/desktop-commander\` and
   \`io.github.wonderwhy-er/desktop-commander\` identifiers belong to
-  upstream; this candidate must not be advertised as an official
-  independently branded JDC distribution. Resolve package identity,
-  licenses, third-party notices and release namespace ownership first.
+  upstream. This candidate carries private JDC repository identity, but is
+  **not yet an installable or official public release**. Preserve the MIT
+  attribution and independently verify npm namespace custody, third-party
+  notices, signed provenance and distribution approval first.
 - Do not infer isolation from \`--no-onboarding\`, an OpenCode prompt,
   filesystem path admission or a Dockerfile. Runtime permissions
   require provider-side/OS-level evidence.

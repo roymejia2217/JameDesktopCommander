@@ -500,6 +500,71 @@ test('Linux recovery disables and removes an owned altered JDC unit without runn
   }
 });
 
+test('Linux profile directory custody denies foreign writes before doctor, activation and health', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'jdc-tunnel-profile-custody-'));
+  const client = path.join(home, 'verified-client');
+  const profiles = path.join(home, 'profiles');
+  const file = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  const profileFile = path.join(profiles, 'jdc.yaml');
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push([bin, ...args]);
+    if (bin === 'systemctl' && args[1] === 'show' &&
+        args.includes('--property=FragmentPath')) {
+      return 'FragmentPath=' + file + '\nDropInPaths=\nLoadState=loaded\nNeedDaemonReload=no\n';
+    }
+    if (bin === 'systemctl' && args[1] === 'show') {
+      return 'ActiveState=active\nUnitFileState=enabled\n';
+    }
+    if (bin === client && args[0] === 'profiles') {
+      return JSON.stringify([{ name: 'jdc', path: profileFile }]);
+    }
+    if (bin === client && args[0] === 'health') {
+      return JSON.stringify({ result: 'ok', healthz: { ok: true },
+        readyz: { ok: true }, control_plane_poll: { ok: true } });
+    }
+    return '';
+  };
+  const deps = { platform: 'linux', home, run };
+  const options = ['--tunnel-client-bin', client, '--profile-dir', profiles, '--profile', 'jdc'];
+  try {
+    await mkdir(profiles, { mode: 0o700 });
+    await writeFile(client, 'Non-executed fixture\n', { mode: 0o700 });
+    await writeFile(profileFile, 'health:\n  url_file: /tmp/fixture-url\n', { mode: 0o600 });
+    await chmod(profiles, 0o777);
+    const beforeDoctor = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['doctor', ...options], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    assert.ok(!calls.slice(beforeDoctor).some(call => call[0] === client),
+      'Doctor must not execute a client using an attacker-writable profile directory');
+    await assert.rejects(runLinuxTunnelCommand(['install', ...options], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    await assert.rejects(stat(file), { code: 'ENOENT' },
+      'Unsafe profile custody must be rejected before unit creation');
+
+    await chmod(profiles, 0o700);
+    assert.equal((await runLinuxTunnelCommand(['doctor', ...options], deps)).action, 'doctor');
+    await runLinuxTunnelCommand(['install', ...options], deps);
+    await chmod(profiles, 0o777);
+    const activationStart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    assert.ok(!calls.slice(activationStart).some(call => call[0] === 'systemctl' &&
+        ['enable', 'start', 'try-restart'].includes(call[2])),
+    'A mutable credential directory must never authorize activation');
+    assert.equal((await runLinuxTunnelCommand(['stop'], deps)).action, 'stop',
+      'Emergency stop remains available even with compromised profile custody');
+    assert.equal((await runLinuxTunnelCommand(['uninstall'], deps)).action, 'uninstall');
+  } finally {
+    await chmod(home, 0o700).catch(() => {});
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('Linux no user systemd session must fail before writing a service', {
   skip: process.platform !== 'linux',
 }, async () => {

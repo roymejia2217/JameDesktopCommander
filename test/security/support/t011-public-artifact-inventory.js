@@ -6,6 +6,9 @@ const PINNED_UPLOAD = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43
 const matrixTarget = '$' + '{{ matrix.target }}';
 const candidatePath = '$' + '{{ runner.temp }}' +
   '/UNPUBLISHED-jdc-portable-' + matrixTarget + '.tar';
+const installerPath = '$' + '{{ runner.temp }}' +
+  '/jdc-installer-output/UNPUBLISHED-jdc-installer-' + matrixTarget +
+  '.' + '$' + "{{ matrix.target == 'win32-x64' && 'exe' || 'deb' }}";
 
 function reject(reason) {
   throw new Error('E_T011_PUBLIC_ARTIFACT: ' + reason);
@@ -51,17 +54,23 @@ export function validatePublicArtifactInventory(workflows) {
       }
     }
   }
-  if (uploads.length !== 2 ||
-      !uploads.some((entry) =>
-        entry.workflowName === 't011-capability-feasibility.yml' &&
-        entry.jobName === 'native-probe') ||
-      !uploads.some((entry) =>
-        entry.workflowName === 'distribution-candidate.yml' &&
-        entry.jobName === 'portable-candidate')) {
+  const nativeUploads = uploads.filter(entry =>
+    entry.workflowName === 't011-capability-feasibility.yml' &&
+    entry.jobName === 'native-probe');
+  const portableUploads = uploads.filter(entry =>
+    entry.workflowName === 'distribution-candidate.yml' &&
+    entry.jobName === 'portable-candidate');
+  if (uploads.length !== 3 || nativeUploads.length !== 1 ||
+      portableUploads.length !== 2) {
     reject('unreviewed upload action or wrong workflow/job');
   }
-  const candidate = uploads.find((entry) =>
-    entry.workflowName === 'distribution-candidate.yml');
+  const candidate = portableUploads.find(entry =>
+    entry.step.with?.name === 'UNPUBLISHED-jdc-portable-' + matrixTarget);
+  const installer = portableUploads.find(entry =>
+    entry.step.with?.name === 'UNPUBLISHED-jdc-installer-' + matrixTarget);
+  if (!candidate || !installer || installer.step.uses !== PINNED_UPLOAD) {
+    reject('installer upload identity or pinned action mismatch');
+  }
   if (candidate.step.uses !== PINNED_UPLOAD) {
     reject('portable upload action SHA not pinned');
   }
@@ -77,6 +86,14 @@ export function validatePublicArtifactInventory(workflows) {
       conf['if-no-files-found'] !== 'error' ||
       conf['compression-level'] !== 0) {
     reject('portable upload path or retention differs from reviewed configuration');
+  }
+  const installerConf = installer.step.with;
+  if (!installerConf ||
+      installerConf.path !== installerPath ||
+      installerConf['retention-days'] !== 7 ||
+      installerConf['if-no-files-found'] !== 'error' ||
+      installerConf['compression-level'] !== 0) {
+    reject('installer upload path or retention differs from reviewed configuration');
   }
   return true;
 }

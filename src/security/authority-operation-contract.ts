@@ -33,7 +33,16 @@ export interface ReadFileAuthorityRequest {
   readonly rootRef: string;
   readonly relativePath: string;
 }
-export type AuthorityRequest = CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest;
+export interface ListDirectoryAuthorityRequest {
+  readonly version: 1;
+  readonly kind: 'list-directory';
+  readonly requestId: string;
+  readonly expectedEpoch: string;
+  readonly rootRef: string;
+  readonly relativePath: string;
+}
+export type AuthorityRequest =
+  CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest | ListDirectoryAuthorityRequest;
 export type AuthorityOperationResult =
   | Readonly<{
     version: 1;
@@ -105,8 +114,8 @@ function pathIsSafe(value: unknown): value is string {
 
 function parsePathRequest(
   input: unknown,
-  kind: 'create-directory' | 'read-file',
-): Readonly<CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest> {
+  kind: 'create-directory' | 'read-file' | 'list-directory',
+): Readonly<AuthorityRequest> {
   try {
     const obj = record(input, ['version', 'kind', 'requestId', 'expectedEpoch',
       'rootRef', 'relativePath']);
@@ -114,8 +123,7 @@ function parsePathRequest(
         !requestId(obj.requestId) || !canonicalEpoch(obj.expectedEpoch) ||
         typeof obj.rootRef !== 'string' || !rootReferencePattern.test(obj.rootRef) ||
         !pathIsSafe(obj.relativePath)) throw new AuthorityContractError();
-    return Object.freeze({ ...obj }) as unknown as
-      Readonly<CreateDirectoryAuthorityRequest | ReadFileAuthorityRequest>;
+    return Object.freeze({ ...obj }) as unknown as Readonly<AuthorityRequest>;
   } catch {
     throw new AuthorityContractError();
   }
@@ -129,6 +137,10 @@ export function parseCreateDirectoryRequest(input: unknown): Readonly<CreateDire
 
 export function parseReadFileRequest(input: unknown): Readonly<ReadFileAuthorityRequest> {
   return parsePathRequest(input, 'read-file') as Readonly<ReadFileAuthorityRequest>;
+}
+
+export function parseListDirectoryRequest(input: unknown): Readonly<ListDirectoryAuthorityRequest> {
+  return parsePathRequest(input, 'list-directory') as Readonly<ListDirectoryAuthorityRequest>;
 }
 /** A committed result is notification of completed broker-side I/O, never
  * permission for the untrusted Node process to perform subsequent I/O. */

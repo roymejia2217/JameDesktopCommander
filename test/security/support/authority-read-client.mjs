@@ -20,16 +20,20 @@ export class AuthorityReadTransportError extends Error {
 /** Returns no permission: only an authenticated native broker can do I/O. */
 export function createIssuerReadClient({
   parseReadFileRequest,
+  parseListDirectoryRequest,
   encodeAuthorityRequestFrame,
   decodeAuthorityReadReplyFrame,
   MAX_AUTHORITY_READ_PAYLOAD_BYTES,
 }) {
-  async function exchangeAuthorityReadFrame(socket, request, deadlineMs) {
+  async function exchangeAuthorityReadFrame(socket, request, deadlineMs, operation = 'read-file') {
     let frame;
     try {
       if (!Number.isSafeInteger(deadlineMs) ||
           deadlineMs < 1 || deadlineMs > MAX_DEADLINE_MS) throw Error('deadline');
-      frame = encodeAuthorityRequestFrame(parseReadFileRequest(request));
+      const validate = operation === 'read-file' ? parseReadFileRequest
+        : operation === 'list-directory' ? parseListDirectoryRequest : null;
+      if (typeof validate !== 'function') throw Error('unsupported operation');
+      frame = encodeAuthorityRequestFrame(validate(request));
     } catch {
       socket.destroy();
       throw new AuthorityReadTransportError('E_AUTHORITY_REQUEST_INVALID');
@@ -97,6 +101,29 @@ export function createIssuerReadClient({
       socket.once('close', onClose);
     });
   }
+  async function exchangeAuthorityListFrame(socket, request, deadlineMs) {
+    const result = await exchangeAuthorityReadFrame(socket, request, deadlineMs, 'list-directory');
+    if (result.status !== 'ok') return result;
+    try {
+      const entries = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.bytes));
+      if (!Array.isArray(entries) || entries.length > 256 ||
+          entries.some((name, i) => typeof name !== 'string' ||
+            name.length === 0 ||
+            (i > 0 && entries[i - 1] >= name))) {
+        throw Error('invalid listing');
+      }
+      for (const name of entries) {
+        parseListDirectoryRequest({ ...request, relativePath: name });
+        if (name.includes('/')) throw Error('nested listing entry');
+      }
+      return Object.freeze({
+        version: 1, status: 'ok', entries: Object.freeze(entries),
+      });
+    } catch {
+      throw new AuthorityReadTransportError('E_AUTHORITY_REPLY_INVALID');
+    }
+  }
+
   /** Test-only fixed endpoint: no caller-provided listener pathname. */
   async function requestIssuerOwnedRead(request, deadlineMs = 5_000) {
     if (process.platform !== 'linux') {
@@ -111,5 +138,22 @@ export function createIssuerReadClient({
       net.createConnection({ path: ISSUER_SOCKET }), request, deadlineMs,
     );
   }
-  return Object.freeze({ exchangeAuthorityReadFrame, requestIssuerOwnedRead });
+  /** Fixed endpoint, protocol-tested read-only list request, never a grant. */
+  async function requestIssuerOwnedList(request, deadlineMs = 5_000) {
+    if (process.platform !== 'linux') {
+      throw new AuthorityReadTransportError('E_AUTHORITY_UNAVAILABLE');
+    }
+    try {
+      parseListDirectoryRequest(request);
+    } catch {
+      throw new AuthorityReadTransportError('E_AUTHORITY_REQUEST_INVALID');
+    }
+    return exchangeAuthorityListFrame(
+      net.createConnection({ path: ISSUER_SOCKET }), request, deadlineMs,
+    );
+  }
+  return Object.freeze({
+    exchangeAuthorityReadFrame, exchangeAuthorityListFrame,
+    requestIssuerOwnedRead, requestIssuerOwnedList,
+  });
 }

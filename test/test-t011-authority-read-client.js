@@ -14,7 +14,7 @@ import {
   decodeAuthorityReadReplyFrame,
   MAX_AUTHORITY_READ_PAYLOAD_BYTES,
 } from '../dist/security/authority-frame-contract.js';
-import { parseReadFileRequest } from '../dist/security/authority-operation-contract.js';
+import { parseReadFileRequest, parseListDirectoryRequest } from '../dist/security/authority-operation-contract.js';
 const { exchangeAuthorityReadFrame } = createIssuerReadClient({
   encodeAuthorityRequestFrame, decodeAuthorityReadReplyFrame,
   MAX_AUTHORITY_READ_PAYLOAD_BYTES, parseReadFileRequest,
@@ -113,5 +113,39 @@ test('nonresponsive endpoint is rejected by a wall-clock deadline', async t => {
   await assert.rejects(
     exchangeAuthorityReadFrame(net.createConnection(address), request, 150),
     error => error instanceof AuthorityReadTransportError && error.code === 'E_AUTHORITY_TIMEOUT',
+  );
+});
+test('shared authority transport validates typed directory listing without granting paths', async t => {
+  const address = await serve(t, socket => {
+    const chunks = [];
+    let replied = false;
+    socket.on('data', chunk => {
+      if (replied) return;
+      chunks.push(chunk);
+      const frame = Buffer.concat(chunks);
+      if (frame.length < 4 || frame.length < frame.readUInt32BE(0) + 4) return;
+      assert.equal(frame.length, frame.readUInt32BE(0) + 4);
+      const body = JSON.parse(frame.subarray(4).toString('utf8'));
+      assert.equal(body.kind, 'list-directory');
+      assert.equal(body.relativePath, 'nested');
+      replied = true;
+      socket.end(reply(Buffer.from('["a.txt","z.txt"]')));
+    });
+  });
+  const client = createIssuerReadClient({
+    encodeAuthorityRequestFrame,
+    decodeAuthorityReadReplyFrame,
+    MAX_AUTHORITY_READ_PAYLOAD_BYTES,
+    parseReadFileRequest,
+    parseListDirectoryRequest,
+  });
+  const listing = { ...request, kind: 'list-directory', relativePath: 'nested' };
+  assert.deepEqual(
+    await client.exchangeAuthorityListFrame(net.createConnection(address), listing, 1000),
+    { version: 1, status: 'ok', entries: ['a.txt', 'z.txt'] },
+  );
+  await assert.rejects(
+    client.exchangeAuthorityListFrame(net.createConnection(address), { ...listing, kind: 'create-directory' }, 1000),
+    error => error instanceof AuthorityReadTransportError && error.code === 'E_AUTHORITY_REQUEST_INVALID',
   );
 });

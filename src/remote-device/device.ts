@@ -9,6 +9,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { captureRemote } from '../utils/capture.js';
 import { createRemoteCallReceipt } from './remote-call-receipt.js';
+import { currentLocalRemoteCommand } from './local-cli-invocation.js';
 
 export interface MCPDeviceOptions {
     persistSession?: boolean;
@@ -273,8 +274,8 @@ export class MCPDevice {
                 console.log('└─ Press Ctrl+C to disconnect.');
                 console.log('');
                 console.log('┌─ Commands');
-                console.log('│ Help:    npx @wonderwhy-er/desktop-commander@latest remote --help');
-                console.log('│ Log out: npx @wonderwhy-er/desktop-commander@latest remote --logout');
+                console.log('│ Help:    ' + (currentLocalRemoteCommand('--help') ?? 'Use your installed JDC entrypoint with remote --help'));
+                console.log('│ Log out: ' + (currentLocalRemoteCommand('--logout') ?? 'Use your installed JDC entrypoint with remote --logout'));
                 console.log('└─ Run these in a new Terminal, or after disconnecting.');
                 console.log('');
             }

@@ -69,6 +69,49 @@ fn execute_claimed_read_on_roots(
     selected.execute_authenticated_read_with_external_claim(frame, claim)
 }
 
+/// Bind an authenticated listing frame to an issuer-retained root, its
+/// witnessed policy epoch and one durable replay claim. The result is
+/// serialized only after bounded handle-relative enumeration succeeds.
+/// This is an internal research operation, never a Node-side path grant.
+fn execute_claimed_list_on_roots(
+    roots: &mut [SealedDirectoryGrant],
+    policy_epoch: u64,
+    frame: AuthenticatedFrame,
+    claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+) -> Result<Vec<u8>, DispatchDenied> {
+    let request = crate::canonical_request::decode_list_directory_frame(frame.wire())
+        .map_err(|_| DispatchDenied)?;
+    if request.expected_epoch() != policy_epoch {
+        return Err(DispatchDenied);
+    }
+    let selected = roots
+        .iter_mut()
+        .find(|root| root.matches_bound_identity(request.root_ref(), request.expected_epoch()))
+        .ok_or(DispatchDenied)?;
+    let entries = selected.execute_authenticated_list_with_external_claim(frame, claim)?;
+    serde_json::to_vec(&entries).map_err(|_| DispatchDenied)
+}
+
+/// One authenticated operation router for the existing bounded read/list
+/// primitives. The canonical kind is selected only after kernel peer admission
+/// and strict frame parsing. A create/mutation frame must never spend replay.
+fn execute_claimed_readonly_on_roots(
+    roots: &mut [SealedDirectoryGrant],
+    policy_epoch: u64,
+    frame: AuthenticatedFrame,
+    claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
+) -> Result<Vec<u8>, DispatchDenied> {
+    use crate::canonical_request::{decode_readonly_operation_frame, ReadOnlyOperation};
+    match decode_readonly_operation_frame(frame.wire()).map_err(|_| DispatchDenied)? {
+        ReadOnlyOperation::ReadFile => {
+            execute_claimed_read_on_roots(roots, policy_epoch, frame, claim)
+        }
+        ReadOnlyOperation::ListDirectory => {
+            execute_claimed_list_on_roots(roots, policy_epoch, frame, claim)
+        }
+    }
+}
+
 /// Retains the already-open native roots and the OS-pinned replay-file
 /// observation. Handles and replay authority never escape this object. Its
 /// non-release read dispatcher accepts only the retained systemd listener and
@@ -207,7 +250,7 @@ impl UnissuedIssuer {
         Ok(())
     }
 
-    fn execute_claimed_read(
+    fn execute_claimed_readonly(
         &mut self,
         frame: AuthenticatedFrame,
     ) -> Result<Vec<u8>, DispatchDenied> {
@@ -216,18 +259,17 @@ impl UnissuedIssuer {
         }
         let epoch = self.policy_epoch;
         let (roots, replay_writer) = (&mut self.roots, &mut self.replay_writer);
-        execute_claimed_read_on_roots(roots, epoch, frame, |request_id| {
+        execute_claimed_readonly_on_roots(roots, epoch, frame, |request_id| {
             replay_writer
                 .claim_once(request_id)
                 .map_err(|_| DispatchDenied)
         })
     }
 
-    /// Non-release integration boundary. It only uses the listener retained
-    /// from systemd activation and the fixed bootstrap-prepared MCP principal;
-    /// no caller can inject a root handle, replay store, UID/GID or pathname.
-    /// The installed binary remains deny-only and does not call this method.
-    pub fn dispatch_one_inherited_read_reply(
+    /// Single authenticated service operation boundary, shared by read-file
+    /// and list-directory. Unsupported kinds are denied before a replay claim.
+    /// This non-release probe is NOT called by the deny-only service main.
+    pub fn dispatch_one_inherited_readonly_reply(
         &mut self,
         deadline: std::time::Duration,
     ) -> Result<(), DispatchDenied> {
@@ -242,7 +284,7 @@ impl UnissuedIssuer {
             principal,
             deadline,
             |issuer| issuer.revalidate().map_err(|_| DispatchDenied),
-            |issuer, frame| issuer.execute_claimed_read(frame),
+            |issuer, frame| issuer.execute_claimed_readonly(frame),
             |issuer| issuer.revoke(),
         )
     }
@@ -373,6 +415,171 @@ mod tests {
             Ok(()),
             "a newly opened same-object pair can pass identity binding"
         );
+    }
+
+    #[test]
+    fn authenticated_readonly_router_selects_read_and_list_without_spending_mutation_replay() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        const ROOT: &str = "0123456789abcdef0123456789abcdef";
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let allowed = temp.path().join("allowed");
+        let nested = allowed.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("inside.txt"), b"AUTHORIZED_BYTES").unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap(),
+        );
+        let policy =
+            IssuerPolicy::decode_exact_for_test(policy_bytes.as_bytes(), 7, [1; 32]).unwrap();
+        let mut roots = vec![SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap()];
+        let frame = |kind: &str, uuid: &str, epoch: u64, root: &str, path: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"{kind}","requestId":"{uuid}","expectedEpoch":"{epoch}","rootRef":"{root}","relativePath":"{path}"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&wire).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &receiver,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        };
+        let mut claims = Vec::new();
+        let read = execute_claimed_readonly_on_roots(
+            &mut roots,
+            7,
+            frame(
+                "read-file",
+                "11111111-1111-4111-8111-111111111111",
+                7,
+                ROOT,
+                "nested/inside.txt",
+            ),
+            |id| {
+                claims.push(id);
+                Ok(())
+            },
+        );
+        assert_eq!(read, Ok(b"AUTHORIZED_BYTES".to_vec()));
+        let list = execute_claimed_readonly_on_roots(
+            &mut roots,
+            7,
+            frame(
+                "list-directory",
+                "22222222-2222-4222-8222-222222222222",
+                7,
+                ROOT,
+                "nested",
+            ),
+            |id| {
+                claims.push(id);
+                Ok(())
+            },
+        );
+        assert_eq!(list, Ok(br#"["inside.txt"]"#.to_vec()));
+        for (kind, root, epoch) in [
+            ("create-directory", ROOT, 7),
+            ("read-file", ROOT, 8),
+            ("list-directory", "00000000000000000000000000000000", 7),
+        ] {
+            assert_eq!(
+                execute_claimed_readonly_on_roots(
+                    &mut roots,
+                    7,
+                    frame(
+                        kind,
+                        "33333333-3333-4333-8333-333333333333",
+                        epoch,
+                        root,
+                        "nested"
+                    ),
+                    |id| {
+                        claims.push(id);
+                        Ok(())
+                    },
+                ),
+                Err(DispatchDenied),
+            );
+        }
+        assert_eq!(claims.len(), 2, "denied requests must not consume replay");
+        assert_ne!(
+            claims[0], claims[1],
+            "each admitted operation has its own replay ID"
+        );
+    }
+
+    #[test]
+    fn linux_issuer_root_selection_claims_once_for_bounded_listing() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        const ROOT: &str = "0123456789abcdef0123456789abcdef";
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let home = std::env::var_os("HOME").unwrap();
+        let temp = tempfile::tempdir_in(home).unwrap();
+        let allowed = temp.path().join("allowed");
+        let nested = allowed.join("nested");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(nested.join("z.txt"), b"Z").unwrap();
+        std::fs::write(nested.join("a.txt"), b"A").unwrap();
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"OUTSIDE_UNCHANGED").unwrap();
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed.to_str().unwrap()).unwrap(),
+        );
+        let policy =
+            IssuerPolicy::decode_exact_for_test(policy_bytes.as_bytes(), 7, [1; 32]).unwrap();
+        let mut roots = vec![SealedDirectoryGrant::from_issuer_policy(&policy, ROOT).unwrap()];
+        let frame = |root: &str, epoch: u64| {
+            let body = format!(
+                r#"{{"version":1,"kind":"list-directory","requestId":"{ID}","expectedEpoch":"{epoch}","rootRef":"{root}","relativePath":"nested"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&wire).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &receiver,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        };
+        let mut claims = 0;
+        let accepted = execute_claimed_list_on_roots(&mut roots, 7, frame(ROOT, 7), |_| {
+            claims += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(accepted, br#"["a.txt","z.txt"]"#);
+        for (root, epoch) in [(ROOT, 8), ("00000000000000000000000000000000", 7)] {
+            assert_eq!(
+                execute_claimed_list_on_roots(&mut roots, 7, frame(root, epoch), |_| {
+                    claims += 1;
+                    Ok(())
+                }),
+                Err(DispatchDenied),
+            );
+        }
+        assert_eq!(claims, 1);
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"OUTSIDE_UNCHANGED");
     }
 
     #[test]

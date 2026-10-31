@@ -42,6 +42,22 @@ assert.deepEqual(JSON.parse(doctor.stdout), {
   releaseEligible: false,
 });
 
+// The extracted archive must never tell users to install the original
+// upstream package. Check the *actual bundled* CLI and its own Node binary.
+const remoteHelp = spawnSync(binary, [entrypoint, 'remote', '--help'], {
+  cwd: candidate, encoding: 'utf8', timeout: 15000, maxBuffer: 65536,
+  env: { ...process.env, NODE_OPTIONS: '' },
+});
+assert.equal(remoteHelp.error, undefined, 'Packaged JDC remote help could not start');
+assert.equal(remoteHelp.status, 0, 'Packaged JDC remote help failed');
+assert.match(remoteHelp.stdout, /JameDesktopCommander Remote MCP device/);
+assert.ok(remoteHelp.stdout.includes(binary), 'Remote help does not point to the bundled Node executable');
+assert.ok(remoteHelp.stdout.includes(entrypoint), 'Remote help does not point to the bundled JDC entrypoint');
+assert.match(remoteHelp.stdout, /remote --logout/);
+assert.match(remoteHelp.stdout, /remote --debug/);
+assert.doesNotMatch(remoteHelp.stdout, /npx|@wonderwhy-er\/desktop-commander/i);
+assert.equal(remoteHelp.stderr, '', 'Packaged remote help emitted unexpected stderr');
+
 const sdk = join(candidate, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm', 'client');
 const [{ Client }, { StdioClientTransport }] = await Promise.all([
   import(pathToFileURL(join(sdk, 'index.js')).href),

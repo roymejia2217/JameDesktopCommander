@@ -1035,6 +1035,9 @@ export async function writePdf(
     outputPath?: string,
     options: any = {}
 ): Promise<void> {
+    // Creation and modification both use pathname-based reads/writes. A
+    // restricted policy requires native authority, not validatePath alone.
+    await requireUnrestrictedLegacyFilesystem('write_pdf');
     const validPath = await validatePath(filePath);
     const fileExtension = getFileExtension(validPath);
 

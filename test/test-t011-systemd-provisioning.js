@@ -81,3 +81,16 @@ test('socket denial evidence fallback binds a missing journal invocation tag to 
   ]) assert.ok(acceptance.includes(required),
     'missing fail-closed correlated denial evidence: ' + required);
 });
+
+test('real Linux acceptance independently checks denial by PID and bounded execution window', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /--argjson maximum "\$exec_exited_us"/,
+    'journal acceptance must reject events after the current service process exits');
+  assert.match(acceptance, /\.__MONOTONIC_TIMESTAMP \| tonumber\) <= \$maximum/,
+    'a reused PID or later event is not evidence for this invocation');
+  assert.match(acceptance, /if ! grep -Fxq 'E_POLICY_UNAVAILABLE' <<<"\$pid_journal"/,
+    'native acceptance must exercise and REQUIRE process-correlated denial even when the journal invocation tag exists');
+  assert.match(acceptance, /T011_SOCKET_DENIAL_CORRELATED_BY_SYSTEMD_PID_NONRELEASE/,
+    'the native runner must report positive OS process correlation separately');
+});

@@ -18,6 +18,11 @@ use crate::canonical_request::safe_relative_path;
 /// let unapproved = Dir::open_ambient_dir(".", ambient_authority()).unwrap();
 /// let _forged = RootedDirectory::from_preopened(unapproved);
 /// ```
+/// Unproven staged replacement is not even compiled into a normal library:
+/// ```compile_fail
+/// use jdc_authority_service::handle_mkdir::RootedDirectory;
+/// let _ = RootedDirectory::replace_existing_file_staged;
+/// ```
 pub struct RootedDirectory {
     root: Dir,
 }
@@ -45,10 +50,12 @@ pub struct RootedDirectory {
 /// use jdc_authority_service::handle_mkdir::ProtectedStagingDirectory;
 /// let _stage = ProtectedStagingDirectory::from_provisioned_linux_state();
 /// ```
+#[cfg(test)]
 pub struct ProtectedStagingDirectory {
     root: Dir,
 }
 
+#[cfg(test)]
 impl ProtectedStagingDirectory {
     /// Windows bootstrap consumes a preopened directory handle; the OS token,
     /// protected DACL and service SID are checked before accepting it.
@@ -365,13 +372,28 @@ impl RootedDirectory {
         Ok(())
     }
 
-    /// Experimental **replace-by-new-inode** semantics. Never opens the old
-    /// final inode for writing, which matters for cross-root hardlink aliases.
-    /// A future broker must prove separate-principal staging custody, same-volume
-    /// rename, destination state under races and crash recovery. In particular,
-    /// the destination might disappear between metadata and rename; this is NOT
-    /// yet an atomic compare-and-replace contract. There is no MCP grant here.
+    /// Conservative non-release fallback: without OS-enforced exclusive
+    /// custody or an atomic expected-object commit, replacement is UNAVAILABLE.
+    /// Reject before inspecting paths, creating staging files or changing bytes.
+    /// The experimental algorithm remains compiled only for Rust unit tests.
+    #[cfg(test)]
     pub fn replace_existing_file_staged(
+        &self,
+        _staging: &ProtectedStagingDirectory,
+        _relative: &str,
+        _stage_nonce: &str,
+        _bytes: &[u8],
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "E_REPLACE_ATOMICITY_UNPROVEN",
+        ))
+    }
+
+    // Preserve positive and adversarial native OS fixtures while public
+    // replacement is permanently deny-only until a reviewed custody design.
+    #[cfg(test)]
+    pub(crate) fn replace_existing_file_staged_fixture(
         &self,
         staging: &ProtectedStagingDirectory,
         relative: &str,
@@ -387,8 +409,9 @@ impl RootedDirectory {
         )
     }
 
-    // Test-only deterministic race injection. This closure is never exposed
-    // to an untrusted caller, issuer, IPC endpoint or MCP handler.
+    // Test-only deterministic race injection: NEVER compiled into native
+    // service or addon production/library artifact without cfg(test).
+    #[cfg(test)]
     fn replace_existing_file_staged_with_precommit_hook(
         &self,
         staging: &ProtectedStagingDirectory,
@@ -677,7 +700,7 @@ mod tests {
             Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
         );
         rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -880,6 +903,36 @@ mod tests {
     }
 
     #[test]
+    fn public_staged_replacement_denies_without_atomic_object_custody_before_any_write() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage_dir = fixture.path().join("private-stage");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&stage_dir).unwrap();
+        let destination = allowed.join("file.bin");
+        let original = b"EXISTING_BYTES_MUST_REMAIN";
+        std::fs::write(&destination, original).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
+        };
+        let denial = rooted
+            .replace_existing_file_staged(
+                &staging,
+                "file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"UNPROVEN_REPLACEMENT_MUST_NOT_COMMIT",
+            )
+            .expect_err("public replacement cannot commit without atomic object custody proof");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_ATOMICITY_UNPROVEN");
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&stage_dir).unwrap().count(), 0);
+    }
+
+    #[test]
     fn staged_replacement_denies_destination_name_swapped_to_outside_object() {
         let fixture = tempfile::tempdir().unwrap();
         let allowed = fixture.path().join("allowed");
@@ -1026,7 +1079,7 @@ mod tests {
             root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
         };
         let denial = rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -1069,7 +1122,7 @@ mod tests {
             root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
         };
         rooted
-            .replace_existing_file_staged(&staging, "target.bin", nonce, b"NEW_IN_ROOT")
+            .replace_existing_file_staged_fixture(&staging, "target.bin", nonce, b"NEW_IN_ROOT")
             .expect("private stage must be independent of destination namespace");
         assert_eq!(std::fs::read(&victim).unwrap(), protected_bytes);
         assert_eq!(std::fs::read(&hostile_stage).unwrap(), protected_bytes);
@@ -1098,7 +1151,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(&staging, "file.bin", nonce, b"WRONG",)
+            .replace_existing_file_staged_fixture(&staging, "file.bin", nonce, b"WRONG",)
             .is_err());
         assert_eq!(
             std::fs::read(allowed.join("file.bin")).unwrap(),
@@ -1138,7 +1191,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "junction/file.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -1170,7 +1223,7 @@ mod tests {
             root: Dir::open_ambient_dir(&stage_dir, ambient_authority()).unwrap(),
         };
         assert!(rooted
-            .replace_existing_file_staged(
+            .replace_existing_file_staged_fixture(
                 &staging,
                 "alias/file.bin",
                 "0123456789abcdef0123456789abcdef",
@@ -1202,7 +1255,7 @@ mod tests {
             "0000",
         ] {
             assert!(rooted
-                .replace_existing_file_staged(&staging, "file.bin", invalid, b"CHANGE")
+                .replace_existing_file_staged_fixture(&staging, "file.bin", invalid, b"CHANGE")
                 .is_err());
             assert_eq!(std::fs::read(allowed.join("file.bin")).unwrap(), b"SAFE");
         }

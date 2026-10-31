@@ -197,8 +197,21 @@ the final identity check and commit can invalidate the decision. Neither
 `nlink == 1` nor `same-file` comparison proves the origin of the object or
 provides an atomic compare-and-replace. A privileged bind mount remains a
 demonstrated Linux counterexample to storage separation without a defended
-mount/principal model. This code must remain experimental and deny-only,
-and #148 OPEN/P0 until a separately reviewed object custody/atomic commit
+mount/principal model.
+
+**Conservative no-release boundary (2026-10-31, PR #234):** the
+staged-replacement method and the protected staging capability now compile
+**only under Rust `cfg(test)`**. The test-visible method returns
+`E_REPLACE_ATOMICITY_UNPROVEN` before any staging write or destination
+mutation. Its former handle-relative replacement algorithm remains private
+to the native OS fixture tests via an explicitly named
+`replace_existing_file_staged_fixture` entry point, so genuine positive and
+adversarial cases continue to execute without exposing a callable replacement
+method in normal builds. A Rust `compile_fail` doctest verifies the public
+method is absent in the normal library artifact. This does **not** establish
+invariant O or authorize any read/write/rename route.
+
+#148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 
 **Execution order and acceptance, all mandatory:**

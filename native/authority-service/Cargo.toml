@@ -11,9 +11,9 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.149"
 cap-std = "=4.0.3" # Preopened-directory-only operation; no ambient path API.
 cap-fs-ext = "=4.0.3" # OS metadata from the already-open file handle.
-same-file = "=1.0.6" # Compare independently opened OS file handles, not path strings.
-
 [dev-dependencies]
+# Compare OS file handles only inside the non-shipping experimental fixtures.
+same-file = "=1.0.6"
 tempfile = "=3.23.0"
 rusqlite = { version = "=0.37.0", default-features = false, features = ["bundled"] }
 jdc-authority-store = { path = "../authority-store", features = ["offline-fixture"] }

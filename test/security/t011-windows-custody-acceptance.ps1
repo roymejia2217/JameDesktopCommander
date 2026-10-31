@@ -164,6 +164,35 @@ try {
     # removed by rollback, and the stored epoch must remain unchanged.
     Require-Success 'OWNER_SQLITE_JOURNAL_LIFECYCLE' $service.Credential $fixture @('prove-rollback-journal', $db)
     Require-Success 'OWNER_READ' $service.Credential $fixture @('verify-2', $db)
+    # Verify a not-yet-published staging object under real, distinct SIDs.
+    # Owner positive hardlink is mandatory, so an unrelated filesystem error
+    # cannot masquerade as a successful attacker denial.
+    $stageToken = [guid]::NewGuid().ToString('N')
+    $unpublishedStage = Join-Path $state ('.jdc-stage-' + $stageToken)
+    $ownerStageLink = Join-Path $state ('.jdc-stage-owner-' + $stageToken)
+    $stagedExteriorAlias = Join-Path $public ('stage-exfil-' + $stageToken)
+    $attackerStageName = Join-Path $state ('.jdc-stage-forged-' + $stageToken)
+    Require-Success 'OWNER_STAGE_CREATE' $service.Credential $probe @('canary', $unpublishedStage, $unpublishedStage)
+    $stageBefore = (Get-FileHash -LiteralPath $unpublishedStage -Algorithm SHA256).Hash
+    Require-Success 'OWNER_STAGE_HARDLINK' $service.Credential $probe @('hardlink', $unpublishedStage, $ownerStageLink)
+    Require-Success 'OWNER_STAGE_HARDLINK_SAME_OBJECT' $service.Credential $probe @('same-object', $unpublishedStage, $ownerStageLink)
+    Require-Success 'OWNER_STAGE_LINK_REMOVE' $service.Credential $probe @('unlink', $ownerStageLink, $unpublishedStage)
+    Require-Denied 'ATTACKER_STAGE_READ' $attacker.Credential $probe @('read', $unpublishedStage, $canary)
+    Require-Denied 'ATTACKER_STAGE_HARDLINK' $attacker.Credential $probe @('hardlink', $unpublishedStage, $stagedExteriorAlias)
+    Require-Denied 'ATTACKER_STAGE_APPEND' $attacker.Credential $probe @('append', $unpublishedStage, $canary)
+    Require-Denied 'ATTACKER_STAGE_OVERWRITE' $attacker.Credential $probe @('overwrite', $unpublishedStage, $canary)
+    Require-Denied 'ATTACKER_STAGE_UNLINK' $attacker.Credential $probe @('unlink', $unpublishedStage, $canary)
+    Require-Denied 'ATTACKER_STAGE_CREATE' $attacker.Credential $probe @('canary', $unpublishedStage, $attackerStageName)
+    if ((Test-Path -LiteralPath $stagedExteriorAlias) -or (Test-Path -LiteralPath $attackerStageName)) {
+        throw 'E_CUSTODY_STAGE_ALIAS_CREATED'
+    }
+    if ((Get-FileHash -LiteralPath $unpublishedStage -Algorithm SHA256).Hash -ne $stageBefore) {
+        throw 'E_CUSTODY_STAGE_BYTES_CHANGED'
+    }
+    Require-Success 'OWNER_STAGE_REMOVE' $service.Credential $probe @('unlink', $unpublishedStage, $canary)
+    if (Test-Path -LiteralPath $unpublishedStage) { throw 'E_CUSTODY_STAGE_CLEANUP_FAILED' }
+    Write-Output 'T011_STAGE_WINDOWS_CUSTODY_PASS_NONRELEASE'
+
     $before = (Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash
 
     foreach ($operation in @('read', 'append', 'rename', 'unlink', 'create', 'parent-rename')) {

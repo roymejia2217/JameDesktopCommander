@@ -26,3 +26,27 @@ test('Windows custody test belongs to the governed existing native matrix', () =
     /replay/, /attacker/, /finally/,
   ]) assert.match(script, required);
 });
+
+test('Windows prepublication staging custody uses separate real SIDs and same-volume positive control', () => {
+  const script = fs.readFileSync(path.join(root,
+    'test/security/t011-windows-custody-acceptance.ps1'), 'utf8');
+  for (const proof of [
+    'T011_STAGE_WINDOWS_CUSTODY_PASS_NONRELEASE',
+    'OWNER_STAGE_CREATE',
+    'OWNER_STAGE_HARDLINK_SAME_OBJECT',
+    'ATTACKER_STAGE_HARDLINK',
+    'ATTACKER_STAGE_READ',
+    'E_CUSTODY_STAGE_BYTES_CHANGED',
+  ]) assert.ok(script.includes(proof), 'Missing genuine Windows custody evidence: ' + proof);
+});
+
+test('Windows staging principal proof actually tests service-only links and outsider denials', () => {
+  const script = fs.readFileSync(path.join(root, 'test/security/t011-windows-custody-acceptance.ps1'), 'utf8');
+  for (const proof of [
+    /Require-Success 'OWNER_STAGE_HARDLINK' \$service\.Credential \$probe/,
+    /Require-Success 'OWNER_STAGE_HARDLINK_SAME_OBJECT' \$service\.Credential \$probe/,
+    /Require-Denied 'ATTACKER_STAGE_HARDLINK' \$attacker\.Credential \$probe/,
+    /Require-Denied 'ATTACKER_STAGE_READ' \$attacker\.Credential \$probe/,
+    /Get-FileHash -LiteralPath \$unpublishedStage -Algorithm SHA256/,
+  ]) assert.match(script, proof);
+});

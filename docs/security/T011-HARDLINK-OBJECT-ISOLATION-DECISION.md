@@ -254,6 +254,29 @@ principal/ACL and filesystem attestation, same-volume/cross-volume
 acceptance, no-overwrite collision semantics, crash/cancellation recovery
 and review of all original #147 attacks before any operation may ship.
 
+**Distinct-principal prepublication staging proof (2026-10-31, hosted
+acceptance extension):** the existing Linux and Windows custody acceptance
+scripts now test a separate unpublished staging file under the already
+protected state directory. On Linux, the service principal
+`jdc-authority` must create the file and successfully form a same-volume
+hard link to its own object, with kernel device/inode identity checked.
+The independent `nobody` identity must fail to read, link, append,
+remove or create another entry in that protected directory. On Windows,
+two independent disposable unprivileged SIDs test equivalent owner
+positive link/same-object and attacker read/link/write/unlink/create
+denials under an inheritance-disabled NTFS DACL. Both scripts check exact
+content digests before and after the attempts, require no attacker alias,
+and remove the temporary staging name. The scripts require disposable
+hosted CI; they are never executed on the installed user host.
+
+**Scope of this proof:** the real tests demonstrate separation under the
+specific CI principals and ACL/mode state, not immunity to an attacker
+already sharing the service UID/SID, elevated privileges, inherited
+handles or a changed parent/mount topology. The same-principal stage
+leak counterexample above remains valid. No production stage capability
+is issued and no `create_new_file` API becomes available to normal
+builds. The original #147 object-isolation requirements remain blocked.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

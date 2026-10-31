@@ -232,8 +232,9 @@ process_journal="$(sudo -n journalctl -b \
   "_SYSTEMD_UNIT=$service_name" \
   "SYSLOG_IDENTIFIER=jdc-authority-service" --no-pager --output=json)"
 pid_journal="$(jq -r --argjson minimum "$exec_started_us" \
-  --argjson maximum "$exec_exited_us" '
+  --argjson maximum "$exec_exited_us" --arg invocation "$after_invocation" '
   select(.__MONOTONIC_TIMESTAMP != null and
+         (._SYSTEMD_INVOCATION_ID == null or ._SYSTEMD_INVOCATION_ID == $invocation) and
          ((.__MONOTONIC_TIMESTAMP | tonumber) >= $minimum) and
          ((.__MONOTONIC_TIMESTAMP | tonumber) <= $maximum) and
          (.MESSAGE == "E_POLICY_UNAVAILABLE" or

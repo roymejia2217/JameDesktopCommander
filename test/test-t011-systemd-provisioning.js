@@ -94,3 +94,13 @@ test('real Linux acceptance independently checks denial by PID and bounded execu
   assert.match(acceptance, /T011_SOCKET_DENIAL_CORRELATED_BY_SYSTEMD_PID_NONRELEASE/,
     'the native runner must report positive OS process correlation separately');
 });
+
+test('OS PID journal correlation rejects an explicit different invocation ID', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /--arg invocation "\$after_invocation"/,
+    'the current systemd invocation ID must be supplied to the journal filter');
+  assert.match(acceptance,
+    /\._SYSTEMD_INVOCATION_ID == null or \._SYSTEMD_INVOCATION_ID == \$invocation/,
+    'absence of a journal tag may fall back to PID, but an explicit mismatched tag must deny');
+});

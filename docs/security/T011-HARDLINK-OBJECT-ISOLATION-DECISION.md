@@ -232,6 +232,28 @@ entire write complete **before** publishing the new inode and prove
 private-staging, no-overwrite publication and principal custody on both
 operating systems.
 
+**Test-only no-overwrite publication study (2026-10-31, subsequent to PR
+#234):** a separate native Rust fixture creates and syncs the full payload
+in a staging directory, then uses `cap-std::Dir::hard_link` between **two
+preopened directory handles** to create the final destination name. A
+deterministic OS-thread test proves the destination is absent until after
+full staging sync; another installs a real outside hardlink under that
+destination name before publication, verifies the no-overwrite link fails,
+and preserves the outside bytes and alias identity. The staging name is
+cleaned after the publication attempt. **This is not a production API**:
+the entire fixture exists only in `cfg(test)`, and the public methods
+remain excluded from ordinary builds.
+
+A third OS-thread fixture demonstrates the **missing custody proof**:
+when the temporary directory is accessible to the attacker's principal,
+an outside hardlink can be created to the already-written staging inode,
+exposing its full contents **before** destination publication. This is
+recorded as an explicitly **negative security counterexample**, not
+evidence of confidentiality. A complete design still needs separate
+principal/ACL and filesystem attestation, same-volume/cross-volume
+acceptance, no-overwrite collision semantics, crash/cancellation recovery
+and review of all original #147 attacks before any operation may ship.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

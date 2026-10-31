@@ -362,6 +362,68 @@ impl RootedDirectory {
         ))
     }
 
+    // RESEARCH ONLY. A private, already-verified same-volume stage would be
+    // essential for real security; this method does NOT attest that custody.
+    // Write/sync first, then publish with a no-overwrite hardlink relative
+    // to pinned source/destination Dir handles. No post-publication writes.
+    // An attacker able to link the private stage still defeats this model.
+    #[cfg(test)]
+    fn create_new_file_staged_with_prepublish_hook(
+        &self,
+        staging: &ProtectedStagingDirectory,
+        relative: &str,
+        nonce: &str,
+        bytes: &[u8],
+        before_publish: impl FnOnce(),
+    ) -> io::Result<()> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        let valid_nonce = nonce.len() == 32
+            && nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !safe_relative_path(relative) || !valid_nonce || bytes.len() > MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_STAGED_CREATE_DENIED",
+            ));
+        }
+        let stage = format!(".jdc-create-stage-{nonce}");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut writer = staging.root.open_with(&stage, &options)?;
+        if let Err(err) = writer.write_all(bytes).and_then(|_| writer.sync_all()) {
+            drop(writer);
+            let _ = staging.root.remove_file(&stage);
+            return Err(err);
+        }
+        drop(writer);
+
+        let publication = (|| -> io::Result<()> {
+            let mut components = relative.split('/').peekable();
+            let mut opened: Option<Dir> = None;
+            while let Some(component) = components.next() {
+                let parent = opened.as_ref().unwrap_or(&self.root);
+                if components.peek().is_some() {
+                    opened = Some(parent.open_dir(component)?);
+                } else {
+                    before_publish();
+                    return staging.root.hard_link(&stage, parent, component);
+                }
+            }
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "E_STAGED_CREATE_DENIED",
+            ))
+        })();
+        // Once published, the new destination shares the fully synced inode.
+        // Removing our stage name does not modify any published bytes.
+        let cleanup = staging.root.remove_file(&stage);
+        match publication {
+            Ok(()) => cleanup,
+            Err(err) => Err(err),
+        }
+    }
+
     // Genuine OS-positive/negative fixtures are preserved without exporting
     // a callable creation method in an ordinary library or service build.
     #[cfg(test)]
@@ -1292,6 +1354,151 @@ mod tests {
                 .is_err());
             assert_eq!(std::fs::read(allowed.join("file.bin")).unwrap(), b"SAFE");
         }
+    }
+
+    #[test]
+    fn test_only_staged_create_writes_full_bytes_before_destination_publication() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let private_stage = fixture.path().join("private-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &private_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let stage_name = ".jdc-create-stage-0123456789abcdef0123456789abcdef";
+        let stage_path = private_stage.join(stage_name);
+        let external_alias = outside.join("prepublish-alias.bin");
+        let payload = b"COMPLETE_BEFORE_PUBLISH";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        rooted
+            .create_new_file_staged_with_prepublish_hook(
+                &staging,
+                "new.bin",
+                "0123456789abcdef0123456789abcdef",
+                payload,
+                || {
+                    // Attacker runs after the staged writer finished syncing,
+                    // but before the destination becomes visible.
+                    std::thread::scope(|threads| {
+                        threads
+                            .spawn(|| {
+                                assert!(std::fs::hard_link(&destination, &external_alias).is_err());
+                            })
+                            .join()
+                            .unwrap();
+                    });
+                    assert!(!destination.exists());
+                    assert_eq!(std::fs::read(&stage_path).unwrap(), payload);
+                    assert!(!external_alias.exists());
+                },
+            )
+            .expect("test-only same-volume staged publish");
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        assert!(!stage_path.exists(), "private staging name must be removed");
+        assert!(!external_alias.exists());
+    }
+
+    #[test]
+    fn test_only_staged_create_denies_raced_occupied_destination_without_clobber() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let private_stage = fixture.path().join("private-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &private_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let exterior = outside.join("victim.bin");
+        let sentinel = b"EXTERIOR_BYTES_MUST_SURVIVE";
+        std::fs::write(&exterior, sentinel).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+        let result = rooted.create_new_file_staged_with_prepublish_hook(
+            &staging,
+            "new.bin",
+            "0123456789abcdef0123456789abcdef",
+            b"NEVER_OVERWRITE",
+            || {
+                std::thread::scope(|threads| {
+                    threads
+                        .spawn(|| {
+                            std::fs::hard_link(&exterior, &destination)
+                                .expect("attacker must install genuine exterior alias")
+                        })
+                        .join()
+                        .unwrap();
+                });
+                assert!(same_file::is_same_file(&destination, &exterior).unwrap());
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(same_file::is_same_file(&destination, &exterior).unwrap());
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&exterior).unwrap(), sentinel);
+        assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_only_staged_create_proves_unprotected_stage_exposes_full_bytes_before_publish() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let unprotected_stage = fixture.path().join("unprotected-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &unprotected_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let source_stage =
+            unprotected_stage.join(".jdc-create-stage-0123456789abcdef0123456789abcdef");
+        let attacker_alias = outside.join("attacker-stage-link.bin");
+        let payload = b"STAGING_CUSTODY_IS_A_REQUIRED_SECURITY_CONDITION";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            // Constructor here is test-only: it has NOT attested an OS
+            // principal, and another same-identity process can link this file.
+            root: Dir::open_ambient_dir(&unprotected_stage, ambient_authority()).unwrap(),
+        };
+        rooted
+            .create_new_file_staged_with_prepublish_hook(
+                &staging,
+                "new.bin",
+                "0123456789abcdef0123456789abcdef",
+                payload,
+                || {
+                    std::thread::scope(|threads| {
+                        threads
+                            .spawn(|| {
+                                std::fs::hard_link(&source_stage, &attacker_alias)
+                                    .expect("fixture proves staging directory is accessible");
+                            })
+                            .join()
+                            .unwrap();
+                    });
+                    assert!(!destination.exists());
+                    assert!(same_file::is_same_file(&source_stage, &attacker_alias).unwrap());
+                    assert_eq!(
+                        std::fs::read(&attacker_alias).unwrap(),
+                        payload,
+                        "NEGATIVE SECURITY EVIDENCE: bytes are exposed without stage custody"
+                    );
+                },
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(&attacker_alias).unwrap(), payload);
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        assert!(!source_stage.exists());
     }
 
     #[test]

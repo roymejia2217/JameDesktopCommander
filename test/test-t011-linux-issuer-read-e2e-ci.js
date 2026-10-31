@@ -44,8 +44,10 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(acceptance, /jdc-authority\.service\.d\/read-e2e\.conf/);
   assert.match(probe, /dispatch_one_inherited_readonly_reply/);
   assert.doesNotMatch(probe, /dispatch_one_inherited_read_reply/);
-  assert.match(probe, /for _ in 0\.\.2/);
+  assert.match(probe, /for _ in 0\.\.3/);
   assert.match(acceptance, /T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS/);
+  assert.match(acceptance, /requestIssuerOwnedList/);
+  assert.match(acceptance, /T011_ISSUER_READ_E2E_SEQUENTIAL_LIST_PASS/);
   assert.match(acceptance, /22222222-2222-4222-8222-222222222222/);
   assert.match(acceptance, /second_payload_source/);
   assert.match(acceptance, /inside2\.bin/);

@@ -8,6 +8,7 @@ import {
   AuthorityContractError,
   parseCreateDirectoryRequest,
   parseReadFileRequest,
+  parseListDirectoryRequest,
   parseOperationResult,
   type AuthorityOperationResult,
   type AuthorityRequest,
@@ -62,11 +63,18 @@ function buildFrame(payload: string): Buffer {
 }
 
 function parseAuthorityRequest(input: unknown): Readonly<AuthorityRequest> {
-  try {
-    return parseCreateDirectoryRequest(input);
-  } catch {
-    return parseReadFileRequest(input);
+  for (const parse of [
+    parseCreateDirectoryRequest,
+    parseReadFileRequest,
+    parseListDirectoryRequest,
+  ]) {
+    try {
+      return parse(input);
+    } catch {
+      // Reject unless exactly one reviewed canonical operation is valid.
+    }
   }
+  return deny();
 }
 
 function requestJSON(req: Readonly<AuthorityRequest>): string {

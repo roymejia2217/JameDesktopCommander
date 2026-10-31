@@ -12,7 +12,7 @@ fn run() -> Result<(), ()> {
     // Two independent authenticated sessions share the same OS-attested
     // issuer, retained root handles and durable replay ledger. The count is
     // fixed in this disposable probe, never client- or environment-controlled.
-    for _ in 0..2 {
+    for _ in 0..3 {
         issuer
             .dispatch_one_inherited_readonly_reply(Duration::from_secs(5))
             .map_err(|_| ())?;

@@ -154,3 +154,15 @@ test('C4d rejects an epoch-swapped committed frame before the caller accepts suc
   assert.throws(() => decodeAuthorityResultFrame(wire, req.requestId), bad);
   assert.throws(() => encodeAuthorityResultFrame(committed(), req.requestId, '7'), bad);
 });
+test('C4d list-directory retains strict canonical framing without accepting mutation aliases', () => {
+  const listing = { ...readRequest(), kind: 'list-directory', relativePath: 'nested' };
+  const encoded = encodeAuthorityRequestFrame(listing);
+  assert.deepEqual(decodeAuthorityRequestFrame(encoded), listing);
+  assert.ok(Object.isFrozen(decodeAuthorityRequestFrame(encoded)));
+  assert.throws(
+    () => encodeAuthorityRequestFrame({ ...listing, kind: 'get-any-path' }), bad,
+  );
+  assert.throws(
+    () => encodeAuthorityRequestFrame({ ...listing, relativePath: '../outside' }), bad,
+  );
+});

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   parseCreateDirectoryRequest,
   parseReadFileRequest,
+  parseListDirectoryRequest,
   parseOperationResult,
   AUTHORITY_PROTOCOL_VERSION,
 } from '../dist/security/authority-operation-contract.js';
@@ -104,4 +105,13 @@ test('C4c refuses a committed reply for a different or unspecified request epoch
     req.requestId, req.expectedEpoch), bad);
   assert.throws(() => parseOperationResult(done, req.requestId), bad);
   assert.throws(() => parseOperationResult(done, req.requestId, '0'), bad);
+});
+test('C4c list-directory is strictly typed and shares the canonical bounded-root grammar', () => {
+  const listing = { ...valid(), kind: 'list-directory', relativePath: 'project' };
+  assert.deepEqual(parseListDirectoryRequest(listing), listing);
+  assert.ok(Object.isFrozen(parseListDirectoryRequest(listing)));
+  assert.throws(() => parseListDirectoryRequest(readRequest()), bad);
+  assert.throws(() => parseListDirectoryRequest(valid()), bad);
+  assert.throws(() => parseListDirectoryRequest({ ...listing, relativePath: '../outside' }), bad);
+  assert.throws(() => parseListDirectoryRequest({ ...listing, expectedEpoch: '0' }), bad);
 });

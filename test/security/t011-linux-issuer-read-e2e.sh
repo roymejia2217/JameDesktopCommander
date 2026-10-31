@@ -144,6 +144,9 @@ sudo -n install -o root -g jdc-authority -m 0640 -- "$anchor_source" "$admin_dir
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$replay_source" "$state_dir/claims.sqlite3"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/inside.bin"
+sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root/nested"
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/nested/a.txt"
+sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/nested/z.txt"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root_two"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$second_payload_source" "$read_root_two/inside2.bin"
 sudo -n install -D -o root -g root -m 0755 -- "$probe" "$installed_probe"
@@ -191,7 +194,7 @@ const { createIssuerReadClient } =
   await import(pathToFileURL(readClientPath).href);
 const frameContract = await import(pathToFileURL(contractPath).href);
 const operationContract = await import(pathToFileURL(operationContractPath).href);
-const { requestIssuerOwnedRead } =
+const { requestIssuerOwnedRead, requestIssuerOwnedList } =
   createIssuerReadClient({ ...frameContract, ...operationContract });
 const request = JSON.parse(
   '{"version":1,"kind":"read-file","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"inside.bin"}',
@@ -216,6 +219,16 @@ assert.deepEqual(
   Buffer.concat([Buffer.from([2, 0, 0x43, 0x2a]), Buffer.from('SECOND\n')]),
 );
 console.log('T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS');
+const listing = await requestIssuerOwnedList({
+  version: 1,
+  kind: 'list-directory',
+  requestId: '33333333-3333-4333-8333-333333333333',
+  expectedEpoch: '1',
+  rootRef: '0123456789abcdef0123456789abcdef',
+  relativePath: 'nested',
+});
+assert.deepEqual(listing, { version: 1, status: 'ok', entries: ['a.txt', 'z.txt'] });
+console.log('T011_ISSUER_READ_E2E_SEQUENTIAL_LIST_PASS');
 NODE
 
 sudo -n journalctl --sync
@@ -240,6 +253,7 @@ rows = db.execute(
 expected = [
     ("0000000000000001", "11111111111141118111111111111111"),
     ("0000000000000001", "22222222222242228222222222222222"),
+    ("0000000000000001", "33333333333343338333333333333333"),
 ]
 if rows != expected:
     raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_NOT_DURABLE:{rows!r}")
@@ -313,6 +327,7 @@ rows = db.execute(
 expected = [
     ("0000000000000001", "11111111111141118111111111111111"),
     ("0000000000000001", "22222222222242228222222222222222"),
+    ("0000000000000001", "33333333333343338333333333333333"),
 ]
 if rows != expected:
     raise SystemExit(f"E_ISSUER_READ_E2E_REPLAY_LEDGER_CHANGED:{rows!r}")
@@ -370,7 +385,7 @@ import sqlite3
 import sys
 with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as db:
     count = db.execute("SELECT count(*) FROM replay_claims").fetchone()[0]
-if count != 3:
+if count != 4:
     raise SystemExit(f"E_ISSUER_READ_E2E_DENIED_ALIAS_CLAIM_NOT_DURABLE:{count}")
 print("T011_SAME_DEVICE_BIND_ALIAS_DENIED_CLAIM_DURABLE")
 PY
@@ -423,6 +438,7 @@ with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as db:
 expected = [
     ("11111111111141118111111111111111",),
     ("22222222222242228222222222222222",),
+    ("33333333333343338333333333333333",),
     ("44444444444444448444444444444444",),
     ("55555555555545558555555555555555",),
 ]

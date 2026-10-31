@@ -273,8 +273,19 @@ hosted CI; they are never executed on the installed user host.
 specific CI principals and ACL/mode state, not immunity to an attacker
 already sharing the service UID/SID, elevated privileges, inherited
 handles or a changed parent/mount topology. The same-principal stage
-leak counterexample above remains valid. No production stage capability
-is issued and no `create_new_file` API becomes available to normal
+leak counterexample above remains valid. A **fourth** native OS-thread
+counterexample separately proves source-name substitution after full staging
+sync but before publication: an attacker with write access to the staging
+namespace renames the approved inode aside, installs a distinct attacker
+inode under the original staging filename, and retains its own hardlink.
+The test-only publisher succeeds and binds the destination name to the
+attacker's inode, not to the completed writer inode. The exact bytes and
+kernel same-file identities are asserted independently. This is **negative
+security evidence**, never proof that publication is safe under same-principal
+access. An inode identity precheck before publication would remain racy;
+production requires independently defended staging custody and an atomic
+object-source commit contract or continued fail-closed exclusion. No
+production stage capability is issued and no `create_new_file` API becomes available to normal
 builds. The original #147 object-isolation requirements remain blocked.
 
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit

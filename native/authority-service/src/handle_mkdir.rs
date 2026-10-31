@@ -366,7 +366,10 @@ impl RootedDirectory {
     // essential for real security; this method does NOT attest that custody.
     // Write/sync first, then publish with a no-overwrite hardlink relative
     // to pinned source/destination Dir handles. No post-publication writes.
-    // An attacker able to link the private stage still defeats this model.
+    // Even AFTER sync, a same-principal attacker can rename the stage inode
+    // away and install a different inode at this name. A subsequent hard_link
+    // publishes attacker bytes; NO atomic expected-source object proof exists.
+    // This is a negative research fixture, never shipping authority.
     #[cfg(test)]
     fn create_new_file_staged_with_prepublish_hook(
         &self,
@@ -1461,6 +1464,77 @@ mod tests {
         assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
         assert_eq!(std::fs::read(&exterior).unwrap(), sentinel);
         assert_eq!(std::fs::read_dir(&private_stage).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_only_staged_create_proves_source_name_swap_publishes_attacker_inode_nonrelease() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let shared_stage = fixture.path().join("attacker-writable-stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &shared_stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let destination = allowed.join("new.bin");
+        let token = random_stage_token();
+        let stage_path = shared_stage.join(format!(".jdc-create-stage-{token}"));
+        let displaced_original = outside.join("stolen-stage-original.bin");
+        let attacker_injected_alias = outside.join("attacker-injected-hardlink.bin");
+        let authorized_payload = b"AUTHENTIC_WRITER_BYTES";
+        let injected_payload = b"ATTACKER_SUBSTITUTED_INODE_BYTES";
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&shared_stage, ambient_authority()).unwrap(),
+        };
+        let result = rooted.create_new_file_staged_with_prepublish_hook(
+            &staging,
+            "new.bin",
+            &token,
+            authorized_payload,
+            || {
+                std::thread::scope(|threads| {
+                    threads
+                        .spawn(|| {
+                            std::fs::rename(&stage_path, &displaced_original)
+                                .expect("attacker must take original staged inode");
+                            std::fs::write(&stage_path, injected_payload).expect(
+                                "attacker must install distinct source inode under same name",
+                            );
+                            std::fs::hard_link(&stage_path, &attacker_injected_alias)
+                                .expect("attacker must retain kernel identity of injected inode");
+                        })
+                        .join()
+                        .expect("attacker thread");
+                });
+                assert!(!destination.exists());
+                assert_eq!(
+                    std::fs::read(&displaced_original).unwrap(),
+                    authorized_payload
+                );
+                assert_eq!(std::fs::read(&stage_path).unwrap(), injected_payload);
+                assert!(!same_file::is_same_file(&stage_path, &displaced_original).unwrap());
+            },
+        );
+        result.expect("NEGATIVE CONTROL: unguarded name lookup publishes attacker-owned source");
+        assert_eq!(std::fs::read(&destination).unwrap(), injected_payload);
+        assert_eq!(
+            std::fs::read(&displaced_original).unwrap(),
+            authorized_payload
+        );
+        assert!(
+            same_file::is_same_file(&destination, &attacker_injected_alias).unwrap(),
+            "NEGATIVE SECURITY EVIDENCE: published inode belongs to attacker"
+        );
+        assert!(
+            !same_file::is_same_file(&destination, &displaced_original).unwrap(),
+            "publication must not be confused with the originally written inode"
+        );
+        assert!(
+            !stage_path.exists(),
+            "test-only fixture cleaned attacker-swapped stage name"
+        );
     }
 
     #[test]

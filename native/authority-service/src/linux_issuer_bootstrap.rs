@@ -102,14 +102,31 @@ fn execute_claimed_readonly_on_roots(
     claim: impl FnOnce([u8; 16]) -> Result<(), DispatchDenied>,
 ) -> Result<Vec<u8>, DispatchDenied> {
     use crate::canonical_request::{decode_readonly_operation_frame, ReadOnlyOperation};
-    match decode_readonly_operation_frame(frame.wire()).map_err(|_| DispatchDenied)? {
+    // Parse before touching replay. Bad wire input must not poison a valid
+    // issuer, but a failed *durable* claim must revoke every retained root.
+    let operation = decode_readonly_operation_frame(frame.wire()).map_err(|_| DispatchDenied)?;
+    let mut claim_failed = false;
+    let guarded_claim = |request_id| {
+        let outcome = claim(request_id);
+        if outcome.is_err() {
+            claim_failed = true;
+        }
+        outcome
+    };
+    let result = match operation {
         ReadOnlyOperation::ReadFile => {
-            execute_claimed_read_on_roots(roots, policy_epoch, frame, claim)
+            execute_claimed_read_on_roots(roots, policy_epoch, frame, guarded_claim)
         }
         ReadOnlyOperation::ListDirectory => {
-            execute_claimed_list_on_roots(roots, policy_epoch, frame, claim)
+            execute_claimed_list_on_roots(roots, policy_epoch, frame, guarded_claim)
+        }
+    };
+    if claim_failed {
+        for root in roots.iter_mut() {
+            root.revoke();
         }
     }
+    result
 }
 
 /// Retains the already-open native roots and the OS-pinned replay-file
@@ -258,12 +275,25 @@ impl UnissuedIssuer {
             return Err(DispatchDenied);
         }
         let epoch = self.policy_epoch;
-        let (roots, replay_writer) = (&mut self.roots, &mut self.replay_writer);
-        execute_claimed_readonly_on_roots(roots, epoch, frame, |request_id| {
-            replay_writer
-                .claim_once(request_id)
-                .map_err(|_| DispatchDenied)
-        })
+        let mut claim_failed = false;
+        let result = {
+            let (roots, replay_writer) = (&mut self.roots, &mut self.replay_writer);
+            execute_claimed_readonly_on_roots(roots, epoch, frame, |request_id| {
+                let claim = replay_writer
+                    .claim_once(request_id)
+                    .map_err(|_| DispatchDenied);
+                if claim.is_err() {
+                    claim_failed = true;
+                }
+                claim
+            })
+        };
+        if claim_failed {
+            // Failed durable custody/replay checks terminate the *whole*
+            // issuer session, not just the selected directory grant.
+            self.revoke();
+        }
+        result
     }
 
     /// Single authenticated service operation boundary, shared by read-file
@@ -415,6 +445,137 @@ mod tests {
             Ok(()),
             "a newly opened same-object pair can pass identity binding"
         );
+    }
+
+    #[test]
+    fn failed_replay_claim_revokes_all_retained_roots_not_only_selected_root() {
+        use std::io::Write;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        const FIRST: &str = "0123456789abcdef0123456789abcdef";
+        const SECOND: &str = "fedcba9876543210fedcba9876543210";
+        let fixture = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let allowed_a = fixture.path().join("root-a");
+        let allowed_b = fixture.path().join("root-b");
+        std::fs::create_dir(&allowed_a).unwrap();
+        std::fs::create_dir(&allowed_b).unwrap();
+        std::fs::write(allowed_a.join("inside.bin"), b"A").unwrap();
+        std::fs::write(allowed_b.join("inside.bin"), b"B").unwrap();
+
+        let policy_bytes = format!(
+            r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{FIRST}","absolutePath":{}}},{{"rootRef":"{SECOND}","absolutePath":{}}}]}}"#,
+            serde_json::to_string(allowed_a.to_str().unwrap()).unwrap(),
+            serde_json::to_string(allowed_b.to_str().unwrap()).unwrap(),
+        );
+        let policy =
+            IssuerPolicy::decode_exact_for_test(policy_bytes.as_bytes(), 7, [1; 32]).unwrap();
+        let mut roots = vec![
+            SealedDirectoryGrant::from_issuer_policy(&policy, FIRST).unwrap(),
+            SealedDirectoryGrant::from_issuer_policy(&policy, SECOND).unwrap(),
+        ];
+        let frame = |kind: &str, root: &str, uuid: &str| {
+            let body = format!(
+                r#"{{"version":1,"kind":"{kind}","requestId":"{uuid}","expectedEpoch":"7","rootRef":"{root}","relativePath":"inside.bin"}}"#,
+            );
+            let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+            wire.extend_from_slice(body.as_bytes());
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&wire).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            crate::unix_session::read_authenticated_frame(
+                &receiver,
+                unsafe { libc::geteuid() },
+                unsafe { libc::getegid() },
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        };
+        // Exercise an actual SQLite UNIQUE replay constraint, rather than
+        // simulating a durable-store failure with a preselected Err value.
+        let sqlite = rusqlite::Connection::open(fixture.path().join("claims.sqlite3")).unwrap();
+        sqlite
+            .execute_batch(
+                "CREATE TABLE replay_claims (request BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID",
+            )
+            .unwrap();
+        let mut claim_attempts = 0usize;
+        // Malformed/unsupported requests do not spend replay or revoke a
+        // healthy issuer. Do not let unauthenticated noise become a DoS latch.
+        assert_eq!(
+            execute_claimed_readonly_on_roots(
+                &mut roots,
+                7,
+                frame(
+                    "create-directory",
+                    FIRST,
+                    "99999999-9999-4999-8999-999999999999"
+                ),
+                |_| panic!("mutation kind must be rejected before replay"),
+            ),
+            Err(DispatchDenied),
+        );
+        // Positive control: the unrelated root is genuinely live beforehand.
+        assert_eq!(
+            execute_claimed_readonly_on_roots(
+                &mut roots,
+                7,
+                frame("read-file", SECOND, "11111111-1111-4111-8111-111111111111"),
+                |id| {
+                    claim_attempts += 1;
+                    sqlite
+                        .execute("INSERT INTO replay_claims (request) VALUES (?1)", [&id[..]])
+                        .map(|_| ())
+                        .map_err(|_| DispatchDenied)
+                },
+            ),
+            Ok(b"B".to_vec()),
+        );
+        assert_eq!(claim_attempts, 1);
+        // Reusing the same authenticated request identity against a DIFFERENT
+        // root must hit SQLite's actual UNIQUE constraint and poison ALL roots.
+        assert_eq!(
+            execute_claimed_readonly_on_roots(
+                &mut roots,
+                7,
+                frame("read-file", FIRST, "11111111-1111-4111-8111-111111111111"),
+                |id| {
+                    claim_attempts += 1;
+                    let error = sqlite
+                        .execute("INSERT INTO replay_claims (request) VALUES (?1)", [&id[..]])
+                        .expect_err("duplicate durable request identity must fail in SQLite");
+                    assert_eq!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::ConstraintViolation),
+                    );
+                    Err(DispatchDenied)
+                },
+            ),
+            Err(DispatchDenied),
+            "SQLite duplicate replay failure must not expose any payload",
+        );
+        assert_eq!(claim_attempts, 2);
+        assert_eq!(
+            execute_claimed_readonly_on_roots(
+                &mut roots,
+                7,
+                frame("read-file", SECOND, "33333333-3333-4333-8333-333333333333"),
+                |_| panic!("globally revoked issuer must never spend replay again"),
+            ),
+            Err(DispatchDenied),
+            "revocation must reach every root, even if the ledger later appears healthy",
+        );
+        assert_eq!(claim_attempts, 2);
+        let rows: i64 = sqlite
+            .query_row("SELECT COUNT(*) FROM replay_claims", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "failed requests cannot change durable replay state"
+        );
+        assert_eq!(std::fs::read(allowed_a.join("inside.bin")).unwrap(), b"A");
+        assert_eq!(std::fs::read(allowed_b.join("inside.bin")).unwrap(), b"B");
     }
 
     #[test]

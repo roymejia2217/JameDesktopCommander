@@ -64,3 +64,20 @@ test('real admitted MCP socket client must demonstrate systemd activation still 
   assert.match(acceptance, /NRestarts/,
     'failing startup must not cause an automatic privileged restart');
 });
+
+test('socket denial evidence fallback binds a missing journal invocation tag to the latest OS process', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  for (const required of [
+    'ExecMainPID',
+    'ExecMainStartTimestampMonotonic',
+    '_PID=$exec_pid',
+    '_UID=$service_uid',
+    '_GID=$service_gid',
+    '_SYSTEMD_UNIT=$service_name',
+    '__MONOTONIC_TIMESTAMP',
+    'E_POLICY_UNAVAILABLE',
+    'E_IDENTITY_REQUIRED',
+  ]) assert.ok(acceptance.includes(required),
+    'missing fail-closed correlated denial evidence: ' + required);
+});

@@ -378,6 +378,25 @@ impl RootedDirectory {
         stage_nonce: &str,
         bytes: &[u8],
     ) -> io::Result<()> {
+        self.replace_existing_file_staged_with_precommit_hook(
+            staging,
+            relative,
+            stage_nonce,
+            bytes,
+            || {},
+        )
+    }
+
+    // Test-only deterministic race injection. This closure is never exposed
+    // to an untrusted caller, issuer, IPC endpoint or MCP handler.
+    fn replace_existing_file_staged_with_precommit_hook(
+        &self,
+        staging: &ProtectedStagingDirectory,
+        relative: &str,
+        stage_nonce: &str,
+        bytes: &[u8],
+        before_commit: impl FnOnce(),
+    ) -> io::Result<()> {
         const MAX_BYTES: usize = 1024 * 1024;
         let valid_nonce = stage_nonce.len() == 32
             && stage_nonce
@@ -426,6 +445,25 @@ impl RootedDirectory {
                     return Err(err);
                 }
                 drop(fresh);
+                before_commit();
+                // The initial opened-handle observation can become stale while
+                // the replacement is being synchronized. Reject a now-shared
+                // original object before changing any destination entry.
+                // This narrows one interleaving; it is NOT an atomic compare-
+                // and-replace or a proof against subsequent aliases.
+                let still_private = existing
+                    .metadata()
+                    .map(|observed| {
+                        observed.is_file() && cap_fs_ext::MetadataExt::nlink(&observed) == 1
+                    })
+                    .unwrap_or(false);
+                if !still_private {
+                    let _ = staging.root.remove_file(&stage);
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "E_REPLACE_SHARED_OBJECT",
+                    ));
+                }
                 let replaced = staging.root.rename(&stage, parent, component);
                 if replaced.is_err() {
                     let _ = staging.root.remove_file(&stage);
@@ -816,6 +854,61 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read(&outside_file).unwrap(), b"UNTOUCHED_SECRET");
+    }
+
+    #[test]
+    fn staged_replacement_denies_hardlink_added_after_preflight_before_commit() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        let private_stage = fixture.path().join("private-stage");
+        for directory in [&allowed, &outside, &private_stage] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let internal = allowed.join("file.bin");
+        let external_alias = outside.join("external-alias.bin");
+        let original = b"KEEP_ORIGINAL_OBJECT_BYTES";
+        std::fs::write(&internal, original).unwrap();
+        let rooted = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let staging = ProtectedStagingDirectory {
+            root: Dir::open_ambient_dir(&private_stage, ambient_authority()).unwrap(),
+        };
+
+        let denial = rooted
+            .replace_existing_file_staged_with_precommit_hook(
+                &staging,
+                "file.bin",
+                "0123456789abcdef0123456789abcdef",
+                b"SHOULD_NOT_COMMIT",
+                || {
+                    // The real kernel sees the alias appear only after the
+                    // opened handle passed the first nlink==1 check and the
+                    // private replacement bytes were staged and synchronized.
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                std::fs::hard_link(&internal, &external_alias)
+                                    .expect("OS attacker hardlink must succeed");
+                            })
+                            .join()
+                            .expect("attacker thread must run");
+                    });
+                    assert!(same_file::is_same_file(&internal, &external_alias).unwrap());
+                    assert_eq!(std::fs::read(&external_alias).unwrap(), original);
+                },
+            )
+            .expect_err("a new exterior alias before commit must abort replacement");
+        assert_eq!(denial.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(denial.to_string(), "E_REPLACE_SHARED_OBJECT");
+        assert_eq!(std::fs::read(&internal).unwrap(), original);
+        assert_eq!(std::fs::read(&external_alias).unwrap(), original);
+        assert_eq!(
+            std::fs::read_dir(&private_stage).unwrap().count(),
+            0,
+            "failed commit must clean only its own protected staging file",
+        );
     }
 
     #[test]

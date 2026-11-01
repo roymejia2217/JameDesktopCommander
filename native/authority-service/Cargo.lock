@@ -246,6 +246,7 @@ dependencies = [
  "libc",
  "rusqlite",
  "rustix",
+ "rustix-linux-procfs",
  "same-file",
  "sd-notify",
  "serde",

@@ -288,6 +288,54 @@ object-source commit contract or continued fail-closed exclusion. No
 production stage capability is issued and no `create_new_file` API becomes available to normal
 builds. The original #147 object-isolation requirements remain blocked.
 
+**Linux unnamed-file feasibility (non-release):** `O_TMPFILE` and `linkat`
+through a preopened `/proc/self/fd` directory and a preopened destination
+directory were exercised only in a test fixture on Linux `tmpfs` and the
+workspace's `overlay` filesystem, as an unprivileged UID without
+`CAP_DAC_READ_SEARCH` in its effective or permitted sets. The fixture proves
+that a fully written and synced unnamed inode can be published under a new name
+and that an existing hard-link destination is not
+replaced. It compares actual device/inode identities and bytes. Unsupported
+`O_TMPFILE`, unavailable procfs, or an uninstalled attack is a test failure,
+not a passing result. See the Linux [`open(2)`](https://man7.org/linux/man-pages/man2/open.2.html)
+and [`linkat(2)`](https://man7.org/linux/man-pages/man2/linkat.2.html) contracts.
+
+Three **negative controls** also demonstrate the limits: moving the preopened
+destination directory outside the original root before publication exposes the
+payload at its new location; and the same principal can create an exterior
+hard link to the file after publication. An untrusted ordinary directory used
+in place of `/proc/self/fd` can also supply a different object under the source
+descriptor number, causing the fixture to publish attacker bytes. All controls
+require real operations, object identity and exact bytes. Their passing results
+demonstrate these counterexamples, not safety. Procfs provenance, mount topology,
+parent and principal custody, cancellation, crash durability, other mounts and
+Windows parity remain unproven. This fixture does not provide a production API,
+solve invariant O, or change any release gate.
+
+**Verified-procfs fixture follow-up:** the test-only path now also exercises
+`rustix-linux-procfs` 0.1.1's `proc_self_fd()` to obtain its own checked
+procfs directory handle; a separately created fake directory with a matching
+descriptor filename does not redirect this call. The earlier unverified
+fixture and its substitution counterexample remain intact. The crate documents
+its procfs and mount checks, and is pinned only as a Linux development
+dependency already present in the lockfile's transitive dependency graph.
+This is a positive test with a fake **sibling directory**: it does not simulate
+an attacker replacing or mounting over `/proc`, prove the library's checks
+race-free under mount mutation, or establish a production trust boundary.
+The other two negative controls and all release gates remain unchanged.
+See the [rustix-linux-procfs documentation](https://docs.rs/rustix-linux-procfs/0.1.1/rustix_linux_procfs/).
+
+**Static `/proc` overmount acceptance (non-release):** a fresh instance of
+`examples/linux_procfs_probe.rs` obtained the checked handle on the normal
+host procfs. In a disposable user and private mount namespace, an actual
+`tmpfs` was mounted over `/proc`; `stat -f` confirmed the replacement type,
+and a fresh probe exited 1 with `Unsupported`. The mount disappeared with the
+namespace. This requires user namespaces and namespace-local mount permission;
+failure to establish the overmount is inconclusive, not a security PASS.
+It demonstrates denial of this particular static substitution only, not
+concurrent mount mutation, procfs impersonation by a privileged principal,
+destination custody, or Windows behavior. No CI acceptance is claimed.
+
 **Windows handle-based publication feasibility (2026-10-31, PR #236,
 test-only):** official `SetFileInformationByHandle(FileRenameInfo)` can
 rename the **already-open source file object**, rather than look up the

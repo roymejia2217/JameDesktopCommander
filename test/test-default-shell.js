@@ -12,6 +12,7 @@ import { configManager } from '../dist/config-manager.js';
 import { startProcess, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
 import os from 'os';
+import { after, before, test } from 'node:test';
 
 // We need a wrapper because startProcess in tools/improved-process-tools.js returns a ServerResult
 // but our tests expect to receive the actual command result
@@ -153,13 +154,13 @@ async function teardown(originalConfig) {
 /**
  * Test setting defaultShell to /bin/sh
  */
-async function testDefaultShellSh() {
+async function testDefaultShellSh(t) {
   console.log('\nTest 1: Setting defaultShell to /bin/sh');
   
   // Check if /bin/sh is available
   const isAvailable = await isShellAvailable('/bin/sh');
   if (!isAvailable) {
-    console.log('⚠️  Skipping /bin/sh test: shell not available on this system');
+    t.skip('/bin/sh is unavailable');
     return;
   }
   
@@ -185,13 +186,13 @@ async function testDefaultShellSh() {
 /**
  * Test setting defaultShell to bash  
  */
-async function testDefaultShellBash() {
+async function testDefaultShellBash(t) {
   console.log('\nTest 2: Setting defaultShell to /bin/bash');
   
   // Check if /bin/bash is available
   const isAvailable = await isShellAvailable('/bin/bash');
   if (!isAvailable) {
-    console.log('⚠️  Skipping /bin/bash test: shell not available on this system');
+    t.skip('/bin/bash is unavailable');
     return;
   }
   
@@ -217,13 +218,13 @@ async function testDefaultShellBash() {
 /**
  * Test setting defaultShell to cmd (Windows Command Prompt)
  */
-async function testDefaultShellCmd() {
+async function testDefaultShellCmd(t) {
   console.log('\nTest 3: Setting defaultShell to cmd');
   
   // Check if cmd is available (Windows only)
   const isAvailable = await isShellAvailable('cmd');
   if (!isAvailable) {
-    console.log('⚠️  Skipping cmd test: shell not available on this system (likely not Windows)');
+    t.skip('cmd is unavailable');
     return;
   }
   
@@ -249,13 +250,13 @@ async function testDefaultShellCmd() {
 /**
  * Test setting defaultShell to pwsh (PowerShell Core)
  */
-async function testDefaultShellPwsh() {
+async function testDefaultShellPwsh(t) {
   console.log('\nTest 4: Setting defaultShell to pwsh');
   
   // Check if pwsh is available
   const isAvailable = await isShellAvailable('pwsh');
   if (!isAvailable) {
-    console.log('⚠️  Skipping pwsh test: PowerShell Core not available on this system');
+    t.skip('PowerShell Core is unavailable');
     return;
   }
   
@@ -280,7 +281,7 @@ async function testDefaultShellPwsh() {
 /**
  * Test switching between different shells
  */
-async function testShellSwitching() {
+async function testShellSwitching(t) {
   console.log('\nTest 5: Testing shell switching');
   
   // Get available shells for switching test
@@ -291,7 +292,7 @@ async function testShellSwitching() {
   if (await isShellAvailable('pwsh')) availableShells.push('pwsh');
   
   if (availableShells.length < 2) {
-    console.log('⚠️  Skipping shell switching test: need at least 2 available shells');
+    t.skip('at least two shells are required');
     return;
   }
   
@@ -331,7 +332,7 @@ async function testShellSwitching() {
 /**
  * Test that configuration changes persist
  */
-async function testConfigurationPersistence() {
+async function testConfigurationPersistence(t) {
   console.log('\nTest 6: Testing configuration persistence');
   
   // Find an available shell for testing
@@ -344,7 +345,7 @@ async function testConfigurationPersistence() {
     } else if (await isShellAvailable('pwsh')) {
       testShell = 'pwsh';
     } else {
-      console.log('⚠️  Skipping persistence test: no available shells found');
+      t.skip('no supported shell is available');
       return;
     }
   }
@@ -364,58 +365,13 @@ async function testConfigurationPersistence() {
   console.log('✓ Test 6 passed: configuration persistence works correctly');
 }
 
-/**
- * Main test function
- */
-async function runDefaultShellTests() {
-  console.log('=== defaultShell Configuration Tests ===\n');
-  console.log(`Platform: ${os.platform()}`);
-  
-  // Test 1: Setting defaultShell to /bin/sh
-  await testDefaultShellSh();
-  
-  // Test 2: Setting defaultShell to /bin/bash
-  await testDefaultShellBash();
-  
-  // Test 3: Setting defaultShell to cmd (Windows)
-  await testDefaultShellCmd();
-  
-  // Test 4: Setting defaultShell to pwsh (PowerShell Core)
-  await testDefaultShellPwsh();
-  
-  // Test 5: Testing shell switching
-  await testShellSwitching();
-  
-  // Test 6: Testing configuration persistence
-  await testConfigurationPersistence();
-  
-  console.log('\n✅ All defaultShell tests completed!');
-}
+let originalConfig;
+before(async () => { originalConfig = await setup(); });
+after(async () => { if (originalConfig) await teardown(originalConfig); });
 
-// Export the main test function
-export default async function runTests() {
-  let originalConfig;
-  try {
-    originalConfig = await setup();
-    await runDefaultShellTests();
-  } catch (error) {
-    console.error('❌ Test failed:', error.message);
-    console.error('Full error:', error);
-    return false;
-  } finally {
-    if (originalConfig) {
-      await teardown(originalConfig);
-    }
-  }
-  return true;
-}
-
-// If this file is run directly (not imported), execute the test
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runTests().then(success => {
-    if (!success) process.exitCode = 1;
-  }).catch(error => {
-    console.error('❌ Unhandled error:', error);
-    process.exit(1);
-  });
-}
+test('default shell selects /bin/sh', testDefaultShellSh);
+test('default shell selects /bin/bash', testDefaultShellBash);
+test('default shell selects cmd', testDefaultShellCmd);
+test('default shell selects PowerShell Core', testDefaultShellPwsh);
+test('default shell switching changes the executing shell', testShellSwitching);
+test('default shell configuration persists', testConfigurationPersistence);

@@ -78,9 +78,9 @@ function getExpectedShellOutput(shellPath) {
     case 'cmd.exe':
       return ['cmd', 'cmd.exe'];
     case 'pwsh':
-      return ['pwsh'];
+      return ['Core'];
     case 'powershell':
-      return ['powershell'];
+      return ['Desktop'];
     default:
       return [shellPath];
   }
@@ -97,7 +97,7 @@ async function getShellFromCommand(shellPath = null) {
     if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
       command = 'echo %0';
     } else if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      command = 'Write-Host $MyInvocation.MyCommand.Name';
+      command = 'Write-Output $PSVersionTable.PSEdition';
     }
     
     const result = await executeCommand(command, 2000);

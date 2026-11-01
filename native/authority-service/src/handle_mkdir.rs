@@ -148,7 +148,7 @@ impl RootedDirectory {
         Self { root }
     }
 
-    /// Re-validate object identity, never an ambient request path. Both
+    /// Re-validate object and mount identity, never an ambient request path. Both
     /// directory handles have already been opened by trusted issuer policy.
     /// This proves equality only at this observation instant; concurrent
     /// namespace changes and hard-link object isolation remain separate P0s.
@@ -171,7 +171,10 @@ impl RootedDirectory {
         }
         let original = stat_dir(self.root.as_raw_fd())?;
         let observed = stat_dir(other.root.as_raw_fd())?;
-        Ok(original.st_dev == observed.st_dev && original.st_ino == observed.st_ino)
+        if original.st_dev != observed.st_dev || original.st_ino != observed.st_ino {
+            return Ok(false);
+        }
+        Ok(mounted_object_id(&self.root)? == mounted_object_id(&other.root)?)
     }
 
     /// Atomic OS-relative single-child mkdir. The supplied handle remains
@@ -933,6 +936,48 @@ mod tests {
         root.create_descendant("legitimate/nested").unwrap();
         assert!(allowed.join("legitimate/nested").is_dir());
         assert!(!outside.join("legitimate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires the real bind-mount fixture; mandatory in hosted acceptance"]
+    fn root_revalidation_rejects_same_inode_from_another_mount() {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::PathBuf;
+        let fixture = PathBuf::from(
+            std::env::var_os("JDC_T011_MKDIR_MOUNT_FIXTURE")
+                .expect("mandatory real bind-mount fixture was not supplied"),
+        );
+        let original = fixture.join("outside");
+        let alias = fixture.join("allowed/alias");
+        let original_meta = std::fs::metadata(&original).unwrap();
+        let alias_meta = std::fs::metadata(&alias).unwrap();
+        assert_eq!(
+            (original_meta.dev(), original_meta.ino()),
+            (alias_meta.dev(), alias_meta.ino())
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&original, ambient_authority()).unwrap(),
+        );
+        let same = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&original, ambient_authority()).unwrap(),
+        );
+        let mounted_alias = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&alias, ambient_authority()).unwrap(),
+        );
+        assert_ne!(
+            mounted_object_id(&root.root).unwrap(),
+            mounted_object_id(&mounted_alias.root).unwrap(),
+            "attack setup must provide a distinct real mount identity"
+        );
+        assert!(
+            root.same_open_directory(&same).unwrap(),
+            "unchanged root must remain valid"
+        );
+        assert!(
+            !root.same_open_directory(&mounted_alias).unwrap(),
+            "the same inode via a different mount must revoke the grant"
+        );
     }
 
     #[cfg(target_os = "linux")]

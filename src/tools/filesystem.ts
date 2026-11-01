@@ -407,6 +407,7 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
         });
 
         if (!response.ok) {
+            controller.abort();
             throw new Error(`HTTP error! Status: ${response.status}`);
         }
 

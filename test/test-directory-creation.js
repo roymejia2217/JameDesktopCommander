@@ -55,9 +55,8 @@ async function setup() {
   // Save original config to restore later
   const originalConfig = await configManager.getConfig();
   
-  // Set allowed directories to include our test directory
-  await configManager.setValue('allowedDirectories', [BASE_TEST_DIR]);
-  console.log(`✓ Setup: set allowed directories to include: ${BASE_TEST_DIR}`);
+  // Creation via the legacy filesystem is available only in unrestricted mode.
+  await configManager.setValue('allowedDirectories', []);
   
   return originalConfig;
 }
@@ -113,7 +112,7 @@ export default async function runTests() {
     await testDirectoryCreation();
   } catch (error) {
     console.error('❌ Test failed:', error.message);
-    return false;
+    throw error;
   } finally {
     if (originalConfig) {
       await teardown(originalConfig);

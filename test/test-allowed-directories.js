@@ -240,7 +240,11 @@ async function testHomeAllowedDirectory() {
     assert.deepStrictEqual(config.allowedDirectories, [HOME_DIR], 'allowedDirectories should contain only the home directory');
     
     // Check if OUTSIDE_DIR is inside the home directory
-    const isOutsideDirInHome = OUTSIDE_DIR.toLowerCase().startsWith(HOME_DIR.toLowerCase());
+    const isWithinHome = (candidate) => {
+        const relative = path.relative(HOME_DIR, candidate);
+        return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+    };
+    const isOutsideDirInHome = isWithinHome(OUTSIDE_DIR);
 
     // Test access to various locations
     const testDirAccess = await isPathAccessible(TEST_DIR);
@@ -250,9 +254,10 @@ async function testHomeAllowedDirectory() {
     const outsideDirAccess = await isPathAccessible(OUTSIDE_DIR);
     const rootAccess = await isPathAccessible(TEST_ROOT_PATH);
     
-    // Only test directory and its contents should be accessible
-    assert.strictEqual(testDirAccess, true, 'Test directory should be accessible');
-    assert.strictEqual(testFileAccess, true, 'Files in test directory should be accessible');
+    // The checkout may be outside the operator's home directory.
+    const testDirInHome = isWithinHome(TEST_DIR);
+    assert.strictEqual(testDirAccess, testDirInHome, 'Test directory access must match home containment');
+    assert.strictEqual(testFileAccess, testDirInHome, 'Test file access must match home containment');
     assert.strictEqual(homeDirAccess, true, 'Home directory should be accessible');
     assert.strictEqual(homeTildaDirAccess, true, 'HOME TILDA directory should be accessible');
     
@@ -264,7 +269,7 @@ async function testHomeAllowedDirectory() {
         assert.strictEqual(outsideDirAccess, false, 'Outside directory should not be accessible');
     }
     
-    assert.strictEqual(rootAccess, false, 'Root path should not be accessible');
+    assert.strictEqual(rootAccess, isWithinHome(TEST_ROOT_PATH), 'Root access must match home containment');
     
     console.log('✓ Home directory allowedDirectories setting correctly restricts access');
 }
@@ -393,7 +398,7 @@ export default async function runTests() {
     await testAllowedDirectories();
   } catch (error) {
     console.error('❌ Test failed:', error.message);
-    return false;
+    throw error;
   } finally {
     if (originalConfig) {
       await teardown(originalConfig);

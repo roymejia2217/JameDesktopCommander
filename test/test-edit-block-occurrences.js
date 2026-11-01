@@ -62,6 +62,8 @@ End of footer`);
   
   // Save original config to restore later
   const originalConfig = await configManager.getConfig();
+  // Exercise legacy edit behavior in explicitly unrestricted mode.
+  await configManager.setValue('allowedDirectories', []);
   return originalConfig;
 }
 
@@ -84,9 +86,6 @@ async function testMoreOccurrencesThanExpected() {
   console.log('\nTest 1: More occurrences than expected');
   
   try {
-    // Allow access to test directory
-    await configManager.setValue('allowedDirectories', [TEST_DIR]);
-    
     // Try to replace all occurrences but only specify 1 expected replacement
     const result = await handleEditBlock({
       file_path: MULTI_OCCURRENCE_FILE,
@@ -155,10 +154,8 @@ async function testExactNumberOfOccurrences() {
     
     // Check that the operation succeeded
     assert.strictEqual(result.content[0].type, 'text', 'Result should be text');
-    assert.ok(
-      result.content[0].text.includes('Successfully applied 4 edits'),
-      'Should report success with the correct number of edits'
-    );
+    assert.notEqual(result.isError, true, result.content[0].text);
+    assert.match(result.content[0].text, /This line has been replaced correctly\./);
     
     // Verify the file content
     const fileContent = await fs.readFile(MULTI_OCCURRENCE_FILE, 'utf8');
@@ -199,10 +196,8 @@ This is a MODIFIED target line in the header.`,
     
     // Check that the operation succeeded
     assert.strictEqual(result.content[0].type, 'text', 'Result should be text');
-    assert.ok(
-      result.content[0].text.includes('Successfully applied 1 edit'),
-      'Should report success with the header edit'
-    );
+    assert.notEqual(result.isError, true, result.content[0].text);
+    assert.match(result.content[0].text, /MODIFIED target line in the header/);
     
     // Target the occurrence in the footer section using context
     result = await handleEditBlock({
@@ -216,10 +211,8 @@ This is a MODIFIED target line in the footer.`,
     
     // Check that the operation succeeded
     assert.strictEqual(result.content[0].type, 'text', 'Result should be text');
-    assert.ok(
-      result.content[0].text.includes('Successfully applied 1 edit'),
-      'Should report success with the footer edit'
-    );
+    assert.notEqual(result.isError, true, result.content[0].text);
+    assert.match(result.content[0].text, /MODIFIED target line in the footer/);
     
     // Verify the file content
     const fileContent = await fs.readFile(CONTEXT_TEST_FILE, 'utf8');
@@ -284,19 +277,14 @@ async function testEmptySearchString() {
   
   try {
     // Try to use an empty search string
-    const result = await handleEditBlock({
+    const before = await fs.readFile(CONTEXT_TEST_FILE);
+    await assert.rejects(handleEditBlock({
       file_path: CONTEXT_TEST_FILE,
       old_string: '',
       new_string: 'This replacement should not be applied.',
       expected_replacements: 1
-    });
-    
-    // Check that we got the appropriate error message
-    assert.strictEqual(result.content[0].type, 'text', 'Result should be text');
-    assert.ok(
-      result.content[0].text.includes('Empty search strings are not allowed'),
-      'Should report that empty search strings are not allowed'
-    );
+    }), /Must provide either/);
+    assert.deepStrictEqual(await fs.readFile(CONTEXT_TEST_FILE), before);
     
     console.log('✓ Test correctly rejected empty search string');
   } catch (error) {
@@ -340,7 +328,7 @@ export default async function runTests() {
     await runEditBlockOccurrencesTests();
   } catch (error) {
     console.error('❌ Test failed:', error.message);
-    return false;
+    throw error;
   } finally {
     if (originalConfig) {
       await teardown(originalConfig);

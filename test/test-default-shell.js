@@ -9,7 +9,7 @@
  */
 
 import { configManager } from '../dist/config-manager.js';
-import { startProcess, forceTerminate } from '../dist/tools/improved-process-tools.js';
+import { startProcess, readProcessOutput, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
 import os from 'os';
 import { after, before, test } from 'node:test';
@@ -29,41 +29,38 @@ async function executeCommand(command, timeout_ms = 2000, shell = null) {
   return await startProcess(args);
 }
 
+async function runCommandToExit(command, initialTimeoutMs = 2000, shell = null) {
+  const started = await executeCommand(command, initialTimeoutMs, shell);
+  const initial = started.content?.[0]?.text ?? '';
+  assert.notEqual(started.isError, true, initial);
+  const match = initial.match(/Process started with PID (\d+)/);
+  assert.ok(match, `start_process did not return a PID: ${initial}`);
+  const pid = Number(match[1]);
+  const result = await readProcessOutput({
+    pid, timeout_ms: 15000, wait_for: 'exit', offset: -20, length: 20,
+  });
+  const text = result.content?.[0]?.text ?? '';
+  assert.notEqual(result.isError, true, text);
+  if (!/Process completed with exit code \d+/.test(text)) {
+    await forceTerminate({ pid });
+    throw new Error(`Shell command did not finish within the deadline: ${text}`);
+  }
+  return result;
+}
+
 /**
  * Check if a shell is available on the system
  */
 async function isShellAvailable(shellPath) {
-  try {
-    // For Windows shells, use different detection methods
-    if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
-      // On Windows, cmd should always be available
-      if (os.platform() === 'win32') {
-        return true;
-      }
-      return false;
-    }
-    
-    if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      // Check if PowerShell is available
-      try {
-        const result = await executeCommand(`${shellPath} -Command "Get-Host"`, 2000);
-        return result.content && result.content[0] && !result.content[0].text.includes('not found');
-      } catch (error) {
-        return false;
-      }
-    }
-    
-    // For Unix shells, check if the file exists and is executable
-    try {
-      const result = await executeCommand(`test -x "${shellPath}" && echo "available"`, 2000);
-      return result.content && result.content[0] && result.content[0].text.includes('available');
-    } catch (error) {
-      return false;
-    }
-  } catch (error) {
-    console.log(`Could not check availability of ${shellPath}: ${error.message}`);
-    return false;
-  }
+  if (shellPath === 'cmd' || shellPath === 'cmd.exe') return os.platform() === 'win32';
+  const powershell = shellPath === 'pwsh' || shellPath === 'powershell';
+  const command = powershell
+    ? `${shellPath} -NoProfile -Command "Get-Host"`
+    : `test -x "${shellPath}" && echo "available"`;
+  const result = await runCommandToExit(command);
+  const text = result.content?.[0]?.text ?? '';
+  return /Process completed with exit code 0/.test(text)
+    && (powershell || text.includes('available'));
 }
 
 /**
@@ -92,32 +89,23 @@ function getExpectedShellOutput(shellPath) {
  */
 async function getShellFromCommand(shellPath = null) {
   try {
-    let command = 'echo $0';
+    let command = 'printf \'JDC_SHELL_VALUE:%s\\n\' "$0"';
     
     // Use different commands for Windows shells
     if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
-      command = 'echo %0';
+      command = 'echo JDC_SHELL_VALUE:%0';
     } else if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      command = 'Write-Output $PSVersionTable.PSEdition';
+      command = "Write-Output ('JDC_SHELL_VALUE:' + $PSVersionTable.PSEdition)";
     }
     
-    const result = await executeCommand(command, 2000);
+    const result = await runCommandToExit(command);
     
     // Extract shell name from the result
     if (result.content && result.content[0] && result.content[0].text) {
       const output = result.content[0].text;
-      // Look for the shell name in the output, handling both PID line and actual output
-      const lines = output.split('\n').filter(line => line.trim() !== '');
-      
-      // Find the line that contains the actual shell output (not the PID line, Command started, or Initial output)
-      for (const line of lines) {
-        if (!line.includes('PID') && 
-            !line.includes('Command started') && 
-            !line.includes('Initial output:') &&
-            line.trim() !== '') {
-          return line.trim();
-        }
-      }
+      assert.match(output, /Process completed with exit code 0/);
+      const match = output.match(/^JDC_SHELL_VALUE:([^\r\n]+)\r?$/m);
+      if (match) return match[1].trim();
     }
     
     throw new Error('Could not extract shell name from command output');
@@ -375,3 +363,12 @@ test('default shell selects cmd', testDefaultShellCmd);
 test('default shell selects PowerShell Core', testDefaultShellPwsh);
 test('default shell switching changes the executing shell', testShellSwitching);
 test('default shell configuration persists', testConfigurationPersistence);
+test('delayed shell output is read after the process exits', async () => {
+  const shell = os.platform() === 'win32' ? 'cmd.exe' : '/bin/sh';
+  const command = `"${process.execPath}" -e "setTimeout(() => console.log('JDC_DELAYED_SHELL_MARKER'), 400)"`;
+  const result = await runCommandToExit(command, 20, shell);
+  const output = result.content?.[0]?.text ?? '';
+  assert.notEqual(result.isError, true, output);
+  assert.match(output, /Process completed with exit code 0/);
+  assert.match(output, /JDC_DELAYED_SHELL_MARKER/);
+});

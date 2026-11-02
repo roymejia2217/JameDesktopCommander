@@ -63,7 +63,7 @@ test('installer provenance rejects N-API addons at any candidate path, not just 
 test('installer admits only pinned platform runtime dependency addons', () => {
   const approved = {
     'win32-x64': 'node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64-0.35.5.node',
-    'linux-x64': 'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64.node',
+    'linux-x64': 'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.5.node',
   };
   for (const [target, path] of Object.entries(approved)) {
     const input = valid(target);

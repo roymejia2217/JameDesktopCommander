@@ -27,9 +27,13 @@ export function validateInstallerInput({ pkg, manifest, target, expectedCommit }
   for (const entry of manifest.files) {
     assert.ok(FILE.test(entry.path), 'Unsafe or noncanonical candidate entry');
     assert.ok(!entry.path.split('/').includes('..'), 'Traversal entry');
-    assert.ok(!entry.path.toLowerCase().startsWith('native/'),
-      'Blocked native capability payload must not ship');
     const folded = entry.path.toLowerCase();
+    assert.ok(!folded.startsWith('native/'),
+      'Blocked native capability payload must not ship');
+    // Never permit an unreviewed N-API binary under another package path.
+    // An installer copies the entire candidate tree, not only native/.
+    assert.ok(!folded.endsWith('.node'),
+      'Blocked unreviewed N-API addon must not ship');
     assert.ok(!seen.has(folded), 'Case-folded duplicate');
     seen.add(folded);
   }

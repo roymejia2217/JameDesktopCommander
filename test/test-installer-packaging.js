@@ -39,6 +39,27 @@ test('candidate installer input retains provenance and denies unsafe alterations
     }
   }
 });
+test('installer provenance rejects N-API addons at any candidate path, not just native/', () => {
+  for (const target of ['win32-x64', 'linux-x64']) {
+    for (const path of [
+      'native/jdc-capability-probe.node',
+      'dist/plugins/ffi-payload.node',
+      'node_modules/suspicious/build/Release/bridge.NODE',
+    ]) {
+      const input = valid(target);
+      input.manifest.files.push({ path });
+      // Keep the manifest count truthful: rejection must be due to the addon
+      // itself, not a stale fileCount masking an unsafe payload.
+      input.manifest.fileCount = input.manifest.files.length;
+      assert.throws(
+        () => validateInstallerInput(input),
+        /Blocked .*native|Blocked .*addon/,
+        `Expected explicit native addon denial for ${target}: ${path}`,
+      );
+    }
+  }
+});
+
 test('Windows installer stays per-user with separate launcher and no service takeover', async () => {
   const iss = await readFile(resolve(root,'packaging/windows/JameDesktopCommander.iss'),'utf8');
   const cmd = await readFile(resolve(root,'packaging/windows/jdc.cmd'),'utf8');

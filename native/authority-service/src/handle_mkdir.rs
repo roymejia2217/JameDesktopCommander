@@ -2597,6 +2597,18 @@ mod tests {
         let root = RootedDirectory::from_preopened(
             Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
         );
+        // Positive attack control: the old unguarded cap-std operation
+        // genuinely opens the foreign mount; denial must come from our
+        // explicit mounted-object admission rather than filesystem DAC.
+        let unguarded = root
+            .root
+            .open_dir("proc")
+            .expect("raw directory open must reach the foreign procfs mount");
+        assert_ne!(
+            mounted_object_id(&root.root).unwrap(),
+            mounted_object_id(&unguarded).unwrap(),
+            "raw child open must cross the kernel mount boundary",
+        );
         let denied = root
             .open_child("proc")
             .err()

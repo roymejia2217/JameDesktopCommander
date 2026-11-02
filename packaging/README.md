@@ -24,6 +24,31 @@ for platform-specific installable artifacts.
   commit, platform and runtime entrypoint. The validation module in scripts/
   validate-installer-input.mjs is an input guard, **not** a package builder.
 
+## Pinned official OpenAI Secure MCP Tunnel dependency
+
+The Windows x64 and Debian amd64 **unpublished** installer candidates include
+OpenAI's official `tunnel-client 0.0.19` full release bundle. The source is
+`openai/tunnel-client`, not a vendored fork. Version, exact archive filenames
+and SHA-256 digests are pinned in `packaging/tunnel-client-release.json`.
+`scripts/verify-tunnel-client-release.mjs` verifies each downloaded archive
+**before extraction or execution** on disposable hosted runners. The official
+LICENSE, NOTICE and SBOM/license materials remain alongside the executable.
+
+The installed CLI is under `tools/tunnel-client/` within the JDC directory.
+Installation does **not** provision authentication, auto-create a tunnel,
+modify Scheduled Tasks/systemd units or restart a running client. The existing
+`jdc tunnel install --tunnel-client-bin <absolute-path> ...` and Linux lifecycle
+commands may target this executable explicitly. A future user-facing guided
+onboarding flow requires its own acceptance and security review; shipping this
+binary alone does not implement that flow. The active Windows host should
+transition only through a separately verified, reversible service cutover.
+
+Verification of release SHA-256 establishes correspondence with the pinned
+GitHub artifact, **not** independent publisher signature/provenance validation.
+The current non-release candidates remain unsigned and fail closed for
+missing/unverified downloads. Release approval still requires independently
+verified provenance, full installer acceptance and all P0 gates below.
+
 ## Production release gate
 
 The only approved release version/tag publisher is the existing

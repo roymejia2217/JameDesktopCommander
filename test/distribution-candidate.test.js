@@ -61,6 +61,27 @@ test('candidate contains runtime, license and complete offline SHA-256 file inve
   });
 });
 
+test('candidate inventory keeps approved native dependencies but denies injected addons', async () => {
+  await withFixture(async options => {
+    const approved = join(options.source, 'node_modules', '@img', 'sharp-linux-x64',
+      'lib', 'sharp-linux-x64-0.35.5.node');
+    await mkdir(dirname(approved), { recursive: true });
+    await writeFile(approved, Buffer.from('PINNED_PACKAGE_FIXTURE'));
+    const manifest = await buildCandidate(options);
+    assert.ok(manifest.files.some(item => item.path ===
+      'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.5.node'));
+    assert.deepEqual(await verifyCandidate(options), manifest);
+    const inApprovedPackage = join(options.source, 'node_modules',
+      '@img', 'sharp-linux-x64', 'lib', 'injected-authority.node');
+    await writeFile(inApprovedPackage, Buffer.from('INJECTED_SAME_PACKAGE_ADDON'));
+    await assert.rejects(buildCandidate(options), /Unapproved runtime native addon/);
+    await rm(inApprovedPackage);
+    const unexpected = join(options.source, 'node_modules', 'fixture', 'inject.node');
+    await writeFile(unexpected, Buffer.from('UNAPPROVED'));
+    await assert.rejects(buildCandidate(options), /Unapproved runtime native addon/);
+  });
+});
+
 test('portable candidate excludes source-only test fixtures from staged distribution', async () => {
   await withFixture(async options => {
     const sourceFixture = join(options.source, 'test', 'fixtures', 'oc07-synthetic-only.txt');

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { approvedRuntimeNativeAddon } from './approved-runtime-native-addons.mjs';
 
 const VALID_TARGETS = new Set(['win32-x64','linux-x64']);
 const SHA = /^[0-9a-f]{40}$/;
@@ -32,7 +33,7 @@ export function validateInstallerInput({ pkg, manifest, target, expectedCommit }
       'Blocked native capability payload must not ship');
     // Never permit an unreviewed N-API binary under another package path.
     // An installer copies the entire candidate tree, not only native/.
-    assert.ok(!folded.endsWith('.node'),
+    assert.ok(!folded.endsWith('.node') || approvedRuntimeNativeAddon(entry.path, target),
       'Blocked unreviewed N-API addon must not ship');
     assert.ok(!seen.has(folded), 'Case-folded duplicate');
     seen.add(folded);

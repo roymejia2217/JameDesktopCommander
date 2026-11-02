@@ -60,6 +60,21 @@ test('installer provenance rejects N-API addons at any candidate path, not just 
   }
 });
 
+test('installer admits only pinned platform runtime dependency addons', () => {
+  const approved = {
+    'win32-x64': 'node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64-0.35.5.node',
+    'linux-x64': 'node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64.node',
+  };
+  for (const [target, path] of Object.entries(approved)) {
+    const input = valid(target);
+    input.manifest.files.push({ path });
+    input.manifest.fileCount = input.manifest.files.length;
+    assert.deepEqual(validateInstallerInput(input), {
+      version: '0.2.52', target, sourceCommit: sha,
+    });
+  }
+});
+
 test('Windows installer stays per-user with separate launcher and no service takeover', async () => {
   const iss = await readFile(resolve(root,'packaging/windows/JameDesktopCommander.iss'),'utf8');
   const cmd = await readFile(resolve(root,'packaging/windows/jdc.cmd'),'utf8');

@@ -367,6 +367,44 @@ handle-bound and no-overwrite operation on both platforms **without**
 adding privilege or ambient-path fallback. Until then deny-only remains
 mandatory.
 
+**Windows NT-native root-relative follow-up (2026-11-02, unpublished local
+fixture):** a separate `cfg(test)` Rust helper used
+`NtSetInformationFile(FileRenameInformation)` with an already-open source
+file handle and an already-open destination directory handle as
+`RootDirectory`. Real Windows NTFS tests demonstrated source-object identity
+after the staging name was substituted, no-overwrite refusal of a hard-linked
+outside destination with exact `STATUS_OBJECT_NAME_COLLISION (0xC0000035)`,
+and continued binding to the preopened directory object after that directory
+was renamed. A new RED fixture using a one-character basename initially
+returned `STATUS_INFO_LENGTH_MISMATCH (0xC0000004)` because the supplied
+buffer length was smaller than `sizeof(FILE_RENAME_INFO)`. The test-only
+buffer length now includes at least that full ABI structure size; short,
+Unicode BMP and supplementary-plane names passed as native source-object
+publishes. A subsequent adversarial basename fixture reproduced
+`STATUS_OBJECT_NAME_INVALID (0xC0000033)` for a Win32-reserved `|` name
+that the helper had not rejected as invalid input. The test-only boundary now
+rejects the Win32 reserved characters, control codes, trailing dot/space and
+separators/stream syntax before calling NT; source bytes and the destination
+directory remained unchanged across the rejected cases. This is a bounded
+research validation, not canonical-name security acceptance or production
+routing. A follow-up real-Windows native test showed that holding a source
+stage with `FILE_SHARE_READ` (no shared WRITE or DELETE) denied a second-handle
+rename, **but the same OS principal still created a real external hard link**.
+The fixture checked identical kernel file identity, then appended bytes using
+the retained writer and observed those new bytes through the outside alias.
+The original optimistic assertion that a share-mode lock would prevent the
+hard link failed; the retained negative fixture now requires the alias and
+its observed outside-byte effect. File share restrictions alone do **not**
+establish object/content confinement, even when a source-name swap is denied.
+Only a separately attested storage/OS-principal authority model could make
+this design eligible for a stronger invariant; no live mutation is enabled.
+These narrow outcomes are **not** proof that a moved parent remains
+inside the authorized root, nor that untrusted same-principal aliases,
+concurrent mount change, cancellation, crash recovery, Linux parity or #124
+FFI ownership are secure. Do not add this NT operation to a normal build or
+activate a released mutation handler. Host-wide tests, strict lint and
+independent review are additional gates; #148 is still fail closed.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

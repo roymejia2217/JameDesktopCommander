@@ -58,6 +58,55 @@ outside_file="$attacker/outside.bin"
 sudo -n -u jdc-authority -- sh -c 'printf SERVICE_DOMAIN_BYTES > "$1"' sh "$service_file"
 sudo -n -u nobody -- sh -c 'printf OUTSIDE_DOMAIN_SENTINEL_UNCHANGED > "$1"' sh "$outside_file"
 outside_hash="$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)"
+# Exercise real read, in-place rewrite, append, rename and unlink under
+# BOTH valid principals. Without these positive controls, an unavailable
+# executable or broken filesystem could make all adversarial denials look green.
+attacker_control="$attacker/operation-control.bin"
+attacker_source="$attacker/operation-source.bin"
+sudo -n -u nobody -- sh -c 'printf ATTACKER_CONTROL > "$1"' sh "$attacker_control"
+sudo -n -u nobody -- sh -c 'printf ATTACKER_REPLACEMENT > "$1"' sh "$attacker_source"
+sudo -n -u nobody -- cat -- "$attacker_control" >/dev/null
+sudo -n -u nobody -- sh -c 'printf APPENDED >> "$1"' sh "$attacker_control"
+sudo -n -u nobody -- cp -- "$attacker_source" "$attacker_control"
+[[ "$(sudo -n -u nobody -- cat -- "$attacker_control")" == ATTACKER_REPLACEMENT ]] || exit 1
+sudo -n -u nobody -- mv -- "$attacker_control" "$attacker/operation-renamed.bin"
+sudo -n -u nobody -- rm -- "$attacker/operation-renamed.bin"
+service_control="$isolated/service-control.bin"
+sudo -n -u jdc-authority -- cp -- "$service_file" "$service_control"
+sudo -n -u jdc-authority -- cat -- "$service_control" >/dev/null
+sudo -n -u jdc-authority -- sh -c 'printf APPENDED >> "$1"' sh "$service_control"
+sudo -n -u jdc-authority -- cp -- "$service_file" "$service_control"
+sudo -n -u jdc-authority -- mv -- "$service_control" "$isolated/service-renamed.bin"
+sudo -n -u jdc-authority -- rm -- "$isolated/service-renamed.bin"
+[[ "$(sudo -n -u jdc-authority -- cat -- "$service_file")" == SERVICE_DOMAIN_BYTES ]] || exit 1
+service_hash="$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)"
+echo 'T011_STORAGE_REAL_OPERATION_POSITIVE_CONTROLS_PASS'
+
+expect_denied() {
+  local operation="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    echo "E_STORAGE_UNAUTHORIZED_$operation" >&2
+    exit 1
+  fi
+}
+expect_denied read sudo -n -u nobody -- cat -- "$service_file"
+expect_denied rewrite sudo -n -u nobody -- sh -c 'printf INJECTED > "$1"' sh "$service_file"
+expect_denied append sudo -n -u nobody -- sh -c 'printf INJECTED >> "$1"' sh "$service_file"
+expect_denied rename sudo -n -u nobody -- mv -- "$service_file" "$attacker/stolen-service.bin"
+expect_denied unlink sudo -n -u nobody -- rm -- "$service_file"
+expect_denied create sudo -n -u nobody -- touch -- "$isolated/injected.bin"
+[[ ! -e "$attacker/stolen-service.bin" && ! -e "$isolated/injected.bin" ]] || {
+  echo 'E_STORAGE_PROTECTED_NAMESPACE_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)" == "$service_hash" ]] || {
+  echo 'E_STORAGE_PROTECTED_BYTES_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || {
+  echo 'E_STORAGE_EXTERIOR_BYTES_CHANGED' >&2; exit 1;
+}
+echo 'T011_STORAGE_LINUX_READ_REWRITE_APPEND_RENAME_DENIED'
+
 # The attack principal MUST succeed at a same-device hard link first.
 sudo -n -u nobody -- ln -- "$outside_file" "$attacker/positive-link.bin"
 [[ "$(sudo -n stat -c %d:%i "$outside_file")" == "$(sudo -n stat -c %d:%i "$attacker/positive-link.bin")" ]] || exit 1

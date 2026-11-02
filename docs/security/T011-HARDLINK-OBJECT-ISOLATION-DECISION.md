@@ -461,6 +461,47 @@ hardlinks, prevent a root from being moved during a live operation, or
 authorize the existing four #147 invariant-O RED scenarios. Production native
 issuer activation and publication remain denied pending independent review.
 
+### Protected-domain operation acceptance expansion (2026-11-02, draft #240)
+
+The existing disposable Linux tmpfs and Windows VHD/NTFS CI fixtures already
+exercise distinct real OS principals and separate filesystems/volumes.
+Their earlier successful tests established **cross-device hard-link refusal**
+and selected read/append permission denials; they did **not** cover the
+entire read/rewrite/append/rename/delete operation set under a common
+positive-control and exact-byte preservation contract.
+
+The current non-release acceptance expansion adds the following checks to
+those existing OS-managed fixtures (no third-party ACL wrapper or live-host
+provisioning):
+
+- The actual attacker principal must successfully read, append, rewrite,
+  rename, unlink and create objects in its **own** writable directory.
+- The actual dedicated service principal must successfully exercise the same
+  operations inside the isolated storage domain.
+- The attacker must then fail those operations against the service-owned
+  object, with the original object's SHA-256 unchanged, no renamed or
+  injected entry, and the independently stored outside sentinel unchanged.
+- A test-only Rust probe supplies an explicit native **in-place rewrite**
+  operation. The focused Windows RED test initially failed with
+  `unknown operation` (exit 101); after implementation, a real
+  hardlink-alias test proves that rewriting one filename changes the bytes
+  visible through the other name. This is a retained **negative property**
+  of same-object hard links, not evidence of containment.
+
+These assertions must run on actual disposable, differently provisioned
+Windows and Linux OS principals before any cross-platform acceptance is
+claimed. A test passing because an account, tool, mount, or attack setup is
+unavailable is an invalid result.
+
+**Scope restriction:** These are OS access-control and storage-boundary
+tests, not green results for the original four #147 native-capability
+fixtures. They do not prove same-principal isolation, concurrent mount
+namespace custody, service-token security on live hosts, full MCP routing
+or an independently reviewed issuer. Privileged administrators can still
+bind-mount foreign objects in the Linux research fixture; the proof and
+its explicit threat-model exclusions must remain visible. The service
+continues deny-only pending complete object-domain authority review.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

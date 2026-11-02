@@ -146,6 +146,38 @@ exit
     Require-UserSuccess 'ATTACKER_OWN_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, $ownLink)
     Require-UserSuccess 'ATTACKER_SAME_OBJECT' $attacker.Credential $probe @('same-object', $outsideFile, $ownLink)
     Remove-Item -LiteralPath $ownLink -Force
+    # Positive real-OS controls: each operation MUST work on attacker-owned
+    # storage and service-owned storage before a denial is accepted as custody.
+    $attackerControl = Join-Path $outside 'operation-control.bin'
+    $attackerSource = Join-Path $outside 'operation-source.bin'
+    Require-UserSuccess 'ATTACKER_CONTROL_WRITE' $attacker.Credential $probe @('canary', $attackerControl, $attackerControl)
+    Require-UserSuccess 'ATTACKER_CONTROL_SOURCE' $attacker.Credential $probe @('canary', $attackerSource, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_READ' $attacker.Credential $probe @('read', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_APPEND' $attacker.Credential $probe @('append', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_REWRITE' $attacker.Credential $probe @('rewrite', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_RENAME' $attacker.Credential $probe @('rename', $attackerControl, $attackerSource)
+    $attackerRenamed = [IO.Path]::ChangeExtension($attackerControl, '.renamed')
+    if (-not (Test-Path -LiteralPath $attackerRenamed)) { throw 'E_STORAGE_CONTROL_RENAME_NOT_OBSERVED' }
+    Require-UserSuccess 'ATTACKER_CONTROL_UNLINK' $attacker.Credential $probe @('unlink', $attackerRenamed, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_CREATE' $attacker.Credential $probe @('create', $attackerControl, $attackerSource)
+    if (-not (Test-Path -LiteralPath (Join-Path $outside 'forged.sqlite3'))) {
+        throw 'E_STORAGE_CONTROL_CREATE_NOT_OBSERVED'
+    }
+    $serviceControl = Join-Path $volume 'service-operation-control.bin'
+    Require-UserSuccess 'SERVICE_CONTROL_WRITE' $service.Credential $probe @('canary', $serviceControl, $serviceControl)
+    Require-UserSuccess 'SERVICE_CONTROL_READ' $service.Credential $probe @('read', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_APPEND' $service.Credential $probe @('append', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_REWRITE' $service.Credential $probe @('rewrite', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_RENAME' $service.Credential $probe @('rename', $serviceControl, $serviceFile)
+    $serviceRenamed = [IO.Path]::ChangeExtension($serviceControl, '.renamed')
+    if (-not (Test-Path -LiteralPath $serviceRenamed)) { throw 'E_STORAGE_SERVICE_RENAME_NOT_OBSERVED' }
+    Require-UserSuccess 'SERVICE_CONTROL_UNLINK' $service.Credential $probe @('unlink', $serviceRenamed, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_CREATE' $service.Credential $probe @('create', $serviceControl, $serviceFile)
+    if (-not (Test-Path -LiteralPath (Join-Path $volume 'forged.sqlite3'))) {
+        throw 'E_STORAGE_SERVICE_CREATE_NOT_OBSERVED'
+    }
+    $serviceBefore = (Get-FileHash -LiteralPath $serviceFile -Algorithm SHA256).Hash
+
     $adminLocalLink = Join-Path $volume 'admin-positive.bin'
     $adminPositive = Start-Process -FilePath $probe -ArgumentList @('hardlink', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
     if ($adminPositive.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_LOCAL_HARDLINK_FAILED' }
@@ -154,6 +186,15 @@ exit
     Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin'))
     Require-UserDenial 'ATTACKER_CANNOT_READ_SERVICE' $attacker.Credential $probe @('read', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_APPEND_SERVICE' $attacker.Credential $probe @('append', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_REWRITE_SERVICE' $attacker.Credential $probe @('rewrite', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_RENAME_SERVICE' $attacker.Credential $probe @('rename', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_UNLINK_SERVICE' $attacker.Credential $probe @('unlink', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_CREATE_SERVICE' $attacker.Credential $probe @('create', $serviceFile, $outsideFile)
+    if ((Get-FileHash -LiteralPath $serviceFile -Algorithm SHA256).Hash -ne $serviceBefore -or
+        (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($serviceFile, '.renamed')))) {
+        throw 'E_STORAGE_PROTECTED_OBJECT_CHANGED'
+    }
+    Write-Output 'T011_STORAGE_WINDOWS_READ_REWRITE_APPEND_RENAME_DENIED'
     Require-UserDenial 'ATTACKER_CANNOT_LINK_IN_VOLUME' $attacker.Credential $probe @('hardlink', $serviceFile, (Join-Path $volume 'attacker-internal.bin'))
     # Even an administrator with positive same-volume hardlink rights must
     # receive the kernel's exact cross-device denial, not an unrelated error.

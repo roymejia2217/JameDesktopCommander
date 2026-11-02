@@ -17,6 +17,17 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
             .open(protected)?
             .write_all(b"unauthorized"),
         "overwrite" => fs::copy(auxiliary, protected).map(|_| ()),
+        // Native in-place rewrite, retaining inode identity: this deliberately
+        // exposes alias effects when both names belong to one file object.
+        // Only a disposable security test probe; NOT a production writer.
+        "rewrite" => {
+            let replacement = fs::read(auxiliary)?;
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(protected)?
+                .write_all(&replacement)
+        }
         "hardlink" => fs::hard_link(protected, auxiliary),
         // CI-only identity proof; equal byte content is not evidence that two
         // Windows/Unix paths share the same OS file object.
@@ -69,6 +80,23 @@ mod tests {
             attempt("same-object", &source, &copied).is_err(),
             "equal bytes from independent objects must not establish identity"
         );
+    }
+
+    #[test]
+    fn rewrite_preserves_native_file_identity_and_reaches_all_hardlink_aliases() {
+        let dir = tempfile::tempdir().expect("disposable private fixture");
+        let source = dir.path().join("original.bin");
+        let alias = dir.path().join("alias.bin");
+        let replacement = dir.path().join("replacement.bin");
+        fs::write(&source, b"ORIGINAL_BYTES").unwrap();
+        fs::write(&replacement, b"REPLACED_BYTES").unwrap();
+        attempt("hardlink", &source, &alias).unwrap();
+        assert!(same_file::is_same_file(&source, &alias).unwrap());
+        attempt("rewrite", &source, &replacement)
+            .expect("rewrite probe must perform a real native in-place rewrite");
+        assert_eq!(fs::read(&source).unwrap(), b"REPLACED_BYTES");
+        assert_eq!(fs::read(&alias).unwrap(), b"REPLACED_BYTES");
+        assert!(same_file::is_same_file(&source, &alias).unwrap());
     }
 
     #[test]

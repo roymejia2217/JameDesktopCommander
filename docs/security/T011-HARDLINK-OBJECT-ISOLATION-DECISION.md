@@ -434,6 +434,33 @@ contract and the original #147 scenarios prove invariant O on both OSes.
    Only then may a separate security review consider changing
    `releaseEligible:false`.
 
+### Child capability mount-domain admission (2026-11-02, draft #240)
+
+The earlier native `RootedDirectory::open_child` validated only the child
+basename, then delegated to `cap_std::fs::Dir::open_dir`. Unlike the bounded
+read, listing, and descendant creation primitives, it did **not** compare
+the opened child directory's Linux kernel mount ID to its parent. As a result,
+a same-device bind mount could become a fresh root capability and subsequent
+operations would check against the **imported** mount instead of the originally
+authorized storage domain. This is a distinct object-authority escalation,
+not an argument that link-count preflights establish invariant O.
+
+The non-shipping Linux native implementation now opens the child with
+`open_dir_nofollow` and compares `statx(STATX_MNT_ID)` on the two already-open
+directory handles before returning a child capability. A mismatch returns
+`EXDEV`; missing mount identity fails closed. The test contract includes a
+nonprivileged `/` -> `/proc` mount crossing and a real writable same-device
+bind mount whose mount ID is distinct despite identical device/inode. The
+positive control opens a legitimate same-mount child and creates a nested
+directory. The existing GitHub-hosted disposable mount fixture must execute
+the latter case before this change can receive native Linux acceptance.
+
+This closes only an identified mount-hop capability-admission path. It does
+**not** establish protected storage ownership, disallow same-principal
+hardlinks, prevent a root from being moved during a live operation, or
+authorize the existing four #147 invariant-O RED scenarios. Production native
+issuer activation and publication remain denied pending independent review.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

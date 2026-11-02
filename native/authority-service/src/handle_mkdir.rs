@@ -630,7 +630,22 @@ impl RootedDirectory {
     /// Neither this function nor its parent constructor grants policy authority.
     pub fn open_child(&self, name: &str) -> io::Result<Self> {
         validate_single_child(name)?;
-        self.root.open_dir(name).map(Self::from_preopened)
+        #[cfg(target_os = "linux")]
+        {
+            // A child capability must not silently redefine the protected
+            // storage domain by traversing a same-device bind mount. Check
+            // kernel mount identities on the opened handles, not pathnames.
+            let root_mount = mounted_object_id(&self.root)?;
+            let opened = self.root.open_dir_nofollow(name)?;
+            if mounted_object_id(&opened)? != root_mount {
+                return Err(io::Error::from_raw_os_error(libc::EXDEV));
+            }
+            Ok(Self::from_preopened(opened))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.root.open_dir(name).map(Self::from_preopened)
+        }
     }
 
     /// Create a nested directory strictly relative to the supplied root handle.
@@ -936,6 +951,52 @@ mod tests {
         root.create_descendant("legitimate/nested").unwrap();
         assert!(allowed.join("legitimate/nested").is_dir());
         assert!(!outside.join("legitimate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires the real bind-mount fixture; mandatory in hosted acceptance"]
+    fn opened_child_rejects_writable_same_device_bind_mount_without_issuing_capability() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = std::path::PathBuf::from(
+            std::env::var_os("JDC_T011_MKDIR_MOUNT_FIXTURE")
+                .expect("mandatory real bind-mount fixture was not supplied"),
+        );
+        let allowed = fixture.join("allowed");
+        let outside = fixture.join("outside");
+        let alias = allowed.join("alias");
+        let original = std::fs::metadata(&outside).unwrap();
+        let imported = std::fs::metadata(&alias).unwrap();
+        assert_eq!(
+            (original.dev(), original.ino()),
+            (imported.dev(), imported.ino())
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        let mounted = root.root.open_dir_nofollow("alias").unwrap();
+        assert_ne!(
+            mounted_object_id(&root.root).unwrap(),
+            mounted_object_id(&mounted).unwrap(),
+            "attacker must install a genuinely distinct mount identity",
+        );
+        let sentinel = outside.join("jdc-open-child-exterior-marker");
+        assert!(!sentinel.exists());
+        let denied = root
+            .open_child("alias")
+            .err()
+            .expect("a foreign mounted directory must not become an authorized child");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+        assert!(!sentinel.exists());
+        std::fs::create_dir_all(allowed.join("legitimate")).unwrap();
+        root.open_child("legitimate")
+            .unwrap()
+            .create_child("opened-child-positive-control")
+            .unwrap();
+        assert!(allowed
+            .join("legitimate/opened-child-positive-control")
+            .is_dir());
+        assert!(!outside.join("opened-child-positive-control").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -2485,6 +2546,75 @@ mod tests {
         ] {
             assert!(parent.open_child(rejected).is_err(), "opened {rejected:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nested_open_denies_ntfs_junction_to_outside_without_issuing_capability() {
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"DO_NOT_READ_OR_WRITE").unwrap();
+        let alias = allowed.join("alias");
+        let created = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&outside)
+            .output()
+            .expect("real NTFS junction fixture must run");
+        assert!(
+            created.status.success(),
+            "junction fixture failed: {created:?}"
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        assert!(
+            root.open_child("alias").is_err(),
+            "a directory junction must not grant a capability to outside storage",
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"DO_NOT_READ_OR_WRITE");
+        assert!(!outside.join("nested").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_open_rejects_foreign_kernel_mount_before_issuing_child_capability() {
+        use std::os::unix::fs::MetadataExt;
+
+        // /proc is a real foreign mount even without privilege to create a
+        // disposable bind mount. Fail the fixture if that premise is false.
+        let original = std::fs::metadata("/").unwrap();
+        let proc = std::fs::metadata("/proc").unwrap();
+        assert_ne!(
+            original.dev(),
+            proc.dev(),
+            "a distinct procfs mount is required"
+        );
+        let root = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir("/", ambient_authority()).unwrap(),
+        );
+        let denied = root
+            .open_child("proc")
+            .err()
+            .expect("a child capability must never switch kernel mounts");
+        assert_eq!(denied.raw_os_error(), Some(libc::EXDEV));
+
+        // Positive control: a normal child on the same filesystem stays usable.
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join("inside")).unwrap();
+        let legitimate = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(fixture.path(), ambient_authority()).unwrap(),
+        );
+        legitimate
+            .open_child("inside")
+            .unwrap()
+            .create_child("nested")
+            .unwrap();
+        assert!(fixture.path().join("inside/nested").is_dir());
     }
 
     #[cfg(target_os = "linux")]

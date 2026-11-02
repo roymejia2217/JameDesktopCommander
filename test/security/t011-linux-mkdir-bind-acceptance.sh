@@ -54,6 +54,10 @@ findmnt -rn --kernel --mountpoint "$alias" >/dev/null || {
 echo T011_MKDIR_REAL_WRITABLE_SAME_DEVICE_BIND_ATTACK_READY
 JDC_T011_MKDIR_MOUNT_FIXTURE="$fixture" \
   cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml \
+    --lib handle_mkdir::tests::opened_child_rejects_writable_same_device_bind_mount_without_issuing_capability \
+    -- --ignored --exact --nocapture
+JDC_T011_MKDIR_MOUNT_FIXTURE="$fixture" \
+  cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml \
     --lib handle_mkdir::tests::root_revalidation_rejects_same_inode_from_another_mount \
     -- --ignored --exact --nocapture
 JDC_T011_MKDIR_MOUNT_FIXTURE="$fixture" \

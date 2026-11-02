@@ -80,6 +80,7 @@ sudo -n -u jdc-authority -- mv -- "$service_control" "$isolated/service-renamed.
 sudo -n -u jdc-authority -- rm -- "$isolated/service-renamed.bin"
 [[ "$(sudo -n -u jdc-authority -- cat -- "$service_file")" == SERVICE_DOMAIN_BYTES ]] || exit 1
 service_hash="$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)"
+service_object_id="$(sudo -n stat -c '%d:%i' -- "$service_file")"
 echo 'T011_STORAGE_REAL_OPERATION_POSITIVE_CONTROLS_PASS'
 
 expect_denied() {
@@ -101,6 +102,9 @@ expect_denied create sudo -n -u nobody -- touch -- "$isolated/injected.bin"
 }
 [[ "$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)" == "$service_hash" ]] || {
   echo 'E_STORAGE_PROTECTED_BYTES_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n stat -c '%d:%i' -- "$service_file")" == "$service_object_id" ]] || {
+  echo 'E_STORAGE_PROTECTED_FILE_OBJECT_CHANGED' >&2; exit 1;
 }
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || {
   echo 'E_STORAGE_EXTERIOR_BYTES_CHANGED' >&2; exit 1;

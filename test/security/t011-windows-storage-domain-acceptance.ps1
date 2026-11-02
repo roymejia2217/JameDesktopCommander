@@ -181,7 +181,11 @@ exit
     $adminLocalLink = Join-Path $volume 'admin-positive.bin'
     $adminPositive = Start-Process -FilePath $probe -ArgumentList @('hardlink', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
     if ($adminPositive.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_LOCAL_HARDLINK_FAILED' }
-    Remove-Item -LiteralPath $adminLocalLink -Force
+    # Keep a kernel-identical, separately named administrator witness until
+    # AFTER all malicious operations. Equal final bytes alone cannot detect
+    # an inode/file-ID substitution.
+    $beforeIdentity = Start-Process -FilePath $probe -ArgumentList @('same-object', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
+    if ($beforeIdentity.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_ORIGINAL_IDENTITY_FAILED' }
     Write-Output 'T011_STORAGE_SAME_VOLUME_HARDLINK_PASS'
     Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin'))
     Require-UserDenial 'ATTACKER_CANNOT_READ_SERVICE' $attacker.Credential $probe @('read', $serviceFile, $outsideFile)
@@ -194,6 +198,9 @@ exit
         (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($serviceFile, '.renamed')))) {
         throw 'E_STORAGE_PROTECTED_OBJECT_CHANGED'
     }
+    $afterIdentity = Start-Process -FilePath $probe -ArgumentList @('same-object', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
+    if ($afterIdentity.ExitCode -ne 0) { throw 'E_STORAGE_PROTECTED_FILE_OBJECT_CHANGED' }
+    Remove-Item -LiteralPath $adminLocalLink -Force
     Write-Output 'T011_STORAGE_WINDOWS_READ_REWRITE_APPEND_RENAME_DENIED'
     Require-UserDenial 'ATTACKER_CANNOT_LINK_IN_VOLUME' $attacker.Credential $probe @('hardlink', $serviceFile, (Join-Path $volume 'attacker-internal.bin'))
     # Even an administrator with positive same-volume hardlink rights must

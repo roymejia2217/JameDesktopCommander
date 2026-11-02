@@ -481,6 +481,11 @@ provisioning):
 - The attacker must then fail those operations against the service-owned
   object, with the original object's SHA-256 unchanged, no renamed or
   injected entry, and the independently stored outside sentinel unchanged.
+  The original **file object identity** must also survive: Linux compares
+  kernel device/inode before and after; Windows retains an administrative
+  hard-link witness and rechecks same-file kernel identity after the
+  attempted mutations, before removing that witness. Matching bytes alone
+  are deliberately insufficient to establish identity.
 - A test-only Rust probe supplies an explicit native **in-place rewrite**
   operation. The focused Windows RED test initially failed with
   `unknown operation` (exit 101); after implementation, a real

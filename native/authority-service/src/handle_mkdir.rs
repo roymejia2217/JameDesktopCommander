@@ -1511,6 +1511,292 @@ mod tests {
         Ok(())
     }
 
+    // Research only: native NT information class 10 (FileRenameInformation).
+    // Unlike Win32 SetFileInformationByHandle, this test probes a destination
+    // relative to an already-open directory handle. NOT a released API.
+    #[cfg(windows)]
+    fn windows_test_nt_root_handle_no_replace(
+        source: &std::fs::File,
+        destination_parent: &std::fs::File,
+        basename: &str,
+    ) -> io::Result<()> {
+        use std::ffi::c_void;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtSetInformationFile(
+                file_handle: *mut c_void,
+                io_status_block: *mut c_void,
+                file_information: *mut c_void,
+                length: u32,
+                file_information_class: u32,
+            ) -> i32;
+        }
+        if basename.is_empty()
+            || basename == "."
+            || basename == ".."
+            || basename.contains(['/', ':'])
+            || basename.contains(char::from(92))
+            || basename.contains(char::from(0))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsafe basename",
+            ));
+        }
+        let wide = basename.encode_utf16().collect::<Vec<_>>();
+        let length = wide
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .and_then(|count| count.checked_add(std::mem::offset_of!(FILE_RENAME_INFO, FileName)))
+            .map(|length| length.max(std::mem::size_of::<FILE_RENAME_INFO>()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "oversize name"))?;
+        let length = u32::try_from(length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "oversize name"))?;
+        let mut buffer = vec![0u64; (length as usize).div_ceil(std::mem::size_of::<u64>())];
+        let mut status_block = [0usize; 2];
+
+        // SAFETY: FILE_RENAME_INFO uses the same documented ABI layout for
+        // FileRenameInformation. The u64 buffer is aligned to HANDLE; the
+        // byte length covers the UTF-16 name; both handles and the buffers
+        // remain owned and alive until the synchronous NT call returns.
+        unsafe {
+            let data = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            (*data).Anonymous.ReplaceIfExists = false;
+            (*data).RootDirectory = destination_parent.as_raw_handle();
+            (*data).FileNameLength = u32::try_from(wide.len() * 2).unwrap();
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*data).FileName.as_mut_ptr(), wide.len());
+            let status = NtSetInformationFile(
+                source.as_raw_handle(),
+                status_block.as_mut_ptr().cast(),
+                data.cast(),
+                length,
+                10, // FILE_INFORMATION_CLASS::FileRenameInformation
+            );
+            if status < 0 {
+                return Err(io::Error::other(format!(
+                    "NtSetInformationFile(FileRenameInformation) NTSTATUS {status:#010x}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_nt_root_handle_supports_short_and_unicode_basenames() {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let stage = fixture.path().join("stage");
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::create_dir(&allowed).unwrap();
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&allowed)
+            .unwrap();
+        for (index, basename) in ["x", "ñ", "📂"].into_iter().enumerate() {
+            let stage_name = stage.join(format!("stage-{index}.bin"));
+            let payload = format!("ORIGINAL_{index}");
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .access_mode(FILE_GENERIC_WRITE | DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&stage_name)
+                .unwrap();
+            writer.write_all(payload.as_bytes()).unwrap();
+            writer.sync_all().unwrap();
+            windows_test_nt_root_handle_no_replace(&writer, &parent, basename)
+                .expect("short and Unicode names must publish the source handle");
+            let published = allowed.join(basename);
+            assert_eq!(std::fs::read(&published).unwrap(), payload.as_bytes());
+            assert_eq!(
+                same_file::Handle::from_path(&published).unwrap(),
+                same_file::Handle::from_file(writer.try_clone().unwrap()).unwrap()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_nt_root_handle_denies_existing_destination_without_overwrite() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage = fixture.path().join("stage");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&stage).unwrap();
+        let outside = fixture.path().join("sentinel.bin");
+        let dest = allowed.join("published.bin");
+        std::fs::write(&outside, b"EXTERIOR_SENTINEL").unwrap();
+        let stage_file = stage.join("stage.bin");
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&stage_file)
+            .unwrap();
+        opened.write_all(b"AUTHORIZED_WRITER").unwrap();
+        opened.sync_all().unwrap();
+        let pinned_parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&allowed)
+            .unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::hard_link(&outside, &dest)
+                        .expect("attacker must occupy destination through an exterior hardlink")
+                })
+                .join()
+                .unwrap();
+        });
+        let err = windows_test_nt_root_handle_no_replace(&opened, &pinned_parent, "published.bin")
+            .expect_err("existing destination must not be replaced");
+        assert!(
+            err.to_string().contains("0xc0000035"),
+            "native error must be reported: {err}"
+        );
+        assert!(same_file::is_same_file(&outside, &dest).unwrap());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"EXTERIOR_SENTINEL");
+        assert_eq!(std::fs::read(&stage_file).unwrap(), b"AUTHORIZED_WRITER");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_nt_root_handle_remains_pinned_after_parent_name_swap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let displaced_root = fixture.path().join("moved-allowed");
+        let stage = fixture.path().join("stage");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&stage).unwrap();
+        let stage_file = stage.join("stage.bin");
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&stage_file)
+            .unwrap();
+        opened.write_all(b"PINNED_ROOT_PAYLOAD").unwrap();
+        opened.sync_all().unwrap();
+        let pinned_parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&allowed)
+            .unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::rename(&allowed, &displaced_root)
+                        .expect("attacker must move original destination directory");
+                    std::fs::create_dir(&allowed)
+                        .expect("attacker must create a different directory at old pathname");
+                })
+                .join()
+                .unwrap();
+        });
+        windows_test_nt_root_handle_no_replace(&opened, &pinned_parent, "published.bin")
+            .expect("NT-relative publication must target held directory object");
+        let published_in_original = displaced_root.join("published.bin");
+        assert_eq!(
+            std::fs::read(&published_in_original).unwrap(),
+            b"PINNED_ROOT_PAYLOAD"
+        );
+        assert!(
+            !allowed.join("published.bin").exists(),
+            "new directory with former pathname must remain untouched"
+        );
+        assert_eq!(
+            same_file::Handle::from_path(&published_in_original).unwrap(),
+            same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap(),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_nt_root_handle_publishes_original_after_stage_name_swap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let allowed = fixture.path().join("allowed");
+        let stage = fixture.path().join("stage");
+        let outside = fixture.path().join("outside");
+        for directory in [&allowed, &stage, &outside] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let source = stage.join("staged.bin");
+        let displaced = outside.join("original.bin");
+        let attacker_alias = outside.join("attacker.bin");
+        let destination = allowed.join("published.bin");
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&source)
+            .unwrap();
+        opened.write_all(b"EXPECTED_WRITER_INODE").unwrap();
+        opened.sync_all().unwrap();
+        let pinned_parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&allowed)
+            .unwrap();
+        std::thread::scope(|threads| {
+            threads
+                .spawn(|| {
+                    std::fs::rename(&source, &displaced).expect("attacker must move source entry");
+                    std::fs::write(&source, b"ATTACKER_REPLACEMENT")
+                        .expect("attacker must insert another inode at source name");
+                    std::fs::hard_link(&source, &attacker_alias)
+                        .expect("attacker must retain a kernel identity proof");
+                })
+                .join()
+                .unwrap();
+        });
+        windows_test_nt_root_handle_no_replace(&opened, &pinned_parent, "published.bin")
+            .expect("native NT relative-root rename must publish held writer object");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"EXPECTED_WRITER_INODE"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"ATTACKER_REPLACEMENT");
+        assert_eq!(
+            same_file::Handle::from_path(&destination).unwrap(),
+            same_file::Handle::from_file(opened.try_clone().unwrap()).unwrap()
+        );
+        assert!(!same_file::is_same_file(&destination, &attacker_alias).unwrap());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_test_only_handle_rename_publishes_original_inode_after_source_name_swap() {

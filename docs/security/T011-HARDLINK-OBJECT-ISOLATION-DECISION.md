@@ -319,6 +319,26 @@ handle-bound and no-overwrite operation on both platforms **without**
 adding privilege or ambient-path fallback. Until then deny-only remains
 mandatory.
 
+**Windows NT-native root-relative follow-up (2026-11-02, unpublished local
+fixture):** a separate `cfg(test)` Rust helper used
+`NtSetInformationFile(FileRenameInformation)` with an already-open source
+file handle and an already-open destination directory handle as
+`RootDirectory`. Real Windows NTFS tests demonstrated source-object identity
+after the staging name was substituted, no-overwrite refusal of a hard-linked
+outside destination with exact `STATUS_OBJECT_NAME_COLLISION (0xC0000035)`,
+and continued binding to the preopened directory object after that directory
+was renamed. A new RED fixture using a one-character basename initially
+returned `STATUS_INFO_LENGTH_MISMATCH (0xC0000004)` because the supplied
+buffer length was smaller than `sizeof(FILE_RENAME_INFO)`. The test-only
+buffer length now includes at least that full ABI structure size; short,
+Unicode BMP and supplementary-plane names passed as native source-object
+publishes. These narrow outcomes are **not** proof that a moved parent remains
+inside the authorized root, nor that untrusted same-principal aliases,
+concurrent mount change, cancellation, crash recovery, Linux parity or #124
+FFI ownership are secure. Do not add this NT operation to a normal build or
+activate a released mutation handler. Host-wide tests, strict lint and
+independent review are additional gates; #148 is still fail closed.
+
 #148 stays OPEN/P0 until a separately reviewed object-custody/atomic commit
 contract and the original #147 scenarios prove invariant O on both OSes.
 

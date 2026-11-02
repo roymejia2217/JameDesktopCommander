@@ -1539,7 +1539,10 @@ mod tests {
             || basename == ".."
             || basename.contains(['/', ':'])
             || basename.contains(char::from(92))
-            || basename.contains(char::from(0))
+            || basename.ends_with(['.', ' '])
+            || basename
+                .chars()
+                .any(|ch| ch <= '\u{001f}' || matches!(ch, '<' | '>' | '|' | '?' | '*' | '"'))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1582,6 +1585,60 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_only_nt_root_handle_rejects_ambiguous_win32_basenames_without_mutation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let stage = fixture.path().join("staged.bin");
+        let allowed = fixture.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::write(&stage, b"SOURCE_UNCHANGED").unwrap();
+        let source = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&stage)
+            .unwrap();
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&allowed)
+            .unwrap();
+        for basename in [
+            "bad|name",
+            "bad?name",
+            "bad*name",
+            "bad<name",
+            "bad>name",
+            "bad\\name",
+            "bad/name",
+            "bad:name",
+            "bad\u{0001}name",
+            "trailing.",
+            "trailing ",
+            "..",
+            ".",
+            "",
+        ] {
+            let err = windows_test_nt_root_handle_no_replace(&source, &parent, basename)
+                .expect_err("ambiguous or device-incompatible Win32 basename must be denied");
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::InvalidInput,
+                "basename {basename:?}: {err}"
+            );
+            assert_eq!(std::fs::read(&stage).unwrap(), b"SOURCE_UNCHANGED");
+            assert_eq!(std::fs::read_dir(&allowed).unwrap().count(), 0);
+        }
     }
 
     #[cfg(windows)]

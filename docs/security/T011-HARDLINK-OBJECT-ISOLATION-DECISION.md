@@ -332,7 +332,14 @@ returned `STATUS_INFO_LENGTH_MISMATCH (0xC0000004)` because the supplied
 buffer length was smaller than `sizeof(FILE_RENAME_INFO)`. The test-only
 buffer length now includes at least that full ABI structure size; short,
 Unicode BMP and supplementary-plane names passed as native source-object
-publishes. These narrow outcomes are **not** proof that a moved parent remains
+publishes. A subsequent adversarial basename fixture reproduced
+`STATUS_OBJECT_NAME_INVALID (0xC0000033)` for a Win32-reserved `|` name
+that the helper had not rejected as invalid input. The test-only boundary now
+rejects the Win32 reserved characters, control codes, trailing dot/space and
+separators/stream syntax before calling NT; source bytes and the destination
+directory remained unchanged across the rejected cases. This is a bounded
+research validation, not canonical-name security acceptance or production
+routing. These narrow outcomes are **not** proof that a moved parent remains
 inside the authorized root, nor that untrusted same-principal aliases,
 concurrent mount change, cancellation, crash recovery, Linux parity or #124
 FFI ownership are secure. Do not add this NT operation to a normal build or

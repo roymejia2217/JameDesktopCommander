@@ -35,6 +35,23 @@ and SHA-256 digests are pinned in `packaging/tunnel-client-release.json`.
 LICENSE, NOTICE and SBOM/license materials remain alongside the executable.
 
 The installed CLI is under `tools/tunnel-client/` within the JDC directory.
+An explicit `--bundled` selection is available for `jdc tunnel install`
+on both supported operating systems (and for read-only `jdc tunnel doctor`
+on Linux). For example:
+
+```text
+jdc tunnel install --bundled --profile-dir <absolute-existing-profile-directory> --profile <existing-profile-name>
+```
+
+This merely resolves the platform-specific installed official executable;
+the normal lifecycle validates the supplied profile and invokes the official
+`doctor` before registering the user-level task/unit. Existing registrations
+are not replaced without the existing explicit replacement authorization.
+The option rejects duplicate or mixed `--tunnel-client-bin` selection;
+there is no fallback to a system-global binary or implicit download.
+A packaged binary is not proof against a same-principal file replacement,
+and installed service custody must still satisfy the platform-specific gates.
+
 Installation does **not** provision authentication, auto-create a tunnel,
 modify Scheduled Tasks/systemd units or restart a running client. The existing
 `jdc tunnel install --tunnel-client-bin <absolute-path> ...` and Linux lifecycle

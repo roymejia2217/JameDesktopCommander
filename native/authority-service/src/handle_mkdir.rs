@@ -1534,16 +1534,10 @@ mod tests {
                 file_information_class: u32,
             ) -> i32;
         }
-        if basename.is_empty()
-            || basename == "."
-            || basename == ".."
-            || basename.contains(['/', ':'])
-            || basename.contains(char::from(92))
-            || basename.ends_with(['.', ' '])
-            || basename
-                .chars()
-                .any(|ch| ch <= '\u{001f}' || matches!(ch, '<' | '>' | '|' | '?' | '*' | '"'))
-        {
+        // Keep the native publication fixture on the exact same canonical
+        // grammar as sealed requests: this includes Win32 device names and
+        // disallows aliases that ordinary Windows path APIs interpret specially.
+        if !safe_relative_path(basename) || basename.contains('/') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsafe basename",
@@ -1614,6 +1608,12 @@ mod tests {
             .open(&allowed)
             .unwrap();
         for basename in [
+            "CON",
+            "NUL.txt",
+            "COM1",
+            "LPT9.log",
+            "CONIN$",
+            "COM¹",
             "bad|name",
             "bad?name",
             "bad*name",

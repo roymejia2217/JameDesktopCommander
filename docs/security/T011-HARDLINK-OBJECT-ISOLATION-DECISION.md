@@ -339,7 +339,18 @@ rejects the Win32 reserved characters, control codes, trailing dot/space and
 separators/stream syntax before calling NT; source bytes and the destination
 directory remained unchanged across the rejected cases. This is a bounded
 research validation, not canonical-name security acceptance or production
-routing. These narrow outcomes are **not** proof that a moved parent remains
+routing. A follow-up real-Windows native test showed that holding a source
+stage with `FILE_SHARE_READ` (no shared WRITE or DELETE) denied a second-handle
+rename, **but the same OS principal still created a real external hard link**.
+The fixture checked identical kernel file identity, then appended bytes using
+the retained writer and observed those new bytes through the outside alias.
+The original optimistic assertion that a share-mode lock would prevent the
+hard link failed; the retained negative fixture now requires the alias and
+its observed outside-byte effect. File share restrictions alone do **not**
+establish object/content confinement, even when a source-name swap is denied.
+Only a separately attested storage/OS-principal authority model could make
+this design eligible for a stronger invariant; no live mutation is enabled.
+These narrow outcomes are **not** proof that a moved parent remains
 inside the authorized root, nor that untrusted same-principal aliases,
 concurrent mount change, cancellation, crash recovery, Linux parity or #124
 FFI ownership are secure. Do not add this NT operation to a normal build or

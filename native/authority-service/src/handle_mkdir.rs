@@ -1796,6 +1796,55 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_test_only_share_lock_blocks_rename_but_does_not_isolate_file_object() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("stage.bin");
+        let outside = fixture.path().join("outside.bin");
+        let mut opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
+            // Other handles cannot request DELETE/WRITE while this
+            // staged writer lives. This is a primitive test, not custody.
+            .share_mode(FILE_SHARE_READ)
+            .open(&source)
+            .unwrap();
+        opened.write_all(b"INITIAL_STAGE_BYTES").unwrap();
+        opened.sync_all().unwrap();
+        let moved = fixture.path().join("moved.bin");
+        let rename_error = std::fs::rename(&source, &moved)
+            .expect_err("another handle must not rename an open staged source");
+        assert!(
+            matches!(rename_error.raw_os_error(), Some(5 | 32)),
+            "unexpected rename outcome: {rename_error}"
+        );
+        assert!(source.exists());
+        // NEGATIVE SECURITY EVIDENCE: denying FILE_SHARE_DELETE/WRITE does
+        // not stop CreateHardLinkW by the same OS principal. Prove that a real
+        // external pathname points at the same opened file object, and that
+        // a subsequent write through the held writer changes outside bytes.
+        std::fs::hard_link(&source, &outside)
+            .expect("attacker must create a real same-principal hardlink");
+        assert!(same_file::is_same_file(&source, &outside).unwrap());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"INITIAL_STAGE_BYTES");
+        opened.write_all(b"_EXPOSED_AFTER_LINK").unwrap();
+        opened.sync_all().unwrap();
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"INITIAL_STAGE_BYTES_EXPOSED_AFTER_LINK"
+        );
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&outside).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_test_only_nt_root_handle_publishes_original_after_stage_name_swap() {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{

@@ -213,10 +213,23 @@ mod windows {
                 let Ok(anchor) = open_dir(&stage) else {
                     return COMPOSITE_ADMIN_CHAIN_DENIED;
                 };
+                // Disposable SCM fixture only. This pathname-derived starting
+                // handle is not a trusted production-policy root provenance.
+                let Some(anchor_parent_path) = stage.parent() else {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
+                };
+                let Some(anchor_name) = stage.file_name().and_then(|name| name.to_str()) else {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
+                };
+                let Ok(anchor_parent) = open_dir(anchor_parent_path) else {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
+                };
                 let Ok(exterior_attempt) = root.try_clone() else {
                     return DENIED_ROOT_OPEN;
                 };
                 if jdc_authority_service::windows_policy_root::observe_preopened_chain_bound_isolated_service_root(
+                    &anchor_parent,
+                    anchor_name,
                     &anchor,
                     &[(&foreign_parent, "foreign-parent")],
                     exterior_attempt,
@@ -245,6 +258,8 @@ mod windows {
                 // revalidation of every named administrative chain entry.
                 let Ok(mut composite) =
                     jdc_authority_service::windows_policy_root::observe_preopened_chain_bound_isolated_service_root(
+                        &anchor_parent,
+                        anchor_name,
                         &anchor,
                         &[(&parent, "mount-parent")],
                         composite_root,

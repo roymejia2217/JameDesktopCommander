@@ -22,6 +22,7 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
 $created = $false
 $vhd = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.vhdx')
 $isolated = Join-Path $stage 'isolated'
+$foreignParent = Join-Path $stage 'foreign-parent'
 $attached = $false
 $letter = @('R', 'S', 'T', 'U', 'V', 'W') |
     Where-Object { -not (Test-Path -LiteralPath ("${_}:\")) } |
@@ -145,6 +146,10 @@ try {
     # attached NTFS root, while a same-volume root and weakened root ACL deny.
     # This tests a composed non-shipping observation, NOT an issuer grant.
     Set-ExactDirectoryAcl $state $virtual $modify $inherit $false
+    # Same-principal, admin-controlled but unrelated parent: it satisfies the
+    # security-descriptor shape but must not bind the actual NTFS mount root.
+    New-Item -Path $foreignParent -ItemType Directory -ErrorAction Stop | Out-Null
+    Set-ExactDirectoryAcl $foreignParent $virtual $read $inherit $false
     New-Item -Path $isolated -ItemType Directory -ErrorAction Stop | Out-Null
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'SAME_VOLUME_CANNOT_BIND_ISOLATED_ROOT' 52

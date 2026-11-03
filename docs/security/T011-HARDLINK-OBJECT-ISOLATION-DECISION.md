@@ -657,12 +657,65 @@ native volume identity plus protected component-pinned bootstrap and
 real service principal. This isolated **data-only** check must not be
 substituted for completion of #148 or the four original #147 RED cases.
 
+### Windows direct-child kernel-handle binding (2026-11-02, #148)
+
+The Windows non-shipping root observer now checks **the relationship between
+its trusted administrative parent handle and its previously opened root
+handle**, rather than relying on the existence of two unrelated objects
+with plausible owner, DACL and volume attributes.
+
+`verify_preopened_named_child_identity` uses official Windows
+`NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the **already
+opened parent handle**, `ObjectName` restricted to **one safe directory
+component**, existing-only disposition and directory-only options.
+The open intentionally follows the **final** mountpoint into its NTFS
+volume, because `FILE_OPEN_REPARSE_POINT` would inspect the reparse object
+rather than the authorized filesystem root. On both obtained kernel
+handles, `GetFileInformationByHandleEx(FileIdInfo)` yields the full
+64-bit volume identity and 128-bit file identity; admission requires an
+exact match, nonzero identities and directory/non-reparse target
+attributes. The rooted reopened handle is closed automatically.
+
+**TDD:** a new real Windows test first failed RED (Rust exit 101:
+function absent), then went GREEN for a matching direct-child,
+unrelated-parent and unrelated-root controls. Invalid components
+(separators, ADS separators, dot components, reserved Windows names)
+deny. A separate real NTFS test renames the original, already-open root
+and replaces the original name with a new directory: the **stale original
+handle must DENY**, the freshly opened new root may pass a new snapshot,
+and the original sentinel bytes remain unchanged.
+
+**Hosted acceptance:** the existing restricted Windows SCM/VHD fixture
+continues to run the combined token + root ACL + administrator parent
+ACL + separate-volume proof; its test-only program now also requires
+the native rooted direct-child identity comparison against the exact
+`isolated` mountpoint entry. An additional **separately opened**
+administrator-owned `foreign-parent` with a valid read-only
+service ACE must be rejected for the same VHD root by the real
+restricted SCM process. This checks that correct-looking ACLs and
+volume metadata cannot substitute for actual kernel-rooted child
+identity; a falsely accepted foreign parent fails the fixture with
+its own service-specific exit code (54), and an unopenable required
+foreign parent fails with code (55). The fixture's positive case is essential:
+a denial-only implementation must not count as correct. The test is
+not a production service or installer.
+
+**Limitations:** this proves a **point-in-time** parent/name/root
+relationship, not immutable custody under concurrent administrator
+mountpoint replacement; it is not an atomic revocation protocol,
+an exclusive storage origin attestation or protection against a
+privileged actor exposing another route to the same filesystem.
+The final reparse is intentionally followed for the mounted volume,
+while no undocumented `OBJ_DONT_REPARSE` behavior is assumed. Keep
+all #147 real object-alias RED cases and separate FFI/MCP blockers
+open until their independent acceptance.
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in
 place, rather than introducing a new service or installer. Its debug-only,
 never-shipped `windows_state_scm_probe` invokes the real
-`observe_preopened_isolated_service_root(parent_handle, root_handle)`
+`observe_preopened_isolated_service_root(parent_handle, root_handle, "isolated")`
 under the restricted **NT SERVICE\\JameDesktopCommanderAuthority** token.
 The production library implementation requires that token's established
 OS identity preflight and the kernel-opened root's exact

@@ -8,18 +8,27 @@ use std::{
     os::windows::{fs::MetadataExt, io::AsRawHandle},
     ptr,
 };
-use windows_sys::Win32::{
-    Foundation::LocalFree,
-    Security::{
-        AclSizeInformation,
-        Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        EqualSid, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsWellKnownSid,
-        WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_SIZE_INFORMATION,
-        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+use windows_sys::{
+    Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN},
     },
-    Storage::FileSystem::{
-        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO,
+    Win32::{
+        Foundation::{LocalFree, OBJ_CASE_INSENSITIVE, UNICODE_STRING},
+        Security::{
+            AclSizeInformation,
+            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
+            EqualSid, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl, IsWellKnownSid,
+            WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_SIZE_INFORMATION,
+            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::{
+            FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+            FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        },
+        System::IO::IO_STATUS_BLOCK,
     },
 };
 
@@ -270,49 +279,50 @@ fn validate_volume_boundary(observed: WindowsVolumeBoundary) -> Result<(), Ident
     Ok(())
 }
 
-/// Read metadata from the two already-open kernel objects, never ambient
-/// paths or client-provided serials. Does NOT establish actual parent/child
-/// relationship, owner/ACL, filesystem identity or authorization; a caller
-/// must independently prove those stronger properties before any grant.
+/// Read a full kernel object identity from an owned OS directory handle.
+/// This cannot establish custody or an actual namespace parent relationship.
+fn from_handle(opened: &File) -> Result<(u64, u32, [u8; 16]), IdentityDenied> {
+    // SAFETY: both fixed-size, zero-initialized Win32 POD buffers are
+    // borrowed exclusively by the kernel while the same owned File handle
+    // stays open. No raw pointer escapes. Unsupported identity queries
+    // DENY; legacy 32/64-bit identifier fallback would truncate ReFS IDs.
+    let mut identity: FILE_ID_INFO = unsafe { mem::zeroed() };
+    if unsafe {
+        GetFileInformationByHandleEx(
+            opened.as_raw_handle().cast(),
+            FileIdInfo,
+            (&mut identity as *mut FILE_ID_INFO).cast(),
+            mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(IdentityDenied);
+    }
+    let mut attributes: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
+    if unsafe {
+        GetFileInformationByHandleEx(
+            opened.as_raw_handle().cast(),
+            FileAttributeTagInfo,
+            (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(IdentityDenied);
+    }
+    Ok((
+        identity.VolumeSerialNumber,
+        attributes.FileAttributes,
+        identity.FileId.Identifier,
+    ))
+}
+
+/// Compare already-open handles without trusting path strings. This is
+/// necessary separation, NOT a Windows authority grant.
 pub fn verify_preopened_volume_separation(
     parent: &File,
     root: &File,
 ) -> Result<(), IdentityDenied> {
-    fn from_handle(opened: &File) -> Result<(u64, u32, [u8; 16]), IdentityDenied> {
-        // SAFETY: both fixed-size, zero-initialized Win32 POD buffers are
-        // borrowed exclusively by the kernel while the same owned File handle
-        // stays open. No raw pointer escapes. Unsupported identity queries
-        // DENY; legacy 32/64-bit identifier fallback would truncate ReFS IDs.
-        let mut identity: FILE_ID_INFO = unsafe { mem::zeroed() };
-        if unsafe {
-            GetFileInformationByHandleEx(
-                opened.as_raw_handle().cast(),
-                FileIdInfo,
-                (&mut identity as *mut FILE_ID_INFO).cast(),
-                mem::size_of::<FILE_ID_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(IdentityDenied);
-        }
-        let mut attributes: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
-        if unsafe {
-            GetFileInformationByHandleEx(
-                opened.as_raw_handle().cast(),
-                FileAttributeTagInfo,
-                (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(IdentityDenied);
-        }
-        Ok((
-            identity.VolumeSerialNumber,
-            attributes.FileAttributes,
-            identity.FileId.Identifier,
-        ))
-    }
     let (pvol, pattrs, pidx) = from_handle(parent)?;
     let (rvol, rattrs, ridx) = from_handle(root)?;
     validate_volume_boundary(WindowsVolumeBoundary {
@@ -323,6 +333,112 @@ pub fn verify_preopened_volume_separation(
         parent_file_index: Some(pidx),
         root_file_index: Some(ridx),
     })
+}
+
+/// Verify that the root kernel handle currently resolves from exactly one
+/// named entry under the already-open administrative parent handle.
+///
+/// NtCreateFile(RootDirectory) performs a real kernel-relative open; no
+/// ambient path is reconstructed. The final NTFS volume mountpoint must
+/// resolve normally (FILE_OPEN_REPARSE_POINT would open the link itself).
+/// The reopened object must have the exact same 64-bit volume + 128-bit
+/// file identity as the protected root handle. This is an INSTANT admission
+/// proof, not a permanent origin invariant or a concurrency/revocation grant.
+pub fn verify_preopened_named_child_identity(
+    parent: &File,
+    root: &File,
+    child: &str,
+) -> Result<(), IdentityDenied> {
+    use std::os::windows::io::FromRawHandle;
+
+    // Strictly one component, no device aliases, NT stream syntax, dot,
+    // separators, Unicode normalization or client-supplied traversals.
+    let valid = !child.is_empty()
+        && child.len() <= 64
+        && child
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && !matches!(
+            child.to_ascii_uppercase().as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+    if !valid {
+        return Err(IdentityDenied);
+    }
+    let mut wide: Vec<u16> = child.encode_utf16().collect();
+    let bytes = u16::try_from(wide.len().saturating_mul(2)).map_err(|_| IdentityDenied)?;
+    let native_name = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle().cast(),
+        ObjectName: &native_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    let mut handle = ptr::null_mut();
+    let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+    // SAFETY: all input buffers and the owning parent File remain alive for
+    // this synchronous, open-existing kernel call. The returned HANDLE is
+    // immediately adopted by File for exactly-once close, including failures
+    // of subsequent identity reads. No client-controlled path is consulted.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_READ_ATTRIBUTES,
+            &attributes,
+            &mut status_block,
+            ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+            ptr::null(),
+            0,
+        )
+    };
+    if status < 0 || handle.is_null() || handle as isize == -1 {
+        return Err(IdentityDenied);
+    }
+    let relative = unsafe { File::from_raw_handle(handle) };
+    let (volume, flags, object) = from_handle(&relative)?;
+    let (expected_volume, expected_flags, expected_object) = from_handle(root)?;
+    if volume == 0
+        || object == [0; 16]
+        || flags & FILE_ATTRIBUTE_DIRECTORY == 0
+        || flags & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || expected_flags & FILE_ATTRIBUTE_DIRECTORY == 0
+        || expected_flags & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || (volume, object) != (expected_volume, expected_object)
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
 }
 
 /// Data-only observer. It requires the current *kernel* process token to be
@@ -356,6 +472,7 @@ pub fn observe_preopened_service_state(
 pub fn observe_preopened_isolated_service_root(
     parent: &File,
     root: File,
+    child_name: &str,
 ) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
     let observed = observe_preopened_service_state(root)?;
     let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
@@ -365,6 +482,7 @@ pub fn observe_preopened_isolated_service_root(
         ServiceDaclPolicy::ReadonlyAdministratorParent,
     )?;
     verify_preopened_volume_separation(parent, &observed.file)?;
+    verify_preopened_named_child_identity(parent, &observed.file, child_name)?;
     Ok(observed)
 }
 
@@ -595,6 +713,111 @@ mod tests {
     }
 
     #[test]
+    fn real_windows_root_relative_child_identity_requires_exact_parent_and_name() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let parent_path = fixture.path().join("actual-parent");
+        let foreign_parent_path = fixture.path().join("foreign-parent");
+        let child_path = parent_path.join("isolated");
+        let foreign_child_path = foreign_parent_path.join("isolated");
+        std::fs::create_dir(&parent_path).unwrap();
+        std::fs::create_dir(&foreign_parent_path).unwrap();
+        std::fs::create_dir(&child_path).unwrap();
+        std::fs::create_dir(&foreign_child_path).unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(&parent_path);
+        let foreign_parent = open(&foreign_parent_path);
+        let child = open(&child_path);
+        let foreign_child = open(&foreign_child_path);
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &child, "isolated"),
+            Ok(()),
+            "exact direct child must be accepted independently of volume isolation"
+        );
+        assert_eq!(
+            verify_preopened_named_child_identity(&foreign_parent, &child, "isolated"),
+            Err(IdentityDenied),
+            "a protected but unrelated parent must not authorize this root handle"
+        );
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &foreign_child, "isolated"),
+            Err(IdentityDenied),
+            "a replacement root object must not be accepted by its pathname"
+        );
+        for rejected in [
+            "",
+            ".",
+            "..",
+            "other",
+            "isolated/child",
+            "../isolated",
+            "isolated\\child",
+            "isolated:stream",
+            "isolated.",
+            "isolated ",
+            "CON",
+        ] {
+            assert_eq!(
+                verify_preopened_named_child_identity(&parent, &child, rejected),
+                Err(IdentityDenied),
+                "unsafe or wrong direct component {rejected:?} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_replaced_child_does_not_validate_stale_root_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let root_path = fixture.path().join("isolated");
+        let retired_path = fixture.path().join("original-retired");
+        std::fs::create_dir(&root_path).unwrap();
+        let sentinel = root_path.join("sentinel.bin");
+        std::fs::write(&sentinel, b"ORIGINAL_UNCHANGED_BYTES").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(fixture.path());
+        let initially_authorized = open(&root_path);
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &initially_authorized, "isolated"),
+            Ok(()),
+            "positive witness must pass before substitution"
+        );
+        std::fs::rename(&root_path, &retired_path)
+            .expect("actual NTFS rename of an opened directory must be exercised");
+        std::fs::create_dir(&root_path).unwrap();
+        let replacement = open(&root_path);
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &initially_authorized, "isolated"),
+            Err(IdentityDenied),
+            "a previously opened root must not be authorized after its name changes object"
+        );
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &replacement, "isolated"),
+            Ok(()),
+            "a newly opened matching root still passes the snapshot identity check"
+        );
+        assert_eq!(
+            std::fs::read(retired_path.join("sentinel.bin")).unwrap(),
+            b"ORIGINAL_UNCHANGED_BYTES"
+        );
+        assert!(!root_path.join("sentinel.bin").exists());
+    }
+
+    #[test]
     fn real_same_volume_directory_handles_never_pass_isolation_preflight() {
         use std::os::windows::fs::OpenOptionsExt;
         const BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -671,10 +894,14 @@ mod tests {
         let root = open_dir(&child);
         // Contract: there is no path-only, caller-supplied DACL, or
         // free-standing volume-serial constructor for this observer.
-        let _typecheck: fn(&File, File) -> Result<ObservedWindowsStateDirectory, IdentityDenied> =
+        let _typecheck: fn(
+            &File,
+            File,
+            &str,
+        ) -> Result<ObservedWindowsStateDirectory, IdentityDenied> =
             observe_preopened_isolated_service_root;
         assert_eq!(
-            observe_preopened_isolated_service_root(&parent, root).err(),
+            observe_preopened_isolated_service_root(&parent, root, "separate-root").err(),
             Some(IdentityDenied),
             "a normal interactive user cannot mint an SCM-bound root observation"
         );

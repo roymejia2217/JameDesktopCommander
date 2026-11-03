@@ -25,6 +25,8 @@ mod windows {
     const DENIED_ROOT_DACL: u32 = 51;
     const DENIED_VOLUME_IDENTITY: u32 = 52;
     const DENIED_PARENT_DACL: u32 = 53;
+    const FOREIGN_PARENT_INCORRECTLY_ACCEPTED: u32 = 54;
+    const FOREIGN_PARENT_NOT_OBSERVABLE: u32 = 55;
     const UNOPENABLE_FIXTURE: u32 = 43;
     const UNTRUSTED_IDENTITY: u32 = 44;
     const NOT_DEBUG_BUILD: u32 = 45;
@@ -72,8 +74,10 @@ mod windows {
                 DENIED_ROOT_DACL,
                 DENIED_VOLUME_IDENTITY,
                 DENIED_PARENT_DACL,
+                FOREIGN_PARENT_INCORRECTLY_ACCEPTED,
+                FOREIGN_PARENT_NOT_OBSERVABLE,
             ];
-            assert_eq!(failures, [48, 49, 50, 51, 52, 53]);
+            assert_eq!(failures, [48, 49, 50, 51, 52, 53, 54, 55]);
             let mut distinct = failures.to_vec();
             distinct.sort_unstable();
             distinct.dedup();
@@ -172,8 +176,21 @@ mod windows {
                 {
                     return DENIED_VOLUME_IDENTITY;
                 }
+                // Adversarial real SCM control: an equally administrator-
+                // controlled foreign parent with the same protected ACL
+                // cannot mint an observation for this mounted NTFS root.
+                let Ok(foreign_parent) = open_dir(&stage.join("foreign-parent")) else {
+                    return FOREIGN_PARENT_NOT_OBSERVABLE;
+                };
+                if jdc_authority_service::windows_policy_root::verify_preopened_named_child_identity(
+                    &foreign_parent, &root, "isolated",
+                )
+                .is_ok()
+                {
+                    return FOREIGN_PARENT_INCORRECTLY_ACCEPTED;
+                }
                 if jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
-                    &parent, root,
+                    &parent, root, "isolated",
                 )
                 .is_err()
                 {

@@ -18,8 +18,8 @@ use windows_sys::Win32::{
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     },
     Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT,
+        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO,
     },
 };
 
@@ -206,12 +206,12 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
 /// attestation, protected component traversal, filesystem identity and review.
 #[derive(Debug, Clone, Copy)]
 struct WindowsVolumeBoundary {
-    parent_serial: Option<u32>,
-    root_serial: Option<u32>,
+    parent_serial: Option<u64>,
+    root_serial: Option<u64>,
     parent_attributes: u32,
     root_attributes: u32,
-    parent_file_index: Option<u64>,
-    root_file_index: Option<u64>,
+    parent_file_index: Option<[u8; 16]>,
+    root_file_index: Option<[u8; 16]>,
 }
 
 fn validate_volume_boundary(observed: WindowsVolumeBoundary) -> Result<(), IdentityDenied> {
@@ -222,8 +222,8 @@ fn validate_volume_boundary(observed: WindowsVolumeBoundary) -> Result<(), Ident
     if parent_volume == 0
         || root_volume == 0
         || parent_volume == root_volume
-        || observed.parent_file_index.is_none_or(|id| id == 0)
-        || observed.root_file_index.is_none_or(|id| id == 0)
+        || observed.parent_file_index.is_none_or(|id| id == [0; 16])
+        || observed.root_file_index.is_none_or(|id| id == [0; 16])
         || observed.parent_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
         || observed.root_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
         || observed.parent_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -242,16 +242,40 @@ pub fn verify_preopened_volume_separation(
     parent: &File,
     root: &File,
 ) -> Result<(), IdentityDenied> {
-    fn from_handle(opened: &File) -> Result<(u32, u32, u64), IdentityDenied> {
-        // SAFETY: the initialized Win32 POD buffer is exclusively borrowed
-        // by GetFileInformationByHandle for the lifetime of this owned File.
-        // No pointer escapes; unsuccessful kernel queries fail closed.
-        let mut result: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(opened.as_raw_handle().cast(), &mut result) } == 0 {
+    fn from_handle(opened: &File) -> Result<(u64, u32, [u8; 16]), IdentityDenied> {
+        // SAFETY: both fixed-size, zero-initialized Win32 POD buffers are
+        // borrowed exclusively by the kernel while the same owned File handle
+        // stays open. No raw pointer escapes. Unsupported identity queries
+        // DENY; legacy 32/64-bit identifier fallback would truncate ReFS IDs.
+        let mut identity: FILE_ID_INFO = unsafe { mem::zeroed() };
+        if unsafe {
+            GetFileInformationByHandleEx(
+                opened.as_raw_handle().cast(),
+                FileIdInfo,
+                (&mut identity as *mut FILE_ID_INFO).cast(),
+                mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
             return Err(IdentityDenied);
         }
-        let index = (u64::from(result.nFileIndexHigh) << 32) | u64::from(result.nFileIndexLow);
-        Ok((result.dwVolumeSerialNumber, result.dwFileAttributes, index))
+        let mut attributes: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
+        if unsafe {
+            GetFileInformationByHandleEx(
+                opened.as_raw_handle().cast(),
+                FileAttributeTagInfo,
+                (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(IdentityDenied);
+        }
+        Ok((
+            identity.VolumeSerialNumber,
+            attributes.FileAttributes,
+            identity.FileId.Identifier,
+        ))
     }
     let (pvol, pattrs, pidx) = from_handle(parent)?;
     let (rvol, rattrs, ridx) = from_handle(root)?;
@@ -381,8 +405,8 @@ mod tests {
             root_serial: Some(0x5678),
             parent_attributes: 0x10,
             root_attributes: 0x10,
-            parent_file_index: Some(4),
-            root_file_index: Some(9),
+            parent_file_index: Some([4; 16]),
+            root_file_index: Some([9; 16]),
         };
         assert_eq!(validate_volume_boundary(valid), Ok(()));
         for rejected in [
@@ -431,15 +455,49 @@ mod tests {
                 ..valid
             },
             WindowsVolumeBoundary {
-                root_file_index: Some(0),
+                root_file_index: Some([0; 16]),
                 ..valid
             },
             WindowsVolumeBoundary {
-                parent_file_index: Some(0),
+                parent_file_index: Some([0; 16]),
                 ..valid
             },
         ] {
             assert_eq!(validate_volume_boundary(rejected), Err(IdentityDenied));
+        }
+    }
+
+    #[test]
+    fn full_kernel_volume_and_file_ids_reject_truncated_or_missing_identity() {
+        // Two 64-bit volume IDs may share their lower 32 bits. The legacy
+        // BY_HANDLE_FILE_INFORMATION projection cannot represent this case.
+        let high_bits_differ = WindowsVolumeBoundary {
+            parent_serial: Some(0x0000_0001_aabb_ccdd),
+            root_serial: Some(0x0000_0002_aabb_ccdd),
+            parent_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            root_attributes: FILE_ATTRIBUTE_DIRECTORY,
+            parent_file_index: Some([0x01; 16]),
+            root_file_index: Some([0x02; 16]),
+        };
+        assert_eq!(validate_volume_boundary(high_bits_differ), Ok(()));
+        assert_eq!(
+            validate_volume_boundary(WindowsVolumeBoundary {
+                root_serial: high_bits_differ.parent_serial,
+                ..high_bits_differ
+            }),
+            Err(IdentityDenied)
+        );
+        for absent in [
+            WindowsVolumeBoundary {
+                parent_file_index: Some([0; 16]),
+                ..high_bits_differ
+            },
+            WindowsVolumeBoundary {
+                root_file_index: Some([0; 16]),
+                ..high_bits_differ
+            },
+        ] {
+            assert_eq!(validate_volume_boundary(absent), Err(IdentityDenied));
         }
     }
 

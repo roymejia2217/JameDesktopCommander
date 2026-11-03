@@ -603,11 +603,14 @@ mount-namespace/provisioning guarantees before #148 can close.
 The Linux issuer now rejects roots sharing a device/mount domain, but Windows
 does not yet have an equivalent production root issuer. This increment adds
 a **non-authorizing Windows volume preflight**, using the official
-`GetFileInformationByHandle` Win32 API on already-open directory handles.
-It compares the kernel-provided volume serials and rejects equal, missing or
-zero identities; zero or missing file indices and non-directory or reparse
-objects also deny. No ambient pathname is reopened to obtain its metadata,
-no compiler-unstable metadata API is enabled, and no Windows grant/SCM
+`GetFileInformationByHandleEx` API with `FileIdInfo` and
+`FileAttributeTagInfo` on already-open directory handles. The kernel
+provides 64-bit volume serials and 128-bit file IDs: equal, missing or
+zero volume identities; missing/all-zero file IDs; and non-directory or
+reparse attributes deny. An unsupported or failed extended information
+query **denies**, without falling back to the legacy truncated 32-bit
+volume and 64-bit file index. No ambient pathname is reopened to obtain
+metadata, no compiler-unstable API is enabled, and no Windows grant/SCM
 activation changes.
 
 The non-issuing `observe_preopened_isolated_service_root` now composes
@@ -634,8 +637,17 @@ and `1 passed; 0 failed; 0 ignored` in the captured native output:
 count as an OS storage proof. Its established unrelated attacker/service
 DACL and cross-volume hard-link attacks continue unmodified.
 
-**Security limits are material:** Win32 volume serial numbers are only
-a *necessary discriminator*, not globally unique hardware identities.
+**TDD for extended kernel IDs:** a new focused case first failed RED
+(Rust exit 101) because the prior 32-bit serial and 64-bit file-index
+representation could not express two 64-bit volume IDs with identical
+lower 32 bits or a full 128-bit file ID. It then passed GREEN after
+adopting `FILE_ID_INFO`. Existing real same-volume handle denial
+and the explicitly unignored hosted NTFS VHD admission test continue
+to exercise the same production preflight implementation.
+
+**Security limits are material:** even a 64-bit Windows volume serial
+is only a *necessary discriminator*, not a globally unique immutable
+storage-origin credential.
 Collision, administrative reformat, duplicated volume images, and alternate
 mount paths are not excluded by this preflight. It does not prove the
 opened root is really a child of the supplied parent, inspect its owner or

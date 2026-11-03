@@ -1094,8 +1094,14 @@ mod tests {
                 .open(path)
                 .unwrap()
         };
+        let administrative_ancestor = open(&authorized);
         let parent = open(&junction);
         let root = open(&junction.join("isolated"));
+        assert_eq!(
+            verify_preopened_named_child_identity(&administrative_ancestor, &parent, "parent"),
+            Ok(()),
+            "a pinned administrative ancestor must admit the original live parent entry"
+        );
         let mut observation =
             ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(&parent, root, "isolated")
                 .expect("opened parent/child objects really match before the namespace change");
@@ -1107,6 +1113,11 @@ mod tests {
             .expect("the actual junction entry must disappear without deleting its target");
         assert!(!junction.exists(), "the authorized pathname must disappear");
         assert!(root_path.is_dir());
+        assert_eq!(
+            verify_preopened_named_child_identity(&administrative_ancestor, &parent, "parent"),
+            Err(IdentityDenied),
+            "an independent pinned ancestor must detect the removed parent entry"
+        );
         // NEGATIVE SECURITY EVIDENCE, never an acceptance of authorization:
         // the two still-open handles preserve parent/child identity after
         // removal of the *only configured* authorized namespace entry.

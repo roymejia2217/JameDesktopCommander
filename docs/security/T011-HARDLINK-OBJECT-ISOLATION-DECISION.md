@@ -813,6 +813,16 @@ this control proves the counterexample, **not** object isolation.
 The current observer binds a parent and child handle only: it does not
 possess or attest the configured administrative ancestor chain, and a
 removed parent junction is invisible to this restricted recheck.
+An independent test-only **opened administrative ancestor** supplies a
+positive kernel-relative parent lookup before junction removal and a
+negative one afterward (`IdentityDenied`), using the existing
+`verify_preopened_named_child_identity` primitive. This control passes
+on real Windows, but the production observation does **not** retain
+or revalidate that extra ancestor handle, and the ancestor's own origin
+and administration are not thereby authenticated. It proves that a
+missing parent entry is detectable with an independently pinned
+ancestor, not that the required entire root-to-volume custody chain is
+closed or that use/revocation is atomic.
 Releasing a Windows storage grant requires independently reviewed
 admin-owned ancestor handles and point-of-use custody/revocation under
 the specified OS principals; neither a pathname prefix nor a fresh

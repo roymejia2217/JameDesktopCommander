@@ -458,13 +458,13 @@ pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable
     reject_current_thread_impersonation()?;
     let token = open_current_process_token()?;
     let expected = service_sid()?;
-    let classification = if let Some(user_sid) = token_user_matches_service(token.0, &expected)? {
-        verified_snapshot(token.0, &expected, user_sid)?.classify()
-    } else {
-        TokenFinding::IdentityMismatch
+    let Some(user_sid) = token_user_matches_service(token.0, &expected)? else {
+        reject_current_thread_impersonation()?;
+        return Ok(TokenFinding::IdentityMismatch);
     };
+    let snapshot = verified_snapshot(token.0, &expected, user_sid)?;
     reject_current_thread_impersonation()?;
-    Ok(classification)
+    Ok(snapshot.classify())
 }
 
 #[cfg(test)]

@@ -669,7 +669,7 @@ Desktop Commander can be run in Docker containers for **complete isolation from 
 
 ## Updating & Uninstalling Desktop Commander
 
-### Automatic Updates (Options 1, 2, 3, 4 & 6)
+### Automatic Updates (Options 1, 2, 4 & 6)
 **Options 1 (npx), 2 (bash installer), 4 (manual npx config), and 6 (Docker)** support automatic updates as documented above. **Option 3 (Smithery) is retired** and cannot be used for installation. No manual intervention needed.
 
 ### Manual Updates (Option 5)

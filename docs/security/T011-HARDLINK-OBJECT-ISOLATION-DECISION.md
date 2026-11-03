@@ -897,6 +897,48 @@ provenance, and is not integrated into
 mount-object custody, #147 hard-link adversarial acceptance, and #124
 FFI review remain mandatory. **#148 remains P0 BLOCKED; release NO-GO.**
 
+**Windows chain-bound isolated-root observation (2026-11-03; NON-RELEASE):**
+A subsequent Windows NTFS test reproduced a **real RED** (Rust exit 101,
+`Ok(())` versus the demanded `IdentityDenied`) for a standalone
+kernel-bound root observation whose parent and child were both in an
+*exterior* directory, despite a separately valid administrative chain
+anchored elsewhere. The configured administrative terminal parent
+and the root's actual parent were independent observations: each check
+could succeed without binding the root to the administrative chain.
+A separate first attempt to rename a live administrative directory
+failed during fixture preparation with Windows `ERROR_ACCESS_DENIED (5)`;
+that was **not** treated as a security RED or a proven attack.
+
+The new `ObservedWindowsChainBoundIsolatedRoot` is a **non-issuing,
+typed composite**. It pins the complete supplied administrative chain,
+selects the protected root's direct parent **only from its final
+administrative handle**, and permanently revokes the composite before
+revalidating its ancestor chain and isolated-root bindings. The new
+public `observe_preopened_chain_bound_isolated_service_root` additionally
+requires the actual restricted SCM process identity plus protected,
+administrator-owned read/traverse DACL checks on both the supplied
+anchor and *every* administrative chain entry at admission and
+revalidation. It continues to use the existing full kernel file IDs,
+no-final-reparse ancestor rules, mounted-root traversal, and
+cross-volume preflight. A normal interactive process is denied by
+the real production path. Real ordinary-NTFS kernel-only positive and
+unrelated-root negative fixtures now pass. The existing junction
+fixture also proves that a standalone root-only check succeeds after
+an intermediate exterior alias but the composite refuses it and
+preserves exterior canary bytes.
+
+**Scope of evidence:** Normal-user positive fixtures exercise only
+`#[cfg(test)]` kernel checks; they do **not** establish a successful
+SCM-privileged positive, administratively provisioned trusted anchor,
+path-independent canonical policy source, exclusive object custody,
+race-atomic filesystem operations, or persistence of issuer grants.
+The older `observe_preopened_isolated_service_root` remains an
+independent, non-authorizing experiment (including the existing SCM
+probe); no shipping handler has been moved to this composite.
+Hosted Windows positive SCM/VHD acceptance must be added and checked
+before considering the new observation production-qualified.
+#148 remains P0/BLOCKED and `releaseEligible:false`.
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

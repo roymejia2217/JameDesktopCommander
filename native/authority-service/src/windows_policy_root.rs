@@ -697,6 +697,109 @@ pub fn observe_preopened_isolated_service_root(
     Ok(observation)
 }
 
+/// An administrative-chain-bound, non-issuing root observation. The root
+/// and the complete pinned administrative chain must revalidate together.
+/// This type exposes no filesystem operation or reusable root File handle.
+///
+/// Neither an ACL snapshot nor an independently supplied anchor proves its
+/// configured administrative origin, exclusive custody or atomic I/O safety.
+pub struct ObservedWindowsChainBoundIsolatedRoot {
+    administrative: ObservedWindowsAdministrativeChain,
+    isolated: ObservedWindowsIsolatedRoot,
+    active: bool,
+}
+
+impl ObservedWindowsChainBoundIsolatedRoot {
+    /// Check the actual SCM token, protected administrative DACLs, every
+    /// pinned ancestor edge, then the isolated root's own kernel/ACL gates.
+    /// Any failure or unwind permanently revokes this joint observation.
+    pub fn revalidate(&mut self) -> Result<(), IdentityDenied> {
+        if !self.active {
+            return Err(IdentityDenied);
+        }
+        self.active = false;
+        verify_service_identity()?;
+        let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
+        inspect_acl(
+            &self.administrative.anchor,
+            &sid,
+            ServiceDaclPolicy::ReadonlyAdministratorParent,
+        )?;
+        for (entry, _) in &self.administrative.entries {
+            inspect_acl(entry, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;
+        }
+        self.administrative.revalidate()?;
+        self.isolated.revalidate()?;
+        self.active = true;
+        Ok(())
+    }
+
+    // Kernel-only fixture: does not authenticate an SCM principal/ACL,
+    // segregated volume, or administrative anchor and cannot issue I/O.
+    #[cfg(test)]
+    fn from_preopened_kernel_fixture(
+        anchor: &File,
+        chain: &[(&File, &str)],
+        root: File,
+        root_name: &str,
+    ) -> Result<Self, IdentityDenied> {
+        let administrative = ObservedWindowsAdministrativeChain::observe(anchor, chain)?;
+        let &(parent, _) = chain.last().ok_or(IdentityDenied)?;
+        let isolated =
+            ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(parent, root, root_name)?;
+        let mut observed = Self {
+            administrative,
+            isolated,
+            active: true,
+        };
+        observed.revalidate_kernel_only_for_test()?;
+        Ok(observed)
+    }
+
+    #[cfg(test)]
+    fn revalidate_kernel_only_for_test(&mut self) -> Result<(), IdentityDenied> {
+        if !self.active {
+            return Err(IdentityDenied);
+        }
+        self.active = false;
+        self.administrative.revalidate()?;
+        self.isolated.revalidate_kernel_binding_only_for_test()?;
+        self.active = true;
+        Ok(())
+    }
+}
+
+/// Non-issuing authenticated-process preflight for a mounted isolated root.
+/// The parent of the mounted root is selected ONLY as the final pinned
+/// administrative-chain entry, not from an unrelated supplied handle.
+///
+/// This verifies the real SCM principal and protected per-ancestor ACLs but
+/// still cannot establish the administrative anchor's configured provenance
+/// or durable/exclusive storage custody. It is not a grant or MCP backend.
+pub fn observe_preopened_chain_bound_isolated_service_root(
+    anchor: &File,
+    chain: &[(&File, &str)],
+    root: File,
+    root_name: &str,
+) -> Result<ObservedWindowsChainBoundIsolatedRoot, IdentityDenied> {
+    verify_service_identity()?;
+    let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
+    inspect_acl(anchor, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;
+    for &(entry, _) in chain {
+        inspect_acl(entry, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;
+    }
+    let administrative = ObservedWindowsAdministrativeChain::observe(anchor, chain)?;
+    let &(parent, _) = chain.last().ok_or(IdentityDenied)?;
+    let isolated = observe_preopened_isolated_service_root(parent, root, root_name)?;
+    let mut observed = ObservedWindowsChainBoundIsolatedRoot {
+        administrative,
+        isolated,
+        active: true,
+    };
+    observed.revalidate()?;
+    Ok(observed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1351,6 +1454,26 @@ mod tests {
             .is_err(),
             "the revocable observer must not admit an intermediate exterior junction"
         );
+        let mut isolated_only = ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(
+            &redirected_parent,
+            open(&alias.join("child")),
+            "child",
+        )
+        .expect("a standalone root fixture follows the valid final edge after the junction");
+        assert_eq!(
+            isolated_only.revalidate_kernel_binding_only_for_test(),
+            Ok(())
+        );
+        assert!(
+            ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &anchor,
+                &[(&redirected_parent, "aliased")],
+                open(&alias.join("child")),
+                "child",
+            )
+            .is_err(),
+            "the composite must deny the intermediate exterior junction even when root binding passes"
+        );
         assert_eq!(
             std::fs::read(outside_parent.join("sentinel.bin")).unwrap(),
             b"EXTERIOR_PARENT_UNCHANGED"
@@ -1410,6 +1533,85 @@ mod tests {
         assert_eq!(
             std::fs::read(&sentinel).unwrap(),
             b"REVOCATION_SENTINEL_UNCHANGED"
+        );
+    }
+
+    #[test]
+    fn chain_bound_root_observation_rejects_unrelated_parent_without_mutation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let authorized = fixture.path().join("authorized");
+        let parent_path = authorized.join("parent");
+        let legitimate_root = parent_path.join("isolated");
+        let outside_parent = fixture.path().join("outside-parent");
+        let outside_root = outside_parent.join("isolated");
+        std::fs::create_dir_all(&legitimate_root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+        std::fs::write(outside_root.join("canary.bin"), b"OUTSIDE_BYTES_UNCHANGED").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let anchor = open(&authorized);
+        let parent = open(&parent_path);
+        let exterior_parent = open(&outside_parent);
+        let exterior_root = open(&outside_root);
+        assert_eq!(
+            verify_preopened_administrative_chain(&anchor, &[(&parent, "parent")]),
+            Ok(()),
+            "the configured administrative ancestry must be an ordinary real NTFS chain"
+        );
+        assert_eq!(
+            verify_preopened_named_child_identity(&parent, &exterior_root, "isolated"),
+            Err(IdentityDenied),
+            "the exterior root is not a child of the supplied administrative chain"
+        );
+        let mut root_only = ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(
+            &exterior_parent,
+            exterior_root,
+            "isolated",
+        )
+        .unwrap();
+        assert_eq!(
+            root_only.revalidate_kernel_binding_only_for_test(),
+            Ok(()),
+            "negative control: the root-only check still accepts its unrelated exterior parent"
+        );
+        assert!(
+            ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &anchor,
+                &[(&parent, "parent")],
+                open(&outside_root),
+                "isolated"
+            )
+            .is_err(),
+            "the chain-bound root must not admit a directory outside the supplied anchor"
+        );
+        let mut inside = ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+            &anchor,
+            &[(&parent, "parent")],
+            open(&legitimate_root),
+            "isolated",
+        )
+        .expect("ordinary positive control must bind its exact administrative parent");
+        assert_eq!(inside.revalidate_kernel_only_for_test(), Ok(()));
+        assert!(
+            observe_preopened_chain_bound_isolated_service_root(
+                &anchor,
+                &[(&parent, "parent")],
+                open(&legitimate_root),
+                "isolated"
+            )
+            .is_err(),
+            "normal interactive users cannot attest the real restricted SCM identity"
+        );
+        assert_eq!(
+            std::fs::read(outside_root.join("canary.bin")).unwrap(),
+            b"OUTSIDE_BYTES_UNCHANGED"
         );
     }
 

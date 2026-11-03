@@ -560,6 +560,44 @@ release blockers. These checks cannot make arbitrary same-principal writable
 data safe, cannot stop a privileged host administrator and **do not
 activate** the native service or any MCP operation.
 
+### Issuer-read E2E fixture migration after mandatory root custody (2026-11-02)
+
+The initial hosted `82f0047` Linux root-admission test **passed 1/1**
+under the dedicated service principal but the later Node→systemd→issuer
+read E2E returned `E_AUTHORITY_UNAVAILABLE`. That E2E had provisioned its
+two policy roots as ordinary child directories under the service-owned
+SQLite state path. The stricter issuer correctly rejected both roots:
+neither was a separate mount, and their immediate parent was mutable by
+the service principal. The E2E's previous positive behavior was therefore
+not legitimate proof of object custody.
+
+The disposable hosted fixture now provisions an independent,
+root-admin-owned `/var/lib/jdc-authority-roots` mountpoint parent and
+two **different kernel filesystems** for the policy roots. Policy bytes
+and their independently computed administrative digest/witness are
+updated together. No runtime fallback for the old shared-volume roots
+is added. The fixture preserves the original binary reads, sequential
+list, durable replay, invalid rootRef, and native mounted-alias denial
+contracts. It also deliberately mounts a subdirectory of a separately
+mounted backing tmpfs as the first policy root; a sibling exterior
+file on that backing filesystem has the same `st_dev` but lies
+**outside the authorized root subtree**. A privileged administrator
+then bind-mounts that file over an in-root name to reproduce the
+same-device, different-mount attack. The issuer must deny the alias
+and preserve the exterior SHA-256, even though a trivial `st_dev` or
+hardlink-count check would miss the attack.
+
+**Crucial limitation:** The backing mount is accessible through a
+second, administrator-created pathname solely to construct the
+adversarial same-device case. This test configuration does **not**
+satisfy the exclusive-origin assumption for production roots, and
+the issuer's current owner/mode/mount-ID gate alone cannot prove that
+an administrator has not exposed the same filesystem elsewhere.
+The test validates fail-closed mount-bound operations under a
+privileged attack fixture, not a complete administrator-resistant
+origin invariant. Independent review must approve the supported
+mount-namespace/provisioning guarantees before #148 can close.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

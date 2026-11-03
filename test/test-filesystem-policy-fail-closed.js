@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configManager, ConfigManager } from '../dist/config-manager.js';
@@ -101,6 +101,44 @@ test('a nonempty allowlist containing slash never becomes unrestricted legacy au
       else configManager.getAllowedDirectoriesForFilesystem = previous;
     }
   });
+});
+
+test('a selected slash root does not authorize unrelated Windows volumes', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows drive namespace only');
+    return;
+  }
+  const selectedRoot = await realpath('/');
+  let otherRoot;
+  for (const candidate of ['C:\\', 'D:\\', 'E:\\']) {
+    if (candidate.slice(0, 2).toLowerCase() === selectedRoot.slice(0, 2).toLowerCase()) continue;
+    try {
+      otherRoot = await realpath(candidate);
+      break;
+    } catch {
+      // Only a genuinely present different volume can prove this boundary.
+    }
+  }
+  if (!otherRoot) {
+    t.skip('A second real Windows volume is required for the cross-drive control');
+    return;
+  }
+  const original = configManager.getAllowedDirectoriesForFilesystem;
+  try {
+    for (const policy of [['/'], ['/', selectedRoot]]) {
+      configManager.getAllowedDirectoriesForFilesystem = async () => policy;
+      await assert.doesNotReject(validatePath(selectedRoot),
+        'the selected current-drive root remains accessible for validation');
+      await assert.rejects(
+        validatePath(otherRoot),
+        /Path not allowed/,
+        'a configured slash must not bypass the actual volume-root boundary'
+      );
+    }
+  } finally {
+    if (original === undefined) delete configManager.getAllowedDirectoriesForFilesystem;
+    else configManager.getAllowedDirectoriesForFilesystem = original;
+  }
 });
 
 test('failed config watcher reload invalidates the previously accepted allowlist', async () => {

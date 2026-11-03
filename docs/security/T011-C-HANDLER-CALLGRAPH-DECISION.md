@@ -88,6 +88,14 @@ its own exact HEAD and examine all new provider/preview/adapter entrypoints.
    verified both `['/']` and `['/', otherRoot]` deny with exterior bytes
    unchanged, while `[]` remains admissible (GREEN). This restores only
    fail-closed legacy admission, **not** native object-bound authority.
+   A second real-Windows RED showed that path validation interpreted the
+   configured slash root as authority over *every* drive, although the
+   canonical slash root is the current drive. The narrow GREEN removes
+   that global shortcut; only an exact empty policy is unrestricted,
+   while nonempty root selections use canonical path-boundary checks.
+   A real existing second Windows drive is denied; the selected drive
+   remains accepted. This is path-validation correctness, not an
+   object-bound authorization grant.
 2. **Pin authority for one operation.** A reviewed native backend must
    establish the root handle and immutable policy revision, acquire child
    objects relative to that root, retain valid lifetimes through completion

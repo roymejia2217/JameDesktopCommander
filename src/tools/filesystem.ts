@@ -191,9 +191,12 @@ async function validateParentDirectories(directoryPath: string): Promise<boolean
  * @returns boolean True if path is allowed
  */
 async function isPathAllowed(pathToCheck: string): Promise<boolean> {
-    // If root directory is allowed, all paths are allowed
+    // Only the explicit empty policy is unrestricted. A configured '/' is
+    // a real filesystem root: on Windows it names the current drive root,
+    // never all volumes or UNC shares. Check it through the ordinary
+    // canonical root-boundary logic below.
     const allowedDirectories = await getAllowedDirs();
-    if (allowedDirectories.includes('/') || allowedDirectories.length === 0) {
+    if (allowedDirectories.length === 0) {
         return true;
     }
 

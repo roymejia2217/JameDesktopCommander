@@ -705,6 +705,24 @@ GitHub-hosted Windows runner:
    Failure to detach prevents recursive deletion of a still-mounted
    filesystem. This test must never execute on a user computer.
 
+**First exact-SHA hosted failure and surgical remediation:** The initial
+GitHub Windows SCM/VHD attempt rejected the expected positive root.
+The subsequent diagnostic test recorded SCM service-specific **exit 51**,
+unambiguously locating the failure at the *opened VHD root's protected
+DACL*, not the volume identity or administrator parent policy. The
+original fixture had set the ACL through the mountpoint pathname only.
+The revised disposable fixture assigns the VHD an independently verified
+temporary drive letter **in addition to** its directory mountpoint
+and sets the exact owner/ACL explicitly on the VHD's actual NTFS drive
+root before invoking SCM. Every later read-only, foreign-ACE and
+restoration scenario alters and verifies that actual volume root too,
+rather than accidentally testing only the reparse mountpoint's ACL.
+This does not relax the observed principal/mode policy; a mismatched
+root must still deny. The secondary drive letter is an **administrator-
+provisioned test alias**, not evidence of single-name exclusive origin
+for a production volume. The new exact-SHA hosted positive/negative
+acceptance is mandatory before this remediation can be credited.
+
 **Security boundary:** This is *non-authorizing* custody feasibility.
 DiskPart is an official Windows tool and the fixture runs exclusively
 on disposable CI hosts. The verification does **not** prove stable

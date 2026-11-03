@@ -23,6 +23,11 @@ $created = $false
 $vhd = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.vhdx')
 $isolated = Join-Path $stage 'isolated'
 $attached = $false
+$letter = @('R', 'S', 'T', 'U', 'V', 'W') |
+    Where-Object { -not (Test-Path -LiteralPath ("${_}:\")) } |
+    Select-Object -First 1
+if (-not $letter) { throw 'E_C4R_NO_FREE_TEMP_NTFS_DRIVE_LETTER' }
+$volumeRoot = "${letter}:\"
 $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $world = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-11')
@@ -150,6 +155,7 @@ select vdisk file="$vhd"
 attach vdisk
 create partition primary
 format fs=ntfs quick label=JDC-C4R
+assign letter=$letter
 assign mount="$isolated"
 exit
 "@
@@ -158,6 +164,10 @@ exit
     $attached = [bool]$diskImage.Attached
     if (-not $attached) { throw 'E_C4R_VHD_NOT_ATTACHED' }
     $disk = $diskImage | Get-Disk -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $volumeRoot -PathType Container) -or
+        (Get-Partition -DriveLetter $letter).DiskNumber -ne $disk.Number) {
+        throw 'E_C4R_DIRECT_VHD_ROOT_DRIVE_NOT_VERIFIED'
+    }
     $systemDisk = (Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).DiskNumber
     if ($disk.Number -eq $systemDisk) { throw 'E_C4R_VHD_SHARED_DISK' }
     $partitions = @($disk | Get-Partition -ErrorAction Stop)
@@ -171,6 +181,11 @@ exit
     if ((Get-Volume -Partition $mountedPartitions[0]).FileSystem -ne 'NTFS') {
         throw 'E_C4R_VHD_NON_NTFS'
     }
+    # A mountpoint is itself a reparse point. Do not assume that setting
+    # its ACL also sets the *target volume root* DACL that a default
+    # CreateFile handle observes. Explicitly provision the same mounted
+    # NTFS object through its independent real drive-root namespace.
+    Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ACTUAL_SCM_TOKEN_WITH_PROTECTED_NTFS_VHD_ROOT' 46
     # A service-writable mountpoint parent could rename or replace the
@@ -180,12 +195,16 @@ exit
     Require-ServiceResult 'SERVICE_MUTABLE_MOUNT_PARENT_DENIED' 53
     Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
     Require-ServiceResult 'ADMINISTRATIVE_MOUNT_PARENT_RESTORED' 46
+    Set-ExactDirectoryAcl $volumeRoot $virtual $read $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $read $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_INSUFFICIENT_SERVICE_RIGHTS' 51
+    Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_ACL_RESTORED' 46
+    Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $true
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $true
     Require-ServiceResult 'ISOLATED_ROOT_FOREIGN_ACE_DENIED' 51
+    Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_FINAL_POSITIVE' 46
 

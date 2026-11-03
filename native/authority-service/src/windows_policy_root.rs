@@ -480,6 +480,19 @@ mod tests {
             root_file_index: Some([0x02; 16]),
         };
         assert_eq!(validate_volume_boundary(high_bits_differ), Ok(()));
+        // ReFS may legitimately use bits 64..127 of FILE_ID_128. The
+        // historical 64-bit file-index projection cannot represent this
+        // nonzero object ID, but the kernel's full identifier can.
+        let mut high_only_file_id = [0u8; 16];
+        high_only_file_id[15] = 0x80;
+        assert_eq!(
+            validate_volume_boundary(WindowsVolumeBoundary {
+                root_file_index: Some(high_only_file_id),
+                ..high_bits_differ
+            }),
+            Ok(()),
+            "valid high-half-only file identity must not be truncated or denied"
+        );
         assert_eq!(
             validate_volume_boundary(WindowsVolumeBoundary {
                 root_serial: high_bits_differ.parent_serial,

@@ -20,6 +20,9 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
     throw 'E_C4R_TEST_BINARY_NOT_BUILT'
 }
 $created = $false
+$vhd = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.vhdx')
+$isolated = Join-Path $stage 'isolated'
+$attached = $false
 $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $world = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-11')
@@ -80,6 +83,20 @@ function Require-ServiceResult([string] $scenario, [int] $expected) {
     }
 }
 
+function Invoke-DisposableDiskPart([string] $commands) {
+    $instructions = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.txt')
+    [IO.File]::WriteAllText($instructions, ($commands -replace '\r?\n', "`r`n"))
+    try {
+        $output = & diskpart.exe /s $instructions 2>&1
+        if ($LASTEXITCODE -ne 0 -or
+            ($output -match 'Virtual Disk Service error|DiskPart has encountered an error')) {
+            throw "E_C4R_DISKPART_FAILED: $($output -join ' | ')"
+        }
+    } finally {
+        Remove-Item -LiteralPath $instructions -Force -ErrorAction SilentlyContinue
+    }
+}
+
 try {
     New-Item -Path $stage -ItemType Directory -ErrorAction Stop | Out-Null
     New-Item -Path $binDir -ItemType Directory -ErrorAction Stop | Out-Null
@@ -119,7 +136,54 @@ try {
     Require-ServiceResult 'MISSING_OBJECT_INHERITANCE' 42
     Set-ExactDirectoryAcl $state $virtual $modify $inherit $true
     Require-ServiceResult 'UNAUTHORIZED_FOREIGN_ACE' 42
+    # A real SCM restricted service token must positively observe a separately
+    # attached NTFS root, while a same-volume root and weakened root ACL deny.
+    # This tests a composed non-shipping observation, NOT an issuer grant.
+    Set-ExactDirectoryAcl $state $virtual $modify $inherit $false
+    New-Item -Path $isolated -ItemType Directory -ErrorAction Stop | Out-Null
+    Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
+    Require-ServiceResult 'SAME_VOLUME_CANNOT_BIND_ISOLATED_ROOT' 47
+    if (Test-Path -LiteralPath $vhd) { throw 'E_C4R_VHD_COLLISION' }
+    $vhdSetup = @"
+create vdisk file="$vhd" maximum=128 type=expandable
+select vdisk file="$vhd"
+attach vdisk
+create partition primary
+format fs=ntfs quick label=JDC-C4R
+assign mount="$isolated"
+exit
+"@
+    Invoke-DisposableDiskPart $vhdSetup
+    $diskImage = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
+    $attached = [bool]$diskImage.Attached
+    if (-not $attached) { throw 'E_C4R_VHD_NOT_ATTACHED' }
+    $disk = $diskImage | Get-Disk -ErrorAction Stop
+    $systemDisk = (Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).DiskNumber
+    if ($disk.Number -eq $systemDisk) { throw 'E_C4R_VHD_SHARED_DISK' }
+    $partitions = @($disk | Get-Partition -ErrorAction Stop)
+    $mountPath = $isolated.TrimEnd('\') + '\'
+    $mountedPartitions = @($partitions | Where-Object {
+        @($_.AccessPaths | ForEach-Object { $_.TrimEnd('\') + '\' }) -contains $mountPath
+    })
+    if ($mountedPartitions.Count -ne 1) {
+        throw 'E_C4R_VHD_MOUNT_PATH_NOT_VERIFIED'
+    }
+    if ((Get-Volume -Partition $mountedPartitions[0]).FileSystem -ne 'NTFS') {
+        throw 'E_C4R_VHD_NON_NTFS'
+    }
+    Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
+    Require-ServiceResult 'ACTUAL_SCM_TOKEN_WITH_PROTECTED_NTFS_VHD_ROOT' 46
+    Set-ExactDirectoryAcl $isolated $virtual $read $inherit $false
+    Require-ServiceResult 'ISOLATED_ROOT_INSUFFICIENT_SERVICE_RIGHTS' 47
+    Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
+    Require-ServiceResult 'ISOLATED_ROOT_ACL_RESTORED' 46
+    Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $true
+    Require-ServiceResult 'ISOLATED_ROOT_FOREIGN_ACE_DENIED' 47
+    Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
+    Require-ServiceResult 'ISOLATED_ROOT_FINAL_POSITIVE' 46
+
     Write-Output 'T011-C4r Windows actual restricted SCM state-DACL positive/negative: PASS (non-release)'
+    Write-Output 'T011_STORAGE_WINDOWS_ACTUAL_SCM_ISOLATED_VOLUME_COMPOSED_PASS_NONRELEASE'
 }
 finally {
     $cleanupFailed = $false
@@ -127,7 +191,31 @@ finally {
         & $sc delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
     }
-    if (Test-Path -LiteralPath $stage) {
+    # Detach the disposable VHD BEFORE recursively removing its directory
+    # mountpoint. On any detach failure, preserve the mounted filesystem and
+    # report failure rather than ever recursing through a live volume.
+    $volumeStillAttached = $false
+    if (Test-Path -LiteralPath $vhd) {
+        try {
+            $image = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
+            if ($image.Attached) {
+                Invoke-DisposableDiskPart @"
+select vdisk file="$vhd"
+detach vdisk
+exit
+"@
+            }
+            $image = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
+            if ($image.Attached) {
+                throw 'E_C4R_ISOLATED_VHD_STILL_ATTACHED'
+            }
+            Remove-Item -LiteralPath $vhd -Force -ErrorAction Stop
+        } catch {
+            $cleanupFailed = $true
+            $volumeStillAttached = $true
+        }
+    }
+    if ((Test-Path -LiteralPath $stage) -and -not $volumeStillAttached) {
         try { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
         catch { $cleanupFailed = $true }
     }

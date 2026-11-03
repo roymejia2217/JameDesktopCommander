@@ -657,6 +657,53 @@ native volume identity plus protected component-pinned bootstrap and
 real service principal. This isolated **data-only** check must not be
 substituted for completion of #148 or the four original #147 RED cases.
 
+### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
+
+The existing official disposable Windows hosted-SCM fixture is extended in
+place, rather than introducing a new service or installer. Its debug-only,
+never-shipped `windows_state_scm_probe` invokes the real
+`observe_preopened_isolated_service_root(parent_handle, root_handle)`
+under the restricted **NT SERVICE\\JameDesktopCommanderAuthority** token.
+The production library implementation requires that token's established
+OS identity preflight and the kernel-opened root's exact
+administrator-owned DACL, then enforces distinct kernel volume identities
+on the open handles. The fixture leaves the existing state-DACL
+positive/negative scenarios and their strict SCM service-specific exit
+codes intact.
+
+The new acceptance demands ALL of the following on a disposable
+GitHub-hosted Windows runner:
+
+1. An administrator-owned, protected-DACL ordinary directory at
+   `%ProgramData%/JDC-T011-C4R-*/isolated` on the **same device** as the
+   parent must be rejected by the real restricted SCM token (exit 47).
+2. A standard 128 MiB expandable NTFS VHD is created and attached using
+   Windows DiskPart; its independent physical disk is compared to the
+   system disk using `Get-Partition` and `Get-DiskImage | Get-Disk`.
+   The VHD is mounted into that empty directory using the documented
+   NTFS folder mount-point contract. The exact mounted partition and
+   NTFS filesystem type are verified, then its root receives the
+   established, explicit administrator-owned three-principal DACL.
+3. The actual SCM service must now accept the composed **token + DACL +
+   separate-volume** observation (exit 46), deny a service read-only
+   root DACL (47), accept its restoration (46), reject an unauthorized
+   foreign ACE (47), and accept final restoration (46). Success is
+   recorded only after all independent positive and negative steps;
+   a stuck-deny implementation cannot pass.
+4. Cleanup always attempts service removal, VHD detach **before**
+   recursive deletion of the temporary mountpoint, and VHD removal.
+   Failure to detach prevents recursive deletion of a still-mounted
+   filesystem. This test must never execute on a user computer.
+
+**Security boundary:** This is *non-authorizing* custody feasibility.
+DiskPart is an official Windows tool and the fixture runs exclusively
+on disposable CI hosts. The verification does **not** prove stable
+parent-to-child object linkage across the folder mountpoint, absence
+of a second privileged mount or administrative namespace replacement,
+nor same-principal hardlink provenance inside the approved volume. It
+does not install or activate a production issuer and does not close
+issue #148 or supersede the four #147 RED attacks.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

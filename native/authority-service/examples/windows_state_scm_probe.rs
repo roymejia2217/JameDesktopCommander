@@ -15,6 +15,8 @@ mod windows {
     const NAME: &str = "JameDesktopCommanderAuthority";
     const ACCEPTED_OBSERVATION: u32 = 41;
     const DENIED_DACL: u32 = 42;
+    const ACCEPTED_ISOLATED_ROOT: u32 = 46;
+    const DENIED_ISOLATED_ROOT: u32 = 47;
     const UNOPENABLE_FIXTURE: u32 = 43;
     const UNTRUSTED_IDENTITY: u32 = 44;
     const NOT_DEBUG_BUILD: u32 = 45;
@@ -28,6 +30,14 @@ mod windows {
         }
     }
 
+    fn isolated_disposition(valid: bool) -> u32 {
+        if valid {
+            ACCEPTED_ISOLATED_ROOT
+        } else {
+            DENIED_ISOLATED_ROOT
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -35,6 +45,14 @@ mod windows {
         fn real_positive_and_negative_proofs_have_distinct_terminal_codes() {
             assert_eq!(disposition(true), ACCEPTED_OBSERVATION);
             assert_eq!(disposition(false), DENIED_DACL);
+        }
+
+        #[test]
+        fn actual_scm_isolated_root_requires_separate_positive_and_denial_verdicts() {
+            assert_eq!(isolated_disposition(true), 46);
+            assert_eq!(isolated_disposition(false), 47);
+            assert_ne!(isolated_disposition(false), ACCEPTED_OBSERVATION);
+            assert_ne!(isolated_disposition(true), DENIED_DACL);
         }
     }
 
@@ -70,24 +88,52 @@ mod windows {
         if jdc_authority_service::verify_service_identity().is_err() {
             return UNTRUSTED_IDENTITY;
         }
-        let Some(path) = std::env::current_exe().ok().and_then(|exe| {
+        let Some(stage) = std::env::current_exe().ok().and_then(|exe| {
             exe.parent()
                 .and_then(|p| p.parent())
-                .map(|p| p.join("state"))
+                .map(|p| p.to_path_buf())
         }) else {
             return UNOPENABLE_FIXTURE;
         };
-        let Ok(dir) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)
-        else {
+        let open_dir = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+        };
+        let Ok(state) = open_dir(&stage.join("state")) else {
             return UNOPENABLE_FIXTURE;
         };
-        disposition(
-            jdc_authority_service::windows_policy_root::observe_preopened_service_state(dir)
-                .is_ok(),
-        )
+        let isolated = stage.join("isolated");
+        // The isolated-root case exists ONLY in disposable hosted tests. No
+        // caller parameter or client input can opt a production SCM service
+        // into a grant; even a positive result is merely a terminal exit code.
+        // Unexpected metadata lookup errors must not silently fall back to
+        // the ordinary state-DACL observation.
+        match std::fs::symlink_metadata(&isolated) {
+            Ok(_) => {
+                let validated_state =
+                    jdc_authority_service::windows_policy_root::observe_preopened_service_state(
+                        state,
+                    )
+                    .is_ok();
+                let isolated_valid = match (open_dir(&stage), open_dir(&isolated)) {
+                    (Ok(parent), Ok(root)) => {
+                        jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
+                            &parent, root,
+                        )
+                        .is_ok()
+                    }
+                    _ => false,
+                };
+                isolated_disposition(validated_state && isolated_valid)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => disposition(
+                jdc_authority_service::windows_policy_root::observe_preopened_service_state(state)
+                    .is_ok(),
+            ),
+            Err(_) => isolated_disposition(false),
+        }
     }
 }
 

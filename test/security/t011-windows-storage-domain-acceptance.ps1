@@ -136,6 +136,22 @@ exit
     $outerDisk = (Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).DiskNumber
     $innerDisk = (Get-Partition -DriveLetter $letter).DiskNumber
     if ($outerDisk -eq $innerDisk) { throw 'E_STORAGE_SAME_WINDOWS_DISK' }
+    if ((Get-Volume -DriveLetter $env:SystemDrive.TrimEnd(':')).FileSystem -ne 'NTFS') {
+        throw 'E_STORAGE_PARENT_NOT_NTFS'
+    }
+    # Validate that the native preflight actually observes two real opened
+    # Windows kernel volume identities. This is NOT a service root grant:
+    # the fixture runs under the disposable runner administrator identity.
+    $env:JDC_T011_WINDOWS_VHD_PARENT = $root
+    $env:JDC_T011_WINDOWS_VHD_ROOT = $volume
+    try {
+        & cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight -- --ignored --exact --nocapture
+        if ($LASTEXITCODE -ne 0) { throw 'E_STORAGE_NATIVE_WINDOWS_VHD_PRECHECK_FAILED' }
+    } finally {
+        Remove-Item Env:\JDC_T011_WINDOWS_VHD_PARENT -ErrorAction SilentlyContinue
+        Remove-Item Env:\JDC_T011_WINDOWS_VHD_ROOT -ErrorAction SilentlyContinue
+    }
+    Write-Output 'T011_STORAGE_NATIVE_WINDOWS_VOLUME_HANDLE_IDENTITY_PASS'
     Set-CustodyAcl $volume @(@{ SID = $service.SID; Rights = 'Modify' })
     $serviceFile = Join-Path $volume 'service.bin'
     $outsideFile = Join-Path $outside 'outside.bin'

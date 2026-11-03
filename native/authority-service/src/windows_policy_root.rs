@@ -17,7 +17,10 @@ use windows_sys::Win32::{
         WinBuiltinAdministratorsSid, WinLocalSystemSid, ACL, ACL_SIZE_INFORMATION,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     },
-    Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
+    Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT,
+    },
 };
 
 const WRITE_DAC: u32 = 0x0004_0000;
@@ -196,6 +199,72 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
     validate_ace_set(&summaries)
 }
 
+/// OS-handle volume isolation preflight. A volume serial number is only a
+/// necessary discriminator, NOT a trustworthy volume GUID or unique physical
+/// storage-origin proof; two independently formatted volumes can collide.
+/// The actual Windows root issuer remains disabled pending OS-principal ACL
+/// attestation, protected component traversal, filesystem identity and review.
+#[derive(Debug, Clone, Copy)]
+struct WindowsVolumeBoundary {
+    parent_serial: Option<u32>,
+    root_serial: Option<u32>,
+    parent_attributes: u32,
+    root_attributes: u32,
+    parent_file_index: Option<u64>,
+    root_file_index: Option<u64>,
+}
+
+fn validate_volume_boundary(observed: WindowsVolumeBoundary) -> Result<(), IdentityDenied> {
+    let (Some(parent_volume), Some(root_volume)) = (observed.parent_serial, observed.root_serial)
+    else {
+        return Err(IdentityDenied);
+    };
+    if parent_volume == 0
+        || root_volume == 0
+        || parent_volume == root_volume
+        || observed.parent_file_index.is_none_or(|id| id == 0)
+        || observed.root_file_index.is_none_or(|id| id == 0)
+        || observed.parent_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || observed.root_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || observed.parent_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || observed.root_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
+/// Read metadata from the two already-open kernel objects, never ambient
+/// paths or client-provided serials. Does NOT establish actual parent/child
+/// relationship, owner/ACL, filesystem identity or authorization; a caller
+/// must independently prove those stronger properties before any grant.
+pub fn verify_preopened_volume_separation(
+    parent: &File,
+    root: &File,
+) -> Result<(), IdentityDenied> {
+    fn from_handle(opened: &File) -> Result<(u32, u32, u64), IdentityDenied> {
+        // SAFETY: the initialized Win32 POD buffer is exclusively borrowed
+        // by GetFileInformationByHandle for the lifetime of this owned File.
+        // No pointer escapes; unsuccessful kernel queries fail closed.
+        let mut result: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(opened.as_raw_handle().cast(), &mut result) } == 0 {
+            return Err(IdentityDenied);
+        }
+        let index = (u64::from(result.nFileIndexHigh) << 32) | u64::from(result.nFileIndexLow);
+        Ok((result.dwVolumeSerialNumber, result.dwFileAttributes, index))
+    }
+    let (pvol, pattrs, pidx) = from_handle(parent)?;
+    let (rvol, rattrs, ridx) = from_handle(root)?;
+    validate_volume_boundary(WindowsVolumeBoundary {
+        parent_serial: Some(pvol),
+        root_serial: Some(rvol),
+        parent_attributes: pattrs,
+        root_attributes: rattrs,
+        parent_file_index: Some(pidx),
+        root_file_index: Some(ridx),
+    })
+}
+
 /// Data-only observer. It requires the current *kernel* process token to be
 /// the dedicated SCM service identity before looking at any supplied handle.
 /// Its caller must independently acquire the state directory via protected,
@@ -287,6 +356,134 @@ mod tests {
                 "missing container-inheritance on ACE index {principal}"
             );
         }
+    }
+
+    #[test]
+    fn distinct_volume_admission_denies_unavailable_equal_or_untrusted_metadata() {
+        let valid = WindowsVolumeBoundary {
+            parent_serial: Some(0x1234),
+            root_serial: Some(0x5678),
+            parent_attributes: 0x10,
+            root_attributes: 0x10,
+            parent_file_index: Some(4),
+            root_file_index: Some(9),
+        };
+        assert_eq!(validate_volume_boundary(valid), Ok(()));
+        for rejected in [
+            WindowsVolumeBoundary {
+                root_serial: valid.parent_serial,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_serial: None,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_serial: None,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_serial: Some(0),
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_serial: Some(0),
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_attributes: valid.root_attributes | FILE_ATTRIBUTE_REPARSE_POINT,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_attributes: valid.parent_attributes | FILE_ATTRIBUTE_REPARSE_POINT,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_attributes: 0,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_attributes: 0,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_file_index: None,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_file_index: None,
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                root_file_index: Some(0),
+                ..valid
+            },
+            WindowsVolumeBoundary {
+                parent_file_index: Some(0),
+                ..valid
+            },
+        ] {
+            assert_eq!(validate_volume_boundary(rejected), Err(IdentityDenied));
+        }
+    }
+
+    #[test]
+    fn real_same_volume_directory_handles_never_pass_isolation_preflight() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let child = fixture.path().join("root");
+        std::fs::create_dir(&child).unwrap();
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(fixture.path())
+            .unwrap();
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(&child)
+            .unwrap();
+        assert_eq!(
+            verify_preopened_volume_separation(&parent, &opened),
+            Err(IdentityDenied),
+            "same-volume NTFS handles must not become an isolated root"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a disposable, separately attached NTFS VHD under hosted acceptance"]
+    fn real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let parent_path = std::env::var_os("JDC_T011_WINDOWS_VHD_PARENT")
+            .expect("the disposable parent on the system disk is mandatory");
+        let volume_path = std::env::var_os("JDC_T011_WINDOWS_VHD_ROOT")
+            .expect("the independent NTFS VHD volume root is mandatory");
+        let open_dir = |path: &std::ffi::OsStr| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .expect("a real already-open directory handle is required")
+        };
+        let parent = open_dir(&parent_path);
+        let separate = open_dir(&volume_path);
+        assert_eq!(
+            verify_preopened_volume_separation(&parent, &separate),
+            Ok(()),
+            "a real separately formatted NTFS volume must be distinguishable"
+        );
+        assert_eq!(
+            verify_preopened_volume_separation(&separate, &separate),
+            Err(IdentityDenied),
+            "two handles to the same VHD must never pass isolation"
+        );
+        assert_eq!(
+            verify_preopened_volume_separation(&parent, &parent),
+            Err(IdentityDenied),
+            "two handles to the system volume must never pass isolation"
+        );
     }
 
     #[test]

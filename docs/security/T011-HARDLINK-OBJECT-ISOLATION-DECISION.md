@@ -598,6 +598,39 @@ privileged attack fixture, not a complete administrator-resistant
 origin invariant. Independent review must approve the supported
 mount-namespace/provisioning guarantees before #148 can close.
 
+### Windows non-issuing opened-handle volume discriminator (2026-11-02, #148)
+
+The Linux issuer now rejects roots sharing a device/mount domain, but Windows
+does not yet have an equivalent production root issuer. This increment adds
+a **non-authorizing Windows volume preflight**, using the official
+`GetFileInformationByHandle` Win32 API on already-open directory handles.
+It compares the kernel-provided volume serials and rejects equal, missing or
+zero identities; zero or missing file indices and non-directory or reparse
+objects also deny. No ambient pathname is reopened to obtain its metadata,
+no compiler-unstable metadata API is enabled, and no Windows grant/SCM
+activation changes.
+
+A Windows local unit test must prove that two genuine handles to directories
+on the **same existing NTFS volume** are denied. The existing disposable
+Windows VHD acceptance creates a separate NTFS disk and runs an
+**explicitly unignored** Rust test against the VHD root and a directory on
+the system drive. The test requires the different-volume preflight to
+accept, and both same-volume controls to deny. The PowerShell fixture
+independently verifies actual `Get-Partition` disk numbers and NTFS for
+both drives. Its established unrelated attacker/service DACL and
+cross-volume hard-link attacks continue unmodified.
+
+**Security limits are material:** Win32 volume serial numbers are only
+a *necessary discriminator*, not globally unique hardware identities.
+Collision, administrative reformat, duplicated volume images, and alternate
+mount paths are not excluded by this preflight. It does not prove the
+opened root is really a child of the supplied parent, inspect its owner or
+ACL, authenticate a Windows SCM service token, exclude unauthorized aliases
+or issue a capability. Those require a stronger, separately reviewed
+native volume identity plus protected component-pinned bootstrap and
+real service principal. This isolated **data-only** check must not be
+substituted for completion of #148 or the four original #147 RED cases.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

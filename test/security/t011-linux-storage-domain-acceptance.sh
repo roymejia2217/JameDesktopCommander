@@ -91,9 +91,15 @@ sudo -n -u jdc-authority -- setpriv --no-new-privs -- env \
   JDC_T011_CUSTODIED_ROOT="$isolated" \
   "$trusted_probe" --ignored --exact \
   issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root --nocapture
-[[ -d "$isolated/issuer-custody-positive" ]] || {
+# Only the dedicated principal may traverse this 0700 mount. Checking
+# from the runner UID would incorrectly turn an enforced denial into a
+# missing-file verdict.
+sudo -n -u jdc-authority -- test -d "$isolated/issuer-custody-positive" || {
   echo E_ISSUER_POSITIVE_ROOT_OPERATION_MISSING >&2; exit 1;
 }
+if sudo -n -u nobody -- test -d "$isolated/issuer-custody-positive"; then
+  echo E_ISSUER_PROTECTED_ROOT_EXPOSED_TO_ATTACKER >&2; exit 1;
+fi
 echo T011_STORAGE_ISSUER_ROOT_ATTESTATION_PASS
 
 # Exercise real read, in-place rewrite, append, rename and unlink under

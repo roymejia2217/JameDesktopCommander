@@ -460,6 +460,28 @@ pub fn verify_preopened_administrative_child_identity(
     )
 }
 
+/// Inspect *every* named, opened administrative directory entry from
+/// an independently pinned anchor. Each step forbids following the final
+/// component's reparse point and checks complete OS file-object identity.
+///
+/// The caller must separately authenticate the anchor's actual provenance
+/// and OS principal. This snapshot is NOT atomic across the steps, does not
+/// convey I/O authority, and cannot be used as a durable storage grant.
+pub fn verify_preopened_administrative_chain(
+    anchor: &File,
+    chain: &[(&File, &str)],
+) -> Result<(), IdentityDenied> {
+    if chain.is_empty() {
+        return Err(IdentityDenied);
+    }
+    let mut parent = anchor;
+    for &(child, child_name) in chain {
+        verify_preopened_administrative_child_identity(parent, child, child_name)?;
+        parent = child;
+    }
+    Ok(())
+}
+
 enum ChildEntryResolution {
     FollowMountRoot,
     OpenEntryItself,
@@ -1150,6 +1172,25 @@ mod tests {
             Ok(()),
             "baseline root-mount-style traversal follows this NTFS junction"
         );
+        // A caller can also hand us a handle opened to the reparse entry
+        // itself rather than to its target. Both identities must deny.
+        const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let link_itself = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
+            .open(&alias)
+            .unwrap();
+        let (_, link_attrs, _) = from_handle(&link_itself).unwrap();
+        assert_ne!(
+            link_attrs & FILE_ATTRIBUTE_REPARSE_POINT,
+            0,
+            "the negative control must hold an actual junction entry"
+        );
+        assert_eq!(
+            verify_preopened_administrative_child_identity(&anchor, &link_itself, "alias-parent"),
+            Err(IdentityDenied),
+            "the junction's own kernel object must not impersonate an ordinary directory"
+        );
         assert_eq!(
             verify_preopened_administrative_child_identity(&anchor, &alias_target, "alias-parent"),
             Err(IdentityDenied),
@@ -1158,6 +1199,86 @@ mod tests {
         assert_eq!(
             std::fs::read(&sentinel).unwrap(),
             b"OUTSIDE_BYTES_NEVER_CHANGED"
+        );
+    }
+
+    #[test]
+    fn administrative_chain_denies_intermediate_junction_even_when_final_entry_matches() {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let admin = fixture.path().join("admin");
+        let normal = admin.join("ordinary");
+        let outside_parent = fixture.path().join("exterior-parent");
+        let alias = admin.join("aliased");
+        std::fs::create_dir(&admin).unwrap();
+        std::fs::create_dir(&normal).unwrap();
+        std::fs::create_dir(normal.join("child")).unwrap();
+        std::fs::create_dir(&outside_parent).unwrap();
+        std::fs::create_dir(outside_parent.join("child")).unwrap();
+        std::fs::write(
+            outside_parent.join("sentinel.bin"),
+            b"EXTERIOR_PARENT_UNCHANGED",
+        )
+        .unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let anchor = open(&admin);
+        assert_eq!(
+            verify_preopened_administrative_chain(&anchor, &[]),
+            Err(IdentityDenied),
+            "an empty witness is not evidence of an administrative chain"
+        );
+        let normal_parent = open(&normal);
+        let normal_child = open(&normal.join("child"));
+        assert_eq!(
+            verify_preopened_administrative_chain(
+                &anchor,
+                &[(&normal_parent, "ordinary"), (&normal_child, "child")]
+            ),
+            Ok(()),
+            "a fully ordinary two-component chain must be admitted"
+        );
+        let linked = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&outside_parent)
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "real junction creation failed: {linked:?}"
+        );
+        let redirected_parent = open(&alias);
+        let redirected_child = open(&alias.join("child"));
+        assert_eq!(
+            verify_preopened_administrative_child_identity(
+                &redirected_parent,
+                &redirected_child,
+                "child"
+            ),
+            Ok(()),
+            "the final legitimate directory cannot attest its parent's administrative origin"
+        );
+        assert_eq!(
+            verify_preopened_administrative_chain(
+                &anchor,
+                &[
+                    (&redirected_parent, "aliased"),
+                    (&redirected_child, "child")
+                ]
+            ),
+            Err(IdentityDenied),
+            "the independent administrative anchor must reject the intermediate junction"
+        );
+        assert_eq!(
+            std::fs::read(outside_parent.join("sentinel.bin")).unwrap(),
+            b"EXTERIOR_PARENT_UNCHANGED"
         );
     }
 

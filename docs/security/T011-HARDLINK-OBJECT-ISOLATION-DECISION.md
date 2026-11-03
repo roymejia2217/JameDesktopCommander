@@ -833,8 +833,10 @@ introduced, and #148 remains P0/BLOCKED.
 A new real-NTFS regression first failed RED (Rust exit 101, `Ok(())`
 instead of the required `IdentityDenied`) because the preexisting
 mount-root-style `NtCreateFile(RootDirectory)` followed a live junction
-from an administrator-owned entry to an exterior directory. A separately
-typed `OpenEntryItself` resolution mode now applies the official
+from a candidate administrative entry in a disposable NTFS test tree
+(not an OS-Administrator-owned or SCM-provisioned directory) to an
+exterior directory. A separately typed `OpenEntryItself` resolution
+mode now applies the official
 `FILE_OPEN_REPARSE_POINT` option only to administrator-directory
 entries; the existing `FollowMountRoot` mode is retained for legitimate
 NTFS volume mountpoints. Both modes keep the existing strict child-name
@@ -849,6 +851,24 @@ independent pinning/checking of every administrative ancestor, atomic
 authorization/use, or proof of exclusive filesystem custody. A matching
 root object via a different ancestor may still be reachable. No
 security-ready grant is implied; #148 remains P0/BLOCKED.
+
+**Windows full supplied-chain negative control (2026-11-03):**
+A second real NTFS test holds an independently opened candidate root,
+an intermediate parent and its final child. When the intermediate
+parent is reached through a `mklink /J` to an exterior subtree, checking
+only the final ordinary child entry returns `Ok(())` although the
+intermediate entry is a reparse point. The final-edge-only baseline
+correctly failed RED (Rust exit 101). The new non-issuing
+`verify_preopened_administrative_chain` checks every supplied
+parent/child pair with no-final-reparse semantics, denies empty
+evidence, accepts the real two-level ordinary-directory control, and
+rejects the exterior alias without changing its canary. It does not
+pin the caller's root-of-trust by policy, establish SCM or
+Administrator ownership, provide an atomic multi-component snapshot,
+or revoke any previously admitted operation. The live protected-root
+observer still does not retain or validate this chain: additional
+kernel identity, administrative ACL, concurrency and exclusive object
+custody acceptance remain necessary for #148.
 
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 

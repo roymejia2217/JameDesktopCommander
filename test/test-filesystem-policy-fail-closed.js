@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configManager, ConfigManager } from '../dist/config-manager.js';
-import { validatePath, writeFile as filesystemWriteFile } from '../dist/tools/filesystem.js';
+import { validatePath, writeFile as filesystemWriteFile, requireUnrestrictedLegacyFilesystem } from '../dist/tools/filesystem.js';
 
 async function withFixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'jdc-policy-fail-closed-'));
@@ -60,11 +60,46 @@ test('explicit empty allowlist stays unrestricted, malformed policy entries are 
       assert.deepEqual(await manager.getAllowedDirectoriesForFilesystem(), []);
       await manager.setValue('allowedDirectories', [root]);
       assert.deepEqual(await manager.getAllowedDirectoriesForFilesystem(), [root]);
+      await manager.setValue('allowedDirectories', ['/']);
+      assert.deepEqual(await manager.getAllowedDirectoriesForFilesystem(), ['/'],
+        'a configured filesystem root is valid restricted policy, not the unrestricted sentinel');
       await manager.setValue('allowedDirectories', ['']);
       await assert.rejects(manager.getAllowedDirectoriesForFilesystem(), /Invalid filesystem authorization policy/i);
       await manager.setValue('allowedDirectories', '[]');
       await assert.rejects(manager.getAllowedDirectoriesForFilesystem(), /Invalid filesystem authorization policy/i);
     } finally { await manager.close(); }
+  });
+});
+
+test('a nonempty allowlist containing slash never becomes unrestricted legacy authority', async () => {
+  await withFixture(async root => {
+    const target = join(root, 'sentinel.txt');
+    await writeFile(target, 'ORIGINAL\n');
+    const previous = configManager.getAllowedDirectoriesForFilesystem;
+    try {
+      for (const configured of [['/'], ['/', root]]) {
+        configManager.getAllowedDirectoriesForFilesystem = async () => configured;
+        await assert.rejects(
+          requireUnrestrictedLegacyFilesystem('root-alias-regression'),
+          /E_POLICY_UNAVAILABLE.*requires native filesystem authority/,
+          'a selected root is restricted policy, never the empty unrestricted sentinel'
+        );
+        await assert.rejects(
+          filesystemWriteFile(target, 'CORRUPTED\n', 'rewrite'),
+          /E_POLICY_UNAVAILABLE.*requires native filesystem authority/,
+          'an unauthorized pathname write must fail before touching the file'
+        );
+        assert.equal(await readFile(target, 'utf8'), 'ORIGINAL\n');
+      }
+      configManager.getAllowedDirectoriesForFilesystem = async () => [];
+      await assert.doesNotReject(
+        requireUnrestrictedLegacyFilesystem('explicit-unrestricted-control'),
+        'the actual empty unrestricted policy must continue to work'
+      );
+    } finally {
+      if (previous === undefined) delete configManager.getAllowedDirectoriesForFilesystem;
+      else configManager.getAllowedDirectoriesForFilesystem = previous;
+    }
   });
 });
 

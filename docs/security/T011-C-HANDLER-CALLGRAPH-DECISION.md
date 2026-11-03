@@ -76,10 +76,18 @@ its own exact HEAD and examine all new provider/preview/adapter entrypoints.
 
 1. **Policy modes remain distinct.** Explicit configured roots select
    *restricted* mode; `allowedDirectories: []` currently means
-   *unrestricted* (`src/tools/filesystem.ts:174-179`). Policy load failure or
-   stale revision is **unavailable/denied**, not a silent empty allowlist.
+   *unrestricted*; see `requireUnrestrictedLegacyFilesystem()` in
+   `src/tools/filesystem.ts`. Policy load failure or stale revision is
+   **unavailable/denied**, not a silent empty allowlist.
    Process/terminal/OpenCode have independent ambient authority; they are
-   not constrained by this filesystem policy.
+   not constrained by this filesystem policy. A nonempty root selection
+   containing `/` is **still restricted policy**, never an alias for the
+   deliberately empty `[]` sentinel: pathname-only handlers must deny it
+   before any file operation. A real Windows regression first observed
+   `requireUnrestrictedLegacyFilesystem()` accepting `['/']` (RED), then
+   verified both `['/']` and `['/', otherRoot]` deny with exterior bytes
+   unchanged, while `[]` remains admissible (GREEN). This restores only
+   fail-closed legacy admission, **not** native object-bound authority.
 2. **Pin authority for one operation.** A reviewed native backend must
    establish the root handle and immutable policy revision, acquire child
    objects relative to that root, retain valid lifetimes through completion

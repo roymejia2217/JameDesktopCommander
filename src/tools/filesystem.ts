@@ -138,7 +138,9 @@ export async function requireUnrestrictedLegacyFilesystem(operation: string): Pr
     } catch {
         throw new Error('Filesystem access denied: E_POLICY_UNAVAILABLE: authorization policy unavailable');
     }
-    if (!Array.isArray(roots) || (roots.length > 0 && !roots.includes('/'))) {
+    // Only the exact empty policy is unrestricted. Even a selected '/' root
+    // is a configured restriction; do not grant ambient pathname I/O.
+    if (!Array.isArray(roots) || roots.length !== 0) {
         throw new Error(`E_POLICY_UNAVAILABLE: ${operation} requires native filesystem authority`);
     }
 }

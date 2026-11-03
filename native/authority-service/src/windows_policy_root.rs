@@ -1063,6 +1063,72 @@ mod tests {
     }
 
     #[test]
+    fn kernel_only_binding_stays_valid_after_parent_junction_removal_nonrelease() {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+        let fixture = tempfile::tempdir().unwrap();
+        let authorized = fixture.path().join("authorized");
+        let exterior_parent = fixture.path().join("exterior-parent");
+        let junction = authorized.join("parent");
+        let root_path = exterior_parent.join("isolated");
+        std::fs::create_dir(&authorized).unwrap();
+        std::fs::create_dir_all(&root_path).unwrap();
+        let original = b"ROOT_CUSTODY_SENTINEL_UNCHANGED";
+        std::fs::write(root_path.join("canary.bin"), original).unwrap();
+        let linked = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&exterior_parent)
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "real junction setup failed: {linked:?}"
+        );
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(SHARE_READ_WRITE_DELETE)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(&junction);
+        let root = open(&junction.join("isolated"));
+        let mut observation =
+            ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(&parent, root, "isolated")
+                .expect("opened parent/child objects really match before the namespace change");
+        assert_eq!(
+            observation.revalidate_kernel_binding_only_for_test(),
+            Ok(())
+        );
+        std::fs::remove_dir(&junction)
+            .expect("the actual junction entry must disappear without deleting its target");
+        assert!(!junction.exists(), "the authorized pathname must disappear");
+        assert!(root_path.is_dir());
+        // NEGATIVE SECURITY EVIDENCE, never an acceptance of authorization:
+        // the two still-open handles preserve parent/child identity after
+        // removal of the *only configured* authorized namespace entry.
+        // Full administrative ancestry and origin custody are NOT checked.
+        let pinned_identity = from_handle(&observation.root.file).unwrap();
+        assert_eq!(
+            pinned_identity,
+            from_handle(&open(&root_path)).unwrap(),
+            "the exterior name must resolve to the same kernel file object"
+        );
+        assert_eq!(
+            observation.revalidate_kernel_binding_only_for_test(),
+            Ok(()),
+            "COUNTEREXAMPLE: handle-relative child identity alone cannot detect removed parent junctions"
+        );
+        assert_eq!(
+            std::fs::read(root_path.join("canary.bin")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
     fn revoked_windows_observation_rejects_real_junction_replacement_and_new_observation_recovers()
     {
         use std::{os::windows::fs::OpenOptionsExt, process::Command};

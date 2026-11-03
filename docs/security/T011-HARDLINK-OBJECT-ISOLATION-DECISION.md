@@ -798,6 +798,27 @@ or FFI execution route has been enabled, and #147's four original
 hardlink adversarial tests must remain unsuppressed and independently
 accepted before release.
 
+**Additional Windows administrative-ancestor counterexample (2026-11-03):**
+A real NTFS `mklink /J` initially exposed an `isolated` directory under
+`authorized/parent`, where both the parent and child handles matched at
+the kernel object level. After deleting only that junction entry, the
+`authorized/parent` pathname was absent; a separate exterior name still
+resolved to the *same* underlying child object, and its original canary
+bytes remained intact. A security-demanding test first failed RED
+(`IdentityDenied` expected but `Ok(())` observed) after the actual
+namespace mutation, not during fixture setup. The permanent `cfg(test)`
+negative control documents the observed `Ok(())` and independently
+checks the real kernel file identity and exterior bytes. A green run of
+this control proves the counterexample, **not** object isolation.
+The current observer binds a parent and child handle only: it does not
+possess or attest the configured administrative ancestor chain, and a
+removed parent junction is invisible to this restricted recheck.
+Releasing a Windows storage grant requires independently reviewed
+admin-owned ancestor handles and point-of-use custody/revocation under
+the specified OS principals; neither a pathname prefix nor a fresh
+`realpath` can meet that contract. No production authorization was
+introduced, and #148 remains P0/BLOCKED.
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

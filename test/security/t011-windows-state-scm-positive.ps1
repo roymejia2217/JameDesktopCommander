@@ -79,7 +79,7 @@ function Require-ServiceResult([string] $scenario, [int] $expected) {
     if ($null -eq $status -or $status.State -ne 'Stopped' -or
         $status.ExitCode -ne 1066 -or $status.ServiceSpecificExitCode -ne $expected -or
         $status.ProcessId -ne 0) {
-        throw "E_C4R_UNEXPECTED_SCM_RESULT_$scenario (expected=$expected)"
+        throw "E_C4R_UNEXPECTED_SCM_RESULT_$scenario (expected=$expected; actual=$($status.ServiceSpecificExitCode); win32=$($status.ExitCode); state=$($status.State))"
     }
 }
 
@@ -142,7 +142,7 @@ try {
     Set-ExactDirectoryAcl $state $virtual $modify $inherit $false
     New-Item -Path $isolated -ItemType Directory -ErrorAction Stop | Out-Null
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
-    Require-ServiceResult 'SAME_VOLUME_CANNOT_BIND_ISOLATED_ROOT' 47
+    Require-ServiceResult 'SAME_VOLUME_CANNOT_BIND_ISOLATED_ROOT' 52
     if (Test-Path -LiteralPath $vhd) { throw 'E_C4R_VHD_COLLISION' }
     $vhdSetup = @"
 create vdisk file="$vhd" maximum=128 type=expandable
@@ -177,15 +177,15 @@ exit
     # volume namespace entry. Even with a correct isolated root ACL, its
     # administrator-controlled direct parent must be read/traverse-only.
     Set-ExactDirectoryAcl $stage $virtual $modify $inherit $false
-    Require-ServiceResult 'SERVICE_MUTABLE_MOUNT_PARENT_DENIED' 47
+    Require-ServiceResult 'SERVICE_MUTABLE_MOUNT_PARENT_DENIED' 53
     Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
     Require-ServiceResult 'ADMINISTRATIVE_MOUNT_PARENT_RESTORED' 46
     Set-ExactDirectoryAcl $isolated $virtual $read $inherit $false
-    Require-ServiceResult 'ISOLATED_ROOT_INSUFFICIENT_SERVICE_RIGHTS' 47
+    Require-ServiceResult 'ISOLATED_ROOT_INSUFFICIENT_SERVICE_RIGHTS' 51
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_ACL_RESTORED' 46
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $true
-    Require-ServiceResult 'ISOLATED_ROOT_FOREIGN_ACE_DENIED' 47
+    Require-ServiceResult 'ISOLATED_ROOT_FOREIGN_ACE_DENIED' 51
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_FINAL_POSITIVE' 46
 

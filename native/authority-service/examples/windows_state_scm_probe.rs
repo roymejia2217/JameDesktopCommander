@@ -17,6 +17,14 @@ mod windows {
     const DENIED_DACL: u32 = 42;
     const ACCEPTED_ISOLATED_ROOT: u32 = 46;
     const DENIED_ISOLATED_ROOT: u32 = 47;
+    // Each code is a test-only SCM service-specific exit verdict, never
+    // client-visible authorization or a production interface.
+    const DENIED_PARENT_OPEN: u32 = 48;
+    const DENIED_ROOT_OPEN: u32 = 49;
+    const DENIED_STATE_DACL: u32 = 50;
+    const DENIED_ROOT_DACL: u32 = 51;
+    const DENIED_VOLUME_IDENTITY: u32 = 52;
+    const DENIED_PARENT_DACL: u32 = 53;
     const UNOPENABLE_FIXTURE: u32 = 43;
     const UNTRUSTED_IDENTITY: u32 = 44;
     const NOT_DEBUG_BUILD: u32 = 45;
@@ -53,6 +61,25 @@ mod windows {
             assert_eq!(isolated_disposition(false), 47);
             assert_ne!(isolated_disposition(false), ACCEPTED_OBSERVATION);
             assert_ne!(isolated_disposition(true), DENIED_DACL);
+        }
+
+        #[test]
+        fn real_scm_admission_failure_codes_distinguish_each_kernel_gate() {
+            let failures = [
+                DENIED_PARENT_OPEN,
+                DENIED_ROOT_OPEN,
+                DENIED_STATE_DACL,
+                DENIED_ROOT_DACL,
+                DENIED_VOLUME_IDENTITY,
+                DENIED_PARENT_DACL,
+            ];
+            assert_eq!(failures, [48, 49, 50, 51, 52, 53]);
+            let mut distinct = failures.to_vec();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), failures.len());
+            assert!(!failures.contains(&ACCEPTED_ISOLATED_ROOT));
+            assert!(!failures.contains(&DENIED_ISOLATED_ROOT));
         }
     }
 
@@ -112,21 +139,47 @@ mod windows {
         // the ordinary state-DACL observation.
         match std::fs::symlink_metadata(&isolated) {
             Ok(_) => {
-                let validated_state =
-                    jdc_authority_service::windows_policy_root::observe_preopened_service_state(
-                        state,
-                    )
-                    .is_ok();
-                let isolated_valid = match (open_dir(&stage), open_dir(&isolated)) {
-                    (Ok(parent), Ok(root)) => {
-                        jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
-                            &parent, root,
-                        )
-                        .is_ok()
-                    }
-                    _ => false,
+                // Exact, non-shipping failure codes distinguish independent
+                // kernel gates. Never turn an unknown failure into a passing
+                // security test or expose these reasons to MCP clients.
+                if jdc_authority_service::windows_policy_root::observe_preopened_service_state(
+                    state,
+                )
+                .is_err()
+                {
+                    return DENIED_STATE_DACL;
+                }
+                let Ok(parent) = open_dir(&stage) else {
+                    return DENIED_PARENT_OPEN;
                 };
-                isolated_disposition(validated_state && isolated_valid)
+                let Ok(root) = open_dir(&isolated) else {
+                    return DENIED_ROOT_OPEN;
+                };
+                let Ok(root_clone) = root.try_clone() else {
+                    return DENIED_ROOT_OPEN;
+                };
+                if jdc_authority_service::windows_policy_root::observe_preopened_service_state(
+                    root_clone,
+                )
+                .is_err()
+                {
+                    return DENIED_ROOT_DACL;
+                }
+                if jdc_authority_service::windows_policy_root::verify_preopened_volume_separation(
+                    &parent, &root,
+                )
+                .is_err()
+                {
+                    return DENIED_VOLUME_IDENTITY;
+                }
+                if jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
+                    &parent, root,
+                )
+                .is_err()
+                {
+                    return DENIED_PARENT_DACL;
+                }
+                isolated_disposition(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => disposition(
                 jdc_authority_service::windows_policy_root::observe_preopened_service_state(state)

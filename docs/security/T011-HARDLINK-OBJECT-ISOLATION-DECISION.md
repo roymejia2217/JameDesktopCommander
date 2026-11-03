@@ -676,7 +676,11 @@ GitHub-hosted Windows runner:
 
 1. An administrator-owned, protected-DACL ordinary directory at
    `%ProgramData%/JDC-T011-C4R-*/isolated` on the **same device** as the
-   parent must be rejected by the real restricted SCM token (exit 47).
+   parent must be rejected by the real restricted SCM token (exit **52**,
+   kernel volume-identity mismatch). The test-only service now distinguishes
+   state DACL failure (50), root DACL failure (51), volume failure (52)
+   and parent DACL failure (53), plus unopenable parent/root (48/49).
+   All are rejection outcomes; these statuses never become MCP errors.
 2. A standard 128 MiB expandable NTFS VHD is created and attached using
    Windows DiskPart; its independent physical disk is compared to the
    system disk using `Get-Partition` and `Get-DiskImage | Get-Disk`.
@@ -690,9 +694,9 @@ GitHub-hosted Windows runner:
    permits only read/traverse (+ optional SYNCHRONIZE), with no right to
    add, rename or delete child objects or change owner/DACL. The same
    SCM token must **deny** when the parent is made service-writable
-   (exit 47), then accept the restored parent (46). The service must
-   separately deny a service read-only root DACL (47), accept its
-   restoration (46), reject an unauthorized foreign ACE (47), and
+   (exit 53), then accept the restored parent (46). The service must
+   separately deny a service read-only root DACL (51), accept its
+   restoration (46), reject an unauthorized foreign ACE (51), and
    accept final restoration (46). Success is recorded only after
    independent positive and negative steps; a stuck-deny implementation
    cannot pass.

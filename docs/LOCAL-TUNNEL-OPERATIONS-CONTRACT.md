@@ -87,7 +87,7 @@ No test output from a mock, synthetic client, or process `Running` state can sub
 
 ## Delivery breakdown
 
-- **S1 — contract and inventory:** this design and source anchors; next PR adds a pure typed status classifier with explicit RED→GREEN regression tests. No authority and no live host changes.
+- **S1 — contract and inventory:** this design and source anchors, plus the present draft's narrowly scoped Windows read-only control-plane HTTP cause classifier and its regression fixtures. This is not a cross-platform administration service or completed production acceptance. Follow-on work must extract a reviewed shared health contract for Linux and implement independently authenticated local authority. No live host changes.
 - **S2 — rotation backend:** protected local secret adapter with typed mutations, safety boundary and TDD.
 - **S3 — lifecycle authorization:** OS-backed, fenced start/stop/restart and durable desired-state tests; no bypass of #96/#80.
 - **S4 — operator presentation:** Windows/Linux installer-integrated UI and equivalent headless CLI; UX and security E2E.

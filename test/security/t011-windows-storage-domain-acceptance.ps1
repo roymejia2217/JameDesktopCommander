@@ -144,12 +144,27 @@ exit
     # the fixture runs under the disposable runner administrator identity.
     $env:JDC_T011_WINDOWS_VHD_PARENT = $root
     $env:JDC_T011_WINDOWS_VHD_ROOT = $volume
+    $testStdout = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stdout"
+    $testStderr = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stderr"
+    $exactNativeTest = 'windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight'
     try {
-        & cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight -- --ignored --exact --nocapture
-        if ($LASTEXITCODE -ne 0) { throw 'E_STORAGE_NATIVE_WINDOWS_VHD_PRECHECK_FAILED' }
+        $cargoBinary = (Get-Command cargo.exe -ErrorAction Stop).Source
+        $native = Start-Process -FilePath $cargoBinary -ArgumentList @(
+            '+1.91.1', 'test', '--locked',
+            '--manifest-path', 'native/authority-service/Cargo.toml', '--lib',
+            $exactNativeTest, '--', '--ignored', '--exact', '--nocapture'
+        ) -WorkingDirectory (Get-Location).Path -Wait -PassThru -RedirectStandardOutput $testStdout -RedirectStandardError $testStderr
+        $observedOutput = Get-Content -LiteralPath $testStdout -Raw -ErrorAction Stop
+        Write-Output $observedOutput
+        if ($null -eq $native.ExitCode -or $native.ExitCode -ne 0 -or
+            -not $observedOutput.Contains("test $exactNativeTest ... ok") -or
+            -not $observedOutput.Contains('test result: ok. 1 passed; 0 failed; 0 ignored;')) {
+            throw 'E_STORAGE_NATIVE_WINDOWS_VHD_PRECHECK_NOT_ONE_EXECUTED_PASS'
+        }
     } finally {
         Remove-Item Env:\JDC_T011_WINDOWS_VHD_PARENT -ErrorAction SilentlyContinue
         Remove-Item Env:\JDC_T011_WINDOWS_VHD_ROOT -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $testStdout, $testStderr -Force -ErrorAction SilentlyContinue
     }
     Write-Output 'T011_STORAGE_NATIVE_WINDOWS_VOLUME_HANDLE_IDENTITY_PASS'
     Set-CustodyAcl $volume @(@{ SID = $service.SID; Rights = 'Modify' })

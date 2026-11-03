@@ -628,8 +628,11 @@ Windows VHD acceptance creates a separate NTFS disk and runs an
 the system drive. The test requires the different-volume preflight to
 accept, and both same-volume controls to deny. The PowerShell fixture
 independently verifies actual `Get-Partition` disk numbers and NTFS for
-both drives. Its established unrelated attacker/service DACL and
-cross-volume hard-link attacks continue unmodified.
+both drives. It also requires an **exact Rust harness test-name PASS line**
+and `1 passed; 0 failed; 0 ignored` in the captured native output:
+`cargo test --exact` can exit 0 when zero tests match, which must never
+count as an OS storage proof. Its established unrelated attacker/service
+DACL and cross-volume hard-link attacks continue unmodified.
 
 **Security limits are material:** Win32 volume serial numbers are only
 a *necessary discriminator*, not globally unique hardware identities.

@@ -24,6 +24,7 @@ test('observational-only result distinguishes readiness from MCP discovery', () 
     toolDiscovery: 'observed_incomplete',
     dispatcher: { active: 1, failuresCumulative: 9, timeoutsCumulative: 9 },
     queueDepth: 0, controlPlaneFailuresConsecutive: 0,
+    controlPlaneHttpStatus: null, controlPlaneProblem: 'unverified',
   });
   assert.doesNotMatch(JSON.stringify(parseTunnelFunctionalHealth(example)), /SECRET_TOOL/);
 });

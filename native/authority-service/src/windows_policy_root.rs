@@ -429,14 +429,18 @@ pub fn verify_preopened_volume_separation(
 /// ambient path is reconstructed. The final NTFS volume mountpoint must
 /// resolve normally (FILE_OPEN_REPARSE_POINT would open the link itself).
 /// The reopened object must have the exact same 64-bit volume + 128-bit
-/// file identity as the protected root handle. This is an INSTANT admission
-/// proof, not a permanent origin invariant or a concurrency/revocation grant.
+/// file identity as the protected root handle. When the last component
+/// is a reparse point, a separate handle-relative FSCTL query additionally
+/// requires a true Volume{GUID} root, never a directory junction target.
+/// These are sequential INSTANT observations, not an atomic origin proof,
+/// concurrency guarantee or authorization to perform filesystem I/O.
 pub fn verify_preopened_named_child_identity(
     parent: &File,
     root: &File,
     child: &str,
 ) -> Result<(), IdentityDenied> {
-    verify_preopened_child_identity(parent, root, child, ChildEntryResolution::FollowMountRoot)
+    verify_preopened_child_identity(parent, root, child, ChildEntryResolution::FollowMountRoot)?;
+    crate::windows_mountpoint::verify_named_volume_mount_entry(parent, child)
 }
 
 /// Observe whether an opened administrator-controlled child is exactly
@@ -1283,6 +1287,123 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual Windows-host acceptance requires a second distinct NTFS volume"]
+    fn real_cross_volume_directory_junction_is_not_a_volume_mount() {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(fixture.path());
+        let foreign = ["D:\\", "E:\\"]
+            .iter()
+            .find_map(|drive| {
+                let root = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(BACKUP_SEMANTICS)
+                    .open(drive)
+                    .ok()?;
+                verify_preopened_volume_separation(&parent, &root)
+                    .is_ok()
+                    .then(|| (drive.to_string(), root))
+            })
+            .expect("manual acceptance requires another real, accessible NTFS volume");
+        let alias = fixture.path().join("isolated");
+        let created = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&foreign.0)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "disposable NTFS junction must exist: {created:?}"
+        );
+        let target = open(&alias);
+        let same_target = from_handle(&target).unwrap() == from_handle(&foreign.1).unwrap();
+        let separate_volume = verify_preopened_volume_separation(&parent, &target);
+        let final_entry = verify_preopened_named_child_identity(&parent, &target, "isolated");
+        // Only remove the local junction entry; the foreign volume is never modified.
+        std::fs::remove_dir(&alias).expect("local disposable junction cleanup must succeed");
+        assert!(
+            same_target,
+            "fixture must actually resolve to foreign volume root"
+        );
+        assert_eq!(
+            separate_volume,
+            Ok(()),
+            "cross-volume gate must pass before type denial"
+        );
+        assert_eq!(
+            final_entry,
+            Err(IdentityDenied),
+            "cross-volume junction is not a mountpoint"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual Windows-host acceptance requires a second distinct NTFS volume"]
+    fn real_volume_guid_root_mountpoint_passes_nonissuing_kernel_preflight() {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let mut root_name: Vec<u16> = "D:\\".encode_utf16().collect();
+        root_name.push(0);
+        let mut guid_name = [0u16; 64];
+        let ok = unsafe {
+            GetVolumeNameForVolumeMountPointW(
+                root_name.as_ptr(),
+                guid_name.as_mut_ptr(),
+                guid_name.len() as u32,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "this manual test requires an accessible D: volume GUID"
+        );
+        let nul = guid_name.iter().position(|&code| code == 0).unwrap();
+        let volume_guid = String::from_utf16(&guid_name[..nul]).unwrap();
+        let alias = fixture.path().join("isolated");
+        let linked = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&volume_guid)
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "disposable volume-root entry must exist: {linked:?}"
+        );
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(fixture.path());
+        let mounted_root = open(&alias);
+        let physical_root = open(std::path::Path::new("D:\\"));
+        let same_root = from_handle(&mounted_root).unwrap() == from_handle(&physical_root).unwrap();
+        let separate = verify_preopened_volume_separation(&parent, &mounted_root);
+        let admissible = verify_preopened_named_child_identity(&parent, &mounted_root, "isolated");
+        std::fs::remove_dir(&alias).expect("remove only the temporary volume GUID entry");
+        assert!(same_root, "opened target must be the physical D: root");
+        assert_eq!(separate, Ok(()), "real second volume must be isolated");
+        assert_eq!(
+            admissible,
+            Ok(()),
+            "real volume GUID root must remain admissible"
+        );
+    }
+
+    #[test]
     fn admin_ancestor_verifier_denies_live_junction_to_outside_even_when_kernel_ids_match() {
         use std::{os::windows::fs::OpenOptionsExt, process::Command};
         const BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -1326,8 +1447,8 @@ mod tests {
         let alias_target = open(&alias);
         assert_eq!(
             verify_preopened_named_child_identity(&anchor, &alias_target, "alias-parent"),
-            Ok(()),
-            "baseline root-mount-style traversal follows this NTFS junction"
+            Err(IdentityDenied),
+            "mounted-root admission must not follow an ordinary NTFS directory junction"
         );
         // A caller can also hand us a handle opened to the reparse entry
         // itself rather than to its target. Both identities must deny.
@@ -1652,8 +1773,8 @@ mod tests {
         let root = open(&junction.join("isolated"));
         assert_eq!(
             verify_preopened_named_child_identity(&administrative_ancestor, &parent, "parent"),
-            Ok(()),
-            "a pinned administrative ancestor must admit the original live parent entry"
+            Err(IdentityDenied),
+            "the newly enforced root-mount check denies the live directory junction"
         );
         let mut observation =
             ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(&parent, root, "isolated")

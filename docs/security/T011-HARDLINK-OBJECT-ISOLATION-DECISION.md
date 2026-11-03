@@ -977,6 +977,55 @@ identity or host provisioning behavior. It grants no filesystem I/O,
 does not authenticate a canonical production anchor, and does not
 change the blocked status of #148 or release NO-GO.
 
+**Windows volume-root reparse identity gate (2026-11-03; NON-RELEASE):**
+A genuine NTFS junction attack fixture exposed a missing discriminator in
+`verify_preopened_named_child_identity`. When the destination handle
+matched the final parent-relative lookup, the old follow-reparse check
+returned **`Ok(())`** even though the final entry was an ordinary
+directory junction pointing outside the administrative volume. The new
+security expectation first produced **RED, Rust exit 101**, after the
+real fixture successfully created the junction.
+
+A separate, private, read-only `windows_mountpoint` classifier opens the
+*final named entry itself* via `NtCreateFile` with the already-open
+parent handle and `FILE_OPEN_REPARSE_POINT`. It uses Microsoft's
+`GetFileInformationByHandleEx(FileAttributeTagInfo)` and
+`DeviceIoControl(FSCTL_GET_REPARSE_POINT)` to inspect the existing
+entry. If a reparse point is present, only the mount-point tag with an
+exact, bounds-checked UTF-16 substitute name identifying a **root**
+`Volume{GUID}` is admissible. An ordinary directory with no reparse
+point retains the kernel-only direct-child control; restricted-service
+volume-separation checks remain mandatory elsewhere. Invalid tags,
+junctions targeting pathnames, malformed lengths/offsets, and
+non-root volume targets fail closed. This is an additional *observation*
+after full volume+file kernel-ID comparison, not a capability grant.
+
+**Executed on the real Windows host:** The original junction RED is now
+GREEN. Two separately **ignored-by-default manual acceptance tests**
+were explicitly invoked on distinct existing NTFS C: and D: volumes:
+one real cross-volume directory junction fails the new gate **after**
+the original separate-volume identity check passed; one disposable
+entry pointing to the real D: volume's GUID root succeeds, including
+real kernel relative open and reparse metadata inspection. Both tests
+passed and removed only their local temporary entries; **D: was read
+without being modified**. Pure documented-layout parser tests accept
+a valid GUID-root fixture and deny malformed/off-root alternatives.
+No administrative ACL, service, VHD, disk layout, or machine runtime
+was changed. Official contracts:
+<https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-point-operations>
+and
+<https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/ns-ntifs-_reparse_data_buffer>.
+
+**Evidence limits:** The check is point-in-time and not atomic with the
+previous identity comparison or later file I/O. The host test used
+existing physical NTFS volumes, **not** a newly mounted CI VHD under
+a restricted SCM service identity. The exact-commit hosted
+SCM/VHD acceptance must confirm volume-root positives and malicious
+alias negatives before this PR can be considered production-ready.
+The independent administrative anchor provenance, authenticated
+issuer/epoch custody, hard-link isolation (#147), and FFI (#124)
+remain unproven. **#148 stays P0/BLOCKED; release NO-GO.**
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

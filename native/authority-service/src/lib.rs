@@ -72,6 +72,9 @@ mod windows_acl_aces;
 #[cfg(windows)]
 pub mod windows_token;
 
+// Private handle-relative volume mountpoint classifier; never grants I/O.
+#[cfg(windows)]
+mod windows_mountpoint;
 // Read-only, non-authorizing Windows kernel handle/DACL observation.
 #[cfg(windows)]
 pub mod windows_policy_root;

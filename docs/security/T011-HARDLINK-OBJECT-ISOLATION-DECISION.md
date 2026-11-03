@@ -744,6 +744,18 @@ constructor verifies only live kernel handles and cannot claim SCM
 credentials or authorize I/O; the hosted service test separately
 requires the actual restricted SCM token.
 
+**Interrupted-check hardening:** `revalidate_or_revoke` now marks its
+observation **inactive before** executing an OS-bound security check.
+It restores `active` only after all checks succeed. A real Windows
+regression uses `catch_unwind` to intentionally interrupt the check
+after a valid kernel binding and then proves the same observation
+cannot be reused, even though the protected directory was never
+altered. The test first proved **RED** (old code returned `Ok(())`
+after the interruption; Rust exit 101), then **GREEN** (sticky
+`IdentityDenied`). A caught Rust panic is not a normal access-denial
+protocol; this closes the fail-open *state* after unwinding rather
+than authorizing any OS I/O.
+
 **Residual limitation:** an administrator can still replace a
 mountpoint after the last successful check. Without a separately
 reviewed atomic use/revocation boundary, this is not a guarantee of

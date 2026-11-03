@@ -83,10 +83,12 @@ impl ObservedWindowsIsolatedRoot {
         if !self.active {
             return Err(IdentityDenied);
         }
-        if check(self).is_err() {
-            self.active = false;
-            return Err(IdentityDenied);
-        }
+        // Fail closed *before* entering any OS or callback check. A caught
+        // panic/unwind cannot leave a previously valid observation active.
+        // Only a complete successful revalidation may restore active=true.
+        self.active = false;
+        check(self)?;
+        self.active = true;
         Ok(())
     }
 
@@ -965,6 +967,51 @@ mod tests {
             verify_preopened_volume_separation(&parent, &parent),
             Err(IdentityDenied),
             "two handles to the system volume must never pass isolation"
+        );
+    }
+
+    #[test]
+    fn interrupted_windows_root_revalidation_must_poison_observation_before_unwind() {
+        use std::{
+            os::windows::fs::OpenOptionsExt,
+            panic::{catch_unwind, AssertUnwindSafe},
+        };
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let child = fixture.path().join("isolated");
+        std::fs::create_dir(&child).unwrap();
+        let open = |p: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(p)
+                .unwrap()
+        };
+        let parent = open(fixture.path());
+        let mut observed = ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(
+            &parent,
+            open(&child),
+            "isolated",
+        )
+        .unwrap();
+        assert_eq!(observed.revalidate_kernel_binding_only_for_test(), Ok(()));
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            let _ = observed.revalidate_or_revoke(|_| -> Result<(), IdentityDenied> {
+                panic!("simulated interruption before the kernel recheck returns");
+            });
+        }));
+        assert!(
+            interrupted.is_err(),
+            "the test must actually exercise unwind"
+        );
+        assert_eq!(
+            observed.revalidate_kernel_binding_only_for_test(),
+            Err(IdentityDenied),
+            "an interrupted security check must never leave the old observation reusable"
+        );
+        assert!(
+            child.is_dir(),
+            "the fixture never mutates the authorized root"
         );
     }
 

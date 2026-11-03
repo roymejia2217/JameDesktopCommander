@@ -11,7 +11,9 @@ use std::{
 use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
-        Storage::FileSystem::{NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN},
+        Storage::FileSystem::{
+            NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+        },
     },
     Win32::{
         Foundation::{LocalFree, OBJ_CASE_INSENSITIVE, UNICODE_STRING},
@@ -434,6 +436,41 @@ pub fn verify_preopened_named_child_identity(
     root: &File,
     child: &str,
 ) -> Result<(), IdentityDenied> {
+    verify_preopened_child_identity(parent, root, child, ChildEntryResolution::FollowMountRoot)
+}
+
+/// Observe whether an opened administrator-controlled child is exactly
+/// the ordinary directory entry named by a pinned parent. Unlike the mounted
+/// isolated-root lookup, the final component is opened with
+/// FILE_OPEN_REPARSE_POINT: junctions and other reparse entries are denied
+/// without following them, even if the opened target has matching file ID.
+///
+/// This is a point-in-time, non-issuing primitive. It does not authenticate
+/// the parent handle, the complete ancestor chain, or concurrent custody.
+pub fn verify_preopened_administrative_child_identity(
+    administrative_ancestor: &File,
+    administrative_child: &File,
+    child_name: &str,
+) -> Result<(), IdentityDenied> {
+    verify_preopened_child_identity(
+        administrative_ancestor,
+        administrative_child,
+        child_name,
+        ChildEntryResolution::OpenEntryItself,
+    )
+}
+
+enum ChildEntryResolution {
+    FollowMountRoot,
+    OpenEntryItself,
+}
+
+fn verify_preopened_child_identity(
+    parent: &File,
+    root: &File,
+    child: &str,
+    resolution: ChildEntryResolution,
+) -> Result<(), IdentityDenied> {
     use std::os::windows::io::FromRawHandle;
 
     // Strictly one component, no device aliases, NT stream syntax, dot,
@@ -502,7 +539,11 @@ pub fn verify_preopened_named_child_identity(
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             FILE_OPEN,
-            FILE_DIRECTORY_FILE,
+            FILE_DIRECTORY_FILE
+                | match resolution {
+                    ChildEntryResolution::FollowMountRoot => 0,
+                    ChildEntryResolution::OpenEntryItself => FILE_OPEN_REPARSE_POINT,
+                },
             ptr::null(),
             0,
         )
@@ -1060,6 +1101,64 @@ mod tests {
             b"UNCHANGED_OUTSIDE_SENTINEL"
         );
         assert!(!replacement.join("canary.bin").exists());
+    }
+
+    #[test]
+    fn admin_ancestor_verifier_denies_live_junction_to_outside_even_when_kernel_ids_match() {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let admin = fixture.path().join("admin");
+        let normal = admin.join("ordinary-parent");
+        let alias = admin.join("alias-parent");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&admin).unwrap();
+        std::fs::create_dir(&normal).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"OUTSIDE_BYTES_NEVER_CHANGED").unwrap();
+        let open = |p: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(p)
+                .unwrap()
+        };
+        let anchor = open(&admin);
+        assert_eq!(
+            verify_preopened_administrative_child_identity(
+                &anchor,
+                &open(&normal),
+                "ordinary-parent"
+            ),
+            Ok(()),
+            "an ordinary direct child must remain admissible"
+        );
+        let made = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "real NTFS junction setup failed: {made:?}"
+        );
+        let alias_target = open(&alias);
+        assert_eq!(
+            verify_preopened_named_child_identity(&anchor, &alias_target, "alias-parent"),
+            Ok(()),
+            "baseline root-mount-style traversal follows this NTFS junction"
+        );
+        assert_eq!(
+            verify_preopened_administrative_child_identity(&anchor, &alias_target, "alias-parent"),
+            Err(IdentityDenied),
+            "administrator-controlled parent traversal must never admit a junction"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"OUTSIDE_BYTES_NEVER_CHANGED"
+        );
     }
 
     #[test]

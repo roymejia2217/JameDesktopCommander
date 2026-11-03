@@ -829,6 +829,27 @@ the specified OS principals; neither a pathname prefix nor a fresh
 `realpath` can meet that contract. No production authorization was
 introduced, and #148 remains P0/BLOCKED.
 
+**Windows no-reparse administrator-entry increment (2026-11-03):**
+A new real-NTFS regression first failed RED (Rust exit 101, `Ok(())`
+instead of the required `IdentityDenied`) because the preexisting
+mount-root-style `NtCreateFile(RootDirectory)` followed a live junction
+from an administrator-owned entry to an exterior directory. A separately
+typed `OpenEntryItself` resolution mode now applies the official
+`FILE_OPEN_REPARSE_POINT` option only to administrator-directory
+entries; the existing `FollowMountRoot` mode is retained for legitimate
+NTFS volume mountpoints. Both modes keep the existing strict child-name
+validation, exact kernel volume/file identity comparison, directory
+attribute checks and unconditional reparse denial on the returned
+object. The real Windows test now passes: an ordinary administrative
+child is accepted; the live junction is refused with the exterior file
+unchanged. The new `verify_preopened_administrative_child_identity`
+is **non-issuing and not yet part of the service-root observer**.
+Specifically, there is still no authenticated root-of-chain anchor,
+independent pinning/checking of every administrative ancestor, atomic
+authorization/use, or proof of exclusive filesystem custody. A matching
+root object via a different ancestor may still be reachable. No
+security-ready grant is implied; #148 remains P0/BLOCKED.
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

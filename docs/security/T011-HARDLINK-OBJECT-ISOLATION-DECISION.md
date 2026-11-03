@@ -710,6 +710,41 @@ while no undocumented `OBJ_DONT_REPARSE` behavior is assumed. Keep
 all #147 real object-alias RED cases and separate FFI/MCP blockers
 open until their independent acceptance.
 
+### Sticky Windows root-observation revocation (2026-11-02, #148)
+
+A separate **data-only** `ObservedWindowsIsolatedRoot` now retains
+both opened kernel handles (administrative parent and NTFS root), the
+single verified component and an irrevocable `active` flag.
+`observe_preopened_isolated_service_root` returns this stricter type
+instead of the general state-directory observation; there is no
+conversion to an operative capability or production I/O API.
+
+`revalidate(&mut self)` rechecks the real SCM service identity,
+protected root and read-only parent DACLs, different kernel volume
+identity, and the exact handle-relative child/root identity. Any
+failure irrevocably revokes this observation: restoring an earlier
+mountpoint path or DACL cannot revive the same object. The existing
+debug-only SCM test now calls `revalidate` **after** successful initial
+admission, making a stuck-deny implementation fail its positive case.
+
+**TDD:** first RED (missing distinct typed observation, Rust exit 101),
+then GREEN on a **real Windows directory rename/replacement**:
+initial kernel binding succeeds, a different directory under the same
+name causes refusal, and renaming the original directory back still
+does not reactivate the revoked observation. The sentinel bytes are
+checked after restoring the original. The local test-only constructor
+verifies only live kernel handles and cannot claim SCM credentials or
+authorize I/O; the hosted service test separately requires the actual
+restricted SCM token.
+
+**Residual limitation:** an administrator can still replace a
+mountpoint after the last successful check. Without a separately
+reviewed atomic use/revocation boundary, this is not a guarantee of
+concurrent invariant-O confinement. No live service, broker handler
+or FFI execution route has been enabled, and #147's four original
+hardlink adversarial tests must remain unsuppressed and independently
+accepted before release.
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

@@ -189,11 +189,16 @@ mod windows {
                 {
                     return FOREIGN_PARENT_INCORRECTLY_ACCEPTED;
                 }
-                if jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
-                    &parent, root, "isolated",
-                )
-                .is_err()
-                {
+                let Ok(mut observed) =
+                    jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
+                        &parent, root, "isolated",
+                    )
+                else {
+                    return DENIED_PARENT_DACL;
+                };
+                // A valid SCM test must exercise the public revalidation
+                // method; successful construction alone is insufficient.
+                if observed.revalidate().is_err() {
                     return DENIED_PARENT_DACL;
                 }
                 isolated_disposition(true)

@@ -62,6 +62,89 @@ impl ObservedWindowsStateDirectory {
     }
 }
 
+/// A non-authorizing observation whose parent and root are both pinned OS
+/// handles. No file-operation API or grant escapes this value.
+///
+/// A revoked observation cannot become valid again, even if a privileged
+/// namespace actor later restores the original mountpoint. Revalidation
+/// is point-in-time only; it does not provide atomic authorization + I/O.
+pub struct ObservedWindowsIsolatedRoot {
+    parent: File,
+    root: ObservedWindowsStateDirectory,
+    child_name: String,
+    active: bool,
+}
+
+impl ObservedWindowsIsolatedRoot {
+    fn revalidate_or_revoke(
+        &mut self,
+        check: impl FnOnce(&Self) -> Result<(), IdentityDenied>,
+    ) -> Result<(), IdentityDenied> {
+        if !self.active {
+            return Err(IdentityDenied);
+        }
+        if check(self).is_err() {
+            self.active = false;
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+
+    /// Require the real SCM token, protected root/parent ACL, separate
+    /// kernel volume and exact relative child identity on every invocation.
+    /// This does not issue execution rights or provide an I/O entrypoint.
+    pub fn revalidate(&mut self) -> Result<(), IdentityDenied> {
+        self.revalidate_or_revoke(|candidate| {
+            verify_service_identity()?;
+            let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
+            inspect_acl(
+                &candidate.root.file,
+                &sid,
+                ServiceDaclPolicy::MutableProtectedState,
+            )?;
+            inspect_acl(
+                &candidate.parent,
+                &sid,
+                ServiceDaclPolicy::ReadonlyAdministratorParent,
+            )?;
+            verify_preopened_volume_separation(&candidate.parent, &candidate.root.file)?;
+            verify_preopened_named_child_identity(
+                &candidate.parent,
+                &candidate.root.file,
+                &candidate.child_name,
+            )
+        })
+    }
+
+    // Kernel-only local regression. This constructor/test hook is compiled
+    // out of the real service and cannot attest SCM identity or grant I/O.
+    #[cfg(test)]
+    fn from_preopened_kernel_fixture(
+        parent: &File,
+        root: File,
+        child: &str,
+    ) -> Result<Self, IdentityDenied> {
+        verify_preopened_named_child_identity(parent, &root, child)?;
+        Ok(Self {
+            parent: parent.try_clone().map_err(|_| IdentityDenied)?,
+            root: ObservedWindowsStateDirectory { file: root },
+            child_name: child.to_owned(),
+            active: true,
+        })
+    }
+
+    #[cfg(test)]
+    fn revalidate_kernel_binding_only_for_test(&mut self) -> Result<(), IdentityDenied> {
+        self.revalidate_or_revoke(|candidate| {
+            verify_preopened_named_child_identity(
+                &candidate.parent,
+                &candidate.root.file,
+                &candidate.child_name,
+            )
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Principal {
     LocalSystem,
@@ -473,17 +556,26 @@ pub fn observe_preopened_isolated_service_root(
     parent: &File,
     root: File,
     child_name: &str,
-) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
-    let observed = observe_preopened_service_state(root)?;
+) -> Result<ObservedWindowsIsolatedRoot, IdentityDenied> {
+    let root = observe_preopened_service_state(root)?;
     let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     inspect_acl(
         parent,
         &service_sid,
         ServiceDaclPolicy::ReadonlyAdministratorParent,
     )?;
-    verify_preopened_volume_separation(parent, &observed.file)?;
-    verify_preopened_named_child_identity(parent, &observed.file, child_name)?;
-    Ok(observed)
+    verify_preopened_volume_separation(parent, &root.file)?;
+    verify_preopened_named_child_identity(parent, &root.file, child_name)?;
+    let mut observation = ObservedWindowsIsolatedRoot {
+        parent: parent.try_clone().map_err(|_| IdentityDenied)?,
+        root,
+        child_name: child_name.to_owned(),
+        active: true,
+    };
+    // Check again after duplicating the parent handle. No result from this
+    // admission is an I/O grant; later use requires fresh revalidation.
+    observation.revalidate()?;
+    Ok(observation)
 }
 
 #[cfg(test)]
@@ -877,6 +969,53 @@ mod tests {
     }
 
     #[test]
+    fn observed_isolated_root_revocation_survives_rename_restore_on_real_ntfs() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let root_path = fixture.path().join("isolated");
+        let moved = fixture.path().join("moved-original");
+        let replacement = fixture.path().join("replacement");
+        std::fs::create_dir(&root_path).unwrap();
+        std::fs::write(root_path.join("canary.bin"), b"UNCHANGED_OUTSIDE_SENTINEL").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(fixture.path());
+        let root = open(&root_path);
+        // This constructor exists only in unit tests. It cannot authenticate
+        // an SCM principal, issue a grant or bypass the production gate.
+        let mut observed =
+            ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(&parent, root, "isolated")
+                .expect("real direct-child precondition must hold");
+        assert_eq!(observed.revalidate_kernel_binding_only_for_test(), Ok(()));
+        std::fs::rename(&root_path, &moved)
+            .expect("actual filesystem rename must be possible under the test principal");
+        std::fs::create_dir(&root_path).unwrap();
+        assert_eq!(
+            observed.revalidate_kernel_binding_only_for_test(),
+            Err(IdentityDenied),
+            "a different object behind the original name must permanently revoke"
+        );
+        std::fs::rename(&root_path, &replacement).unwrap();
+        std::fs::rename(&moved, &root_path).unwrap();
+        assert_eq!(
+            observed.revalidate_kernel_binding_only_for_test(),
+            Err(IdentityDenied),
+            "restoring the old name must not restore a revoked observation"
+        );
+        assert_eq!(
+            std::fs::read(root_path.join("canary.bin")).unwrap(),
+            b"UNCHANGED_OUTSIDE_SENTINEL"
+        );
+        assert!(!replacement.join("canary.bin").exists());
+    }
+
+    #[test]
     fn isolated_root_observation_requires_verified_scm_token_acl_and_volume() {
         use std::os::windows::fs::OpenOptionsExt;
         const BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -898,7 +1037,7 @@ mod tests {
             &File,
             File,
             &str,
-        ) -> Result<ObservedWindowsStateDirectory, IdentityDenied> =
+        ) -> Result<ObservedWindowsIsolatedRoot, IdentityDenied> =
             observe_preopened_isolated_service_root;
         assert_eq!(
             observe_preopened_isolated_service_root(&parent, root, "separate-root").err(),

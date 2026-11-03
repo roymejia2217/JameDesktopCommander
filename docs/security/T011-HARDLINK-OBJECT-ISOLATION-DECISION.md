@@ -870,6 +870,33 @@ observer still does not retain or validate this chain: additional
 kernel identity, administrative ACL, concurrency and exclusive object
 custody acceptance remain necessary for #148.
 
+**Windows revocable supplied-chain observation (2026-11-03; NON-RELEASE):**
+A further real NTFS test first failed **RED (Rust exit 101)** after a
+successful actual child-entry rename and restoration: the existing
+stateless `verify_preopened_administrative_chain` returned `Ok(())`
+despite the failed check observed between those operations. The new
+data-only `ObservedWindowsAdministrativeChain` pins the independently
+supplied anchor and up to 64 opened directory entries, checks the full
+no-reparse chain again after duplicating the handles, and sets its
+internal state to **revoked before every subsequent revalidation**.
+The test now passes: an ordinary two-level chain remains valid, moving
+the pinned child out of its named entry permanently revokes the old
+observation, restoring the name does not resurrect it, and a separate
+fresh non-issuing observation can inspect that restored chain. Existing
+real NTFS intermediate-junction controls also reject empty evidence
+and hostile exterior aliases at observation admission; outside canary
+bytes remain unchanged.
+
+This observation is **not an authority-bearing capability**. The
+caller-supplied anchor is not authenticated by protected OS principal
+or policy; the mechanism does not detect namespace changes that occur
+and disappear entirely *between* checks, does not give a concurrency-
+atomic authorization/I/O boundary, does not prove isolated-object
+provenance, and is not integrated into
+`ObservedWindowsIsolatedRoot` or an MCP handler. Independent SCM/ACL,
+mount-object custody, #147 hard-link adversarial acceptance, and #124
+FFI review remain mandatory. **#148 remains P0 BLOCKED; release NO-GO.**
+
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 
 The existing official disposable Windows hosted-SCM fixture is extended in

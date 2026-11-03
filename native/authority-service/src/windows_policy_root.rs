@@ -482,6 +482,60 @@ pub fn verify_preopened_administrative_chain(
     Ok(())
 }
 
+/// A revocable, non-issuing observation of an independently supplied OS
+/// directory handle and its complete supplied administrative child chain.
+///
+/// This value does not authenticate the origin or ACL of the anchor, grant
+/// filesystem operations, or make verification atomic with later I/O.
+/// Revalidation is point-in-time. Once any verification fails (or panics),
+/// the observation remains revoked even if the namespace is restored.
+pub struct ObservedWindowsAdministrativeChain {
+    anchor: File,
+    entries: Vec<(File, String)>,
+    active: bool,
+}
+
+impl ObservedWindowsAdministrativeChain {
+    /// Pin each supplied object before a second, handle-relative verification.
+    /// This is not a policy issuer; callers still must prove anchor custody.
+    pub fn observe(anchor: &File, chain: &[(&File, &str)]) -> Result<Self, IdentityDenied> {
+        if chain.is_empty() || chain.len() > 64 {
+            return Err(IdentityDenied);
+        }
+        verify_preopened_administrative_chain(anchor, chain)?;
+        let mut entries = Vec::with_capacity(chain.len());
+        for &(child, name) in chain {
+            entries.push((
+                child.try_clone().map_err(|_| IdentityDenied)?,
+                name.to_owned(),
+            ));
+        }
+        let mut observation = Self {
+            anchor: anchor.try_clone().map_err(|_| IdentityDenied)?,
+            entries,
+            active: true,
+        };
+        observation.revalidate()?;
+        Ok(observation)
+    }
+
+    /// Never re-admit a failed observation, including after a panic/unwind.
+    pub fn revalidate(&mut self) -> Result<(), IdentityDenied> {
+        if !self.active {
+            return Err(IdentityDenied);
+        }
+        self.active = false;
+        let chain: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(child, name)| (child, name.as_str()))
+            .collect();
+        verify_preopened_administrative_chain(&self.anchor, &chain)?;
+        self.active = true;
+        Ok(())
+    }
+}
+
 enum ChildEntryResolution {
     FollowMountRoot,
     OpenEntryItself,
@@ -1234,6 +1288,10 @@ mod tests {
             Err(IdentityDenied),
             "an empty witness is not evidence of an administrative chain"
         );
+        assert!(
+            ObservedWindowsAdministrativeChain::observe(&anchor, &[]).is_err(),
+            "the revocable observer must also reject an empty witness"
+        );
         let normal_parent = open(&normal);
         let normal_child = open(&normal.join("child"));
         assert_eq!(
@@ -1244,6 +1302,12 @@ mod tests {
             Ok(()),
             "a fully ordinary two-component chain must be admitted"
         );
+        let mut observed = ObservedWindowsAdministrativeChain::observe(
+            &anchor,
+            &[(&normal_parent, "ordinary"), (&normal_child, "child")],
+        )
+        .expect("an independently pinned ordinary chain must admit a non-issuing observation");
+        assert_eq!(observed.revalidate(), Ok(()));
         let linked = Command::new("cmd.exe")
             .args(["/D", "/C", "mklink", "/J"])
             .arg(&alias)
@@ -1276,9 +1340,76 @@ mod tests {
             Err(IdentityDenied),
             "the independent administrative anchor must reject the intermediate junction"
         );
+        assert!(
+            ObservedWindowsAdministrativeChain::observe(
+                &anchor,
+                &[
+                    (&redirected_parent, "aliased"),
+                    (&redirected_child, "child")
+                ]
+            )
+            .is_err(),
+            "the revocable observer must not admit an intermediate exterior junction"
+        );
         assert_eq!(
             std::fs::read(outside_parent.join("sentinel.bin")).unwrap(),
             b"EXTERIOR_PARENT_UNCHANGED"
+        );
+    }
+
+    #[test]
+    fn restored_administrative_entry_cannot_revive_revoked_chain_observation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+        let fixture = tempfile::tempdir().unwrap();
+        let admin = fixture.path().join("admin");
+        let parent_path = admin.join("parent");
+        let child_path = parent_path.join("child");
+        let retired_path = parent_path.join("retired-child");
+        std::fs::create_dir_all(&child_path).unwrap();
+        let sentinel = child_path.join("canary.bin");
+        std::fs::write(&sentinel, b"REVOCATION_SENTINEL_UNCHANGED").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(SHARE_READ_WRITE_DELETE)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let anchor = open(&admin);
+        let parent = open(&parent_path);
+        let child = open(&child_path);
+        let chain = [(&parent, "parent"), (&child, "child")];
+        let mut observation = ObservedWindowsAdministrativeChain::observe(&anchor, &chain)
+            .expect("two ordinary NTFS entries must admit a non-issuing observation");
+        assert_eq!(observation.revalidate(), Ok(()));
+        std::fs::rename(&child_path, &retired_path)
+            .expect("the actual NTFS child entry must be movable while handles stay pinned");
+        assert_eq!(
+            observation.revalidate(),
+            Err(IdentityDenied),
+            "a missing pinned child must irrevocably revoke the observation"
+        );
+        std::fs::rename(&retired_path, &child_path).unwrap();
+        assert_eq!(
+            verify_preopened_administrative_chain(&anchor, &chain),
+            Ok(()),
+            "negative control: a stateless check forgets that a prior check failed"
+        );
+        assert_eq!(
+            observation.revalidate(),
+            Err(IdentityDenied),
+            "restored entries must not resurrect the previously revoked observation"
+        );
+        let mut fresh = ObservedWindowsAdministrativeChain::observe(&anchor, &chain)
+            .expect("a separately created non-issuing observation may check the restored chain");
+        assert_eq!(fresh.revalidate(), Ok(()));
+        assert_eq!(observation.revalidate(), Err(IdentityDenied));
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"REVOCATION_SENTINEL_UNCHANGED"
         );
     }
 

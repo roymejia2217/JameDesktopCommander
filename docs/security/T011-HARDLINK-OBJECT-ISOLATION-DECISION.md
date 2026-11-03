@@ -684,12 +684,18 @@ GitHub-hosted Windows runner:
    NTFS folder mount-point contract. The exact mounted partition and
    NTFS filesystem type are verified, then its root receives the
    established, explicit administrator-owned three-principal DACL.
-3. The actual SCM service must now accept the composed **token + DACL +
-   separate-volume** observation (exit 46), deny a service read-only
-   root DACL (47), accept its restoration (46), reject an unauthorized
-   foreign ACE (47), and accept final restoration (46). Success is
-   recorded only after all independent positive and negative steps;
-   a stuck-deny implementation cannot pass.
+3. The actual SCM service must now accept the composed **token +
+   protected root DACL + protected administrator-owned parent DACL +
+   separate-volume** observation (exit 46). The parent's service ACE
+   permits only read/traverse (+ optional SYNCHRONIZE), with no right to
+   add, rename or delete child objects or change owner/DACL. The same
+   SCM token must **deny** when the parent is made service-writable
+   (exit 47), then accept the restored parent (46). The service must
+   separately deny a service read-only root DACL (47), accept its
+   restoration (46), reject an unauthorized foreign ACE (47), and
+   accept final restoration (46). Success is recorded only after
+   independent positive and negative steps; a stuck-deny implementation
+   cannot pass.
 4. Cleanup always attempts service removal, VHD detach **before**
    recursive deletion of the temporary mountpoint, and VHD removal.
    Failure to detach prevents recursive deletion of a still-mounted

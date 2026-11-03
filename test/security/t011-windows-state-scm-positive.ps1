@@ -173,6 +173,13 @@ exit
     }
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ACTUAL_SCM_TOKEN_WITH_PROTECTED_NTFS_VHD_ROOT' 46
+    # A service-writable mountpoint parent could rename or replace the
+    # volume namespace entry. Even with a correct isolated root ACL, its
+    # administrator-controlled direct parent must be read/traverse-only.
+    Set-ExactDirectoryAcl $stage $virtual $modify $inherit $false
+    Require-ServiceResult 'SERVICE_MUTABLE_MOUNT_PARENT_DENIED' 47
+    Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
+    Require-ServiceResult 'ADMINISTRATIVE_MOUNT_PARENT_RESTORED' 46
     Set-ExactDirectoryAcl $isolated $virtual $read $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_INSUFFICIENT_SERVICE_RIGHTS' 47
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false

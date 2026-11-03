@@ -29,6 +29,9 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const REQUIRED_ACE_FLAGS: u8 = 0x03; // OI + CI: children and SQLite files must inherit.
 const REQUIRED_ADMIN_RIGHTS: u32 = 0x001f_01ff; // Win32 FILE_ALL_ACCESS.
 const REQUIRED_SERVICE_RIGHTS: u32 = 0x0003_01bf; // Documented NTFS Modify baseline.
+const REQUIRED_PARENT_READ_RIGHTS: u32 = 0x0002_00a9; // ReadAndExecute: no mutation.
+const ALLOWED_PARENT_READ_RIGHTS: u32 = REQUIRED_PARENT_READ_RIGHTS | 0x0010_0000;
+// Only optional SYNCHRONIZE may be added to the parent's read/traverse ACE.
 
 /// An observation of an existing opened directory; this does not grant access.
 /// Neither this value nor a matching DACL authenticates the source of a policy DB.
@@ -65,7 +68,37 @@ struct AceSummary {
     flags: u8,
 }
 
+#[derive(Clone, Copy)]
+enum ServiceDaclPolicy {
+    MutableProtectedState,
+    ReadonlyAdministratorParent,
+}
+
 fn validate_ace_set(aces: &[AceSummary]) -> Result<(), IdentityDenied> {
+    validate_ace_set_with(aces, ServiceDaclPolicy::MutableProtectedState)
+}
+
+fn validate_parent_ace_set(aces: &[AceSummary]) -> Result<(), IdentityDenied> {
+    validate_ace_set_with(aces, ServiceDaclPolicy::ReadonlyAdministratorParent)
+}
+
+fn service_ace_matches(mask: u32, policy: ServiceDaclPolicy) -> bool {
+    match policy {
+        ServiceDaclPolicy::MutableProtectedState => {
+            mask & REQUIRED_SERVICE_RIGHTS == REQUIRED_SERVICE_RIGHTS
+                && mask & (WRITE_DAC | WRITE_OWNER | GENERIC_ALL) == 0
+        }
+        ServiceDaclPolicy::ReadonlyAdministratorParent => {
+            mask & REQUIRED_PARENT_READ_RIGHTS == REQUIRED_PARENT_READ_RIGHTS
+                && mask & !ALLOWED_PARENT_READ_RIGHTS == 0
+        }
+    }
+}
+
+fn validate_ace_set_with(
+    aces: &[AceSummary],
+    policy: ServiceDaclPolicy,
+) -> Result<(), IdentityDenied> {
     if aces.len() != 3 {
         return Err(IdentityDenied);
     }
@@ -85,11 +118,7 @@ fn validate_ace_set(aces: &[AceSummary]) -> Result<(), IdentityDenied> {
             {
                 admins = true
             }
-            Principal::Service
-                if !service
-                    && ace.mask & REQUIRED_SERVICE_RIGHTS == REQUIRED_SERVICE_RIGHTS
-                    && ace.mask & (WRITE_DAC | WRITE_OWNER | GENERIC_ALL) == 0 =>
-            {
+            Principal::Service if !service && service_ace_matches(ace.mask, policy) => {
                 service = true
             }
             _ => return Err(IdentityDenied),
@@ -131,7 +160,11 @@ fn classify_sid(sid: *mut c_void, service_sid: &[u8]) -> Principal {
     }
 }
 
-fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
+fn inspect_acl(
+    file: &File,
+    service_sid: &[u8],
+    policy: ServiceDaclPolicy,
+) -> Result<(), IdentityDenied> {
     let mut owner: *mut c_void = ptr::null_mut();
     let mut dacl: *mut ACL = ptr::null_mut();
     let mut sd: *mut c_void = ptr::null_mut();
@@ -196,7 +229,10 @@ fn inspect_acl(file: &File, service_sid: &[u8]) -> Result<(), IdentityDenied> {
             flags: ace.flags,
         })
         .collect();
-    validate_ace_set(&summaries)
+    match policy {
+        ServiceDaclPolicy::MutableProtectedState => validate_ace_set(&summaries),
+        ServiceDaclPolicy::ReadonlyAdministratorParent => validate_parent_ace_set(&summaries),
+    }
 }
 
 /// OS-handle volume isolation preflight. A volume serial number is only a
@@ -302,7 +338,11 @@ pub fn observe_preopened_service_state(
         return Err(IdentityDenied);
     }
     let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
-    inspect_acl(&file, &service_sid)?;
+    inspect_acl(
+        &file,
+        &service_sid,
+        ServiceDaclPolicy::MutableProtectedState,
+    )?;
     Ok(ObservedWindowsStateDirectory { file })
 }
 
@@ -318,6 +358,12 @@ pub fn observe_preopened_isolated_service_root(
     root: File,
 ) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
     let observed = observe_preopened_service_state(root)?;
+    let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
+    inspect_acl(
+        parent,
+        &service_sid,
+        ServiceDaclPolicy::ReadonlyAdministratorParent,
+    )?;
     verify_preopened_volume_separation(parent, &observed.file)?;
     Ok(observed)
 }
@@ -396,6 +442,40 @@ mod tests {
                 "missing container-inheritance on ACE index {principal}"
             );
         }
+    }
+
+    #[test]
+    fn administrative_mount_parent_allows_service_traversal_but_never_mutation() {
+        let mut parent = legitimate();
+        parent[2].mask = 0x0002_00a9; // NTFS ReadAndExecute
+        assert_eq!(validate_parent_ace_set(&parent), Ok(()));
+        parent[2].mask |= 0x0010_0000; // SYNCHRONIZE
+        assert_eq!(validate_parent_ace_set(&parent), Ok(()));
+        for extra in [
+            0x0000_0002, // FILE_WRITE_DATA / FILE_ADD_FILE
+            0x0000_0004, // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+            0x0001_0000, // DELETE
+            WRITE_DAC,
+            WRITE_OWNER,
+            GENERIC_ALL,
+        ] {
+            let mut untrusted = parent.clone();
+            untrusted[2].mask |= extra;
+            assert_eq!(
+                validate_parent_ace_set(&untrusted),
+                Err(IdentityDenied),
+                "parent became mutable through service ACE bit {extra:#x}"
+            );
+        }
+        let mut missing_traverse = parent.clone();
+        missing_traverse[2].mask &= !0x0000_0020; // FILE_TRAVERSE
+        assert_eq!(
+            validate_parent_ace_set(&missing_traverse),
+            Err(IdentityDenied)
+        );
+        let mut foreign = parent.clone();
+        foreign.push(ace(Principal::Foreign, 1));
+        assert_eq!(validate_parent_ace_set(&foreign), Err(IdentityDenied));
     }
 
     #[test]

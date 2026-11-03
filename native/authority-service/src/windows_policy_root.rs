@@ -701,13 +701,16 @@ pub fn observe_preopened_isolated_service_root(
     Ok(observation)
 }
 
-/// An administrative-chain-bound, non-issuing root observation. The root
-/// and the complete pinned administrative chain must revalidate together.
+/// Non-issuing root observation: the named source-parent/anchor entry,
+/// complete administrative chain, and isolated root are pinned and revalidated.
 /// This type exposes no filesystem operation or reusable root File handle.
 ///
-/// Neither an ACL snapshot nor an independently supplied anchor proves its
-/// configured administrative origin, exclusive custody or atomic I/O safety.
+/// The supplied source parent is not independently authenticated as a canonical
+/// administrator-provisioned policy root; no exclusive custody or atomic I/O
+/// guarantee follows from this point-in-time observation.
 pub struct ObservedWindowsChainBoundIsolatedRoot {
+    anchor_parent: File,
+    anchor_name: String,
     administrative: ObservedWindowsAdministrativeChain,
     isolated: ObservedWindowsIsolatedRoot,
     active: bool,
@@ -723,6 +726,11 @@ impl ObservedWindowsChainBoundIsolatedRoot {
         }
         self.active = false;
         verify_service_identity()?;
+        verify_preopened_administrative_child_identity(
+            &self.anchor_parent,
+            &self.administrative.anchor,
+            &self.anchor_name,
+        )?;
         let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
         inspect_acl(
             &self.administrative.anchor,
@@ -742,16 +750,21 @@ impl ObservedWindowsChainBoundIsolatedRoot {
     // segregated volume, or administrative anchor and cannot issue I/O.
     #[cfg(test)]
     fn from_preopened_kernel_fixture(
+        anchor_parent: &File,
+        anchor_name: &str,
         anchor: &File,
         chain: &[(&File, &str)],
         root: File,
         root_name: &str,
     ) -> Result<Self, IdentityDenied> {
+        verify_preopened_administrative_child_identity(anchor_parent, anchor, anchor_name)?;
         let administrative = ObservedWindowsAdministrativeChain::observe(anchor, chain)?;
         let &(parent, _) = chain.last().ok_or(IdentityDenied)?;
         let isolated =
             ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(parent, root, root_name)?;
         let mut observed = Self {
+            anchor_parent: anchor_parent.try_clone().map_err(|_| IdentityDenied)?,
+            anchor_name: anchor_name.to_owned(),
             administrative,
             isolated,
             active: true,
@@ -766,6 +779,11 @@ impl ObservedWindowsChainBoundIsolatedRoot {
             return Err(IdentityDenied);
         }
         self.active = false;
+        verify_preopened_administrative_child_identity(
+            &self.anchor_parent,
+            &self.administrative.anchor,
+            &self.anchor_name,
+        )?;
         self.administrative.revalidate()?;
         self.isolated.revalidate_kernel_binding_only_for_test()?;
         self.active = true;
@@ -777,16 +795,20 @@ impl ObservedWindowsChainBoundIsolatedRoot {
 /// The parent of the mounted root is selected ONLY as the final pinned
 /// administrative-chain entry, not from an unrelated supplied handle.
 ///
-/// This verifies the real SCM principal and protected per-ancestor ACLs but
-/// still cannot establish the administrative anchor's configured provenance
-/// or durable/exclusive storage custody. It is not a grant or MCP backend.
+/// This verifies the real SCM principal, protected per-ancestor ACLs and the
+/// supplied source-parent/anchor edge. It does not authenticate the caller's
+/// source parent as the configured policy root or prove durable/exclusive
+/// storage custody. It is not a grant or MCP backend.
 pub fn observe_preopened_chain_bound_isolated_service_root(
+    anchor_parent: &File,
+    anchor_name: &str,
     anchor: &File,
     chain: &[(&File, &str)],
     root: File,
     root_name: &str,
 ) -> Result<ObservedWindowsChainBoundIsolatedRoot, IdentityDenied> {
     verify_service_identity()?;
+    verify_preopened_administrative_child_identity(anchor_parent, anchor, anchor_name)?;
     let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     inspect_acl(anchor, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;
     for &(entry, _) in chain {
@@ -796,6 +818,8 @@ pub fn observe_preopened_chain_bound_isolated_service_root(
     let &(parent, _) = chain.last().ok_or(IdentityDenied)?;
     let isolated = observe_preopened_isolated_service_root(parent, root, root_name)?;
     let mut observed = ObservedWindowsChainBoundIsolatedRoot {
+        anchor_parent: anchor_parent.try_clone().map_err(|_| IdentityDenied)?,
+        anchor_name: anchor_name.to_owned(),
         administrative,
         isolated,
         active: true,
@@ -1506,6 +1530,7 @@ mod tests {
                 .open(path)
                 .unwrap()
         };
+        let anchor_parent = open(fixture.path());
         let anchor = open(&admin);
         assert_eq!(
             verify_preopened_administrative_chain(&anchor, &[]),
@@ -1587,6 +1612,8 @@ mod tests {
         );
         assert!(
             ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &anchor_parent,
+                "admin",
                 &anchor,
                 &[(&redirected_parent, "aliased")],
                 open(&alias.join("child")),
@@ -1677,6 +1704,7 @@ mod tests {
                 .open(path)
                 .unwrap()
         };
+        let anchor_parent = open(fixture.path());
         let anchor = open(&authorized);
         let parent = open(&parent_path);
         let exterior_parent = open(&outside_parent);
@@ -1704,6 +1732,8 @@ mod tests {
         );
         assert!(
             ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &anchor_parent,
+                "authorized",
                 &anchor,
                 &[(&parent, "parent")],
                 open(&outside_root),
@@ -1713,6 +1743,8 @@ mod tests {
             "the chain-bound root must not admit a directory outside the supplied anchor"
         );
         let mut inside = ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+            &anchor_parent,
+            "authorized",
             &anchor,
             &[(&parent, "parent")],
             open(&legitimate_root),
@@ -1722,6 +1754,8 @@ mod tests {
         assert_eq!(inside.revalidate_kernel_only_for_test(), Ok(()));
         assert!(
             observe_preopened_chain_bound_isolated_service_root(
+                &anchor_parent,
+                "authorized",
                 &anchor,
                 &[(&parent, "parent")],
                 open(&legitimate_root),
@@ -1733,6 +1767,78 @@ mod tests {
         assert_eq!(
             std::fs::read(outside_root.join("canary.bin")).unwrap(),
             b"OUTSIDE_BYTES_UNCHANGED"
+        );
+    }
+
+    #[test]
+    fn composite_denies_foreign_administrative_anchor_despite_valid_internal_chain() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let configured_anchor = fixture.path().join("configured-stage");
+        let foreign_anchor = fixture.path().join("foreign-stage");
+        let configured_root = configured_anchor.join("mount-parent").join("isolated");
+        let foreign_parent = foreign_anchor.join("mount-parent");
+        let foreign_root = foreign_parent.join("isolated");
+        std::fs::create_dir_all(&configured_root).unwrap();
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        let canary = foreign_root.join("outside-canary");
+        std::fs::write(&canary, b"FOREIGN_ANCHOR_BYTES_UNCHANGED").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let configured_parent = open(fixture.path());
+        let configured_anchor_handle = open(&configured_anchor);
+        let configured_stage_parent = open(&configured_anchor.join("mount-parent"));
+        let mut admitted = ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+            &configured_parent,
+            "configured-stage",
+            &configured_anchor_handle,
+            &[(&configured_stage_parent, "mount-parent")],
+            open(&configured_root),
+            "isolated",
+        )
+        .expect("configured NTFS source must remain an admissible non-issuing observation");
+        assert_eq!(admitted.revalidate_kernel_only_for_test(), Ok(()));
+
+        let forged_anchor = open(&foreign_anchor);
+        let forged_parent = open(&foreign_parent);
+        assert_eq!(
+            verify_preopened_administrative_chain(
+                &forged_anchor,
+                &[(&forged_parent, "mount-parent")],
+            ),
+            Ok(()),
+            "negative control: unrelated NTFS anchor has a valid internal chain"
+        );
+        assert_eq!(
+            verify_preopened_administrative_child_identity(
+                &configured_parent,
+                &forged_anchor,
+                "configured-stage",
+            ),
+            Err(IdentityDenied),
+            "configured source parent and named child distinguish a foreign anchor"
+        );
+        assert!(
+            ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &configured_parent,
+                "configured-stage",
+                &forged_anchor,
+                &[(&forged_parent, "mount-parent")],
+                open(&foreign_root),
+                "isolated",
+            )
+            .is_err(),
+            "complete foreign chain must not substitute for the configured source anchor"
+        );
+        assert_eq!(
+            std::fs::read(&canary).unwrap(),
+            b"FOREIGN_ANCHOR_BYTES_UNCHANGED"
         );
     }
 

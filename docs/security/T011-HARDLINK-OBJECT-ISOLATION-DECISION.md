@@ -710,6 +710,40 @@ while no undocumented `OBJ_DONT_REPARSE` behavior is assumed. Keep
 all #147 real object-alias RED cases and separate FFI/MCP blockers
 open until their independent acceptance.
 
+### Windows effective-thread-token preflight (2026-11-02, #148)
+
+Windows access checks may use a **thread impersonation token** rather
+than the SCM process primary token. Checking only `TokenUser` on
+`GetCurrentProcess` is therefore insufficient to prove the effective
+principal used for file opens or DACL inspections.
+
+The existing read-only `verify_service_identity` path now requires
+`OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, OpenAsSelf=TRUE)`
+to fail with the **specific** `ERROR_NO_TOKEN`. A successfully opened
+thread token (including self-impersonation) is denied and its handle
+closed. Any other error (including an inaccessible or anonymous token)
+is also denied. This gate runs **before and after** the process-token
+SID check, and the separate diagnostic SCM token observer uses the
+same rule. It cannot be bypassed with caller-supplied names or flags.
+Microsoft documents why the effective thread security context takes
+precedence: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthreadtoken>.
+
+**TDD:** a real Windows test initially failed RED with Rust exit
+101 because the effective-thread gate was absent. After implementation
+it passes GREEN using an isolated OS thread:
+`OpenThreadToken` reports no token normally; `ImpersonateSelf` with
+`SecurityImpersonation` creates a genuine thread token which must
+DENY; `RevertToSelf` restores the original context and the gate
+must accept the absence of a thread token again. A drop guard
+reverts the test's temporary impersonation even during unwind.
+The Windows SCM fixture must independently retain its legitimate
+positive admission; a denial-only implementation is unacceptable.
+
+**Limit:** this is a synchronous **observation-only** preflight;
+another actor with authority to change a thread context during a
+future separate operation is not excluded by a prior check. It does
+not grant storage I/O, prove atomic use/revocation, or satisfy #147.
+
 ### Sticky Windows root-observation revocation (2026-11-02, #148)
 
 A separate **data-only** `ObservedWindowsIsolatedRoot` now retains

@@ -732,10 +732,17 @@ then GREEN on a **real Windows directory rename/replacement**:
 initial kernel binding succeeds, a different directory under the same
 name causes refusal, and renaming the original directory back still
 does not reactivate the revoked observation. The sentinel bytes are
-checked after restoring the original. The local test-only constructor
-verifies only live kernel handles and cannot claim SCM credentials or
-authorize I/O; the hosted service test separately requires the actual
-restricted SCM token.
+checked after restoring the original. A second real Windows test
+uses the project's established `mklink /J` NTFS junction fixture to
+replace the root entry with a link to a separate exterior directory:
+the stale observation DENIES, the exterior sentinel bytes remain
+unchanged through junction removal, and restoring the original name
+does not revive the revoked instance. A **fresh** kernel-only fixture
+observation of the restored original must independently pass, proving
+the defense does not simply deny everything. The local test-only
+constructor verifies only live kernel handles and cannot claim SCM
+credentials or authorize I/O; the hosted service test separately
+requires the actual restricted SCM token.
 
 **Residual limitation:** an administrator can still replace a
 mountpoint after the last successful check. Without a separately

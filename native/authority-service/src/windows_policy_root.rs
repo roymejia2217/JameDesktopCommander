@@ -1016,6 +1016,81 @@ mod tests {
     }
 
     #[test]
+    fn revoked_windows_observation_rejects_real_junction_replacement_and_new_observation_recovers()
+    {
+        use std::{os::windows::fs::OpenOptionsExt, process::Command};
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let f = tempfile::tempdir().unwrap();
+        let original = f.path().join("isolated");
+        let retired = f.path().join("retired-original");
+        let exterior = f.path().join("external");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&exterior).unwrap();
+        let sentinel = exterior.join("exterior.bin");
+        std::fs::write(&sentinel, b"EXTERIOR_JUNCTION_BYTES_UNCHANGED").unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open(f.path());
+        let mut old = ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(
+            &parent,
+            open(&original),
+            "isolated",
+        )
+        .unwrap();
+        assert_eq!(old.revalidate_kernel_binding_only_for_test(), Ok(()));
+        std::fs::rename(&original, &retired).unwrap();
+        let made = Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&original)
+            .arg(&exterior)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "real NTFS junction creation failed: {made:?}"
+        );
+        assert_eq!(
+            old.revalidate_kernel_binding_only_for_test(),
+            Err(IdentityDenied),
+            "an unrelated NTFS junction target must revoke the stale observation"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"EXTERIOR_JUNCTION_BYTES_UNCHANGED"
+        );
+        std::fs::remove_dir(&original).expect("delete only the NTFS junction itself");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"EXTERIOR_JUNCTION_BYTES_UNCHANGED"
+        );
+        std::fs::rename(&retired, &original).unwrap();
+        assert_eq!(
+            old.revalidate_kernel_binding_only_for_test(),
+            Err(IdentityDenied),
+            "restoring the original root must never reactivate an old observation"
+        );
+        let mut newly_issued = ObservedWindowsIsolatedRoot::from_preopened_kernel_fixture(
+            &parent,
+            open(&original),
+            "isolated",
+        )
+        .unwrap();
+        assert_eq!(
+            newly_issued.revalidate_kernel_binding_only_for_test(),
+            Ok(())
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"EXTERIOR_JUNCTION_BYTES_UNCHANGED"
+        );
+    }
+
+    #[test]
     fn isolated_root_observation_requires_verified_scm_token_acl_and_volume() {
         use std::os::windows::fs::OpenOptionsExt;
         const BACKUP_SEMANTICS: u32 = 0x0200_0000;

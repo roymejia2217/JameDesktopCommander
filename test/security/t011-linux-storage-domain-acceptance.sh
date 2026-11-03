@@ -23,6 +23,10 @@ attacker="$base/attacker-owned"
 bind_alias=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
+# The mountpoint's immediate parent belongs to the trusted administrator,
+# not to the service or the attacker. Without this, a same-principal process
+# could rename the mountpoint despite the isolated volume's own 0700 mode.
+sudo -n chown root:root "$base"
 sudo -n chown nobody:"$(id -gn nobody)" "$attacker"
 sudo -n chmod 0700 "$attacker"
 cleanup() {
@@ -58,6 +62,38 @@ outside_file="$attacker/outside.bin"
 sudo -n -u jdc-authority -- sh -c 'printf SERVICE_DOMAIN_BYTES > "$1"' sh "$service_file"
 sudo -n -u nobody -- sh -c 'printf OUTSIDE_DOMAIN_SENTINEL_UNCHANGED > "$1"' sh "$outside_file"
 outside_hash="$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)"
+
+# Execute the SAME Rust issuer root-admission implementation under the actual
+# dedicated service UID, without root capabilities or privilege escalation.
+# Never count a synthetic metadata predicate as native positive acceptance.
+test_dir='native/authority-service/target/debug/deps'
+[[ -d "$test_dir" ]] || { echo E_ISSUER_TEST_BINARY_DIR_MISSING >&2; exit 1; }
+issuer_test=''
+matches=0
+while IFS= read -r candidate; do
+  if "$candidate" --list 2>/dev/null | grep -Fq 'issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root:'; then
+    issuer_test="$candidate"
+    matches=$((matches + 1))
+  fi
+done < <(find "$test_dir" -maxdepth 1 -type f -executable -name 'jdc_authority_service-*' | sort)
+[[ "$matches" -eq 1 ]] || { echo E_ISSUER_TEST_BINARY_AMBIGUOUS >&2; exit 1; }
+# Keep the potentially large Rust test harness OUTSIDE the strict 8 MiB
+# protected data volume; pin its checksum and prevent either unprivileged
+# principal from replacing it via the root-admin-owned parent.
+trusted_probe="$base/jdc-issuer-root-admission-test"
+sudo -n install -o root -g root -m 0555 -- "$issuer_test" "$trusted_probe"
+[[ "$(sha256sum "$issuer_test" | cut -d ' ' -f1)" == "$(sudo -n sha256sum "$trusted_probe" | cut -d ' ' -f1)" ]] || {
+  echo E_ISSUER_TEST_BINARY_PROVENANCE_MISMATCH >&2; exit 1;
+}
+sudo -n -u jdc-authority -- setpriv --no-new-privs -- env \
+  JDC_T011_CUSTODIED_ROOT="$isolated" \
+  "$trusted_probe" --ignored --exact \
+  issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root --nocapture
+[[ -d "$isolated/issuer-custody-positive" ]] || {
+  echo E_ISSUER_POSITIVE_ROOT_OPERATION_MISSING >&2; exit 1;
+}
+echo T011_STORAGE_ISSUER_ROOT_ATTESTATION_PASS
+
 # Exercise real read, in-place rewrite, append, rename and unlink under
 # BOTH valid principals. Without these positive controls, an unavailable
 # executable or broken filesystem could make all adversarial denials look green.

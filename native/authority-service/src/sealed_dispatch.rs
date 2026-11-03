@@ -99,6 +99,11 @@ impl SealedDirectoryGrant {
                 .map_err(|_| DispatchDenied)?;
             observed
         };
+        #[cfg(all(target_os = "linux", not(test)))]
+        let rooted = policy
+            .open_custodied_root(root_ref)
+            .map_err(|_| DispatchDenied)?;
+        #[cfg(any(test, not(target_os = "linux")))]
         let rooted = policy.open_root(root_ref).map_err(|_| DispatchDenied)?;
         #[cfg(all(target_os = "linux", not(test)))]
         monitor
@@ -135,8 +140,11 @@ impl SealedDirectoryGrant {
             self.revoke();
             return Err(DispatchDenied);
         }
-        let matches = policy
-            .open_root(&self.root_ref)
+        #[cfg(not(test))]
+        let refreshed = policy.open_custodied_root(&self.root_ref);
+        #[cfg(test)]
+        let refreshed = policy.open_root(&self.root_ref);
+        let matches = refreshed
             .and_then(|opened| {
                 self.rooted
                     .same_open_directory(&opened)

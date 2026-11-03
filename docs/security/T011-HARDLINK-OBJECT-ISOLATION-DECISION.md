@@ -507,6 +507,59 @@ bind-mount foreign objects in the Linux research fixture; the proof and
 its explicit threat-model exclusions must remain visible. The service
 continues deny-only pending complete object-domain authority review.
 
+### Native issuer root admission: Linux-only fail-closed boundary (2026-11-02, #240)
+
+This increment moves the **separate-storage requirement into the Linux
+issuer's root-to-capability transition**, rather than treating successful
+installer fixtures as authorization. `IssuerPolicy::open_root` remains a
+non-authorizing, handle-only administrative preflight. The production-only
+`SealedDirectoryGrant::from_issuer_policy` and its root revalidation path
+instead call `IssuerPolicy::open_custodied_root` after the independently
+attested administrative policy/epoch check.
+
+The new admission must observe the following directly from **already opened
+kernel directory handles** before returning a root capability:
+
+1. Effective service UID/GID must be nonzero, and production code must pass
+   the existing dedicated Linux service identity preflight, including
+   filesystem credentials, no-new-privileges and capabilities policy.
+2. The policy's final root must be a directory owned by that UID/GID with
+   exact mode 0700, located at the root of a **separately mounted
+   filesystem**: both mount ID and device must differ from its immediate
+   parent. A same-device bind alias is not an isolated storage domain.
+3. The mountpoint's immediate parent must be root-admin-owned, without
+   group/other write permissions; all intermediate ancestors must remain
+   root-owned, must not cross foreign mounts and must not be writable by
+   group/other, except for a root-owned sticky directory such as `/tmp`.
+   A service-owned parent could let the service rename its own supposedly
+   protected mountpoint. Parent and child metadata come from `fstat`;
+   mount IDs come from `statx(STATX_MNT_ID)` with no name-based fallback.
+4. A failed observation, unknown mount ID, wrong owner/mode, same-device root,
+   mutable parent or changed root identity **DENIES** before authority is
+   issued. Neither policy JSON nor the MCP client can supply the expected
+   device, UID or mount ID.
+
+A pure, cross-platform Rust security decision test must demonstrate
+**RED→GREEN** for same-mount, same-device, wrong-owner, wrong-mode,
+root-writable-parent and zero-UID/GID cases. A separate hosted Linux
+test runs the **actual issuer method** with a disposable root-owned
+mountpoint parent, mounted tmpfs and the dedicated `jdc-authority`
+principal under `no_new_privs`; it must positively create a child
+inside the isolated root and deny a mismatched root reference. Normal
+unmounted administrative directories must remain rejected even if
+`open_root` can open them by name.
+
+**Scope limits:** This deliberately changes which Linux restricted roots
+could become operational: existing ordinary directories are
+**unsupported/denied**, not silently reinterpreted as isolated. Windows
+issuer parity, unprivileged ownership lifecycle and administrative
+provisioning, race-free mount-namespace custody under privileged adversaries,
+revocation after concurrent namespace mutation, and full #147 native
+read/rewrite/append/replacement adversarial coverage remain distinct
+release blockers. These checks cannot make arbitrary same-principal writable
+data safe, cannot stop a privileged host administrator and **do not
+activate** the native service or any MCP operation.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

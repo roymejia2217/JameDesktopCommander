@@ -71,7 +71,9 @@ test_dir='native/authority-service/target/debug/deps'
 issuer_test=''
 matches=0
 while IFS= read -r candidate; do
-  if "$candidate" --list 2>/dev/null | grep -Fq 'issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root:'; then
+  # Consume the whole test listing: grep -q could close its pipe early,
+  # falsely failing the Rust harness under set -o pipefail.
+  if "$candidate" --list 2>/dev/null | grep -F 'issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root:' >/dev/null; then
     issuer_test="$candidate"
     matches=$((matches + 1))
   fi

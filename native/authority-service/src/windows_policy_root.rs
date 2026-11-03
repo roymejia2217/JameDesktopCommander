@@ -282,6 +282,22 @@ pub fn observe_preopened_service_state(
     Ok(ObservedWindowsStateDirectory { file })
 }
 
+/// Non-issuing Windows storage-root observation. A caller may only supply
+/// ALREADY OPENED directory handles; neither the current process token nor
+/// ACL can be provided as arguments. First require the real SCM service
+/// identity and the protected DACL of the root, then deny same-volume
+/// storage. This is a necessary preflight, not an independently approved
+/// Windows issuer: the parent/child relationship, unique volume provenance,
+/// mount aliases, race-free pinning and durable authority are still missing.
+pub fn observe_preopened_isolated_service_root(
+    parent: &File,
+    root: File,
+) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
+    let observed = observe_preopened_service_state(root)?;
+    verify_preopened_volume_separation(parent, &observed.file)?;
+    Ok(observed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +499,33 @@ mod tests {
             verify_preopened_volume_separation(&parent, &parent),
             Err(IdentityDenied),
             "two handles to the system volume must never pass isolation"
+        );
+    }
+
+    #[test]
+    fn isolated_root_observation_requires_verified_scm_token_acl_and_volume() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let f = tempfile::tempdir().unwrap();
+        let child = f.path().join("separate-root");
+        std::fs::create_dir(&child).unwrap();
+        let open_dir = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let parent = open_dir(f.path());
+        let root = open_dir(&child);
+        // Contract: there is no path-only, caller-supplied DACL, or
+        // free-standing volume-serial constructor for this observer.
+        let _typecheck: fn(&File, File) -> Result<ObservedWindowsStateDirectory, IdentityDenied> =
+            observe_preopened_isolated_service_root;
+        assert_eq!(
+            observe_preopened_isolated_service_root(&parent, root).err(),
+            Some(IdentityDenied),
+            "a normal interactive user cannot mint an SCM-bound root observation"
         );
     }
 

@@ -610,6 +610,17 @@ objects also deny. No ambient pathname is reopened to obtain its metadata,
 no compiler-unstable metadata API is enabled, and no Windows grant/SCM
 activation changes.
 
+The non-issuing `observe_preopened_isolated_service_root` now composes
+this predicate **after** the existing real SCM identity and exact protected
+root-DACL observation. There is no caller-supplied SID, volume serial or
+permission claim. Its public result is the existing data-only observed
+handle, not an execution capability. A focused Windows test proved RED
+(missing integrated observation, Rust exit 101), then GREEN for the
+interactive-user denial and exact typed handle-only signature. The
+separate-volume VHD test checks the volume discriminator under the
+disposable runner administrator and therefore **does not** establish
+the service-token/DACL positive path for this combined observer.
+
 A Windows local unit test must prove that two genuine handles to directories
 on the **same existing NTFS volume** are denied. The existing disposable
 Windows VHD acceptance creates a separate NTFS disk and runs an

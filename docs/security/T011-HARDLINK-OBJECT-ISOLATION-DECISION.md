@@ -933,11 +933,49 @@ SCM-privileged positive, administratively provisioned trusted anchor,
 path-independent canonical policy source, exclusive object custody,
 race-atomic filesystem operations, or persistence of issuer grants.
 The older `observe_preopened_isolated_service_root` remains an
-independent, non-authorizing experiment (including the existing SCM
-probe); no shipping handler has been moved to this composite.
-Hosted Windows positive SCM/VHD acceptance must be added and checked
-before considering the new observation production-qualified.
+independent, non-authorizing experiment. The disposable SCM probe now
+exercises **both** this root-only check and the chain-bound composite;
+no shipping handler has been moved to either observation. The expanded
+hosted Windows SCM/VHD acceptance must actually run and pass before
+considering the new composite production-qualified.
 #148 remains P0/BLOCKED and `releaseEligible:false`.
+
+**Hosted SCM composite-chain acceptance extension (2026-11-03; CI-PENDING):**
+The already disposable-only Windows `windows_state_scm_probe` now
+requires the *composite* `observe_preopened_chain_bound_isolated_service_root`
+to succeed under the real restricted SCM token **in addition** to the
+existing mounted-VHD root observation. The trusted fixture under its
+randomly named `%ProgramData%/JDC-T011-C4R-*` stage now has the
+administrator-owned, protected, read-only-for-service
+`stage/mount-parent` component: the root is mounted at
+`stage/mount-parent/isolated`. The stage directory is the independently
+pinned administrative anchor, and the final parent may only be
+`mount-parent` beneath that exact opened anchor.
+
+The preexisting same-volume failure **52**, parent DACL failure **53**,
+root DACL failure **51**, successful mounted-VHD verdict **46**, and
+the foreign-parent negative control remain explicit. New SCM-only
+exit **56** denotes *composite chain/anchor denial*, and **57** denotes
+an erroneous composite admission through the protected but unrelated
+`stage/foreign-parent`. After a positive VHD admission, the hosted
+script alters only this disposable stage's ACL to make the service
+able to mutate its anchor and requires **56**; restoring the
+administrator-owned protected read/traverse ACL must restore **46**.
+
+**Evidence boundary:** Rust example contract test and debug build,
+PowerShell syntax parsing, and native Windows adversarial unit
+regressions can run without administrative modification on the
+developer's Windows host. The script explicitly rejects execution
+unless `GITHUB_ACTIONS=true`, `RUNNER_OS=Windows` and
+`RUNNER_ENVIRONMENT=github-hosted`, and checks for an existing service
+before provisioning. We do not execute the script or install an SCM
+service/VHD on the development host. This extension is an **untested
+hosted acceptance candidate** until the **exact commit's** disposable
+Windows SCM/VHD workflow runs and passes. Passing local syntax and
+unit tests cannot establish true restricted-SCM positive, volume
+identity or host provisioning behavior. It grants no filesystem I/O,
+does not authenticate a canonical production anchor, and does not
+change the blocked status of #148 or release NO-GO.
 
 ### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
 

@@ -27,6 +27,8 @@ mod windows {
     const DENIED_PARENT_DACL: u32 = 53;
     const FOREIGN_PARENT_INCORRECTLY_ACCEPTED: u32 = 54;
     const FOREIGN_PARENT_NOT_OBSERVABLE: u32 = 55;
+    const COMPOSITE_ADMIN_CHAIN_DENIED: u32 = 56;
+    const COMPOSITE_FOREIGN_CHAIN_INCORRECTLY_ACCEPTED: u32 = 57;
     const UNOPENABLE_FIXTURE: u32 = 43;
     const UNTRUSTED_IDENTITY: u32 = 44;
     const NOT_DEBUG_BUILD: u32 = 45;
@@ -66,6 +68,17 @@ mod windows {
         }
 
         #[test]
+        fn true_scm_composite_custody_gate_has_distinct_denial_verdicts() {
+            assert_eq!(COMPOSITE_ADMIN_CHAIN_DENIED, 56);
+            assert_eq!(COMPOSITE_FOREIGN_CHAIN_INCORRECTLY_ACCEPTED, 57);
+            assert_ne!(COMPOSITE_ADMIN_CHAIN_DENIED, ACCEPTED_ISOLATED_ROOT);
+            assert_ne!(
+                COMPOSITE_FOREIGN_CHAIN_INCORRECTLY_ACCEPTED,
+                DENIED_PARENT_DACL
+            );
+        }
+
+        #[test]
         fn real_scm_admission_failure_codes_distinguish_each_kernel_gate() {
             let failures = [
                 DENIED_PARENT_OPEN,
@@ -76,8 +89,10 @@ mod windows {
                 DENIED_PARENT_DACL,
                 FOREIGN_PARENT_INCORRECTLY_ACCEPTED,
                 FOREIGN_PARENT_NOT_OBSERVABLE,
+                COMPOSITE_ADMIN_CHAIN_DENIED,
+                COMPOSITE_FOREIGN_CHAIN_INCORRECTLY_ACCEPTED,
             ];
-            assert_eq!(failures, [48, 49, 50, 51, 52, 53, 54, 55]);
+            assert_eq!(failures, [48, 49, 50, 51, 52, 53, 54, 55, 56, 57]);
             let mut distinct = failures.to_vec();
             distinct.sort_unstable();
             distinct.dedup();
@@ -135,7 +150,10 @@ mod windows {
         let Ok(state) = open_dir(&stage.join("state")) else {
             return UNOPENABLE_FIXTURE;
         };
-        let isolated = stage.join("isolated");
+        // The disposable mounted root is a child of a separately opened,
+        // protected administrative component under the protected stage anchor.
+        let administrative_parent = stage.join("mount-parent");
+        let isolated = administrative_parent.join("isolated");
         // The isolated-root case exists ONLY in disposable hosted tests. No
         // caller parameter or client input can opt a production SCM service
         // into a grant; even a positive result is merely a terminal exit code.
@@ -153,7 +171,7 @@ mod windows {
                 {
                     return DENIED_STATE_DACL;
                 }
-                let Ok(parent) = open_dir(&stage) else {
+                let Ok(parent) = open_dir(&administrative_parent) else {
                     return DENIED_PARENT_OPEN;
                 };
                 let Ok(root) = open_dir(&isolated) else {
@@ -189,6 +207,28 @@ mod windows {
                 {
                     return FOREIGN_PARENT_INCORRECTLY_ACCEPTED;
                 }
+                // The actual restricted-SCM fixture must exercise the new
+                // *composed* administrative chain, not only the old root-only
+                // preflight. No extra paths, handles or grants escape this probe.
+                let Ok(anchor) = open_dir(&stage) else {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
+                };
+                let Ok(exterior_attempt) = root.try_clone() else {
+                    return DENIED_ROOT_OPEN;
+                };
+                if jdc_authority_service::windows_policy_root::observe_preopened_chain_bound_isolated_service_root(
+                    &anchor,
+                    &[(&foreign_parent, "foreign-parent")],
+                    exterior_attempt,
+                    "isolated",
+                )
+                .is_ok()
+                {
+                    return COMPOSITE_FOREIGN_CHAIN_INCORRECTLY_ACCEPTED;
+                }
+                let Ok(composite_root) = root.try_clone() else {
+                    return DENIED_ROOT_OPEN;
+                };
                 let Ok(mut observed) =
                     jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
                         &parent, root, "isolated",
@@ -200,6 +240,21 @@ mod windows {
                 // method; successful construction alone is insufficient.
                 if observed.revalidate().is_err() {
                     return DENIED_PARENT_DACL;
+                }
+                // Positive terminal verdict requires independent SCM/ACL
+                // revalidation of every named administrative chain entry.
+                let Ok(mut composite) =
+                    jdc_authority_service::windows_policy_root::observe_preopened_chain_bound_isolated_service_root(
+                        &anchor,
+                        &[(&parent, "mount-parent")],
+                        composite_root,
+                        "isolated",
+                    )
+                else {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
+                };
+                if composite.revalidate().is_err() {
+                    return COMPOSITE_ADMIN_CHAIN_DENIED;
                 }
                 isolated_disposition(true)
             }

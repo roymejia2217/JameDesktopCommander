@@ -21,7 +21,8 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
 }
 $created = $false
 $vhd = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.vhdx')
-$isolated = Join-Path $stage 'isolated'
+$mountParent = Join-Path $stage 'mount-parent'
+$isolated = Join-Path $mountParent 'isolated'
 $foreignParent = Join-Path $stage 'foreign-parent'
 $attached = $false
 $letter = @('R', 'S', 'T', 'U', 'V', 'W') |
@@ -107,6 +108,7 @@ try {
     New-Item -Path $stage -ItemType Directory -ErrorAction Stop | Out-Null
     New-Item -Path $binDir -ItemType Directory -ErrorAction Stop | Out-Null
     New-Item -Path $state -ItemType Directory -ErrorAction Stop | Out-Null
+    New-Item -Path $mountParent -ItemType Directory -ErrorAction Stop | Out-Null
     & $sc create $serviceName 'type=' 'own' 'start=' 'demand' 'binPath=' $binary | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_C4R_SCM_CREATE_FAILED' }
     $created = $true
@@ -121,6 +123,7 @@ try {
         [System.Security.Principal.SecurityIdentifier])
 
     Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
+    Set-ExactDirectoryAcl $mountParent $virtual $read $inherit $false
     Set-ExactDirectoryAcl $binDir $virtual $read $inherit $false
     Set-ExactDirectoryAcl $state $virtual $modify $inherit $false
     Copy-Item -LiteralPath $built -Destination $binary -ErrorAction Stop
@@ -196,9 +199,9 @@ exit
     # A service-writable mountpoint parent could rename or replace the
     # volume namespace entry. Even with a correct isolated root ACL, its
     # administrator-controlled direct parent must be read/traverse-only.
-    Set-ExactDirectoryAcl $stage $virtual $modify $inherit $false
+    Set-ExactDirectoryAcl $mountParent $virtual $modify $inherit $false
     Require-ServiceResult 'SERVICE_MUTABLE_MOUNT_PARENT_DENIED' 53
-    Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
+    Set-ExactDirectoryAcl $mountParent $virtual $read $inherit $false
     Require-ServiceResult 'ADMINISTRATIVE_MOUNT_PARENT_RESTORED' 46
     Set-ExactDirectoryAcl $volumeRoot $virtual $read $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $read $inherit $false
@@ -212,6 +215,13 @@ exit
     Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ISOLATED_ROOT_FINAL_POSITIVE' 46
+
+    # The original root-only preflight would not inspect the independently
+    # pinned stage anchor. Only the new composite must fail this scenario.
+    Set-ExactDirectoryAcl $stage $virtual $modify $inherit $false
+    Require-ServiceResult 'ADMINISTRATIVE_ANCHOR_MUTABLE_DENIED' 56
+    Set-ExactDirectoryAcl $stage $virtual $read $inherit $false
+    Require-ServiceResult 'ADMINISTRATIVE_ANCHOR_RESTORED' 46
 
     Write-Output 'T011-C4r Windows actual restricted SCM state-DACL positive/negative: PASS (non-release)'
     Write-Output 'T011_STORAGE_WINDOWS_ACTUAL_SCM_ISOLATED_VOLUME_COMPOSED_PASS_NONRELEASE'

@@ -1101,6 +1101,50 @@ nor same-principal hardlink provenance inside the approved volume. It
 does not install or activate a production issuer and does not close
 issue #148 or supersede the four #147 RED attacks.
 
+### Windows supplied source-parent/anchor edge binding (2026-11-03; NON-RELEASE)
+
+The existing composite `ObservedWindowsChainBoundIsolatedRoot` pinned and
+revalidated a caller-supplied administrative chain, but did not verify the
+first anchor's entry against a named, independently opened source parent.
+A real Windows NTFS fixture created distinct ordinary
+`configured-stage/mount-parent/isolated` and
+`foreign-stage/mount-parent/isolated` trees. Both internal chains were
+valid; before the code change, the complete foreign chain was admitted
+by the old composite despite the actual configured parent's child-name
+identity check rejecting the foreign anchor. The local pre-fix
+adversarial assertion produced **RED, Rust exit 101** with successful
+fixture setup. The exterior canary remained unchanged.
+
+This incremental, non-issuing observer now retains a pinned
+`anchor_parent: File` and `anchor_name: String`, and requires the
+existing `verify_preopened_administrative_child_identity` check during
+admission and every revalidation, in addition to the complete supplied
+administrative chain and the mounted root's existing checks. This
+component-relative kernel lookup compares complete volume and file
+identity and does not follow the final administrative reparse entry.
+Failed checks permanently revoke an old observation. The Windows
+kernel-only adversarial test also requires a positive real NTFS
+configured-chain control, denies the complete foreign chain under the
+expected parent/name, and preserves the exterior canary.
+
+The non-shipping SCM probe is updated to explicitly provide this
+parent/name edge from its **disposable test-executable stage**. That
+derivation is test infrastructure, **not** proof of a production
+canonical root or authorization from a trusted administrator.
+
+**Security limits:** The newly supplied source-parent handle itself
+is **not authenticated as a canonical administrator-provisioned
+ProgramData or policy root**. An actor who may choose that handle
+still controls the beginning of the chain; matching names and kernel
+object identities do not establish independent policy provenance.
+No atomic authorization/use guarantee, exclusive object custody,
+same-principal hard-link confinement, FFI safety proof, installed
+SCM service or MCP authority grant follows from this change.
+The original PR #147 adversarial acceptance requirements are unchanged.
+The exact-commit hosted Windows SCM/VHD test must run in disposable
+GitHub CI before accepting this incremental preflight. #148 remains
+**P0/BLOCKED** and the release remains **NO-GO**.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

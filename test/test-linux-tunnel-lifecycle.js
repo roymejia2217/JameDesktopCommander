@@ -152,6 +152,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let injectedReload = 'no';
   let injectedActivation = null;
   let profileListOverride = null;
+  let profileListRaw = null;
+  let healthRaw = null;
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
@@ -185,8 +187,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       }
       return '';
     }
-    if (args[0] === 'profiles') return JSON.stringify(profileListOverride ?? [{ name: 'jdc', path: profilePath }]);
-    if (args[0] === 'health') return JSON.stringify({
+    if (args[0] === 'profiles') return profileListRaw ?? JSON.stringify(profileListOverride ?? [{ name: 'jdc', path: profilePath }]);
+    if (args[0] === 'health') return healthRaw ?? JSON.stringify({
       result: healthy ? 'ok' : 'degraded',
       healthz: { ok: true }, readyz: { ok: true },
       control_plane_poll: { ok: healthy },
@@ -373,6 +375,53 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     profileListOverride = null;
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
       'The registered in-root profile must remain usable');
+
+    // A protected directory does not protect an existing world-writable file.
+    await chmod(profilePath, 0o666);
+    const beforeWritableProfile = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableProfile).some(c => c[1] === 'health'),
+      'A profile writable by another principal must not select a health endpoint');
+    await chmod(profilePath, 0o600);
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const nested = path.join(profiles, 'nested');
+    const nestedProfile = path.join(nested, 'profile.yaml');
+    await mkdir(nested, { mode: 0o700 });
+    await writeFile(nestedProfile, 'health:\n  url_file: ' + profileUrl + '\n', { mode: 0o600 });
+    profileListOverride = [{ name: 'jdc', path: nestedProfile }];
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'A profile in a protected subdirectory remains usable');
+    await chmod(nested, 0o777);
+    const beforeWritableParent = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableParent).some(c => c[1] === 'health'),
+      'An attacker-writable intermediate directory must not select a health endpoint');
+    await chmod(nested, 0o700);
+    profileListOverride = null;
+
+    // Parser exceptions can include the offending source line or JSON text.
+    // A malformed profile or client response must never expose its contents.
+    const marker = 'JDC_SYNTHETIC_SECRET_MARKER';
+    const assertRedacted = expected => error => {
+      assert.equal(error.message, expected);
+      assert.doesNotMatch(error.message, new RegExp(marker));
+      assert.equal(error.cause, undefined);
+      return true;
+    };
+    await writeFile(profilePath, `bearer: ${marker}: invalid\n`);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel status profile.'));
+    await writeFile(profilePath, 'health:\n  url_file: ' + profileUrl + '\n');
+    profileListOverride = [{ name: 'jdc', path: path.join(profiles, marker) }];
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Linux tunnel status profile is unavailable.'));
+    profileListOverride = null;
+    profileListRaw = marker;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel profiles list response.'));
+    profileListRaw = null;
+    healthRaw = marker;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel health response.'));
+    healthRaw = null;
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'Valid profile and client JSON still report health');
 
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');

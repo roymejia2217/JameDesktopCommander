@@ -72,7 +72,7 @@ namespaces.
 
 Desktop Commander offers multiple installation methods for Claude Desktop.
 
-> **📋 Update & Uninstall Information:** Options 1, 2, 4, and 6 have automatic updates. Option 5 requires manual updates. See below for details.
+> **📋 Update & Uninstall Information:** Options 1, 2, 4, and 6 have automatic updates. Option 3 (Smithery) was retired on October 31, 2026; Option 5 requires manual updates. See below for details.
 
 <details>
 <summary><b>Option 1: Install through npx ⭐ Auto-Updates (Requires Node.js)</b></summary>
@@ -114,11 +114,11 @@ This script handles all dependencies and configuration automatically.
 </details>
 
 <details>
-<summary><b>Option 3: Smithery integration (currently unavailable)</b></summary>
+<summary><b>Option 3: Smithery installation (retired October 31, 2026)</b></summary>
 
-The previously listed Smithery server page now returns HTTP 404. Do not
-follow obsolete installation instructions or enter credentials on an unverified
-replacement. Use Option 1 (npx) or Option 4 (manual configuration) instead.
+Smithery discontinued its managed MCP connections, accounts, API keys, and CLI on October 31, 2026. Installing Desktop Commander through the former Smithery connection flow is **no longer supported**. Use **Option 1 (npx setup)** or **Option 4 (manual Claude Desktop configuration)** instead.
+
+For details, see [Smithery's official service-transition notice](https://www.smithery.ai/future).
 
 </details>
 
@@ -670,7 +670,7 @@ Desktop Commander can be run in Docker containers for **complete isolation from 
 ## Updating & Uninstalling Desktop Commander
 
 ### Automatic Updates (Options 1, 2, 4 & 6)
-**Options 1 (npx), Option 2 (bash installer), 4 (manual config), and 6 (Docker)** automatically update to the latest version whenever you restart Claude. No manual intervention needed.
+**Options 1 (npx), 2 (bash installer), 4 (manual npx config), and 6 (Docker)** support automatic updates as documented above. **Option 3 (Smithery) is retired** and cannot be used for installation. No manual intervention needed.
 
 ### Manual Updates (Option 5)
 - **Option 5 (local checkout):** `cd DesktopCommanderMCP && git pull && npm run setup`
@@ -1085,7 +1085,7 @@ Unlike IDE-focused tools, Claude Desktop Commander provides a solution-centric a
 No. This tool works with Claude Desktop's standard Pro subscription ($20/month), not with API calls, so you won't incur additional costs beyond the subscription fee.
 
 ### Does Desktop Commander automatically update?
-Yes, when installed through npx, Desktop Commander automatically updates to the latest version when you restart Claude. No manual update process is needed.
+Yes, the supported npx-based installations (Options 1 and 4) obtain updates when Claude restarts, according to the documented setup. Smithery installation (Option 3) was retired on October 31, 2026.
 
 ### What are the most common use cases?
 - Exploring and understanding complex codebases

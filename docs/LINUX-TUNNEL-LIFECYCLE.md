@@ -35,14 +35,21 @@ exactly one official profile matching the registered name from
 profile directory are resolved to canonical paths; files outside that
 directory, including sibling paths with matching text prefixes or
 symlinks escaping the directory, are rejected before YAML loading or
-the official client health request. Only then does it read the selected
+the official client health request. The selected file is opened without
+following its final component, checked as a regular file owned by root or
+the current user and not group/world writable, and read from that same open
+handle. Its canonical parent and ancestors must also pass the existing
+directory custody checks. Only then does it read the selected
 profile's `health.url_file` reference and invoke
 `health --json --url-file ... --require-control-plane-poll`.
 A running unit without liveness, readiness and control-plane poll is
 **not** a healthy tunnel; the CLI exits nonzero. This path-selection
 guard does **not** provide race-free OS-object custody: hard links,
 mounts and same-principal concurrent modification remain outside its
-proof and subject to independent T011 security review.
+proof and subject to independent T011 security review. The status checks do
+not attest profile contents consumed independently by the official client
+during doctor, installation or service execution, nor do they establish
+publisher identity or eliminate concurrent ancestor replacement.
 
 The unit is **not a privileged filesystem authority**: this feature must
 not be confused with T011's blocked service and OS-principal custody
@@ -111,6 +118,10 @@ messages or causes. External diagnostics may contain absolute profile paths or
 bearer material; operators should use the maintained client's protected
 private diagnostics for detailed troubleshooting rather than public CLI logs.
 The command still exits nonzero and preserves fail-closed behavior on errors.
+Malformed client JSON and profile YAML also receive source-specific generic
+errors: parser messages can otherwise quote sensitive input. No original
+parser exception or cause is forwarded to the CLI. A missing or inaccessible
+selected profile also returns a generic error rather than its local path.
 
 ## Loaded service definition integrity
 

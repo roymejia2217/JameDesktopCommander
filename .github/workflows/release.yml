@@ -46,7 +46,7 @@ jobs:
               return;
             }
             // Read the live source of truth. API errors must fail the job closed.
-            const blockers = [124, 139, 148];
+            const blockers = [124, 139, 148, 150, 248];
             const outstanding = [];
             for (const issue_number of blockers) {
               const { data } = await github.rest.issues.get({ ...context.repo, issue_number });
@@ -57,7 +57,7 @@ jobs:
             const eligible = outstanding.length === 0;
             core.setOutput('eligible', eligible ? 'true' : 'false');
             if (!eligible) {
-              core.notice('Release Please deferred: P0 issues remain unresolved: ' +
+              core.notice('Release Please deferred: required release issues remain unresolved: ' +
                 outstanding.map(number => '#' + number).join(', '));
             }
 

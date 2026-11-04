@@ -70,8 +70,10 @@ verified provenance, full installer acceptance and all P0 gates below.
 
 The only approved release version/tag publisher is the existing
 .github/workflows/release.yml invoking googleapis/release-please-action.
-It currently requires owner approval plus closed security blockers #124,
-#139 and #148; the candidate workflow cannot remove or override that gate.
+It requires explicit owner approval and closure of P0 security blockers
+#124, #139 and #148, Linux runtime/installer acceptance #150, and secure local
+operations and credential recovery #248. Candidate workflows cannot override
+these release-readiness requirements.
 
 Installer artifacts currently carry UNPUBLISHED filenames, are not signed,
 are retained only as short-lived GitHub Actions artifacts, and must not be

@@ -60,19 +60,30 @@ test('missing manual approval fails closed without API access', async () => {
   }
 });
 
-test('every P0 is checked and any open issue defers release', async () => {
+test('every mandatory release blocker is checked and any open issue defers release', async () => {
   const states = { 124: { state: 'closed' }, 139: { state: 'open' },
-    148: { state: 'closed' } };
+    148: { state: 'closed' }, 150: { state: 'closed' }, 248: { state: 'closed' } };
   const result = await runGate({ states });
-  assert.deepEqual(result.calls, [124, 139, 148]);
+  assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
   assert.equal(result.outputs.get('eligible'), 'false');
   assert.ok(result.notices.some(message => message.includes('139')));
 });
 test('release is eligible only when all blockers are closed and approval is explicit', async () => {
   const closed = { state: 'closed' };
-  const result = await runGate({ states: { 124: closed, 139: closed, 148: closed } });
-  assert.deepEqual(result.calls, [124, 139, 148]);
+  const result = await runGate({ states: { 124: closed, 139: closed, 148: closed, 150: closed, 248: closed } });
+  assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
   assert.equal(result.outputs.get('eligible'), 'true');
+});
+
+test('open Linux installer or local recovery UX issue blocks publication even if all P0 are closed', async () => {
+  for (const blockingIssue of [150, 248]) {
+    const states = Object.fromEntries([124, 139, 148, 150, 248]
+      .map(number => [number, { state: number === blockingIssue ? 'open' : 'closed' }]));
+    const result = await runGate({ states });
+    assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
+    assert.equal(result.outputs.get('eligible'), 'false', `Issue #${blockingIssue} must block publication`);
+    assert.ok(result.notices.some(message => message.includes(`#${blockingIssue}`)));
+  }
 });
 
 test('unavailable GitHub issue or API failure cannot grant release eligibility', async () => {
@@ -81,4 +92,6 @@ test('unavailable GitHub issue or API failure cannot grant release eligibility',
   } });
   assert.equal(result.outputs.get('eligible'), 'false');
   await assert.rejects(runGate({ failOn: 139 }), /API unreachable/);
+  await assert.rejects(runGate({ failOn: 150 }), /API unreachable/);
+  await assert.rejects(runGate({ failOn: 248 }), /API unreachable/);
 });

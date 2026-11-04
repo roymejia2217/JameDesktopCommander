@@ -118,6 +118,10 @@ messages or causes. External diagnostics may contain absolute profile paths or
 bearer material; operators should use the maintained client's protected
 private diagnostics for detailed troubleshooting rather than public CLI logs.
 The command still exits nonzero and preserves fail-closed behavior on errors.
+Malformed client JSON and profile YAML also receive source-specific generic
+errors: parser messages can otherwise quote sensitive input. No original
+parser exception or cause is forwarded to the CLI. A missing or inaccessible
+selected profile also returns a generic error rather than its local path.
 
 ## Loaded service definition integrity
 

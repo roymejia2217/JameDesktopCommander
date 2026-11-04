@@ -338,7 +338,12 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.ok(!calls.slice(beforeDropInRestart).some(c => c[2] === 'try-restart'),
       'Drop-in must block restart before any executable transition');
     injectedDropIn = '';
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const healthyStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    assert.equal(healthyStatus.healthy, true);
+    assert.deepEqual(healthyStatus.lifecycleObservation, {
+      kind: 'local_lifecycle_only', state: 'unverified',
+      reasonCode: 'REMOTE_ROUND_TRIP_UNVERIFIED', remoteRoundTrip: 'not_observed',
+    });
     // A client reporting two entries for one configured profile is ambiguous.
     // Do not select the first entry and claim authenticated readiness.
     for (const duplicate of [
@@ -437,11 +442,20 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal(alive, false, 'Stop between state check and restart must remain effective');
     alive = true;
     healthy = false;
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, false);
+    const degradedStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    assert.equal(degradedStatus.healthy, false);
+    assert.equal(degradedStatus.lifecycleObservation.state, 'unverified');
+    assert.equal(degradedStatus.lifecycleObservation.reasonCode,
+      'CONTROL_PLANE_POLL_UNVERIFIED');
     await assert.rejects(runLinuxTunnelCommand(['restart', '--force'], deps),
       /no extra arguments/, 'Unrecognized restart options must fail closed');
     alive = false;
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.active, false);
+    const inactiveStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    assert.equal(inactiveStatus.active, false);
+    assert.deepEqual(inactiveStatus.lifecycleObservation, {
+      kind: 'local_lifecycle_only', state: 'inactive',
+      reasonCode: 'SERVICE_INACTIVE', remoteRoundTrip: 'not_observed',
+    });
     const beforeRejectedRestart = calls.length;
     await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
     assert.ok(!calls.slice(beforeRejectedRestart).some(c => c[2] === 'try-restart' || c[2] === 'restart'),

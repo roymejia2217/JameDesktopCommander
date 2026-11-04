@@ -81,3 +81,61 @@ export function assessLocalTunnelOperability(
     }
     return verdict('unverified', 'REMOTE_ROUND_TRIP_UNVERIFIED');
 }
+
+/**
+ * Local systemd/client observations do not include fresh remote MCP proof.
+ * Inactivity is a fact about the unit, not proof of an intentional stop.
+ * This coarse lifecycle view is distinct from HTTP component diagnostics.
+ */
+export interface TunnelLocalLifecycleEvidence {
+    active: boolean;
+    enabled: boolean;
+    healthy: boolean;
+    controlPlanePoll: boolean;
+}
+
+export interface TunnelLocalLifecycleObservation {
+    kind: 'local_lifecycle_only';
+    state: 'inactive' | 'unverified';
+    reasonCode:
+        | 'SERVICE_INACTIVE' | 'SERVICE_NOT_ENABLED'
+        | 'CONTROL_PLANE_POLL_UNVERIFIED' | 'LOCAL_HEALTH_UNVERIFIED'
+        | 'LOCAL_EVIDENCE_CONFLICT' | 'REMOTE_ROUND_TRIP_UNVERIFIED';
+    remoteRoundTrip: 'not_observed';
+}
+
+function lifecycleVerdict(
+    state: TunnelLocalLifecycleObservation['state'],
+    reasonCode: TunnelLocalLifecycleObservation['reasonCode'],
+): TunnelLocalLifecycleObservation {
+    return { kind: 'local_lifecycle_only', state, reasonCode,
+        remoteRoundTrip: 'not_observed' };
+}
+
+export function assessTunnelLocalLifecycle(
+    evidence: TunnelLocalLifecycleEvidence,
+): TunnelLocalLifecycleObservation {
+    if (!evidence ||
+        typeof evidence.active !== 'boolean' ||
+        typeof evidence.enabled !== 'boolean' ||
+        typeof evidence.healthy !== 'boolean' ||
+        typeof evidence.controlPlanePoll !== 'boolean' ||
+        (!evidence.active && (evidence.healthy || evidence.controlPlanePoll)) ||
+        (evidence.healthy && !evidence.controlPlanePoll)) {
+        return lifecycleVerdict('unverified', 'LOCAL_EVIDENCE_CONFLICT');
+    }
+
+    if (!evidence.active) {
+        return lifecycleVerdict('inactive', 'SERVICE_INACTIVE');
+    }
+    if (!evidence.enabled) {
+        return lifecycleVerdict('unverified', 'SERVICE_NOT_ENABLED');
+    }
+    if (!evidence.controlPlanePoll) {
+        return lifecycleVerdict('unverified', 'CONTROL_PLANE_POLL_UNVERIFIED');
+    }
+    if (!evidence.healthy) {
+        return lifecycleVerdict('unverified', 'LOCAL_HEALTH_UNVERIFIED');
+    }
+    return lifecycleVerdict('unverified', 'REMOTE_ROUND_TRIP_UNVERIFIED');
+}

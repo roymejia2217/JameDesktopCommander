@@ -32,7 +32,9 @@ The installed third-party tunnel-client, existing UI bridge and OpenCode gateway
 
 The classifier distinguishes active 401/403/429/5xx failures, missing control-plane evidence, absent handshake/discovery, and local readiness. HTTP-denial classification requires a degraded official control-plane component, `http_error` reason and a positive validated consecutive-failure count. A confirmed local readiness failure remains `degraded` even if control-plane diagnostics are unavailable; an unknown control plane cannot hide it. A missing counter, stale HTTP code, missing live/ready flag, or apparently green local probes never become a remotely healthy claim. The results contain allowlisted codes, not raw provider errors, tool names or secrets. A 401 is **rejected credentials**, not independently confirmed expiry.
 
-The remaining cross-platform snapshot, service intent, real operator identity, freshness timestamps, signed local controller, secure rotation, UI, packaged lifecycle and authenticated fresh remote round-trip are **not implemented by this increment**. No installed service/runtime is modified.
+The Linux status surface additionally exposes `lifecycleObservation` from a portable, read-only evaluation of the already parsed systemd activation state and official-client aggregate health. It reports `inactive` without inventing deliberate operator intent, and otherwise uses `unverified` reason codes for a disabled unit, missing control-plane polling, missing local health, inconsistent evidence or absent fresh remote delivery. It cannot diagnose HTTP 401 or prove a remote MCP round trip; it never changes service state. The existing `active`, `enabled`, `healthy` and `controlPlanePoll` fields, as well as Linux exit-code behavior, remain unchanged.
+
+The remaining unified cross-platform snapshot, verified service intent, real operator identity, freshness timestamps, signed local controller, secure rotation, UI, packaged lifecycle and authenticated fresh remote round-trip are **not implemented by these S1 increments**. No installed service/runtime is modified.
 
 ### Remaining target public contract
 

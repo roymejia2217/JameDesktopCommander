@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expandBundledTunnelArguments } from '../platform/tunnel-bundled.js';
 
 import {
     installWindowsTunnelTask,
@@ -482,6 +483,7 @@ Usage:
 
 Notes:
   install runs the official tunnel-client doctor before registering the task.
+  install --bundled --profile-dir <absolute-path> --profile <name> explicitly selects the installed official client; never replaces a running tunnel without --force.
   --recover-on-exit opts in to native Task Scheduler five-minute repetitions on unexpected process exit, including exit code 0.
   stop first disables the task to preserve intentional operator STOP; start re-enables it.
   restart re-registers and launches an external Windows Task Scheduler supervisor so it survives the tunnel process tree.
@@ -497,13 +499,13 @@ export async function runTunnel(
     const platform = dependencies.platform ?? process.platform;
     if (platform === 'linux') {
         if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | uninstall');
+            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | uninstall; doctor|install --bundled --profile-dir <absolute> --profile <name>');
             return;
         }
         try {
             // Import only on Linux: Windows lifecycle and existing tests remain untouched.
             const { runLinuxTunnelCommand } = await import('../platform/linux/tunnel-lifecycle.js');
-            const result = await runLinuxTunnelCommand(args, { platform });
+            const result = await runLinuxTunnelCommand(expandBundledTunnelArguments(args, platform), { platform });
             console.log(JSON.stringify(result, null, 2));
             if (result.action === 'status' &&
                 (!result.status?.active || !result.status.enabled || !result.status.healthy ||
@@ -523,7 +525,7 @@ export async function runTunnel(
     }
 
     try {
-        const result = await runWindowsTunnelCommand(args, dependencies);
+        const result = await runWindowsTunnelCommand(expandBundledTunnelArguments(args, platform), dependencies);
         console.log(formatWindowsTunnelCommandResult(result));
         if (
             result.action === 'status' &&

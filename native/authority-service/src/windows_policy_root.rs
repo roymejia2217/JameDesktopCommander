@@ -1899,6 +1899,84 @@ mod tests {
         // No native I/O grant or production service is created by this test.
     }
 
+    // Non-release NTFS kernel constraint, NOT a sticky-revocation proof:
+    // ordinary ancestor rename cannot exercise a retirement interleaving
+    // while real descendant handles stay open, even with FILE_SHARE_DELETE.
+    #[test]
+    fn pinned_ntfs_descendants_block_source_anchor_rename_nonrelease() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+        let fixture = tempfile::tempdir().unwrap();
+        let stage = fixture.path().join("admin-stage");
+        let retired = fixture.path().join("retired-admin-stage");
+        let parent_path = stage.join("mount-parent");
+        let root_path = parent_path.join("isolated");
+        std::fs::create_dir_all(&root_path).unwrap();
+        let canary = root_path.join("canary.bin");
+        let original = b"RETIRED_SOURCE_ANCHOR_BYTES_UNCHANGED";
+        std::fs::write(&canary, original).unwrap();
+
+        // Explicit delete sharing distinguishes descendant handle custody
+        // from a missing FILE_SHARE_DELETE flag.
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(SHARE_READ_WRITE_DELETE)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let source_parent = open(fixture.path());
+        let anchor = open(&stage);
+        let parent = open(&parent_path);
+        let mut original_observation =
+            ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+                &source_parent,
+                "admin-stage",
+                &anchor,
+                &[(&parent, "mount-parent")],
+                open(&root_path),
+                "isolated",
+            )
+            .expect("positive control: original pinned NTFS chain must be internally valid");
+        assert_eq!(
+            original_observation.revalidate_kernel_only_for_test(),
+            Ok(())
+        );
+
+        let blocked = std::fs::rename(&stage, &retired)
+            .expect_err("real pinned descendants must block ordinary ancestor rename");
+        assert_eq!(
+            blocked.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "NTFS returned a different failure; this kernel constraint is not established"
+        );
+        assert!(stage.is_dir());
+        assert!(!retired.exists());
+        assert_eq!(
+            original_observation.revalidate_kernel_only_for_test(),
+            Ok(()),
+            "no namespace transition occurred; the valid observation must remain valid"
+        );
+        assert_eq!(std::fs::read(&canary).unwrap(), original);
+
+        // The actual same-directory move MUST succeed once every pinned
+        // descendant has been closed; otherwise the setup is inconclusive.
+        drop(original_observation);
+        drop(parent);
+        drop(anchor);
+        drop(source_parent);
+        std::fs::rename(&stage, &retired)
+            .expect("without pinned handles the same NTFS rename must succeed");
+        assert!(!stage.exists());
+        assert!(retired.is_dir());
+        std::fs::rename(&retired, &stage).unwrap();
+        assert_eq!(std::fs::read(&canary).unwrap(), original);
+        // This does not test revocation under a successfully installed swap.
+        // Invariant O and production source-root custody remain unproven.
+    }
+
     #[test]
     fn kernel_only_binding_stays_valid_after_parent_junction_removal_nonrelease() {
         use std::{os::windows::fs::OpenOptionsExt, process::Command};

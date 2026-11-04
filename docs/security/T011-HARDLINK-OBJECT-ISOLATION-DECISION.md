@@ -1182,6 +1182,50 @@ privileged mount replacement, or guarantee read/write atomicity. The four
 original #147 hard-link RED cases and #124/#139/#148 release gates remain
 unchanged, and no production issuer or runtime operation is enabled.
 
+### OS-known Windows ProgramData source-parent binding (2026-11-04; NON-RELEASE)
+
+The composite previously accepted a caller-supplied source-parent handle
+with an internally consistent anchor/child chain. A real NTFS negative
+control proved the foreign tree could satisfy all kernel-only checks when
+the caller chose both the foreign parent and its matching anchor name.
+Merely comparing each child to its supplied parent was insufficient.
+
+The Windows **non-issuing SCM observation** now independently resolves the
+system-wide `FOLDERID_ProgramData` with Microsoft's documented
+`SHGetKnownFolderPath` API, including explicit COM thread initialization
+and `CoTaskMemFree` ownership. It opens that OS-selected folder without
+following its final reparse entry and checks directory type. The existing
+NTFS/local-disk identity logic compares both already-open objects by
+their kernel volume and full file ID, not by a supplied path string. A
+mismatch or unavailable/conflicting COM context DENIES. Admission and
+every SCM-backed revalidation require this parent identity **before**
+revalidating the supplied named anchor, administrative chain, and isolated
+root. The normal-user kernel-only test fixture remains explicitly
+non-authorizing and retains its foreign-source counterexample.
+
+The new Windows TDD regression first failed compilation (missing module),
+then **passed on a real Windows host**: actual system `ProgramData` was
+accepted, while a caller-selected disposable NTFS parent was denied.
+The prior foreign-chain test now additionally asserts the OS-parent
+denial, while its kernel-only counterexample remains visible. The
+real SCM/VHD positive must still execute in exact-head disposable hosted
+Windows acceptance: local normal-user unit tests do **not** prove that the
+SCM service's COM context and protected DACL arrangement accept.
+
+This authenticates only the **OS-known parent directory's identity at the
+instant of observation**. `ProgramData` normally permits user-created
+subdirectories; it is not itself a sealed per-application policy root.
+The supplied anchor child name remains caller-selected, with no
+independently trusted policy/registry binding. A privileged actor may
+change the known-folder configuration, mount aliases or source namespace
+between observation and later I/O. Volume serial/file IDs alone do not
+prove collision-free physical origin. No atomic operation is issued;
+#147's four hard-link/object-integrity RED cases, #124/#139, Linux
+issuer parity and independent security review remain mandatory.
+This is **not** a release approval. Official contracts:
+<https://learn.microsoft.com/en-us/windows/win32/shell/known-folders> and
+<https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath>.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

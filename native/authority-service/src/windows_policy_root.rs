@@ -490,6 +490,28 @@ fn from_handle(opened: &File) -> Result<(u64, u32, [u8; 16]), IdentityDenied> {
     ))
 }
 
+/// Require two already-open local NTFS directories to name the same kernel
+/// file identity. Their pathname strings and permissions are not sufficient.
+/// A matching serial/file ID alone is NOT an OS provisioning or atomicity proof.
+pub(crate) fn verify_preopened_same_directory_identity(
+    given: &File,
+    expected: &File,
+) -> Result<(), IdentityDenied> {
+    let (given_volume, given_flags, given_id) = from_handle(given)?;
+    let (expected_volume, expected_flags, expected_id) = from_handle(expected)?;
+    let ordinary_dir =
+        |flags| flags & FILE_ATTRIBUTE_DIRECTORY != 0 && flags & FILE_ATTRIBUTE_REPARSE_POINT == 0;
+    if given_volume == 0
+        || given_id == [0; 16]
+        || !ordinary_dir(given_flags)
+        || !ordinary_dir(expected_flags)
+        || (given_volume, given_id) != (expected_volume, expected_id)
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 /// Compare already-open handles without trusting path strings. This is
 /// necessary separation, NOT a Windows authority grant.
 pub fn verify_preopened_volume_separation(
@@ -792,9 +814,9 @@ pub fn observe_preopened_isolated_service_root(
 /// complete administrative chain, and isolated root are pinned and revalidated.
 /// This type exposes no filesystem operation or reusable root File handle.
 ///
-/// The supplied source parent is not independently authenticated as a canonical
-/// administrator-provisioned policy root; no exclusive custody or atomic I/O
-/// guarantee follows from this point-in-time observation.
+/// The source parent must match OS-known ProgramData by opened-object identity,
+/// but the caller still supplies the anchor child name and no independent
+/// administrator-provisioned policy identity or atomic I/O grant follows.
 pub struct ObservedWindowsChainBoundIsolatedRoot {
     anchor_parent: File,
     anchor_name: String,
@@ -813,6 +835,7 @@ impl ObservedWindowsChainBoundIsolatedRoot {
         }
         self.active = false;
         verify_service_identity()?;
+        crate::windows_program_data_origin::verify_system_program_data_parent(&self.anchor_parent)?;
         verify_preopened_administrative_child_identity(
             &self.anchor_parent,
             &self.administrative.anchor,
@@ -883,9 +906,9 @@ impl ObservedWindowsChainBoundIsolatedRoot {
 /// administrative-chain entry, not from an unrelated supplied handle.
 ///
 /// This verifies the real SCM principal, protected per-ancestor ACLs and the
-/// supplied source-parent/anchor edge. It does not authenticate the caller's
-/// source parent as the configured policy root or prove durable/exclusive
-/// storage custody. It is not a grant or MCP backend.
+/// source-parent/anchor edge, and OS-known ProgramData parent identity.
+/// It does not authenticate the caller-chosen anchor as the configured policy
+/// root or prove durable/exclusive storage custody. Not an MCP backend/grant.
 pub fn observe_preopened_chain_bound_isolated_service_root(
     anchor_parent: &File,
     anchor_name: &str,
@@ -895,6 +918,7 @@ pub fn observe_preopened_chain_bound_isolated_service_root(
     root_name: &str,
 ) -> Result<ObservedWindowsChainBoundIsolatedRoot, IdentityDenied> {
     verify_service_identity()?;
+    crate::windows_program_data_origin::verify_system_program_data_parent(anchor_parent)?;
     verify_preopened_administrative_child_identity(anchor_parent, anchor, anchor_name)?;
     let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     inspect_acl(anchor, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;
@@ -918,6 +942,34 @@ pub fn observe_preopened_chain_bound_isolated_service_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_known_program_data_parent_must_reject_caller_substitution() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let known = std::env::var_os("ProgramData")
+            .expect("Windows hosted test must expose the system common-data path");
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .expect("actual directory open")
+        };
+        let genuine = open(std::path::Path::new(&known));
+        let foreign_fixture = tempfile::tempdir().expect("disposable negative control");
+        let substituted = open(foreign_fixture.path());
+        assert_eq!(
+            crate::windows_program_data_origin::verify_system_program_data_parent(&genuine),
+            Ok(()),
+            "OS-known ProgramData must remain usable as the non-issuing source parent"
+        );
+        assert_eq!(
+            crate::windows_program_data_origin::verify_system_program_data_parent(&substituted),
+            Err(IdentityDenied),
+            "a legitimate-looking but independently supplied parent cannot replace ProgramData"
+        );
+    }
 
     #[test]
     fn windows_root_identity_must_be_bound_to_kernel_reported_ntfs() {
@@ -2025,6 +2077,13 @@ mod tests {
         };
         let provisioned_parent = open(&provisioned_parent_path);
         let substituted_parent = open(&substituted_parent_path);
+        assert_eq!(
+            crate::windows_program_data_origin::verify_system_program_data_parent(
+                &substituted_parent,
+            ),
+            Err(IdentityDenied),
+            "the independently known ProgramData parent must reject a chosen tree"
+        );
         let anchor = open(&substituted_anchor);
         let chain_parent = open(&substituted_chain_parent);
 

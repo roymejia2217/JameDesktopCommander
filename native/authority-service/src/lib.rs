@@ -72,6 +72,9 @@ mod windows_acl_aces;
 #[cfg(windows)]
 pub mod windows_token;
 
+// OS-known ProgramData parent identity check, never an issuer or filesystem grant.
+#[cfg(windows)]
+mod windows_program_data_origin;
 // Private handle-relative volume mountpoint classifier; never grants I/O.
 #[cfg(windows)]
 mod windows_mountpoint;

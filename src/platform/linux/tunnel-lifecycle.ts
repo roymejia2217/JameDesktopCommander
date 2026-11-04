@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
 
@@ -146,6 +146,29 @@ async function resolveTrustedProfileDirectory(profileDir: string): Promise<strin
     return canonical;
   } catch {
     throw new Error('Linux tunnel profile directory custody cannot be verified.');
+  }
+}
+
+// A trusted parent does not protect an existing file with unsafe permissions.
+// Read and check the same opened regular file. This is a point-in-time check,
+// not protection against same-user writes or concurrent ancestor replacement.
+async function readTrustedStatusProfile(profileFile: string): Promise<string> {
+  try {
+    await resolveTrustedProfileDirectory(path.dirname(profileFile));
+    const file = await open(profileFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      const uid = process.getuid?.();
+      if (uid === undefined || !info.isFile() || (info.uid !== 0 && info.uid !== uid) ||
+          (info.mode & 0o022) !== 0) {
+        throw new Error('Untrusted profile file');
+      }
+      return await file.readFile('utf8');
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new Error('Linux tunnel status profile custody cannot be verified.');
   }
 }
 
@@ -310,8 +333,18 @@ function parseActivationState(response: string): { active: boolean; enabled: boo
   return { active: activeState === 'active', enabled: unitFileState === 'enabled' };
 }
 
+// JSON/YAML parser diagnostics may quote sensitive input. Keep parse errors
+// distinct by source without forwarding messages, source snippets or causes.
+function parseClientJson(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error('Invalid tunnel ' + label + ' response.');
+  }
+}
+
 function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: boolean } {
-  const parsed: unknown = JSON.parse(value);
+  const parsed = parseClientJson(value, 'health');
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('Invalid tunnel health response.');
   const obj = parsed as Record<string, unknown>;
   function checked(key: string): boolean {
@@ -418,8 +451,8 @@ export async function runLinuxTunnelCommand(
       let health = { healthy: false, controlPlanePoll: false };
       if (active) {
         if (!registration) throw new Error('Linux tunnel registration unavailable.');
-        const list = JSON.parse(await run(registration.executable,
-          ['profiles', 'list', '--profile-dir', registration.profileDir, '--json'])) as unknown;
+        const list = parseClientJson(await run(registration.executable,
+          ['profiles', 'list', '--profile-dir', registration.profileDir, '--json']), 'profiles list');
         if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
         // The official client must identify one unambiguous profile.
         // Selecting the first match can report readiness for the wrong entry.
@@ -436,14 +469,22 @@ export async function runLinuxTunnelCommand(
         if (canonicalProfileDir !== registration.profileDir) {
           throw new Error('Tunnel registered profile directory changed.');
         }
-        const profileFile = await realpath(safePath(entry.path));
+        const profileFile = await realpath(safePath(entry.path)).catch(() => {
+          throw new Error('Linux tunnel status profile is unavailable.');
+        });
         const relativeProfile = path.relative(canonicalProfileDir, profileFile);
         if (!relativeProfile || relativeProfile === '..' ||
             relativeProfile.startsWith('..' + path.sep) ||
             path.isAbsolute(relativeProfile)) {
           throw new Error('Tunnel profile is outside registered profile directory.');
         }
-        const profile = YAML.parse(await readFile(profileFile, 'utf8')) as { health?: { url_file?: unknown } };
+        const profileText = await readTrustedStatusProfile(profileFile);
+        let profile: { health?: { url_file?: unknown } };
+        try {
+          profile = YAML.parse(profileText) as { health?: { url_file?: unknown } };
+        } catch {
+          throw new Error('Invalid tunnel status profile.');
+        }
         if (typeof profile?.health?.url_file !== 'string') throw new Error('Missing tunnel health URL reference.');
         const urlFile = safePath(profile.health.url_file);
         health = healthFromJson(await run(registration.executable,

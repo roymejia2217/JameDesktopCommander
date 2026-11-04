@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
 
@@ -146,6 +146,29 @@ async function resolveTrustedProfileDirectory(profileDir: string): Promise<strin
     return canonical;
   } catch {
     throw new Error('Linux tunnel profile directory custody cannot be verified.');
+  }
+}
+
+// A trusted parent does not protect an existing file with unsafe permissions.
+// Read and check the same opened regular file. This is a point-in-time check,
+// not protection against same-user writes or concurrent ancestor replacement.
+async function readTrustedStatusProfile(profileFile: string): Promise<string> {
+  try {
+    await resolveTrustedProfileDirectory(path.dirname(profileFile));
+    const file = await open(profileFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      const uid = process.getuid?.();
+      if (uid === undefined || !info.isFile() || (info.uid !== 0 && info.uid !== uid) ||
+          (info.mode & 0o022) !== 0) {
+        throw new Error('Untrusted profile file');
+      }
+      return await file.readFile('utf8');
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new Error('Linux tunnel status profile custody cannot be verified.');
   }
 }
 
@@ -443,7 +466,7 @@ export async function runLinuxTunnelCommand(
             path.isAbsolute(relativeProfile)) {
           throw new Error('Tunnel profile is outside registered profile directory.');
         }
-        const profile = YAML.parse(await readFile(profileFile, 'utf8')) as { health?: { url_file?: unknown } };
+        const profile = YAML.parse(await readTrustedStatusProfile(profileFile)) as { health?: { url_file?: unknown } };
         if (typeof profile?.health?.url_file !== 'string') throw new Error('Missing tunnel health URL reference.');
         const urlFile = safePath(profile.health.url_file);
         health = healthFromJson(await run(registration.executable,

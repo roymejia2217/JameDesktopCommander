@@ -374,6 +374,29 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
       'The registered in-root profile must remain usable');
 
+    // A protected directory does not protect an existing world-writable file.
+    await chmod(profilePath, 0o666);
+    const beforeWritableProfile = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableProfile).some(c => c[1] === 'health'),
+      'A profile writable by another principal must not select a health endpoint');
+    await chmod(profilePath, 0o600);
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const nested = path.join(profiles, 'nested');
+    const nestedProfile = path.join(nested, 'profile.yaml');
+    await mkdir(nested, { mode: 0o700 });
+    await writeFile(nestedProfile, 'health:\n  url_file: ' + profileUrl + '\n', { mode: 0o600 });
+    profileListOverride = [{ name: 'jdc', path: nestedProfile }];
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'A profile in a protected subdirectory remains usable');
+    await chmod(nested, 0o777);
+    const beforeWritableParent = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableParent).some(c => c[1] === 'health'),
+      'An attacker-writable intermediate directory must not select a health endpoint');
+    await chmod(nested, 0o700);
+    profileListOverride = null;
+
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
     assert.ok(calls.slice(beforeRestart).some(c =>

@@ -3,6 +3,10 @@ import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
+import {
+  assessTunnelLocalLifecycle,
+  type TunnelLocalLifecycleObservation,
+} from '../tunnel-local-operability.js';
 
 export const LINUX_TUNNEL_UNIT = 'jame-desktop-commander-tunnel.service';
 const marker = '# Managed by JameDesktopCommander Linux tunnel lifecycle v1';
@@ -22,6 +26,7 @@ export interface LinuxTunnelStatus {
   enabled: boolean;
   healthy: boolean;
   controlPlanePoll: boolean;
+  lifecycleObservation: TunnelLocalLifecycleObservation;
 }
 
 const defaultRun = (executable: string, args: readonly string[]): Promise<string> =>
@@ -490,7 +495,10 @@ export async function runLinuxTunnelCommand(
         health = healthFromJson(await run(registration.executable,
           ['health', '--json', '--url-file', urlFile, '--require-control-plane-poll']));
       }
-      return { action, unit, status: { unit, active, enabled, ...health } };
+      return { action, unit, status: {
+        unit, active, enabled, ...health,
+        lifecycleObservation: assessTunnelLocalLifecycle({ active, enabled, ...health }),
+      } };
     }
   }
   return { action, unit };

@@ -26,9 +26,9 @@ use windows_sys::{
         },
         Storage::FileSystem::{
             FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
-            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-            FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
+            GetVolumeInformationByHandleW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
         },
         System::IO::IO_STATUS_BLOCK,
     },
@@ -366,9 +366,55 @@ fn validate_volume_boundary(observed: WindowsVolumeBoundary) -> Result<(), Ident
     Ok(())
 }
 
+// This observation is defined for Windows NTFS semantics only.
+// An unrecognized, truncated or malformed kernel-reported FS name must DENY.
+fn validate_ntfs_fs_name(name: &[u16]) -> Result<(), IdentityDenied> {
+    let end = name
+        .iter()
+        .position(|&unit| unit == 0)
+        .ok_or(IdentityDenied)?;
+    if end != 4 || name[end + 1..].iter().any(|&unit| unit != 0) {
+        return Err(IdentityDenied);
+    }
+    if String::from_utf16(&name[..end])
+        .map_err(|_| IdentityDenied)?
+        .eq_ignore_ascii_case("NTFS")
+    {
+        Ok(())
+    } else {
+        Err(IdentityDenied)
+    }
+}
+
+/// Query the actual file system through the same already-open kernel handle.
+/// A volume serial or reparse target alone does not establish NTFS semantics.
+/// This is necessary evidence only, never an authenticated storage issuer.
+fn require_ntfs_volume_from_handle(opened: &File) -> Result<(), IdentityDenied> {
+    let mut name = [0u16; 32];
+    // SAFETY: the live File owns hFile, and the fixed UTF-16 buffer is
+    // exclusively writable for this synchronous Win32 information query.
+    let ok = unsafe {
+        GetVolumeInformationByHandleW(
+            opened.as_raw_handle().cast(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(IdentityDenied);
+    }
+    validate_ntfs_fs_name(&name)
+}
+
 /// Read a full kernel object identity from an owned OS directory handle.
 /// This cannot establish custody or an actual namespace parent relationship.
 fn from_handle(opened: &File) -> Result<(u64, u32, [u8; 16]), IdentityDenied> {
+    require_ntfs_volume_from_handle(opened)?;
     // SAFETY: both fixed-size, zero-initialized Win32 POD buffers are
     // borrowed exclusively by the kernel while the same owned File handle
     // stays open. No raw pointer escapes. Unsupported identity queries
@@ -655,6 +701,7 @@ pub fn observe_preopened_service_state(
     file: File,
 ) -> Result<ObservedWindowsStateDirectory, IdentityDenied> {
     verify_service_identity()?;
+    require_ntfs_volume_from_handle(&file)?;
     let attrs = file.metadata().map_err(|_| IdentityDenied)?;
     if !attrs.is_dir() || attrs.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(IdentityDenied);
@@ -831,6 +878,40 @@ pub fn observe_preopened_chain_bound_isolated_service_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_root_identity_must_be_bound_to_kernel_reported_ntfs() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().expect("disposable Windows fixture");
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(fixture.path())
+            .expect("open a real Windows directory handle");
+        assert_eq!(
+            require_ntfs_volume_from_handle(&directory),
+            Ok(()),
+            "host fixture must reside on real NTFS; never score unknown FS as accepted"
+        );
+        for other in ["ReFS", "FAT32", "exFAT", "SMB", "", "NTFS\0MALICIOUS"] {
+            let raw = other
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                validate_ntfs_fs_name(&raw),
+                Err(IdentityDenied),
+                "unreviewed filesystem names must never pass the NTFS-only observer"
+            );
+        }
+        let valid = "NTFS"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        assert_eq!(validate_ntfs_fs_name(&valid), Ok(()));
+    }
+
     fn ace(principal: Principal, mask: u32) -> AceSummary {
         AceSummary {
             principal,

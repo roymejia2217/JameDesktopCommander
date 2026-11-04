@@ -1145,6 +1145,34 @@ The exact-commit hosted Windows SCM/VHD test must run in disposable
 GitHub CI before accepting this incremental preflight. #148 remains
 **P0/BLOCKED** and the release remains **NO-GO**.
 
+### Windows NTFS-only handle preflight (2026-11-04; NON-RELEASE)
+
+The native Windows observer previously consumed `FILE_ID_INFO` and volume serial
+evidence from arbitrary opened filesystem handles without confirming that
+the filesystem was NTFS. This was outside the reviewed NTFS/ACL/mountpoint
+model. The non-issuing `windows_policy_root::from_handle` now asks Windows
+`GetVolumeInformationByHandleW` for the filesystem name on that SAME opened
+handle before interpreting file identity. The service-state observation
+also applies this check before evaluating its directory DACL. Unsupported
+queries, malformed UTF-16, unknown names (including ReFS, FAT/exFAT and
+SMB labels), or truncated names deny rather than silently enter the NTFS
+acceptance path. No ambient pathname resolution or second storage handle
+is introduced. [Microsoft API documentation](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew).
+
+The Windows TDD probe first failed compilation due to missing NTFS guard
+symbols (RED), then passed using a real opened NTFS directory and synthetic
+rejected filesystem-name cases. Locked Rust 1.91.1 all-targets tests passed
+(135 library passed, 3 ignored hosted-only, plus independent example suites);
+strict Clippy and Rustfmt also passed. These are **local Windows** results.
+Exact new-SHA hosted Windows SCM/VHD and Linux feasibility remain mandatory.
+
+This is **necessary supported-filesystem validation, not independent policy
+origin authentication**: a filesystem name cannot establish the configured
+administrator-provisioned source parent, rule out cross-volume aliases or
+privileged mount replacement, or guarantee read/write atomicity. The four
+original #147 hard-link RED cases and #124/#139/#148 release gates remain
+unchanged, and no production issuer or runtime operation is enabled.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

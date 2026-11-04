@@ -499,7 +499,7 @@ export async function runTunnel(
     const platform = dependencies.platform ?? process.platform;
     if (platform === 'linux') {
         if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | uninstall; doctor|install --bundled --profile-dir <absolute> --profile <name>');
+            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | diagnose | uninstall; doctor|install --bundled --profile-dir <absolute> --profile <name>');
             return;
         }
         try {

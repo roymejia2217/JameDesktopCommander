@@ -132,6 +132,18 @@ test('Linux tunnel rejects other platforms and root before external calls', asyn
   assert.equal(count, 0);
 });
 
+test('Linux diagnose rejects caller-selected endpoints before any health lookup', async () => {
+  const invoked = [];
+  const dependencies = {
+    platform: 'linux', uid: () => 1000, home: '/tmp',
+    run: async (bin, args) => { invoked.push([bin, ...args]); return ''; },
+  };
+  await assert.rejects(runLinuxTunnelCommand([
+    'diagnose', '--endpoint', 'http://127.0.0.1:1234/',
+  ], dependencies), /no extra arguments/);
+  assert.deepEqual(invoked, [['systemctl', '--user', 'show-environment']]);
+});
+
 test('Linux systemd user lifecycle and actual health are fail-closed and preserve operator stop', {
   skip: process.platform !== 'linux',
 }, async () => {
@@ -344,6 +356,61 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       kind: 'local_lifecycle_only', state: 'unverified',
       reasonCode: 'REMOTE_ROUND_TRIP_UNVERIFIED', remoteRoundTrip: 'not_observed',
     });
+    // The local admin endpoint is selected only from the installed,
+    // validated profile; callers cannot supply a URL on the command line.
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    let diagnosticRequests = 0;
+    deps.fetchFn = async (url, init) => {
+      diagnosticRequests++;
+      assert.equal(url.toString(), 'http://127.0.0.1:17543/health?details=true');
+      assert.equal(init.method, 'GET');
+      assert.equal(init.redirect, 'error');
+      return Response.json({
+        live: true, ready: true,
+        components: {
+          mcp: { details: { initialize: { ok: false }, tools_list: { complete: false } } },
+          dispatcher: { details: { active: 0 } },
+          queue: { details: { depth: 0 } },
+          'control-plane': {
+            status: 'degraded', reason_code: 'http_error',
+            details: { consecutive_failures: 5, http_status: 401,
+              last_error: 'PRIVATE_BEARER_NEVER_REPORT' },
+          },
+        },
+      });
+    };
+    const diagnosis = await runLinuxTunnelCommand(['diagnose'], deps);
+    assert.equal(diagnosis.action, 'diagnose');
+    assert.equal(diagnosis.diagnostics.operability.reasonCode, 'CONTROL_PLANE_CREDENTIAL_REJECTED');
+    assert.equal(diagnosis.diagnostics.operability.remoteRoundTrip, 'not_observed');
+    assert.doesNotMatch(JSON.stringify(diagnosis), /PRIVATE_BEARER_NEVER_REPORT/);
+    assert.equal(diagnosticRequests, 1);
+    await writeFile(profileUrl, 'http://untrusted-host:17543/\n');
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /local HTTP endpoint/, 'Non-loopback diagnostic endpoints must deny before network I/O');
+    assert.equal(diagnosticRequests, 1);
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n');
+    await chmod(profileUrl, 0o666);
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /URL file custody/, 'Unsafe permissions must reject without fetching');
+    assert.equal(diagnosticRequests, 1);
+    await chmod(profileUrl, 0o600);
+    const unsafeUrl = path.join(home, 'health-forged.url');
+    await writeFile(unsafeUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    await rm(profileUrl);
+    await symlink(unsafeUrl, profileUrl);
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /URL file custody/, 'A symlink URL file must never select a diagnostic endpoint');
+    assert.equal(diagnosticRequests, 1);
+    await rm(profileUrl);
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    deps.fetchFn = async () => new Response('SENSITIVE_BEARER_NEVER_REPORT', { status: 500 });
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps), error => {
+      assert.equal(error.message, 'Linux tunnel local HTTP endpoint is unavailable or invalid.');
+      assert.doesNotMatch(error.message, /SENSITIVE_BEARER_NEVER_REPORT/);
+      return true;
+    });
+    deps.fetchFn = undefined;
     // A client reporting two entries for one configured profile is ambiguous.
     // Do not select the first entry and claim authenticated readiness.
     for (const duplicate of [
@@ -451,6 +518,12 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       /no extra arguments/, 'Unrecognized restart options must fail closed');
     alive = false;
     const inactiveStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    const beforeInactiveDiagnosis = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /local diagnostics unavailable.*inactive/,
+      'An inactive service has no verified live diagnostic endpoint');
+    assert.ok(!calls.slice(beforeInactiveDiagnosis).some(c => c[1] === 'health' ||
+      c[1] === 'profiles'), 'Inactive diagnosis must not invoke client health or profile commands');
     assert.equal(inactiveStatus.active, false);
     assert.deepEqual(inactiveStatus.lifecycleObservation, {
       kind: 'local_lifecycle_only', state: 'inactive',

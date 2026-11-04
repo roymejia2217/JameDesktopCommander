@@ -1226,6 +1226,50 @@ This is **not** a release approval. Official contracts:
 <https://learn.microsoft.com/en-us/windows/win32/shell/known-folders> and
 <https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath>.
 
+### Protected-HKLM exact source-anchor name (2026-11-04; NON-RELEASE)
+
+The OS-known ProgramData parent check still allowed callers to choose the
+*name* of an administrator-owned child. Two equally valid protected
+subdirectories could satisfy the supplied parent/chain checks without
+identifying the one provisioned for JDC. Therefore the non-issuing SCM
+composite now requires an **independently administered exact child name**
+from a fixed 64-bit HKLM registry view:
+`HKLM\\SOFTWARE\\JameDesktopCommander\\Authority\\EpochAnchor`, value
+`RootAnchorNameV1`. The existing registry observer's strict ACL verifier
+requires protected inheritance, exact administrator/SYSTEM ownership,
+SYSTEM/Administrators full control and **service read-only** rights.
+The service never creates or repairs this key or value.
+
+The registry value is one complete `REG_SZ` UTF-16LE component, limited
+to 64 ASCII letters/digits/`_`/`-`, with exactly one terminal NUL;
+embedded NUL, device aliases, `REG_EXPAND_SZ`, missing/oversized values
+and malformed encodings DENY. The pinned source parent must independently
+be OS-known ProgramData. Both the registry name and the actual kernel
+parent/child identity must match on **admission and every revalidation**,
+with irreversible revocation after a failed check. The registry key is
+reused from the existing epoch authority; no second configuration trust
+channel is added, but this new value is not atomically joined to the
+separate epoch/digest `PolicyAnchorV1` value.
+
+A focused Windows TDD parser regression first failed with unresolved
+`parse_root_anchor_name` (RED, compiler exit 101) and passed after
+implementation. The existing disposable hosted Windows SCM/VHD fixture
+now provisions the exact registry value with independently protected
+ACLs before exercising the composed positive. It then demands genuine
+service exit 56 for a substituted name and for a missing value, with exit
+46 after each restored value. This fixture requires the disposable
+GitHub-hosted Windows runner and deletes only the key hierarchy it
+created; no local registry, SCM service or VHD was changed. The
+**hosted true-SCM outcomes remain unverified until exact-HEAD CI runs**.
+
+This removes a *caller-selected root-name assumption*, but does not
+prove atomic registry/policy updates, survive privileged alias/mount
+replacements, guarantee exclusive storage-object origin or close the
+four #147 same-object hard-link adversarial cases. #124/#139/#148 and
+independent review remain blockers. The runtime issuer is still disabled,
+the native SCM probe terminates without I/O authority, and release
+remains **NO-GO**.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

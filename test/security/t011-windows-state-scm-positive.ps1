@@ -7,6 +7,11 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     throw 'E_C4R_DISPOSABLE_WINDOWS_RUNNER_REQUIRED'
 }
 $serviceName = 'JameDesktopCommanderAuthority'
+$registryParent = 'HKLM:\SOFTWARE\JameDesktopCommander'
+$registryKey = Join-Path $registryParent 'Authority\EpochAnchor'
+if (Test-Path -LiteralPath $registryParent) {
+    throw 'E_C4R_EXISTING_AUTHORITY_REGISTRY'
+}
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     throw 'E_C4R_EXISTING_SCM_SERVICE'
 }
@@ -20,6 +25,7 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
     throw 'E_C4R_TEST_BINARY_NOT_BUILT'
 }
 $created = $false
+$createdRegistry = $false
 $vhd = Join-Path $env:RUNNER_TEMP ('JDC-T011-C4R-' + [guid]::NewGuid().ToString('N') + '.vhdx')
 $mountParent = Join-Path $stage 'mount-parent'
 $isolated = Join-Path $mountParent 'isolated'
@@ -72,6 +78,39 @@ function Set-ExactDirectoryAcl([string] $directory, $serviceSid,
         if ($ace.IsInherited -or $ace.AccessControlType -ne 'Allow') {
             throw 'E_C4R_REAL_ACL_NOT_EXPLICIT_ALLOW'
         }
+    }
+}
+
+function Set-ExactRootRegistryAcl {
+    # Fixed HKLM witness is administered independently of the SCM service.
+    $security = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($existing in @($security.Access)) {
+        $security.RemoveAccessRuleSpecific($existing)
+    }
+    $security.SetOwner($admin)
+    $rules = @(
+        @{ Sid = $system; Rights = [System.Security.AccessControl.RegistryRights]::FullControl }
+        @{ Sid = $admin; Rights = [System.Security.AccessControl.RegistryRights]::FullControl }
+        @{ Sid = $virtual; Rights = [System.Security.AccessControl.RegistryRights]::ReadKey }
+    )
+    foreach ($entry in $rules) {
+        $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
+            $entry.Sid, $entry.Rights,
+            [System.Security.AccessControl.InheritanceFlags]::None,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $registryKey -AclObject $security -ErrorAction Stop
+    $actual = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
+    if (-not $actual.AreAccessRulesProtected -or
+        $actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $admin.Value -or
+        $actual.Access.Count -ne $rules.Count) {
+        throw 'E_C4R_ROOT_REGISTRY_ACL_INVALID'
+    }
+    if (@($actual.Access | Where-Object { $_.IsInherited -or $_.AccessControlType -ne 'Allow' }).Count) {
+        throw 'E_C4R_ROOT_REGISTRY_INHERITED_OR_DENY_ACE'
     }
 }
 
@@ -131,6 +170,16 @@ try {
         (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash) {
         throw 'E_C4R_BINARY_PROVENANCE_MISMATCH'
     }
+
+    # Admin-provisioned, exact source-anchor name; the service can only read.
+    # Never take the expected name from a service process command or env var.
+    New-Item -Path $registryParent -ItemType Key -ErrorAction Stop | Out-Null
+    $createdRegistry = $true
+    New-Item -Path (Join-Path $registryParent 'Authority') -ItemType Key -ErrorAction Stop | Out-Null
+    New-Item -Path $registryKey -ItemType Key -ErrorAction Stop | Out-Null
+    $registeredAnchor = [IO.Path]::GetFileName($stage.TrimEnd('\'))
+    New-ItemProperty -LiteralPath $registryKey -Name RootAnchorNameV1 -PropertyType String -Value $registeredAnchor -ErrorAction Stop | Out-Null
+    Set-ExactRootRegistryAcl
 
     # Positive: the true restricted SCM token can open an exact protected DACL.
     Require-ServiceResult 'VALID_PROTECTED_SERVICE_DACL' 41
@@ -196,6 +245,16 @@ exit
     Set-ExactDirectoryAcl $volumeRoot $virtual $modify $inherit $false
     Set-ExactDirectoryAcl $isolated $virtual $modify $inherit $false
     Require-ServiceResult 'ACTUAL_SCM_TOKEN_WITH_PROTECTED_NTFS_VHD_ROOT' 46
+    # Changing an independently administrator-owned registry source must
+    # deny *even with* a valid SCM principal, mounted root, ACL and chain.
+    Set-ItemProperty -LiteralPath $registryKey -Name RootAnchorNameV1 -Value 'JDC-FORGED-STAGE' -ErrorAction Stop
+    Require-ServiceResult 'ADMINISTRATIVE_REGISTRY_SOURCE_MISMATCH' 56
+    Set-ItemProperty -LiteralPath $registryKey -Name RootAnchorNameV1 -Value $registeredAnchor -ErrorAction Stop
+    Require-ServiceResult 'ADMINISTRATIVE_REGISTRY_SOURCE_RESTORED' 46
+    Remove-ItemProperty -LiteralPath $registryKey -Name RootAnchorNameV1 -ErrorAction Stop
+    Require-ServiceResult 'ADMINISTRATIVE_REGISTRY_SOURCE_MISSING' 56
+    New-ItemProperty -LiteralPath $registryKey -Name RootAnchorNameV1 -PropertyType String -Value $registeredAnchor -ErrorAction Stop | Out-Null
+    Require-ServiceResult 'ADMINISTRATIVE_REGISTRY_FINAL_POSITIVE' 46
     # A service-writable mountpoint parent could rename or replace the
     # volume namespace entry. Even with a correct isolated root ACL, its
     # administrator-controlled direct parent must be read/traverse-only.
@@ -231,6 +290,13 @@ finally {
     if ($created) {
         & $sc delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+    }
+    if ($createdRegistry) {
+        try {
+            Remove-Item -LiteralPath $registryParent -Recurse -Force -ErrorAction Stop
+        } catch {
+            $cleanupFailed = $true
+        }
     }
     # Detach the disposable VHD BEFORE recursively removing its directory
     # mountpoint. On any detach failure, preserve the mounted filesystem and

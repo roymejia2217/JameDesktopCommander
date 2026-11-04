@@ -13,7 +13,7 @@ use windows_sys::Win32::{
     },
     System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS,
-        KEY_READ, KEY_WOW64_64KEY, REG_BINARY, REG_OPTION_OPEN_LINK,
+        KEY_READ, KEY_WOW64_64KEY, REG_BINARY, REG_OPTION_OPEN_LINK, REG_SZ,
     },
 };
 
@@ -21,6 +21,10 @@ use windows_sys::Win32::{
 // No caller input or environment variable may select a different authority.
 const KEY_PATH: &str = "SOFTWARE\\JameDesktopCommander\\Authority\\EpochAnchor";
 const VALUE_NAME: &str = "PolicyAnchorV1";
+// This name is administrator-provisioned in the same protected HKLM key.
+// It is not an arbitrary caller path, environment value or filename.
+// V1 is a single canonical REG_SZ component, never REG_EXPAND_SZ.
+const ROOT_NAME_VALUE: &str = "RootAnchorNameV1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trustee {
@@ -112,6 +116,57 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The source anchor must be one unambiguous Win32 directory component,
+/// provisioned as a complete, NUL-terminated REG_SZ under the trusted key.
+fn parse_root_anchor_name(kind: u32, bytes: &[u8]) -> Result<String, IdentityDenied> {
+    if kind != REG_SZ || bytes.len() < 4 || bytes.len() > 130 || !bytes.len().is_multiple_of(2) {
+        return Err(IdentityDenied);
+    }
+    let chars: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    if chars.last() != Some(&0) || chars[..chars.len() - 1].contains(&0) {
+        return Err(IdentityDenied);
+    }
+    let name = String::from_utf16(&chars[..chars.len() - 1]).map_err(|_| IdentityDenied)?;
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !matches!(
+            name.to_ascii_uppercase().as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+    if valid {
+        Ok(name)
+    } else {
+        Err(IdentityDenied)
+    }
+}
+
 fn trustee(sid: *mut c_void, service: &[u8]) -> Trustee {
     unsafe {
         if IsWellKnownSid(sid, WinLocalSystemSid) != 0 {
@@ -191,8 +246,9 @@ fn verify_protected_registry_acl(key: HKEY, service_sid: &[u8]) -> Result<(), Id
     admit_acl(&aces)
 }
 
-/// Missing key, wrong principal, wrong ACL, missing/malformed value => DENY.
-pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
+/// The administrative origin is read only from this fixed HKLM key. No
+/// caller-selected registry path can substitute a valid-looking key.
+fn open_protected_anchor_key() -> Result<Key, IdentityDenied> {
     verify_service_identity()?;
     let mut raw: HKEY = ptr::null_mut();
     let name = wide(KEY_PATH);
@@ -212,6 +268,36 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
     let key = Key(raw);
     let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     verify_protected_registry_acl(key.0, &service_sid)?;
+    Ok(key)
+}
+
+/// Missing key, wrong SCM principal/DACL, wrong wire format or absent value
+/// must deny before any caller-supplied administrative child can be admitted.
+pub(crate) fn observe_fixed_source_anchor_name() -> Result<String, IdentityDenied> {
+    let key = open_protected_anchor_key()?;
+    let mut kind = 0u32;
+    let mut bytes = [0u8; 130];
+    let mut size = bytes.len() as u32;
+    let value = wide(ROOT_NAME_VALUE);
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            bytes.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if status != 0 || (size as usize) > bytes.len() {
+        return Err(IdentityDenied);
+    }
+    parse_root_anchor_name(kind, &bytes[..size as usize])
+}
+
+/// Missing key, wrong principal, wrong ACL, missing/malformed value => DENY.
+pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
+    let key = open_protected_anchor_key()?;
     let mut kind = 0u32;
     let mut size = 40u32;
     let mut bytes = [0u8; 40];
@@ -281,6 +367,52 @@ mod tests {
             },
         ]
     }
+    #[test]
+    fn protected_root_anchor_name_requires_canonical_exact_reg_sz() {
+        let bytes = |name: &str| {
+            name.encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<u8>>()
+        };
+        let valid = bytes("JDC-T011-C4R-0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            parse_root_anchor_name(REG_SZ, &valid),
+            Ok("JDC-T011-C4R-0123456789abcdef0123456789abcdef".to_owned())
+        );
+        assert_eq!(
+            parse_root_anchor_name(REG_BINARY, &valid),
+            Err(IdentityDenied)
+        );
+        assert_eq!(
+            parse_root_anchor_name(REG_SZ, &valid[..valid.len() - 2]),
+            Err(IdentityDenied)
+        );
+        for bad in [
+            "",
+            "CON",
+            "stage/escape",
+            "stage\\escape",
+            "stage.name",
+            "with space",
+        ] {
+            assert_eq!(
+                parse_root_anchor_name(REG_SZ, &bytes(bad)),
+                Err(IdentityDenied)
+            );
+        }
+        assert_eq!(
+            parse_root_anchor_name(REG_SZ, &bytes(&"A".repeat(65))),
+            Err(IdentityDenied)
+        );
+        let mut embedded = bytes("valid");
+        embedded.extend_from_slice(&[b'X', 0]);
+        assert_eq!(
+            parse_root_anchor_name(REG_SZ, &embedded),
+            Err(IdentityDenied)
+        );
+    }
+
     #[test]
     fn protected_software_registry_admits_only_three_minimal_trustees() {
         assert_eq!(admit_acl(&exact_acl()), Ok(()));

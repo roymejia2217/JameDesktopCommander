@@ -815,8 +815,8 @@ pub fn observe_preopened_isolated_service_root(
 /// This type exposes no filesystem operation or reusable root File handle.
 ///
 /// The source parent must match OS-known ProgramData by opened-object identity,
-/// but the caller still supplies the anchor child name and no independent
-/// administrator-provisioned policy identity or atomic I/O grant follows.
+/// and the anchor child name must equal the fixed protected-HKLM policy
+/// witness. This still cannot establish atomic I/O or exclusive storage custody.
 pub struct ObservedWindowsChainBoundIsolatedRoot {
     anchor_parent: File,
     anchor_name: String,
@@ -836,6 +836,9 @@ impl ObservedWindowsChainBoundIsolatedRoot {
         self.active = false;
         verify_service_identity()?;
         crate::windows_program_data_origin::verify_system_program_data_parent(&self.anchor_parent)?;
+        if crate::windows_epoch_anchor::observe_fixed_source_anchor_name()? != self.anchor_name {
+            return Err(IdentityDenied);
+        }
         verify_preopened_administrative_child_identity(
             &self.anchor_parent,
             &self.administrative.anchor,
@@ -907,8 +910,9 @@ impl ObservedWindowsChainBoundIsolatedRoot {
 ///
 /// This verifies the real SCM principal, protected per-ancestor ACLs and the
 /// source-parent/anchor edge, and OS-known ProgramData parent identity.
-/// It does not authenticate the caller-chosen anchor as the configured policy
-/// root or prove durable/exclusive storage custody. Not an MCP backend/grant.
+/// The registry witness binds the named anchor under OS-known ProgramData;
+/// it does not prove durable/exclusive storage custody or I/O atomicity.
+/// Not an MCP backend/grant.
 pub fn observe_preopened_chain_bound_isolated_service_root(
     anchor_parent: &File,
     anchor_name: &str,
@@ -919,6 +923,9 @@ pub fn observe_preopened_chain_bound_isolated_service_root(
 ) -> Result<ObservedWindowsChainBoundIsolatedRoot, IdentityDenied> {
     verify_service_identity()?;
     crate::windows_program_data_origin::verify_system_program_data_parent(anchor_parent)?;
+    if crate::windows_epoch_anchor::observe_fixed_source_anchor_name()? != anchor_name {
+        return Err(IdentityDenied);
+    }
     verify_preopened_administrative_child_identity(anchor_parent, anchor, anchor_name)?;
     let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
     inspect_acl(anchor, &sid, ServiceDaclPolicy::ReadonlyAdministratorParent)?;

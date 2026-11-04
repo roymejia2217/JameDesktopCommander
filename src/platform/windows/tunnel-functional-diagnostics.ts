@@ -14,6 +14,10 @@ export interface TunnelFunctionalDiagnostics {
     };
     queueDepth: number | null;
     controlPlaneFailuresConsecutive: number | null;
+    controlPlaneHttpStatus: number | null;
+    controlPlaneProblem:
+        | 'none' | 'credential_rejected' | 'permission_denied'
+        | 'rate_limited' | 'server_error' | 'other_http_error' | 'unverified';
 }
 
 const MAX_BYTES = 256 * 1024;
@@ -34,6 +38,30 @@ function count(root: unknown, key: string): number | null {
 function boolean(root: unknown, key: string): boolean | null {
     const value = object(root)?.[key];
     return typeof value === 'boolean' ? value : null;
+}
+
+// A 401 means rejected credentials, not independently proven expiry.
+// Never classify a stale HTTP status when the official component is healthy.
+function controlPlaneFailure(controlPlane: Record<string, unknown>): {
+    httpStatus: number | null;
+    problem: TunnelFunctionalDiagnostics['controlPlaneProblem'];
+} {
+    const details = child(controlPlane, 'details');
+    if (controlPlane.status === 'ok' && count(details, 'consecutive_failures') === 0) {
+        return { httpStatus: null, problem: 'none' };
+    }
+    if (controlPlane.status !== 'degraded' || controlPlane.reason_code !== 'http_error') {
+        return { httpStatus: null, problem: 'unverified' };
+    }
+    const code = count(details, 'http_status');
+    if (code === null || code < 400 || code > 599) {
+        return { httpStatus: null, problem: 'unverified' };
+    }
+    if (code === 401) return { httpStatus: code, problem: 'credential_rejected' };
+    if (code === 403) return { httpStatus: code, problem: 'permission_denied' };
+    if (code === 429) return { httpStatus: code, problem: 'rate_limited' };
+    if (code >= 500) return { httpStatus: code, problem: 'server_error' };
+    return { httpStatus: code, problem: 'other_http_error' };
 }
 
 export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagnostics {
@@ -59,6 +87,7 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
         : ok === false || complete === false
             ? 'observed_incomplete' : 'unverified';
     const ready = boolean(root, 'ready') === true && boolean(root, 'live') === true;
+    const controlPlaneState = controlPlaneFailure(controlPlane);
     return {
         kind: 'observational_only',
         localHealth: ready ? 'ready' : 'not_ready',
@@ -72,6 +101,8 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
         queueDepth: count(child(queue, 'details'), 'depth'),
         controlPlaneFailuresConsecutive:
             count(child(controlPlane, 'details'), 'consecutive_failures'),
+        controlPlaneHttpStatus: controlPlaneState.httpStatus,
+        controlPlaneProblem: controlPlaneState.problem,
     };
 }
 

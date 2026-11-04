@@ -24,6 +24,7 @@ test('observational-only result distinguishes readiness from MCP discovery', () 
     toolDiscovery: 'observed_incomplete',
     dispatcher: { active: 1, failuresCumulative: 9, timeoutsCumulative: 9 },
     queueDepth: 0, controlPlaneFailuresConsecutive: 0,
+    controlPlaneHttpStatus: null, controlPlaneProblem: 'unverified',
   });
   assert.doesNotMatch(JSON.stringify(parseTunnelFunctionalHealth(example)), /SECRET_TOOL/);
 });
@@ -87,4 +88,65 @@ test('counters are strictly nonnegative safe integers', () => {
   const v = parseTunnelFunctionalHealth(bad);
   assert.equal(v.dispatcher.timeoutsCumulative, null);
   assert.equal(v.dispatcher.failuresCumulative, null);
+});
+
+test('running and locally ready tunnel exposes control-plane HTTP 401 as rejected credentials', () => {
+  const incident = structuredClone(example);
+  incident.components.mcp.details.initialize = { ok: false };
+  incident.components['control-plane'] = {
+    status: 'degraded',
+    reason_code: 'http_error',
+    details: {
+      consecutive_failures: 564,
+      http_status: 401,
+      failure_category: 'http_error',
+      last_error: 'PRIVATE_TOKEN_MUST_NOT_LEAK',
+    },
+  };
+  const result = parseTunnelFunctionalHealth(incident);
+  assert.equal(result.localHealth, 'ready');
+  assert.equal(result.mcpInitializeObserved, false);
+  assert.equal(result.controlPlaneFailuresConsecutive, 564);
+  assert.equal(result.controlPlaneHttpStatus, 401);
+  assert.equal(result.controlPlaneProblem, 'credential_rejected');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TOKEN_MUST_NOT_LEAK/);
+});
+
+test('control-plane causes classify safely without asserting expiry or trusting stale errors', () => {
+  const cases = [
+    [401, 'credential_rejected'],
+    [403, 'permission_denied'],
+    [429, 'rate_limited'],
+    [500, 'server_error'],
+    [418, 'other_http_error'],
+  ];
+  for (const [httpStatus, expected] of cases) {
+    const incident = structuredClone(example);
+    incident.components['control-plane'] = {
+      status: 'degraded', reason_code: 'http_error',
+      details: { consecutive_failures: 2, http_status: httpStatus },
+    };
+    const status = parseTunnelFunctionalHealth(incident);
+    assert.equal(status.controlPlaneHttpStatus, httpStatus);
+    assert.equal(status.controlPlaneProblem, expected);
+  }
+
+  const stale = structuredClone(example);
+  stale.components['control-plane'] = {
+    status: 'ok', reason_code: null, details: { consecutive_failures: 0, http_status: 401 },
+  };
+  const healthy = parseTunnelFunctionalHealth(stale);
+  assert.equal(healthy.controlPlaneHttpStatus, null);
+  assert.equal(healthy.controlPlaneProblem, 'none');
+
+  for (const malformed of ['401', -1, 0, 999, 1.5]) {
+    const invalid = structuredClone(example);
+    invalid.components['control-plane'] = {
+      status: 'degraded', reason_code: 'http_error',
+      details: { consecutive_failures: 1, http_status: malformed },
+    };
+    const result = parseTunnelFunctionalHealth(invalid);
+    assert.equal(result.controlPlaneHttpStatus, null);
+    assert.equal(result.controlPlaneProblem, 'unverified');
+  }
 });

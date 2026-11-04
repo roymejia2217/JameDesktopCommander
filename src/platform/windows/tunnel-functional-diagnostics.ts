@@ -1,10 +1,15 @@
+import {
+    assessLocalTunnelOperability,
+    type TunnelLocalOperability,
+} from '../tunnel-local-operability.js';
+
 /**
  * Observational diagnostics from tunnel-client's local admin API.
  * This is not a fresh MCP tools/list or tools/call probe and cannot authorize restart.
  */
 export interface TunnelFunctionalDiagnostics {
     kind: 'observational_only';
-    localHealth: 'ready' | 'not_ready';
+    localHealth: 'ready' | 'not_ready' | 'unverified';
     mcpInitializeObserved: boolean | null;
     toolDiscovery: 'observed_complete' | 'observed_incomplete' | 'unverified';
     dispatcher: {
@@ -18,6 +23,7 @@ export interface TunnelFunctionalDiagnostics {
     controlPlaneProblem:
         | 'none' | 'credential_rejected' | 'permission_denied'
         | 'rate_limited' | 'server_error' | 'other_http_error' | 'unverified';
+    operability: TunnelLocalOperability;
 }
 
 const MAX_BYTES = 256 * 1024;
@@ -50,7 +56,10 @@ function controlPlaneFailure(controlPlane: Record<string, unknown>): {
     if (controlPlane.status === 'ok' && count(details, 'consecutive_failures') === 0) {
         return { httpStatus: null, problem: 'none' };
     }
-    if (controlPlane.status !== 'degraded' || controlPlane.reason_code !== 'http_error') {
+    const failures = count(details, 'consecutive_failures');
+    if (controlPlane.status !== 'degraded' ||
+        controlPlane.reason_code !== 'http_error' ||
+        failures === null || failures === 0) {
         return { httpStatus: null, problem: 'unverified' };
     }
     const code = count(details, 'http_status');
@@ -86,11 +95,14 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
         ? 'observed_complete'
         : ok === false || complete === false
             ? 'observed_incomplete' : 'unverified';
-    const ready = boolean(root, 'ready') === true && boolean(root, 'live') === true;
+    const live = boolean(root, 'live');
+    const ready = boolean(root, 'ready');
+    const localHealth = live === null || ready === null
+        ? 'unverified' : live && ready ? 'ready' : 'not_ready';
     const controlPlaneState = controlPlaneFailure(controlPlane);
-    return {
+    const observed: Omit<TunnelFunctionalDiagnostics, 'operability'> = {
         kind: 'observational_only',
-        localHealth: ready ? 'ready' : 'not_ready',
+        localHealth,
         mcpInitializeObserved: boolean(init, 'ok'),
         toolDiscovery: discovery,
         dispatcher: {
@@ -104,6 +116,7 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
         controlPlaneHttpStatus: controlPlaneState.httpStatus,
         controlPlaneProblem: controlPlaneState.problem,
     };
+    return { ...observed, operability: assessLocalTunnelOperability(observed) };
 }
 
 function verifiedLoopbackBaseUrl(baseUrl: string): URL {

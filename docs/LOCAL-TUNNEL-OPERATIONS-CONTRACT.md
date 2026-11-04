@@ -14,17 +14,27 @@ The incident details are intentionally sanitized: no usernames, exact host paths
 
 ## Verified existing integration surface
 
-| Current component | Existing behavior (protected-main source) | Missing operator guarantee |
+| Current component | Baseline behavior and explicitly noted S1 candidate | Missing operator guarantee |
 | --- | --- | --- |
 | `src/npm-scripts/tunnel.ts` | Windows tunnel command dispatch, native task lifecycle, status, diagnose and events | No credential rotation or local management UI |
-| `src/platform/windows/tunnel-functional-diagnostics.ts` | Bounded loopback-only read of official admin `/health?details=true`; `observational_only`; cumulative counts, MCP initialization and discovery observations | Does not surface typed control-plane HTTP error cause; no verified fresh MCP request |
+| `src/platform/windows/tunnel-functional-diagnostics.ts` | Bounded loopback-only read of official admin `/health?details=true`; typed control-plane HTTP causes already merged in #249; S1 candidate additionally derives a sanitized local operability assessment | No verified fresh MCP remote request and no local credential-recovery UI |
 | `docs/WINDOWS-TUNNEL-RECOVERY-FENCING.md` | Pure recovery preflight; **non-operational** and not an authority token | No OS-enforced privileged recovery executor |
 | `src/platform/linux/tunnel-lifecycle.ts` / `docs/LINUX-TUNNEL-LIFECYCLE.md` | Development-only managed `systemd --user` lifecycle, official-client preflight and status; deliberately stopped state preserved | No shipped local control UI, no credential-rotation path or real authenticated remote E2E |
 | `docs/DISTRIBUTION-CANDIDATE.md` | Portable **unpublished** test candidates, `releaseEligible:false` | Not a signed Windows `.exe` / Linux `.deb` local-management distribution |
 
 The installed third-party tunnel-client, existing UI bridge and OpenCode gateway are **separate components**. Installation-specific service paths and secret stores remain outside Git. UI Bridge presence is *not* authorization to control the tunnel or read secrets.
 
-## Proposed public status contract (not implemented)
+## Target public status contract (partially implemented)
+
+### Implemented S1 local observation subset (read-only)
+
+`src/platform/tunnel-local-operability.ts` defines a portable, pure local assessment of the official client's sanitized component observations. The Windows `tunnel diagnose` parser exposes `operability` with `kind: local_operability_v1`, `state`, `reasonCode` and `remoteRoundTrip: not_observed`. The only possible local-only states are `degraded` and `unverified`; this interface **cannot** assert remote MCP availability or authorize service control.
+
+The classifier distinguishes active 401/403/429/5xx failures, missing control-plane evidence, absent handshake/discovery, and local readiness. HTTP-denial classification requires a degraded official control-plane component, `http_error` reason and a positive validated consecutive-failure count. A confirmed local readiness failure remains `degraded` even if control-plane diagnostics are unavailable; an unknown control plane cannot hide it. A missing counter, stale HTTP code, missing live/ready flag, or apparently green local probes never become a remotely healthy claim. The results contain allowlisted codes, not raw provider errors, tool names or secrets. A 401 is **rejected credentials**, not independently confirmed expiry.
+
+The remaining cross-platform snapshot, service intent, real operator identity, freshness timestamps, signed local controller, secure rotation, UI, packaged lifecycle and authenticated fresh remote round-trip are **not implemented by this increment**. No installed service/runtime is modified.
+
+### Remaining target public contract
 
 A shared, versioned operations core produces **sanitized** observations; platform adapters supply typed evidence. A UI must never infer a stronger state than the evidence.
 

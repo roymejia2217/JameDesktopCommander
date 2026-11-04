@@ -25,6 +25,10 @@ test('observational-only result distinguishes readiness from MCP discovery', () 
     dispatcher: { active: 1, failuresCumulative: 9, timeoutsCumulative: 9 },
     queueDepth: 0, controlPlaneFailuresConsecutive: 0,
     controlPlaneHttpStatus: null, controlPlaneProblem: 'unverified',
+    operability: {
+      kind: 'local_operability_v1', state: 'unverified',
+      reasonCode: 'CONTROL_PLANE_UNVERIFIED', remoteRoundTrip: 'not_observed',
+    },
   });
   assert.doesNotMatch(JSON.stringify(parseTunnelFunctionalHealth(example)), /SECRET_TOOL/);
 });
@@ -40,7 +44,7 @@ test('incomplete snapshots are unknown rather than an invented healthy status', 
 test('missing readiness never becomes true by default', () => {
   const partial = structuredClone(example);
   delete partial.live;
-  assert.equal(parseTunnelFunctionalHealth(partial).localHealth, 'not_ready');
+  assert.equal(parseTunnelFunctionalHealth(partial).localHealth, 'unverified');
 });
 test('only exact HTTP loopback URLs are accepted', async () => {
   let invoked = 0;

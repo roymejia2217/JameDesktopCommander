@@ -1842,6 +1842,63 @@ mod tests {
         );
     }
 
+    // NEGATIVE SECURITY EVIDENCE: the current non-issuing fixture authenticates
+    // parent/child identity, not the provisioned origin of the parent itself.
+    // Passing this test means the missing origin-authority gate is observable;
+    // it does NOT mean an untrusted caller is authorized to select a root.
+    #[test]
+    fn negative_control_caller_selected_anchor_parent_is_not_authenticated_origin() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().unwrap();
+        let provisioned_parent_path = fixture.path().join("provisioned-parent");
+        let substituted_parent_path = fixture.path().join("substituted-parent");
+        let provisioned_root = provisioned_parent_path
+            .join("stage")
+            .join("mount-parent")
+            .join("isolated");
+        let substituted_anchor = substituted_parent_path.join("stage");
+        let substituted_chain_parent = substituted_anchor.join("mount-parent");
+        let substituted_root = substituted_chain_parent.join("isolated");
+        std::fs::create_dir_all(&provisioned_root).unwrap();
+        std::fs::create_dir_all(&substituted_root).unwrap();
+        let outside_canary = substituted_root.join("canary.bin");
+        let outside_bytes = b"UNTRUSTED_PARENT_ORIGIN_BYTES_UNCHANGED";
+        std::fs::write(&outside_canary, outside_bytes).unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        let provisioned_parent = open(&provisioned_parent_path);
+        let substituted_parent = open(&substituted_parent_path);
+        let anchor = open(&substituted_anchor);
+        let chain_parent = open(&substituted_chain_parent);
+
+        // The genuine configured parent correctly rejects a foreign child.
+        assert_eq!(
+            verify_preopened_administrative_child_identity(&provisioned_parent, &anchor, "stage",),
+            Err(IdentityDenied),
+        );
+        // COUNTEREXAMPLE: the same foreign chain becomes internally consistent
+        // when its own parent is supplied. No OS-provisioned policy origin is
+        // consulted by this kernel-only observation.
+        let mut observed = ObservedWindowsChainBoundIsolatedRoot::from_preopened_kernel_fixture(
+            &substituted_parent,
+            "stage",
+            &anchor,
+            &[(&chain_parent, "mount-parent")],
+            open(&substituted_root),
+            "isolated",
+        )
+        .expect("a caller-selected source parent is not authenticated policy provenance");
+        assert_eq!(observed.revalidate_kernel_only_for_test(), Ok(()));
+        assert_eq!(std::fs::read(&outside_canary).unwrap(), outside_bytes);
+        // No native I/O grant or production service is created by this test.
+    }
+
     #[test]
     fn kernel_only_binding_stays_valid_after_parent_junction_removal_nonrelease() {
         use std::{os::windows::fs::OpenOptionsExt, process::Command};

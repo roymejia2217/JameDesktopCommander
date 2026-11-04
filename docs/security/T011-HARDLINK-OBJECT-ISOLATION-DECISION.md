@@ -1159,11 +1159,20 @@ SMB labels), or truncated names deny rather than silently enter the NTFS
 acceptance path. No ambient pathname resolution or second storage handle
 is introduced. [Microsoft API documentation](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew).
 
-The Windows TDD probe first failed compilation due to missing NTFS guard
-symbols (RED), then passed using a real opened NTFS directory and synthetic
-rejected filesystem-name cases. Locked Rust 1.91.1 all-targets tests passed
-(135 library passed, 3 ignored hosted-only, plus independent example suites);
-strict Clippy and Rustfmt also passed. These are **local Windows** results.
+The same opened handle must also pass an explicit local-disk device query
+using `NtQueryVolumeInformationFile(FileFsDeviceInformation)`. The observer
+refuses non-disk device types, removable media, SMB-style `FILE_REMOTE_DEVICE`
+and `FILE_REMOTE_DEVICE_VSMB` characteristics, or missing/short OS results.
+It does not infer locality from an `NTFS` name alone. These probes are
+point-in-time observations, not assurance against administrator-level
+volume replacement or proof of trusted provisioning.
+
+The Windows TDD probes first failed compilation due to absent filesystem-name
+and local-device guards (RED), then passed using a real opened NTFS directory
+and synthetic negative filesystem/device cases. Locked Rust 1.91.1 all-targets
+tests, strict Clippy and Rustfmt are required for the complete current SHA;
+the preceding NTFS-only snapshot passed 135 library cases with 3 ignored
+hosted-only cases. These were **local Windows** results.
 Exact new-SHA hosted Windows SCM/VHD and Linux feasibility remain mandatory.
 
 This is **necessary supported-filesystem validation, not independent policy

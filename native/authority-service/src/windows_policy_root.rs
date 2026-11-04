@@ -12,7 +12,12 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+            FileFsDeviceInformation, NtCreateFile, NtQueryVolumeInformationFile,
+            FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+        },
+        System::SystemServices::{
+            FILE_FS_DEVICE_INFORMATION, FILE_REMOTE_DEVICE, FILE_REMOTE_DEVICE_VSMB,
+            FILE_REMOVABLE_MEDIA,
         },
     },
     Win32::{
@@ -27,10 +32,10 @@ use windows_sys::{
         Storage::FileSystem::{
             FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
             GetVolumeInformationByHandleW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_ATTRIBUTE_TAG_INFO, FILE_DEVICE_DISK, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         },
-        System::IO::IO_STATUS_BLOCK,
+        System::{Ioctl::FILE_DEVICE_DISK_FILE_SYSTEM, IO::IO_STATUS_BLOCK},
     },
 };
 
@@ -386,10 +391,45 @@ fn validate_ntfs_fs_name(name: &[u16]) -> Result<(), IdentityDenied> {
     }
 }
 
+// A remote filesystem can expose familiar file/volume metadata. Reject
+// remote, VSMB and removable devices before interpreting NTFS file identity.
+// This local-device observation is still NOT storage-origin attestation.
+fn validate_local_disk_device(kind: u32, characteristics: u32) -> Result<(), IdentityDenied> {
+    let local_disk = kind == FILE_DEVICE_DISK || kind == FILE_DEVICE_DISK_FILE_SYSTEM;
+    let forbidden = FILE_REMOTE_DEVICE | FILE_REMOTE_DEVICE_VSMB | FILE_REMOVABLE_MEDIA;
+    if !local_disk || (characteristics & forbidden) != 0 {
+        Err(IdentityDenied)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_local_disk_device_from_handle(opened: &File) -> Result<(), IdentityDenied> {
+    let mut io: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+    let mut device: FILE_FS_DEVICE_INFORMATION = unsafe { mem::zeroed() };
+    // SAFETY: the File handle stays live throughout this synchronous volume
+    // information query. Both output buffers are exclusively borrowed,
+    // fixed-size and fully initialized; neither pointer is retained.
+    let status = unsafe {
+        NtQueryVolumeInformationFile(
+            opened.as_raw_handle().cast(),
+            &mut io,
+            (&mut device as *mut FILE_FS_DEVICE_INFORMATION).cast(),
+            mem::size_of::<FILE_FS_DEVICE_INFORMATION>() as u32,
+            FileFsDeviceInformation,
+        )
+    };
+    if status != 0 || io.Information != mem::size_of::<FILE_FS_DEVICE_INFORMATION>() {
+        return Err(IdentityDenied);
+    }
+    validate_local_disk_device(device.DeviceType, device.Characteristics)
+}
+
 /// Query the actual file system through the same already-open kernel handle.
 /// A volume serial or reparse target alone does not establish NTFS semantics.
 /// This is necessary evidence only, never an authenticated storage issuer.
 fn require_ntfs_volume_from_handle(opened: &File) -> Result<(), IdentityDenied> {
+    require_local_disk_device_from_handle(opened)?;
     let mut name = [0u16; 32];
     // SAFETY: the live File owns hFile, and the fixed UTF-16 buffer is
     // exclusively writable for this synchronous Win32 information query.
@@ -910,6 +950,36 @@ mod tests {
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
         assert_eq!(validate_ntfs_fs_name(&valid), Ok(()));
+    }
+
+    #[test]
+    fn windows_root_requires_kernel_local_disk_device_evidence() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let fixture = tempfile::tempdir().expect("disposable Windows fixture");
+        let dir = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(fixture.path())
+            .expect("open a real directory handle");
+        assert_eq!(
+            require_local_disk_device_from_handle(&dir),
+            Ok(()),
+            "real local NTFS fixture must pass kernel device classification"
+        );
+        for kind in [0, 1, 2, 3, 9, 0xffff_ffff] {
+            assert_eq!(validate_local_disk_device(kind, 0), Err(IdentityDenied));
+        }
+        for kind in [7, 8] {
+            assert_eq!(validate_local_disk_device(kind, 0x20), Ok(()));
+            for characteristic in [0x01, 0x10, 0x80000, 0x80011] {
+                assert_eq!(
+                    validate_local_disk_device(kind, characteristic),
+                    Err(IdentityDenied),
+                    "remote or removable device must never pass through NTFS label alone"
+                );
+            }
+        }
     }
 
     fn ace(principal: Principal, mask: u32) -> AceSummary {

@@ -61,10 +61,14 @@ export function assessLocalTunnelOperability(
         case 'none':
             break;
         default:
-            return verdict('unverified', 'CONTROL_PLANE_UNVERIFIED');
+            // An unknown control plane must not mask a confirmed local outage.
+            break;
     }
     if (evidence.localHealth === 'not_ready') {
         return verdict('degraded', 'LOCAL_NOT_READY');
+    }
+    if (evidence.controlPlaneProblem !== 'none') {
+        return verdict('unverified', 'CONTROL_PLANE_UNVERIFIED');
     }
     if (evidence.localHealth !== 'ready') {
         return verdict('unverified', 'LOCAL_READINESS_UNVERIFIED');

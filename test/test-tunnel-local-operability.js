@@ -116,3 +116,12 @@ test('missing failure counter cannot turn an old HTTP 401 into an active denial'
   assert.equal(result.operability.state, 'unverified');
   assert.equal(result.operability.reasonCode, 'CONTROL_PLANE_UNVERIFIED');
 });
+
+test('unknown control-plane status cannot mask a confirmed local readiness failure', () => {
+  const data = observation('degraded', 0);
+  data.ready = false;
+  const result = parseTunnelFunctionalHealth(data);
+  assert.equal(result.localHealth, 'not_ready');
+  assert.equal(result.operability.state, 'degraded');
+  assert.equal(result.operability.reasonCode, 'LOCAL_NOT_READY');
+});

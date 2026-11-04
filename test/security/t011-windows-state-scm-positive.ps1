@@ -102,7 +102,9 @@ function Set-ExactRootRegistryAcl {
             [System.Security.AccessControl.AccessControlType]::Allow)
         $security.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $registryKey -AclObject $security -ErrorAction Stop
+    # Use the Registry provider's -Path binding, as in the established
+    # hosted epoch-anchor acceptance; -LiteralPath failed on this runner.
+    Set-Acl -Path $registryKey -AclObject $security -ErrorAction Stop
     $actual = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
     if (-not $actual.AreAccessRulesProtected -or
         $actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $admin.Value -or

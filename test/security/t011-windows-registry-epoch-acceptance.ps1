@@ -84,8 +84,10 @@ function Expect-ScmResult([string] $scenario, [int] $expected) {
         $observed.ProcessId -ne 0) {
         throw "E_EPOCH_UNEXPECTED_SCM_EXIT_$scenario (expected=$expected)"
     }
+    Write-Output "T011_EPOCH_CASE_${scenario}_PASS"
 }
 
+$hadPrimaryFailure = $false
 try {
     New-Item -Path $stage -ItemType Directory -ErrorAction Stop | Out-Null
     & $sc create $service 'type=' 'own' 'start=' 'demand' 'binPath=' $binary | Out-Null
@@ -173,19 +175,33 @@ try {
     Expect-ScmResult 'FOREIGN_ACL_TRUSTEE' 52
     Write-Output 'T011 Windows actual SCM independently protected registry epoch: PASS (non-release)'
 }
+catch {
+    # The original failure is more important than an error from best-effort
+    # cleanup on the disposable runner. Preserve its original PowerShell stack.
+    $hadPrimaryFailure = $true
+    Write-Output "E_EPOCH_PRIMARY_FAILURE: $($_.Exception.Message)"
+    throw
+}
 finally {
-    $cleanupFailed = $false
+    $cleanupFailures = @()
     if ($createdService) {
         & $sc delete $service | Out-Null
-        if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+        if ($LASTEXITCODE -ne 0) {
+            $cleanupFailures += "E_EPOCH_CLEANUP_SERVICE_FAILED_$LASTEXITCODE"
+        }
     }
     if ($createdRegistry) {
         try { Remove-Item -LiteralPath $registryParent -Recurse -Force -ErrorAction Stop }
-        catch { $cleanupFailed = $true }
+        catch { $cleanupFailures += "E_EPOCH_CLEANUP_REGISTRY_FAILED: $($_.Exception.Message)" }
     }
     if (Test-Path -LiteralPath $stage) {
         try { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
-        catch { $cleanupFailed = $true }
+        catch { $cleanupFailures += "E_EPOCH_CLEANUP_STAGE_FAILED: $($_.Exception.Message)" }
     }
-    if ($cleanupFailed) { throw 'E_EPOCH_DISPOSABLE_RESOURCE_CLEANUP_FAILED' }
+    if ($cleanupFailures.Count -gt 0) {
+        foreach ($failure in $cleanupFailures) { Write-Output $failure }
+        if (-not $hadPrimaryFailure) {
+            throw 'E_EPOCH_DISPOSABLE_RESOURCE_CLEANUP_FAILED'
+        }
+    }
 }

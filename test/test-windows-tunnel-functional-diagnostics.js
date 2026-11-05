@@ -25,6 +25,7 @@ test('observational-only result distinguishes readiness from MCP discovery', () 
     dispatcher: { active: 1, failuresCumulative: 9, timeoutsCumulative: 9 },
     queueDepth: 0, controlPlaneFailuresConsecutive: 0,
     controlPlaneHttpStatus: null, controlPlaneProblem: 'unverified',
+    operatorGuidance: null,
     operability: {
       kind: 'local_operability_v1', state: 'unverified',
       reasonCode: 'CONTROL_PLANE_UNVERIFIED', remoteRoundTrip: 'not_observed',
@@ -113,6 +114,8 @@ test('running and locally ready tunnel exposes control-plane HTTP 401 as rejecte
   assert.equal(result.controlPlaneFailuresConsecutive, 564);
   assert.equal(result.controlPlaneHttpStatus, 401);
   assert.equal(result.controlPlaneProblem, 'credential_rejected');
+  assert.match(result.operatorGuidance, /official provider.*credential/i);
+  assert.match(result.operatorGuidance, /does not prove expiry/i);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TOKEN_MUST_NOT_LEAK/);
 });
 
@@ -133,6 +136,15 @@ test('control-plane causes classify safely without asserting expiry or trusting 
     const status = parseTunnelFunctionalHealth(incident);
     assert.equal(status.controlPlaneHttpStatus, httpStatus);
     assert.equal(status.controlPlaneProblem, expected);
+    if (httpStatus === 403) {
+      assert.match(status.operatorGuidance, /provider permissions/i);
+      assert.doesNotMatch(status.operatorGuidance, /rotate|expired/i);
+    } else if (httpStatus === 429) {
+      assert.match(status.operatorGuidance, /rate.limit/i);
+      assert.match(status.operatorGuidance, /avoid repeated restarts/i);
+    } else if (httpStatus >= 500 || httpStatus === 418) {
+      assert.equal(status.operatorGuidance, null);
+    }
   }
 
   const stale = structuredClone(example);
@@ -142,6 +154,7 @@ test('control-plane causes classify safely without asserting expiry or trusting 
   const healthy = parseTunnelFunctionalHealth(stale);
   assert.equal(healthy.controlPlaneHttpStatus, null);
   assert.equal(healthy.controlPlaneProblem, 'none');
+  assert.equal(healthy.operatorGuidance, null);
 
   for (const malformed of ['401', -1, 0, 999, 1.5]) {
     const invalid = structuredClone(example);

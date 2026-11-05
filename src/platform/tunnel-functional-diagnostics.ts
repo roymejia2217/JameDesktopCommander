@@ -23,6 +23,8 @@ export interface TunnelFunctionalDiagnostics {
     controlPlaneProblem:
         | 'none' | 'credential_rejected' | 'permission_denied'
         | 'rate_limited' | 'server_error' | 'other_http_error' | 'unverified';
+    /** Static operator guidance, not evidence of credential expiry or permission to mutate state. */
+    operatorGuidance: string | null;
     operability: TunnelLocalOperability;
 }
 
@@ -73,6 +75,23 @@ function controlPlaneFailure(controlPlane: Record<string, unknown>): {
     return { httpStatus: code, problem: 'other_http_error' };
 }
 
+// Reuse the verified classification on both OS CLIs. Never echo an untrusted
+// provider message, propose an automatic restart, or infer expiry from 401.
+function recoveryGuidance(
+    problem: TunnelFunctionalDiagnostics['controlPlaneProblem'],
+): string | null {
+    switch (problem) {
+        case 'credential_rejected':
+            return 'Review the active tunnel credential in the official provider credential manager; HTTP 401 does not prove expiry.';
+        case 'permission_denied':
+            return 'Review provider permissions for this account and tunnel profile; HTTP 403 is an access denial.';
+        case 'rate_limited':
+            return 'The provider is rate-limiting requests (HTTP 429); follow its retry guidance and avoid repeated restarts.';
+        default:
+            return null;
+    }
+}
+
 export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagnostics {
     const root = object(raw);
     const components = child(root, 'components');
@@ -115,6 +134,7 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
             count(child(controlPlane, 'details'), 'consecutive_failures'),
         controlPlaneHttpStatus: controlPlaneState.httpStatus,
         controlPlaneProblem: controlPlaneState.problem,
+        operatorGuidance: recoveryGuidance(controlPlaneState.problem),
     };
     return { ...observed, operability: assessLocalTunnelOperability(observed) };
 }

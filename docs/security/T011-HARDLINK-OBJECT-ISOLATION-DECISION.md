@@ -1270,6 +1270,36 @@ independent review remain blockers. The runtime issuer is still disabled,
 the native SCM probe terminates without I/O authority, and release
 remains **NO-GO**.
 
+### Remove the weaker Windows root-only external constructor (2026-11-05; NON-RELEASE)
+
+The original `observe_preopened_isolated_service_root` checked SCM identity,
+protected directory ACLs, root/parent kernel identities and volume
+separation, but **did not** authenticate the OS-known ProgramData parent or
+the independently protected exact HKLM root-anchor name. Unlike the newer
+chain-bound composite, the legacy constructor remained publicly callable
+by downstream crates. While no filesystem grant was issued, that public
+type/API would have offered a plausible but weaker admission point for a
+future native broker, bypassing the provenance checks of #148.
+
+The legacy `ObservedWindowsIsolatedRoot` and constructor are now
+`pub(crate)` only. A downstream Rust `compile_fail` doctest verifies
+the weaker constructor cannot be imported; before the visibility change,
+the doctest **failed as intended**, because the import compiled
+successfully (5/6 doc tests passed; one RED). The existing real-SCM test
+still exercises the legacy positive control through a narrowly named
+**debug-only diagnostic** returning only a terminal `Result<(), IdentityDenied>`
+after actual revalidation, never a retained handle, object capability,
+or I/O grant. The same symbol in release builds is **unconditionally
+denying**; the legacy code cannot be exercised through it. All production
+root admission remains through the stricter chain-bound composite.
+
+This prevents accidental public fallback; it does **not** establish
+independently approved issuer authority, hard-link exclusion, race-atomic
+authorization plus read/append/rewrite, or the four missing original #147
+object-integrity acceptance cases. Hosted exact-head Windows/Linux results
+remain mandatory. No installed service/runtime/registry/volume is altered.
+Production release stays **NO-GO**.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

@@ -75,7 +75,7 @@ impl ObservedWindowsStateDirectory {
 /// A revoked observation cannot become valid again, even if a privileged
 /// namespace actor later restores the original mountpoint. Revalidation
 /// is point-in-time only; it does not provide atomic authorization + I/O.
-pub struct ObservedWindowsIsolatedRoot {
+pub(crate) struct ObservedWindowsIsolatedRoot {
     parent: File,
     root: ObservedWindowsStateDirectory,
     child_name: String,
@@ -102,7 +102,7 @@ impl ObservedWindowsIsolatedRoot {
     /// Require the real SCM token, protected root/parent ACL, separate
     /// kernel volume and exact relative child identity on every invocation.
     /// This does not issue execution rights or provide an I/O entrypoint.
-    pub fn revalidate(&mut self) -> Result<(), IdentityDenied> {
+    pub(crate) fn revalidate(&mut self) -> Result<(), IdentityDenied> {
         self.revalidate_or_revoke(|candidate| {
             verify_service_identity()?;
             let sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
@@ -784,7 +784,15 @@ pub fn observe_preopened_service_state(
 /// storage. This is a necessary preflight, not an independently approved
 /// Windows issuer: the parent/child relationship, unique volume provenance,
 /// mount aliases, race-free pinning and durable authority are still missing.
-pub fn observe_preopened_isolated_service_root(
+///
+/// The legacy root-only observer is intentionally not accessible to downstream
+/// consumers: it bypasses independently bound ProgramData/HKLM provenance.
+///
+/// ```compile_fail
+/// use jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root;
+/// let _untrusted_root_only_admission = observe_preopened_isolated_service_root;
+/// ```
+pub(crate) fn observe_preopened_isolated_service_root(
     parent: &File,
     root: File,
     child_name: &str,
@@ -808,6 +816,32 @@ pub fn observe_preopened_isolated_service_root(
     // admission is an I/O grant; later use requires fresh revalidation.
     observation.revalidate()?;
     Ok(observation)
+}
+
+/// Debug-only, non-authorizing SCM control: preserve a genuine OS comparison
+/// with the legacy root-only gate, but never expose the weaker observer type,
+/// retained handles, or a usable grant outside this crate. The release
+/// diagnostic is permanently DENY and never evaluates the weaker observer.
+#[cfg(debug_assertions)]
+pub fn debug_validate_legacy_isolated_root_without_issuer(
+    parent: &File,
+    root: File,
+    child_name: &str,
+) -> Result<(), IdentityDenied> {
+    let mut observed = observe_preopened_isolated_service_root(parent, root, child_name)?;
+    observed.revalidate()
+}
+
+/// Debug diagnostics have no operational authority in a release build.
+/// The symbol remains shape-compatible for the non-shipping test example,
+/// but the weaker gate is never evaluated here.
+#[cfg(not(debug_assertions))]
+pub fn debug_validate_legacy_isolated_root_without_issuer(
+    _parent: &File,
+    _root: File,
+    _child_name: &str,
+) -> Result<(), IdentityDenied> {
+    Err(IdentityDenied)
 }
 
 /// Non-issuing root observation: the named source-parent/anchor entry,

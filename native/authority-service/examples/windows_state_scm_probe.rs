@@ -242,16 +242,15 @@ mod windows {
                 let Ok(composite_root) = root.try_clone() else {
                     return DENIED_ROOT_OPEN;
                 };
-                let Ok(mut observed) =
-                    jdc_authority_service::windows_policy_root::observe_preopened_isolated_service_root(
+                // The legacy root-only observation is deliberately not an
+                // importable capability type. Only the debug-only diagnostic
+                // returns a terminal verdict; it never returns a root handle.
+                if jdc_authority_service::windows_policy_root::
+                    debug_validate_legacy_isolated_root_without_issuer(
                         &parent, root, "isolated",
                     )
-                else {
-                    return DENIED_PARENT_DACL;
-                };
-                // A valid SCM test must exercise the public revalidation
-                // method; successful construction alone is insufficient.
-                if observed.revalidate().is_err() {
+                    .is_err()
+                {
                     return DENIED_PARENT_DACL;
                 }
                 // Positive terminal verdict requires independent SCM/ACL

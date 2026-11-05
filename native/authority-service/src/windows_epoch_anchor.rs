@@ -20,6 +20,8 @@ use windows_sys::Win32::{
 
 // A separately privileged administrator must provision and protect this key.
 // No caller input or environment variable may select a different authority.
+const ADMIN_PARENT_PATH: &str = "SOFTWARE\\JameDesktopCommander";
+const AUTHORITY_PARENT_PATH: &str = "SOFTWARE\\JameDesktopCommander\\Authority";
 const KEY_PATH: &str = "SOFTWARE\\JameDesktopCommander\\Authority\\EpochAnchor";
 const VALUE_NAME: &str = "PolicyAnchorV1";
 const ACCESS_ALLOWED_TYPE: u8 = 0;
@@ -207,12 +209,15 @@ fn verify_protected_registry_acl(key: HKEY, service_sid: &[u8]) -> Result<(), Id
     admit_acl(&aces)
 }
 
-/// Missing key, wrong principal, wrong ACL, missing/malformed value => DENY.
-pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
-    verify_service_identity()?;
+// Every managed part of the fixed registry chain must be independently
+// attested against the SAME immutable service SID. A protected leaf alone
+// cannot prove that an unprotected parent is not replaceable by another
+// principal. HKLM/SOFTWARE is the OS-administered root, not client input.
+fn open_verified_key(path: &str, service_sid: &[u8]) -> Result<Key, IdentityDenied> {
     let mut raw: HKEY = ptr::null_mut();
-    let name = wide(KEY_PATH);
-    // Never create; bind the 64-bit Registry view to avoid WOW64 alias drift.
+    let name = wide(path);
+    // Never create; bind the 64-bit Registry view and open links themselves
+    // instead of following a potentially redirected authority.
     let code = unsafe {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -226,8 +231,18 @@ pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied>
         return Err(IdentityDenied);
     }
     let key = Key(raw);
+    verify_protected_registry_acl(key.0, service_sid)?;
+    Ok(key)
+}
+
+/// Missing key, wrong principal, wrong ACL anywhere in the managed chain,
+/// missing/malformed value => DENY. None of these observations grant I/O.
+pub fn observe_fixed_epoch_floor() -> Result<ObservedEpochFloor, IdentityDenied> {
+    verify_service_identity()?;
     let service_sid = crate::windows_token::service_sid_bytes().map_err(|_| IdentityDenied)?;
-    verify_protected_registry_acl(key.0, &service_sid)?;
+    let _admin = open_verified_key(ADMIN_PARENT_PATH, &service_sid)?;
+    let _authority = open_verified_key(AUTHORITY_PARENT_PATH, &service_sid)?;
+    let key = open_verified_key(KEY_PATH, &service_sid)?;
     let mut kind = 0u32;
     let mut size = 40u32;
     let mut bytes = [0u8; 40];

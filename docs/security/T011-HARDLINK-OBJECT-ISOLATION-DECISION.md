@@ -434,6 +434,981 @@ contract and the original #147 scenarios prove invariant O on both OSes.
    Only then may a separate security review consider changing
    `releaseEligible:false`.
 
+### Child capability mount-domain admission (2026-11-02, draft #240)
+
+The earlier native `RootedDirectory::open_child` validated only the child
+basename, then delegated to `cap_std::fs::Dir::open_dir`. Unlike the bounded
+read, listing, and descendant creation primitives, it did **not** compare
+the opened child directory's Linux kernel mount ID to its parent. As a result,
+a same-device bind mount could become a fresh root capability and subsequent
+operations would check against the **imported** mount instead of the originally
+authorized storage domain. This is a distinct object-authority escalation,
+not an argument that link-count preflights establish invariant O.
+
+The non-shipping Linux native implementation now opens the child with
+`open_dir_nofollow` and compares `statx(STATX_MNT_ID)` on the two already-open
+directory handles before returning a child capability. A mismatch returns
+`EXDEV`; missing mount identity fails closed. The test contract includes a
+nonprivileged `/` -> `/proc` mount crossing and a real writable same-device
+bind mount whose mount ID is distinct despite identical device/inode. The
+positive control opens a legitimate same-mount child and creates a nested
+directory. The existing GitHub-hosted disposable mount fixture must execute
+the latter case before this change can receive native Linux acceptance.
+
+This closes only an identified mount-hop capability-admission path. It does
+**not** establish protected storage ownership, disallow same-principal
+hardlinks, prevent a root from being moved during a live operation, or
+authorize the existing four #147 invariant-O RED scenarios. Production native
+issuer activation and publication remain denied pending independent review.
+
+### Protected-domain operation acceptance expansion (2026-11-02, draft #240)
+
+The existing disposable Linux tmpfs and Windows VHD/NTFS CI fixtures already
+exercise distinct real OS principals and separate filesystems/volumes.
+Their earlier successful tests established **cross-device hard-link refusal**
+and selected read/append permission denials; they did **not** cover the
+entire read/rewrite/append/rename/delete operation set under a common
+positive-control and exact-byte preservation contract.
+
+The current non-release acceptance expansion adds the following checks to
+those existing OS-managed fixtures (no third-party ACL wrapper or live-host
+provisioning):
+
+- The actual attacker principal must successfully read, append, rewrite,
+  rename, unlink and create objects in its **own** writable directory.
+- The actual dedicated service principal must successfully exercise the same
+  operations inside the isolated storage domain.
+- The attacker must then fail those operations against the service-owned
+  object, with the original object's SHA-256 unchanged, no renamed or
+  injected entry, and the independently stored outside sentinel unchanged.
+  The original **file object identity** must also survive: Linux compares
+  kernel device/inode before and after; Windows retains an administrative
+  hard-link witness and rechecks same-file kernel identity after the
+  attempted mutations, before removing that witness. Matching bytes alone
+  are deliberately insufficient to establish identity.
+- A test-only Rust probe supplies an explicit native **in-place rewrite**
+  operation. The focused Windows RED test initially failed with
+  `unknown operation` (exit 101); after implementation, a real
+  hardlink-alias test proves that rewriting one filename changes the bytes
+  visible through the other name. This is a retained **negative property**
+  of same-object hard links, not evidence of containment.
+
+These assertions must run on actual disposable, differently provisioned
+Windows and Linux OS principals before any cross-platform acceptance is
+claimed. A test passing because an account, tool, mount, or attack setup is
+unavailable is an invalid result.
+
+**Scope restriction:** These are OS access-control and storage-boundary
+tests, not green results for the original four #147 native-capability
+fixtures. They do not prove same-principal isolation, concurrent mount
+namespace custody, service-token security on live hosts, full MCP routing
+or an independently reviewed issuer. Privileged administrators can still
+bind-mount foreign objects in the Linux research fixture; the proof and
+its explicit threat-model exclusions must remain visible. The service
+continues deny-only pending complete object-domain authority review.
+
+### Native issuer root admission: Linux-only fail-closed boundary (2026-11-02, #240)
+
+This increment moves the **separate-storage requirement into the Linux
+issuer's root-to-capability transition**, rather than treating successful
+installer fixtures as authorization. `IssuerPolicy::open_root` remains a
+non-authorizing, handle-only administrative preflight. The production-only
+`SealedDirectoryGrant::from_issuer_policy` and its root revalidation path
+instead call `IssuerPolicy::open_custodied_root` after the independently
+attested administrative policy/epoch check.
+
+The new admission must observe the following directly from **already opened
+kernel directory handles** before returning a root capability:
+
+1. Effective service UID/GID must be nonzero, and production code must pass
+   the existing dedicated Linux service identity preflight, including
+   filesystem credentials, no-new-privileges and capabilities policy.
+2. The policy's final root must be a directory owned by that UID/GID with
+   exact mode 0700, located at the root of a **separately mounted
+   filesystem**: both mount ID and device must differ from its immediate
+   parent. A same-device bind alias is not an isolated storage domain.
+3. The mountpoint's immediate parent must be root-admin-owned, without
+   group/other write permissions; all intermediate ancestors must remain
+   root-owned, must not cross foreign mounts and must not be writable by
+   group/other, except for a root-owned sticky directory such as `/tmp`.
+   A service-owned parent could let the service rename its own supposedly
+   protected mountpoint. Parent and child metadata come from `fstat`;
+   mount IDs come from `statx(STATX_MNT_ID)` with no name-based fallback.
+4. A failed observation, unknown mount ID, wrong owner/mode, same-device root,
+   mutable parent or changed root identity **DENIES** before authority is
+   issued. Neither policy JSON nor the MCP client can supply the expected
+   device, UID or mount ID.
+
+A pure, cross-platform Rust security decision test must demonstrate
+**RED→GREEN** for same-mount, same-device, wrong-owner, wrong-mode,
+root-writable-parent and zero-UID/GID cases. A separate hosted Linux
+test runs the **actual issuer method** with a disposable root-owned
+mountpoint parent, mounted tmpfs and the dedicated `jdc-authority`
+principal under `no_new_privs`; it must positively create a child
+inside the isolated root and deny a mismatched root reference. Normal
+unmounted administrative directories must remain rejected even if
+`open_root` can open them by name.
+
+**Scope limits:** This deliberately changes which Linux restricted roots
+could become operational: existing ordinary directories are
+**unsupported/denied**, not silently reinterpreted as isolated. Windows
+issuer parity, unprivileged ownership lifecycle and administrative
+provisioning, race-free mount-namespace custody under privileged adversaries,
+revocation after concurrent namespace mutation, and full #147 native
+read/rewrite/append/replacement adversarial coverage remain distinct
+release blockers. These checks cannot make arbitrary same-principal writable
+data safe, cannot stop a privileged host administrator and **do not
+activate** the native service or any MCP operation.
+
+### Issuer-read E2E fixture migration after mandatory root custody (2026-11-02)
+
+The initial hosted `82f0047` Linux root-admission test **passed 1/1**
+under the dedicated service principal but the later Node→systemd→issuer
+read E2E returned `E_AUTHORITY_UNAVAILABLE`. That E2E had provisioned its
+two policy roots as ordinary child directories under the service-owned
+SQLite state path. The stricter issuer correctly rejected both roots:
+neither was a separate mount, and their immediate parent was mutable by
+the service principal. The E2E's previous positive behavior was therefore
+not legitimate proof of object custody.
+
+The disposable hosted fixture now provisions an independent,
+root-admin-owned `/var/lib/jdc-authority-roots` mountpoint parent and
+two **different kernel filesystems** for the policy roots. Policy bytes
+and their independently computed administrative digest/witness are
+updated together. No runtime fallback for the old shared-volume roots
+is added. The fixture preserves the original binary reads, sequential
+list, durable replay, invalid rootRef, and native mounted-alias denial
+contracts. It also deliberately mounts a subdirectory of a separately
+mounted backing tmpfs as the first policy root; a sibling exterior
+file on that backing filesystem has the same `st_dev` but lies
+**outside the authorized root subtree**. A privileged administrator
+then bind-mounts that file over an in-root name to reproduce the
+same-device, different-mount attack. The issuer must deny the alias
+and preserve the exterior SHA-256, even though a trivial `st_dev` or
+hardlink-count check would miss the attack.
+
+**Crucial limitation:** The backing mount is accessible through a
+second, administrator-created pathname solely to construct the
+adversarial same-device case. This test configuration does **not**
+satisfy the exclusive-origin assumption for production roots, and
+the issuer's current owner/mode/mount-ID gate alone cannot prove that
+an administrator has not exposed the same filesystem elsewhere.
+The test validates fail-closed mount-bound operations under a
+privileged attack fixture, not a complete administrator-resistant
+origin invariant. Independent review must approve the supported
+mount-namespace/provisioning guarantees before #148 can close.
+
+### Windows non-issuing opened-handle volume discriminator (2026-11-02, #148)
+
+The Linux issuer now rejects roots sharing a device/mount domain, but Windows
+does not yet have an equivalent production root issuer. This increment adds
+a **non-authorizing Windows volume preflight**, using the official
+`GetFileInformationByHandleEx` API with `FileIdInfo` and
+`FileAttributeTagInfo` on already-open directory handles. The kernel
+provides 64-bit volume serials and 128-bit file IDs: equal, missing or
+zero volume identities; missing/all-zero file IDs; and non-directory or
+reparse attributes deny. An unsupported or failed extended information
+query **denies**, without falling back to the legacy truncated 32-bit
+volume and 64-bit file index. No ambient pathname is reopened to obtain
+metadata, no compiler-unstable API is enabled, and no Windows grant/SCM
+activation changes.
+
+The non-issuing `observe_preopened_isolated_service_root` now composes
+this predicate **after** the existing real SCM identity and exact protected
+root-DACL observation. There is no caller-supplied SID, volume serial or
+permission claim. Its public result is the existing data-only observed
+handle, not an execution capability. A focused Windows test proved RED
+(missing integrated observation, Rust exit 101), then GREEN for the
+interactive-user denial and exact typed handle-only signature. The
+separate-volume VHD test checks the volume discriminator under the
+disposable runner administrator and therefore **does not** establish
+the service-token/DACL positive path for this combined observer.
+
+A Windows local unit test must prove that two genuine handles to directories
+on the **same existing NTFS volume** are denied. The existing disposable
+Windows VHD acceptance creates a separate NTFS disk and runs an
+**explicitly unignored** Rust test against the VHD root and a directory on
+the system drive. The test requires the different-volume preflight to
+accept, and both same-volume controls to deny. The PowerShell fixture
+independently verifies actual `Get-Partition` disk numbers and NTFS for
+both drives. It also requires an **exact Rust harness test-name PASS line**
+and `1 passed; 0 failed; 0 ignored` in the captured native output:
+`cargo test --exact` can exit 0 when zero tests match, which must never
+count as an OS storage proof. Its established unrelated attacker/service
+DACL and cross-volume hard-link attacks continue unmodified.
+
+**TDD for extended kernel IDs:** a new focused case first failed RED
+(Rust exit 101) because the prior 32-bit serial and 64-bit file-index
+representation could not express two 64-bit volume IDs with identical
+lower 32 bits or a full 128-bit file ID. It then passed GREEN after
+adopting `FILE_ID_INFO`. Existing real same-volume handle denial
+and the explicitly unignored hosted NTFS VHD admission test continue
+to exercise the same production preflight implementation.
+
+**Security limits are material:** even a 64-bit Windows volume serial
+is only a *necessary discriminator*, not a globally unique immutable
+storage-origin credential.
+Collision, administrative reformat, duplicated volume images, and alternate
+mount paths are not excluded by this preflight. It does not prove the
+opened root is really a child of the supplied parent, inspect its owner or
+ACL, authenticate a Windows SCM service token, exclude unauthorized aliases
+or issue a capability. Those require a stronger, separately reviewed
+native volume identity plus protected component-pinned bootstrap and
+real service principal. This isolated **data-only** check must not be
+substituted for completion of #148 or the four original #147 RED cases.
+
+### Windows direct-child kernel-handle binding (2026-11-02, #148)
+
+The Windows non-shipping root observer now checks **the relationship between
+its trusted administrative parent handle and its previously opened root
+handle**, rather than relying on the existence of two unrelated objects
+with plausible owner, DACL and volume attributes.
+
+`verify_preopened_named_child_identity` uses official Windows
+`NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` set to the **already
+opened parent handle**, `ObjectName` restricted to **one safe directory
+component**, existing-only disposition and directory-only options.
+The open intentionally follows the **final** mountpoint into its NTFS
+volume, because `FILE_OPEN_REPARSE_POINT` would inspect the reparse object
+rather than the authorized filesystem root. On both obtained kernel
+handles, `GetFileInformationByHandleEx(FileIdInfo)` yields the full
+64-bit volume identity and 128-bit file identity; admission requires an
+exact match, nonzero identities and directory/non-reparse target
+attributes. The rooted reopened handle is closed automatically.
+
+**TDD:** a new real Windows test first failed RED (Rust exit 101:
+function absent), then went GREEN for a matching direct-child,
+unrelated-parent and unrelated-root controls. Invalid components
+(separators, ADS separators, dot components, reserved Windows names)
+deny. A separate real NTFS test renames the original, already-open root
+and replaces the original name with a new directory: the **stale original
+handle must DENY**, the freshly opened new root may pass a new snapshot,
+and the original sentinel bytes remain unchanged.
+
+**Hosted acceptance:** the existing restricted Windows SCM/VHD fixture
+continues to run the combined token + root ACL + administrator parent
+ACL + separate-volume proof; its test-only program now also requires
+the native rooted direct-child identity comparison against the exact
+`isolated` mountpoint entry. An additional **separately opened**
+administrator-owned `foreign-parent` with a valid read-only
+service ACE must be rejected for the same VHD root by the real
+restricted SCM process. This checks that correct-looking ACLs and
+volume metadata cannot substitute for actual kernel-rooted child
+identity; a falsely accepted foreign parent fails the fixture with
+its own service-specific exit code (54), and an unopenable required
+foreign parent fails with code (55). The fixture's positive case is essential:
+a denial-only implementation must not count as correct. The test is
+not a production service or installer.
+
+**Limitations:** this proves a **point-in-time** parent/name/root
+relationship, not immutable custody under concurrent administrator
+mountpoint replacement; it is not an atomic revocation protocol,
+an exclusive storage origin attestation or protection against a
+privileged actor exposing another route to the same filesystem.
+The final reparse is intentionally followed for the mounted volume,
+while no undocumented `OBJ_DONT_REPARSE` behavior is assumed. Keep
+all #147 real object-alias RED cases and separate FFI/MCP blockers
+open until their independent acceptance.
+
+### Windows effective-thread-token preflight (2026-11-02, #148)
+
+Windows access checks may use a **thread impersonation token** rather
+than the SCM process primary token. Checking only `TokenUser` on
+`GetCurrentProcess` is therefore insufficient to prove the effective
+principal used for file opens or DACL inspections.
+
+The existing read-only `verify_service_identity` path now requires
+`OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, OpenAsSelf=TRUE)`
+to fail with the **specific** `ERROR_NO_TOKEN`. A successfully opened
+thread token (including self-impersonation) is denied and its handle
+closed. Any other error (including an inaccessible or anonymous token)
+is also denied. This gate runs **before and after** the process-token
+SID check, and the separate diagnostic SCM token observer uses the
+same rule. It cannot be bypassed with caller-supplied names or flags.
+Microsoft documents why the effective thread security context takes
+precedence: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthreadtoken>.
+
+**TDD:** a real Windows test initially failed RED with Rust exit
+101 because the effective-thread gate was absent. After implementation
+it passes GREEN using an isolated OS thread:
+`OpenThreadToken` reports no token normally; `ImpersonateSelf` with
+`SecurityImpersonation` creates a genuine thread token which must
+DENY; `RevertToSelf` restores the original context and the gate
+must accept the absence of a thread token again. A drop guard
+reverts the test's temporary impersonation even during unwind.
+The Windows SCM fixture must independently retain its legitimate
+positive admission; a denial-only implementation is unacceptable.
+
+**Limit:** this is a synchronous **observation-only** preflight;
+another actor with authority to change a thread context during a
+future separate operation is not excluded by a prior check. It does
+not grant storage I/O, prove atomic use/revocation, or satisfy #147.
+
+### Sticky Windows root-observation revocation (2026-11-02, #148)
+
+A separate **data-only** `ObservedWindowsIsolatedRoot` now retains
+both opened kernel handles (administrative parent and NTFS root), the
+single verified component and an irrevocable `active` flag.
+`observe_preopened_isolated_service_root` returns this stricter type
+instead of the general state-directory observation; there is no
+conversion to an operative capability or production I/O API.
+
+`revalidate(&mut self)` rechecks the real SCM service identity,
+protected root and read-only parent DACLs, different kernel volume
+identity, and the exact handle-relative child/root identity. Any
+failure irrevocably revokes this observation: restoring an earlier
+mountpoint path or DACL cannot revive the same object. The existing
+debug-only SCM test now calls `revalidate` **after** successful initial
+admission, making a stuck-deny implementation fail its positive case.
+
+**TDD:** first RED (missing distinct typed observation, Rust exit 101),
+then GREEN on a **real Windows directory rename/replacement**:
+initial kernel binding succeeds, a different directory under the same
+name causes refusal, and renaming the original directory back still
+does not reactivate the revoked observation. The sentinel bytes are
+checked after restoring the original. A second real Windows test
+uses the project's established `mklink /J` NTFS junction fixture to
+replace the root entry with a link to a separate exterior directory:
+the stale observation DENIES, the exterior sentinel bytes remain
+unchanged through junction removal, and restoring the original name
+does not revive the revoked instance. A **fresh** kernel-only fixture
+observation of the restored original must independently pass, proving
+the defense does not simply deny everything. The local test-only
+constructor verifies only live kernel handles and cannot claim SCM
+credentials or authorize I/O; the hosted service test separately
+requires the actual restricted SCM token.
+
+**Interrupted-check hardening:** `revalidate_or_revoke` now marks its
+observation **inactive before** executing an OS-bound security check.
+It restores `active` only after all checks succeed. A real Windows
+regression uses `catch_unwind` to intentionally interrupt the check
+after a valid kernel binding and then proves the same observation
+cannot be reused, even though the protected directory was never
+altered. The test first proved **RED** (old code returned `Ok(())`
+after the interruption; Rust exit 101), then **GREEN** (sticky
+`IdentityDenied`). A caught Rust panic is not a normal access-denial
+protocol; this closes the fail-open *state* after unwinding rather
+than authorizing any OS I/O.
+
+**Residual limitation:** an administrator can still replace a
+mountpoint after the last successful check. Without a separately
+reviewed atomic use/revocation boundary, this is not a guarantee of
+concurrent invariant-O confinement. No live service, broker handler
+or FFI execution route has been enabled, and #147's four original
+hardlink adversarial tests must remain unsuppressed and independently
+accepted before release.
+
+**Additional Windows administrative-ancestor counterexample (2026-11-03):**
+A real NTFS `mklink /J` initially exposed an `isolated` directory under
+`authorized/parent`, where both the parent and child handles matched at
+the kernel object level. After deleting only that junction entry, the
+`authorized/parent` pathname was absent; a separate exterior name still
+resolved to the *same* underlying child object, and its original canary
+bytes remained intact. A security-demanding test first failed RED
+(`IdentityDenied` expected but `Ok(())` observed) after the actual
+namespace mutation, not during fixture setup. The permanent `cfg(test)`
+negative control documents the observed `Ok(())` and independently
+checks the real kernel file identity and exterior bytes. A green run of
+this control proves the counterexample, **not** object isolation.
+The current observer binds a parent and child handle only: it does not
+possess or attest the configured administrative ancestor chain, and a
+removed parent junction is invisible to this restricted recheck.
+An independent test-only **opened administrative ancestor** supplies a
+positive kernel-relative parent lookup before junction removal and a
+negative one afterward (`IdentityDenied`), using the existing
+`verify_preopened_named_child_identity` primitive. This control passes
+on real Windows, but the production observation does **not** retain
+or revalidate that extra ancestor handle, and the ancestor's own origin
+and administration are not thereby authenticated. It proves that a
+missing parent entry is detectable with an independently pinned
+ancestor, not that the required entire root-to-volume custody chain is
+closed or that use/revocation is atomic.
+Releasing a Windows storage grant requires independently reviewed
+admin-owned ancestor handles and point-of-use custody/revocation under
+the specified OS principals; neither a pathname prefix nor a fresh
+`realpath` can meet that contract. No production authorization was
+introduced, and #148 remains P0/BLOCKED.
+
+**Windows no-reparse administrator-entry increment (2026-11-03):**
+A new real-NTFS regression first failed RED (Rust exit 101, `Ok(())`
+instead of the required `IdentityDenied`) because the preexisting
+mount-root-style `NtCreateFile(RootDirectory)` followed a live junction
+from a candidate administrative entry in a disposable NTFS test tree
+(not an OS-Administrator-owned or SCM-provisioned directory) to an
+exterior directory. A separately typed `OpenEntryItself` resolution
+mode now applies the official
+`FILE_OPEN_REPARSE_POINT` option only to administrator-directory
+entries; the existing `FollowMountRoot` mode is retained for legitimate
+NTFS volume mountpoints. Both modes keep the existing strict child-name
+validation, exact kernel volume/file identity comparison, directory
+attribute checks and unconditional reparse denial on the returned
+object. The real Windows test now passes: an ordinary administrative
+child is accepted; the live junction is refused with the exterior file
+unchanged. The new `verify_preopened_administrative_child_identity`
+is **non-issuing and not yet part of the service-root observer**.
+Specifically, there is still no authenticated root-of-chain anchor,
+independent pinning/checking of every administrative ancestor, atomic
+authorization/use, or proof of exclusive filesystem custody. A matching
+root object via a different ancestor may still be reachable. No
+security-ready grant is implied; #148 remains P0/BLOCKED.
+
+**Windows full supplied-chain negative control (2026-11-03):**
+A second real NTFS test holds an independently opened candidate root,
+an intermediate parent and its final child. When the intermediate
+parent is reached through a `mklink /J` to an exterior subtree, checking
+only the final ordinary child entry returns `Ok(())` although the
+intermediate entry is a reparse point. The final-edge-only baseline
+correctly failed RED (Rust exit 101). The new non-issuing
+`verify_preopened_administrative_chain` checks every supplied
+parent/child pair with no-final-reparse semantics, denies empty
+evidence, accepts the real two-level ordinary-directory control, and
+rejects the exterior alias without changing its canary. It does not
+pin the caller's root-of-trust by policy, establish SCM or
+Administrator ownership, provide an atomic multi-component snapshot,
+or revoke any previously admitted operation. The live protected-root
+observer still does not retain or validate this chain: additional
+kernel identity, administrative ACL, concurrency and exclusive object
+custody acceptance remain necessary for #148.
+
+**Windows revocable supplied-chain observation (2026-11-03; NON-RELEASE):**
+A further real NTFS test first failed **RED (Rust exit 101)** after a
+successful actual child-entry rename and restoration: the existing
+stateless `verify_preopened_administrative_chain` returned `Ok(())`
+despite the failed check observed between those operations. The new
+data-only `ObservedWindowsAdministrativeChain` pins the independently
+supplied anchor and up to 64 opened directory entries, checks the full
+no-reparse chain again after duplicating the handles, and sets its
+internal state to **revoked before every subsequent revalidation**.
+The test now passes: an ordinary two-level chain remains valid, moving
+the pinned child out of its named entry permanently revokes the old
+observation, restoring the name does not resurrect it, and a separate
+fresh non-issuing observation can inspect that restored chain. Existing
+real NTFS intermediate-junction controls also reject empty evidence
+and hostile exterior aliases at observation admission; outside canary
+bytes remain unchanged.
+
+This observation is **not an authority-bearing capability**. The
+caller-supplied anchor is not authenticated by protected OS principal
+or policy; the mechanism does not detect namespace changes that occur
+and disappear entirely *between* checks, does not give a concurrency-
+atomic authorization/I/O boundary, does not prove isolated-object
+provenance, and is not integrated into
+`ObservedWindowsIsolatedRoot` or an MCP handler. Independent SCM/ACL,
+mount-object custody, #147 hard-link adversarial acceptance, and #124
+FFI review remain mandatory. **#148 remains P0 BLOCKED; release NO-GO.**
+
+**Windows chain-bound isolated-root observation (2026-11-03; NON-RELEASE):**
+A subsequent Windows NTFS test reproduced a **real RED** (Rust exit 101,
+`Ok(())` versus the demanded `IdentityDenied`) for a standalone
+kernel-bound root observation whose parent and child were both in an
+*exterior* directory, despite a separately valid administrative chain
+anchored elsewhere. The configured administrative terminal parent
+and the root's actual parent were independent observations: each check
+could succeed without binding the root to the administrative chain.
+A separate first attempt to rename a live administrative directory
+failed during fixture preparation with Windows `ERROR_ACCESS_DENIED (5)`;
+that was **not** treated as a security RED or a proven attack.
+
+The new `ObservedWindowsChainBoundIsolatedRoot` is a **non-issuing,
+typed composite**. It pins the complete supplied administrative chain,
+selects the protected root's direct parent **only from its final
+administrative handle**, and permanently revokes the composite before
+revalidating its ancestor chain and isolated-root bindings. The new
+public `observe_preopened_chain_bound_isolated_service_root` additionally
+requires the actual restricted SCM process identity plus protected,
+administrator-owned read/traverse DACL checks on both the supplied
+anchor and *every* administrative chain entry at admission and
+revalidation. It continues to use the existing full kernel file IDs,
+no-final-reparse ancestor rules, mounted-root traversal, and
+cross-volume preflight. A normal interactive process is denied by
+the real production path. Real ordinary-NTFS kernel-only positive and
+unrelated-root negative fixtures now pass. The existing junction
+fixture also proves that a standalone root-only check succeeds after
+an intermediate exterior alias but the composite refuses it and
+preserves exterior canary bytes.
+
+**Scope of evidence:** Normal-user positive fixtures exercise only
+`#[cfg(test)]` kernel checks; they do **not** establish a successful
+SCM-privileged positive, administratively provisioned trusted anchor,
+path-independent canonical policy source, exclusive object custody,
+race-atomic filesystem operations, or persistence of issuer grants.
+The older `observe_preopened_isolated_service_root` remains an
+independent, non-authorizing experiment. The disposable SCM probe now
+exercises **both** this root-only check and the chain-bound composite;
+no shipping handler has been moved to either observation. The expanded
+hosted Windows SCM/VHD acceptance must actually run and pass before
+considering the new composite production-qualified.
+#148 remains P0/BLOCKED and `releaseEligible:false`.
+
+**Hosted SCM composite-chain acceptance extension (2026-11-03; CI-PENDING):**
+The already disposable-only Windows `windows_state_scm_probe` now
+requires the *composite* `observe_preopened_chain_bound_isolated_service_root`
+to succeed under the real restricted SCM token **in addition** to the
+existing mounted-VHD root observation. The trusted fixture under its
+randomly named `%ProgramData%/JDC-T011-C4R-*` stage now has the
+administrator-owned, protected, read-only-for-service
+`stage/mount-parent` component: the root is mounted at
+`stage/mount-parent/isolated`. The stage directory is the independently
+pinned administrative anchor, and the final parent may only be
+`mount-parent` beneath that exact opened anchor.
+
+The preexisting same-volume failure **52**, parent DACL failure **53**,
+root DACL failure **51**, successful mounted-VHD verdict **46**, and
+the foreign-parent negative control remain explicit. New SCM-only
+exit **56** denotes *composite chain/anchor denial*, and **57** denotes
+an erroneous composite admission through the protected but unrelated
+`stage/foreign-parent`. After a positive VHD admission, the hosted
+script alters only this disposable stage's ACL to make the service
+able to mutate its anchor and requires **56**; restoring the
+administrator-owned protected read/traverse ACL must restore **46**.
+
+**Evidence boundary:** Rust example contract test and debug build,
+PowerShell syntax parsing, and native Windows adversarial unit
+regressions can run without administrative modification on the
+developer's Windows host. The script explicitly rejects execution
+unless `GITHUB_ACTIONS=true`, `RUNNER_OS=Windows` and
+`RUNNER_ENVIRONMENT=github-hosted`, and checks for an existing service
+before provisioning. We do not execute the script or install an SCM
+service/VHD on the development host. This extension is an **untested
+hosted acceptance candidate** until the **exact commit's** disposable
+Windows SCM/VHD workflow runs and passes. Passing local syntax and
+unit tests cannot establish true restricted-SCM positive, volume
+identity or host provisioning behavior. It grants no filesystem I/O,
+does not authenticate a canonical production anchor, and does not
+change the blocked status of #148 or release NO-GO.
+
+**Windows volume-root reparse identity gate (2026-11-03; NON-RELEASE):**
+A genuine NTFS junction attack fixture exposed a missing discriminator in
+`verify_preopened_named_child_identity`. When the destination handle
+matched the final parent-relative lookup, the old follow-reparse check
+returned **`Ok(())`** even though the final entry was an ordinary
+directory junction pointing outside the administrative volume. The new
+security expectation first produced **RED, Rust exit 101**, after the
+real fixture successfully created the junction.
+
+A separate, private, read-only `windows_mountpoint` classifier opens the
+*final named entry itself* via `NtCreateFile` with the already-open
+parent handle and `FILE_OPEN_REPARSE_POINT`. It uses Microsoft's
+`GetFileInformationByHandleEx(FileAttributeTagInfo)` and
+`DeviceIoControl(FSCTL_GET_REPARSE_POINT)` to inspect the existing
+entry. If a reparse point is present, only the mount-point tag with an
+exact, bounds-checked UTF-16 substitute name identifying a **root**
+`Volume{GUID}` is admissible. An ordinary directory with no reparse
+point retains the kernel-only direct-child control; restricted-service
+volume-separation checks remain mandatory elsewhere. Invalid tags,
+junctions targeting pathnames, malformed lengths/offsets, and
+non-root volume targets fail closed. This is an additional *observation*
+after full volume+file kernel-ID comparison, not a capability grant.
+
+**Executed on the real Windows host:** The original junction RED is now
+GREEN. Two separately **ignored-by-default manual acceptance tests**
+were explicitly invoked on distinct existing NTFS C: and D: volumes:
+one real cross-volume directory junction fails the new gate **after**
+the original separate-volume identity check passed; one disposable
+entry pointing to the real D: volume's GUID root succeeds, including
+real kernel relative open and reparse metadata inspection. Both tests
+passed and removed only their local temporary entries; **D: was read
+without being modified**. Pure documented-layout parser tests accept
+a valid GUID-root fixture and deny malformed/off-root alternatives.
+No administrative ACL, service, VHD, disk layout, or machine runtime
+was changed. Official contracts:
+<https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-point-operations>
+and
+<https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/content/ntifs/ns-ntifs-_reparse_data_buffer>.
+
+**Evidence limits:** The check is point-in-time and not atomic with the
+previous identity comparison or later file I/O. The host test used
+existing physical NTFS volumes, **not** a newly mounted CI VHD under
+a restricted SCM service identity. The exact-commit hosted
+SCM/VHD acceptance must confirm volume-root positives and malicious
+alias negatives before this PR can be considered production-ready.
+The independent administrative anchor provenance, authenticated
+issuer/epoch custody, hard-link isolation (#147), and FFI (#124)
+remain unproven. **#148 stays P0/BLOCKED; release NO-GO.**
+
+### Actual Windows restricted-SCM plus isolated-volume observation (2026-11-02)
+
+The existing official disposable Windows hosted-SCM fixture is extended in
+place, rather than introducing a new service or installer. Its debug-only,
+never-shipped `windows_state_scm_probe` invokes the real
+`observe_preopened_isolated_service_root(parent_handle, root_handle, "isolated")`
+under the restricted **NT SERVICE\\JameDesktopCommanderAuthority** token.
+The production library implementation requires that token's established
+OS identity preflight and the kernel-opened root's exact
+administrator-owned DACL, then enforces distinct kernel volume identities
+on the open handles. The fixture leaves the existing state-DACL
+positive/negative scenarios and their strict SCM service-specific exit
+codes intact.
+
+The new acceptance demands ALL of the following on a disposable
+GitHub-hosted Windows runner:
+
+1. An administrator-owned, protected-DACL ordinary directory at
+   `%ProgramData%/JDC-T011-C4R-*/isolated` on the **same device** as the
+   parent must be rejected by the real restricted SCM token (exit **52**,
+   kernel volume-identity mismatch). The test-only service now distinguishes
+   state DACL failure (50), root DACL failure (51), volume failure (52)
+   and parent DACL failure (53), plus unopenable parent/root (48/49).
+   All are rejection outcomes; these statuses never become MCP errors.
+2. A standard 128 MiB expandable NTFS VHD is created and attached using
+   Windows DiskPart; its independent physical disk is compared to the
+   system disk using `Get-Partition` and `Get-DiskImage | Get-Disk`.
+   The VHD is mounted into that empty directory using the documented
+   NTFS folder mount-point contract. The exact mounted partition and
+   NTFS filesystem type are verified, then its root receives the
+   established, explicit administrator-owned three-principal DACL.
+3. The actual SCM service must now accept the composed **token +
+   protected root DACL + protected administrator-owned parent DACL +
+   separate-volume** observation (exit 46). The parent's service ACE
+   permits only read/traverse (+ optional SYNCHRONIZE), with no right to
+   add, rename or delete child objects or change owner/DACL. The same
+   SCM token must **deny** when the parent is made service-writable
+   (exit 53), then accept the restored parent (46). The service must
+   separately deny a service read-only root DACL (51), accept its
+   restoration (46), reject an unauthorized foreign ACE (51), and
+   accept final restoration (46). Success is recorded only after
+   independent positive and negative steps; a stuck-deny implementation
+   cannot pass.
+4. Cleanup always attempts service removal, VHD detach **before**
+   recursive deletion of the temporary mountpoint, and VHD removal.
+   Failure to detach prevents recursive deletion of a still-mounted
+   filesystem. This test must never execute on a user computer.
+
+**First exact-SHA hosted failure and surgical remediation:** The initial
+GitHub Windows SCM/VHD attempt rejected the expected positive root.
+The subsequent diagnostic test recorded SCM service-specific **exit 51**,
+unambiguously locating the failure at the *opened VHD root's protected
+DACL*, not the volume identity or administrator parent policy. The
+original fixture had set the ACL through the mountpoint pathname only.
+The revised disposable fixture assigns the VHD an independently verified
+temporary drive letter **in addition to** its directory mountpoint
+and sets the exact owner/ACL explicitly on the VHD's actual NTFS drive
+root before invoking SCM. Every later read-only, foreign-ACE and
+restoration scenario alters and verifies that actual volume root too,
+rather than accidentally testing only the reparse mountpoint's ACL.
+This does not relax the observed principal/mode policy; a mismatched
+root must still deny. The secondary drive letter is an **administrator-
+provisioned test alias**, not evidence of single-name exclusive origin
+for a production volume. The new exact-SHA hosted positive/negative
+acceptance is mandatory before this remediation can be credited.
+
+**Security boundary:** This is *non-authorizing* custody feasibility.
+DiskPart is an official Windows tool and the fixture runs exclusively
+on disposable CI hosts. The verification does **not** prove stable
+parent-to-child object linkage across the folder mountpoint, absence
+of a second privileged mount or administrative namespace replacement,
+nor same-principal hardlink provenance inside the approved volume. It
+does not install or activate a production issuer and does not close
+issue #148 or supersede the four #147 RED attacks.
+
+### Windows supplied source-parent/anchor edge binding (2026-11-03; NON-RELEASE)
+
+The existing composite `ObservedWindowsChainBoundIsolatedRoot` pinned and
+revalidated a caller-supplied administrative chain, but did not verify the
+first anchor's entry against a named, independently opened source parent.
+A real Windows NTFS fixture created distinct ordinary
+`configured-stage/mount-parent/isolated` and
+`foreign-stage/mount-parent/isolated` trees. Both internal chains were
+valid; before the code change, the complete foreign chain was admitted
+by the old composite despite the actual configured parent's child-name
+identity check rejecting the foreign anchor. The local pre-fix
+adversarial assertion produced **RED, Rust exit 101** with successful
+fixture setup. The exterior canary remained unchanged.
+
+This incremental, non-issuing observer now retains a pinned
+`anchor_parent: File` and `anchor_name: String`, and requires the
+existing `verify_preopened_administrative_child_identity` check during
+admission and every revalidation, in addition to the complete supplied
+administrative chain and the mounted root's existing checks. This
+component-relative kernel lookup compares complete volume and file
+identity and does not follow the final administrative reparse entry.
+Failed checks permanently revoke an old observation. The Windows
+kernel-only adversarial test also requires a positive real NTFS
+configured-chain control, denies the complete foreign chain under the
+expected parent/name, and preserves the exterior canary.
+
+The non-shipping SCM probe is updated to explicitly provide this
+parent/name edge from its **disposable test-executable stage**. That
+derivation is test infrastructure, **not** proof of a production
+canonical root or authorization from a trusted administrator.
+
+**Security limits:** The newly supplied source-parent handle itself
+is **not authenticated as a canonical administrator-provisioned
+ProgramData or policy root**. An actor who may choose that handle
+still controls the beginning of the chain; matching names and kernel
+object identities do not establish independent policy provenance.
+No atomic authorization/use guarantee, exclusive object custody,
+same-principal hard-link confinement, FFI safety proof, installed
+SCM service or MCP authority grant follows from this change.
+The original PR #147 adversarial acceptance requirements are unchanged.
+The exact-commit hosted Windows SCM/VHD test must run in disposable
+GitHub CI before accepting this incremental preflight. #148 remains
+**P0/BLOCKED** and the release remains **NO-GO**.
+
+### Windows NTFS-only handle preflight (2026-11-04; NON-RELEASE)
+
+The native Windows observer previously consumed `FILE_ID_INFO` and volume serial
+evidence from arbitrary opened filesystem handles without confirming that
+the filesystem was NTFS. This was outside the reviewed NTFS/ACL/mountpoint
+model. The non-issuing `windows_policy_root::from_handle` now asks Windows
+`GetVolumeInformationByHandleW` for the filesystem name on that SAME opened
+handle before interpreting file identity. The service-state observation
+also applies this check before evaluating its directory DACL. Unsupported
+queries, malformed UTF-16, unknown names (including ReFS, FAT/exFAT and
+SMB labels), or truncated names deny rather than silently enter the NTFS
+acceptance path. No ambient pathname resolution or second storage handle
+is introduced. [Microsoft API documentation](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew).
+
+The same opened handle must also pass an explicit local-disk device query
+using `NtQueryVolumeInformationFile(FileFsDeviceInformation)`. The observer
+refuses non-disk device types, removable media, SMB-style `FILE_REMOTE_DEVICE`
+and `FILE_REMOTE_DEVICE_VSMB` characteristics, or missing/short OS results.
+It does not infer locality from an `NTFS` name alone. These probes are
+point-in-time observations, not assurance against administrator-level
+volume replacement or proof of trusted provisioning.
+
+The Windows TDD probes first failed compilation due to absent filesystem-name
+and local-device guards (RED), then passed using a real opened NTFS directory
+and synthetic negative filesystem/device cases. Locked Rust 1.91.1 all-targets
+tests, strict Clippy and Rustfmt are required for the complete current SHA;
+the preceding NTFS-only snapshot passed 135 library cases with 3 ignored
+hosted-only cases. These were **local Windows** results.
+Exact new-SHA hosted Windows SCM/VHD and Linux feasibility remain mandatory.
+
+This is **necessary supported-filesystem validation, not independent policy
+origin authentication**: a filesystem name cannot establish the configured
+administrator-provisioned source parent, rule out cross-volume aliases or
+privileged mount replacement, or guarantee read/write atomicity. The four
+original #147 hard-link RED cases and #124/#139/#148 release gates remain
+unchanged, and no production issuer or runtime operation is enabled.
+
+### OS-known Windows ProgramData source-parent binding (2026-11-04; NON-RELEASE)
+
+The composite previously accepted a caller-supplied source-parent handle
+with an internally consistent anchor/child chain. A real NTFS negative
+control proved the foreign tree could satisfy all kernel-only checks when
+the caller chose both the foreign parent and its matching anchor name.
+Merely comparing each child to its supplied parent was insufficient.
+
+The Windows **non-issuing SCM observation** now independently resolves the
+system-wide `FOLDERID_ProgramData` with Microsoft's documented
+`SHGetKnownFolderPath` API, including explicit COM thread initialization
+and `CoTaskMemFree` ownership. It opens that OS-selected folder without
+following its final reparse entry and checks directory type. The existing
+NTFS/local-disk identity logic compares both already-open objects by
+their kernel volume and full file ID, not by a supplied path string. A
+mismatch or unavailable/conflicting COM context DENIES. Admission and
+every SCM-backed revalidation require this parent identity **before**
+revalidating the supplied named anchor, administrative chain, and isolated
+root. The normal-user kernel-only test fixture remains explicitly
+non-authorizing and retains its foreign-source counterexample.
+
+The new Windows TDD regression first failed compilation (missing module),
+then **passed on a real Windows host**: actual system `ProgramData` was
+accepted, while a caller-selected disposable NTFS parent was denied.
+The prior foreign-chain test now additionally asserts the OS-parent
+denial, while its kernel-only counterexample remains visible. The
+real SCM/VHD positive must still execute in exact-head disposable hosted
+Windows acceptance: local normal-user unit tests do **not** prove that the
+SCM service's COM context and protected DACL arrangement accept.
+
+This authenticates only the **OS-known parent directory's identity at the
+instant of observation**. `ProgramData` normally permits user-created
+subdirectories; it is not itself a sealed per-application policy root.
+The supplied anchor child name remains caller-selected, with no
+independently trusted policy/registry binding. A privileged actor may
+change the known-folder configuration, mount aliases or source namespace
+between observation and later I/O. Volume serial/file IDs alone do not
+prove collision-free physical origin. No atomic operation is issued;
+#147's four hard-link/object-integrity RED cases, #124/#139, Linux
+issuer parity and independent security review remain mandatory.
+This is **not** a release approval. Official contracts:
+<https://learn.microsoft.com/en-us/windows/win32/shell/known-folders> and
+<https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath>.
+
+### Protected-HKLM exact source-anchor name (2026-11-04; NON-RELEASE)
+
+The OS-known ProgramData parent check still allowed callers to choose the
+*name* of an administrator-owned child. Two equally valid protected
+subdirectories could satisfy the supplied parent/chain checks without
+identifying the one provisioned for JDC. Therefore the non-issuing SCM
+composite now requires an **independently administered exact child name**
+from a fixed 64-bit HKLM registry view:
+`HKLM\\SOFTWARE\\JameDesktopCommander\\Authority\\EpochAnchor`, value
+`RootAnchorNameV1`. The existing registry observer's strict ACL verifier
+requires protected inheritance, exact administrator/SYSTEM ownership,
+SYSTEM/Administrators full control and **service read-only** rights.
+The service never creates or repairs this key or value.
+
+The registry value is one complete `REG_SZ` UTF-16LE component, limited
+to 64 ASCII letters/digits/`_`/`-`, with exactly one terminal NUL;
+embedded NUL, device aliases, `REG_EXPAND_SZ`, missing/oversized values
+and malformed encodings DENY. The pinned source parent must independently
+be OS-known ProgramData. Both the registry name and the actual kernel
+parent/child identity must match on **admission and every revalidation**,
+with irreversible revocation after a failed check. The registry key is
+reused from the existing epoch authority; no second configuration trust
+channel is added, but this new value is not atomically joined to the
+separate epoch/digest `PolicyAnchorV1` value.
+
+A focused Windows TDD parser regression first failed with unresolved
+`parse_root_anchor_name` (RED, compiler exit 101) and passed after
+implementation. The existing disposable hosted Windows SCM/VHD fixture
+now provisions the exact registry value with independently protected
+ACLs before exercising the composed positive. It then demands genuine
+service exit 56 for a substituted name and for a missing value, with exit
+46 after each restored value. This fixture requires the disposable
+GitHub-hosted Windows runner and deletes only the key hierarchy it
+created; no local registry, SCM service or VHD was changed. The
+**hosted true-SCM outcomes remain unverified until exact-HEAD CI runs**.
+
+This removes a *caller-selected root-name assumption*, but does not
+prove atomic registry/policy updates, survive privileged alias/mount
+replacements, guarantee exclusive storage-object origin or close the
+four #147 same-object hard-link adversarial cases. #124/#139/#148 and
+independent review remain blockers. The runtime issuer is still disabled,
+the native SCM probe terminates without I/O authority, and release
+remains **NO-GO**.
+
+### Remove the weaker Windows root-only external constructor (2026-11-05; NON-RELEASE)
+
+The original `observe_preopened_isolated_service_root` checked SCM identity,
+protected directory ACLs, root/parent kernel identities and volume
+separation, but **did not** authenticate the OS-known ProgramData parent or
+the independently protected exact HKLM root-anchor name. Unlike the newer
+chain-bound composite, the legacy constructor remained publicly callable
+by downstream crates. While no filesystem grant was issued, that public
+type/API would have offered a plausible but weaker admission point for a
+future native broker, bypassing the provenance checks of #148.
+
+The legacy `ObservedWindowsIsolatedRoot` and constructor are now
+`pub(crate)` only. A downstream Rust `compile_fail` doctest verifies
+the weaker constructor cannot be imported; before the visibility change,
+the doctest **failed as intended**, because the import compiled
+successfully (5/6 doc tests passed; one RED). The existing real-SCM test
+still exercises the legacy positive control through a narrowly named
+**debug-only diagnostic** returning only a terminal `Result<(), IdentityDenied>`
+after actual revalidation, never a retained handle, object capability,
+or I/O grant. The same symbol in release builds is **unconditionally
+denying**; the legacy code cannot be exercised through it. All production
+root admission remains through the stricter chain-bound composite.
+
+This prevents accidental public fallback; it does **not** establish
+independently approved issuer authority, hard-link exclusion, race-atomic
+authorization plus read/append/rewrite, or the four missing original #147
+object-integrity acceptance cases. Hosted exact-head Windows/Linux results
+remain mandatory. No installed service/runtime/registry/volume is altered.
+Production release stays **NO-GO**.
+
+### Real-NTFS VHD data-plane read / hard-link boundary (2026-11-05; NON-RELEASE)
+
+To avoid equating compilation or metadata checks with working object
+isolation, the disposable GitHub-hosted Windows storage-domain fixture now
+requires **two** exact native OS-level verdicts on its truly attached
+separately formatted NTFS VHD. The first confirms different opened kernel
+volume identities and same-volume denial. The second, run under the
+disposable runner administrator (not the SCM service), uses the real
+`RootedDirectory::read_bounded_file` method to read known authorized
+bytes from that VHD. It then creates and confirms a real same-volume hard
+link to an exterior host-volume canary, attempts a cross-volume hard link
+to the VHD, and requires **Windows ERROR_NOT_SAME_DEVICE (17)**. The
+attempted VHD alias must not exist; the exterior canary and its valid
+same-volume alias must retain the exact bytes, and the VHD authorized
+read must still succeed afterward.
+
+The runner launches both `real_distinct_ntfs_vhd_*` tests with
+`--ignored` but without `--exact`, then explicitly requires both exact
+names and **2 PASS / 0 FAIL / 0 IGNORED** in the output. Missing
+environment, inaccessible VHD, inability to construct a genuine same-
+volume link, wrong error code, a skipped test, or changed exterior bytes
+all FAIL. The test is `#[ignore]` in the ordinary unit suite because
+it is impossible to execute its real attached-VHD preconditions without
+the disposable GitHub-hosted Windows fixture; compiling the test locally
+is **not** acceptance. The hosted exact-HEAD run is required to validate
+it. No local developer-machine VHD or registry/SCM service is changed.
+
+This is an actual **storage-volume boundary and bounded native-read**
+test, not the approved operational broker: the administrator's positive
+root read does not authenticate the future remote peer, issuer
+permissions, data-plane linearization or actual MCP handlers. An
+attacker with administrator access to the VHD is outside this fixture's
+weaker attacker model; independent review must approve the final
+principal/storage threat model. Four original #147 same-volume hard-link
+attacks still fail on its separately tested historic N-API prototype.
+Passing this new VHD fixture cannot close them or certify #148.
+Release remains **NO-GO**.
+
+### Evidence-quality gate for distinct-principal denial (2026-11-05; NON-RELEASE)
+
+The Windows disposable-VHD acceptance formerly treated **any nonzero**
+unprivileged probe exit as evidence that an ACL or storage boundary had denied
+an attacker. That conflated authorization failure with a nonexistent target,
+unknown operation or unrelated I/O error. The custody_attacker fixture now
+reports only its numeric kernel error (without paths or object bytes).
+The PowerShell acceptance requires **ERROR_ACCESS_DENIED (5)** for the
+named distinct-SID protected-object operations; the cross-volume unprivileged
+link may return 5 or **ERROR_NOT_SAME_DEVICE (17)**. The independently
+privileged cross-volume control still requires exactly 17.
+
+A real missing-file negative control must produce a failed probe but **must
+not count as a denied protected operation**. Local Windows unit tests,
+probe execution, PowerShell parsing and lint are necessary but not sufficient:
+the new distinct-SID/VHD checks have **not yet received hosted exact-HEAD
+acceptance**. A runner failure is FAIL, never retroactive approval.
+
+| Actor/capability | Tested scope | Invariant O conclusion |
+| --- | --- | --- |
+| Independent unprivileged Windows SID | NTFS ACL and distinct VHD, real file operations | Conditional, pending hosted gate |
+| Windows administrator/SYSTEM | Can operate on protected storage and make same-volume links | Outside the proven attacker boundary |
+| Service's own SID or retained privileged handle | Can potentially create an alias during I/O | Unproven; transient-link RED remains |
+| Independent Linux UID | Separate root ownership, mount and file operations | Prior hosted conditional evidence only |
+| Same Linux UID or mount-capable privileged principal | Can potentially alias/move the authorized object namespace | Unproven; no generic O claim |
+
+The design must still exclude preexisting aliases, same-principal races and
+privileged mount/root substitutions under an independently reviewed deployment
+threat model. None of these fixture changes enable an issuer grant, relax the
+four original #147 RED tests or certify production isolation.
+
+### Linux native-denial provenance (2026-11-05; NON-RELEASE)
+
+The existing Linux independent-UID fixture originally used a generic
+nonzero-exit assertion for many attacker operations. An absent source, broken
+invocation or unsupported filesystem operation could consequently masquerade
+as a custody denial. For the protected database read and both hard-link
+directions, the test now invokes the already-governed nonshipping Rust
+custody_attacker executable under the real nobody UID. It accepts only Linux
+EACCES (13) or EPERM (1) for these specified operations and rejects an
+explicit ENOENT (2) missing-source negative control. A successful read of
+the attacker-owned canary by the same executable is mandatory first.
+
+Other Linux fixture operations still use generic failure checks; this
+increment does not certify their individual kernel failure causes. The
+native-denial Linux checks passed on hosted Ubuntu at `e610138` in
+[T011 run 42050443043](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/42050443043);
+the full portable candidates still FAIL on the missing release verifier.
+
+**Open-descriptor interleaving (new non-release acceptance, pending hosted CI):**
+the service-UID subprocess opens the actual protected SQLite file on FD 3,
+records its kernel device/inode identity, signals readiness over a FIFO, and
+blocks before reading. While that descriptor is still open, the independent
+`nobody` UID invokes the native Rust hard-link probe against the same
+object and receives only a recognized Linux EACCES/EPERM denial. The runner
+requires the exterior alias to remain absent, releases the service reader,
+waits for successful completion, and compares the exact SHA-256 bytes read
+*through the retained FD* against the original authorized database. Both
+coordination FIFOs and identity witnesses exist only on disposable hosted
+CI; bounded waits make deadlock a test failure, not a passing skip. No
+production service, mount or permission grant changes.
+
+This staged, deterministic interprocess interleaving is stronger than a
+sequential denial: the file descriptor is genuinely open during the
+attacker's link attempt. It does **not** prove an attempt in the middle of
+the actual read syscall, prevent a same-UID actor from creating aliases, or
+provide a general linearizable read/append/rewrite authorization boundary.
+The next release gate still requires independently reviewed exclusive
+principal/storage custody and positive-capable broker adversarial proof.
+The original four #147 attacks remain unsatisfied.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root
@@ -449,4 +1424,5 @@ contract and the original #147 scenarios prove invariant O on both OSes.
 **Disposition requested from security reviewers:** explicitly select a
 verified Candidate A model with environmental attestations and adversarial
 proof, or approve Candidate B denial behavior for each unsupported operation.
-Until then #148/#139/#124/#80 remain OPEN and T011 stays nonshipping.
+As of 2026-11-05, #80 is CLOSED; that does not approve the stronger
+object-isolation claim. #148/#139/#124 remain OPEN and T011 stays nonshipping.

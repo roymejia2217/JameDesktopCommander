@@ -44,7 +44,7 @@ test('CI principals and native probe argument binding preserve positive controls
   assert.match(w, /function Invoke-CIUser\([^\n]*\$probeArgs\)/);
   assert.match(w, /-ArgumentList \$probeArgs\b/);
   assert.match(w, /function Require-UserSuccess\([^\n]*\$probeArgs\)/);
-  assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs\)/);
+  assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs, \[int\[\]\] \$expectedOsCodes = @\(5\)\)/);
 });
 
 test('Linux administrator bind mount exposes a real outside object, not a second hard link', () => {
@@ -76,6 +76,36 @@ test('Linux openat2 uses root FD and NO_XDEV to deny a genuine file bind-mount a
   assert.match(l, /T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE/);
 });
 
+// Linux custody must reject missing-file ENOENT as a false positive,
+// and accept only a real kernel permission denial from the native probe.
+test('Linux custody requires native permission errors, not arbitrary failures', () => {
+  const script = fs.readFileSync(path.join(repo,
+    'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  assert.match(script, /native\/authority-store\/target\/debug\/examples\/custody_attacker/);
+  assert.match(script, /E_PROBE_OS_ERROR_2/);
+  assert.match(script, /T011_CUSTODY_MISSING_SOURCE_FALSE_POSITIVE_REJECTED/);
+  assert.match(script, /E_PROBE_OS_ERROR_13/);
+  assert.match(script, /E_HARDLINK_OS_ERROR_(?:1|13)/);
+  assert.match(script, /expect_native_denied read/);
+  assert.match(script, /expect_native_denied hardlink_source/);
+  assert.match(script, /expect_native_denied hardlink_destination/);
+});
+
+// Real hosted Linux must hold a service-owned file descriptor open while an
+// independent UID attempts a hardlink; no detached sequential-only proxy.
+test('Linux custody races a foreign hardlink against a pinned service read descriptor', () => {
+  const script = fs.readFileSync(path.join(repo,
+    'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_READY/);
+  assert.match(script, /exec 3<"\$1"/);
+  assert.match(script, /stat -Lc "%d:%i" "\/proc\/\$BASHPID\/fd\/3"/);
+  assert.match(script, /expect_native_denied hardlink_during_open_read hardlink/);
+  assert.match(script, /wait "\$reader_pid"/);
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_EXTERIOR_LINK_DENIED/);
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_BYTES_MATCH/);
+  assert.match(script, /timeout 15s/);
+});
+
 // A failed hard-link operation is not enough: administrative cross-volume
 // controls must identify the Windows kernel's ERROR_NOT_SAME_DEVICE (17).
 test('Windows admin cross-volume denials must prove the exact OS error', () => {
@@ -85,4 +115,20 @@ test('Windows admin cross-volume denials must prove the exact OS error', () => {
   assert.match(script, /E_HARDLINK_OS_ERROR_17/);
   assert.match(script, /RedirectStandardError/);
   assert.match(probe, /E_HARDLINK_OS_ERROR_/);
+});
+
+// This static guard supplements (never replaces) the real hosted Windows
+// execution under independent SIDs and the attached NTFS VHD.
+test('Windows custody denial gate rejects unrelated failed probes', () => {
+  const script = fs.readFileSync(windows, 'utf8');
+  const probe = fs.readFileSync(path.join(repo,
+    'native/authority-store/examples/custody_attacker.rs'), 'utf8');
+  assert.match(script, /-RedirectStandardError \$stderrFile/);
+  assert.match(script, /\$accepted -cnotcontains \$observed/);
+  assert.match(script, /E_STORAGE_WRONG_DENIAL_REASON_\$label/);
+  assert.match(script, /GATE_REJECTS_MISSING_SOURCE/);
+  assert.match(script, /T011_STORAGE_MISSING_SOURCE_DENIAL_FALSE_POSITIVE_REJECTED/);
+  assert.match(script, /'ATTACKER_VOLUME_LINK'[^\n]*@\(5, 17\)/);
+  assert.match(probe, /format_probe_os_error/);
+  assert.match(probe, /E_PROBE_OS_ERROR/);
 });

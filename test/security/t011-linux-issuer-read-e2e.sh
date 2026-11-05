@@ -47,11 +47,15 @@ client_gid="$(id -g jdc-mcp-client)"
 
 admin_dir='/etc/jdc-authority'
 state_dir='/var/lib/jdc-authority'
-read_root="$state_dir/read-root"
-read_root_two="$state_dir/read-root-two"
+root_parent='/var/lib/jdc-authority-roots'
+# The privileged fixture deliberately mounts a same-device backing subtree
+# outside the authorized root to retain the original hostile bind-alias case.
+backing_root="$root_parent/read-backing"
+read_root="$root_parent/read-root"
+read_root_two="$root_parent/read-root-two"
 # A privileged, disposable fixture checks same-device bind-mount aliases.
 # Never assume that a link count of one or equal st_dev establishes isolation.
-outside_bind_file="$state_dir/outside-bind.bin"
+outside_bind_file="$backing_root/outside-bind.bin"
 inside_bind_alias="$read_root/mounted-alias.bin"
 socket_dir='/run/jdc-authority-ipc'
 socket_path="$socket_dir/authority.sock"
@@ -73,7 +77,8 @@ if [[ -e "$admin_dir" || -L "$admin_dir" ||
       -e "$dropin_dir" || -L "$dropin_dir" ||
       -e "$installed_probe" || -L "$installed_probe" ||
       -e "$contract_dir" || -L "$contract_dir" ||
-      -e "$socket_dir" || -L "$socket_dir" ]]; then
+      -e "$socket_dir" || -L "$socket_dir" ||
+      -e "$root_parent" || -L "$root_parent" ]]; then
   printf '%s\n' 'E_ISSUER_READ_E2E_PREEXISTING_STATE' >&2
   exit 1
 fi
@@ -81,8 +86,7 @@ state_preexisting=0
 if [[ -d "$state_dir" ]]; then
   state_preexisting=1
   [[ "$(stat -c '%u:%g:%a' "$state_dir")" == "$service_uid:$service_gid:700" ]] || exit 1
-  [[ ! -e "$state_dir/claims.sqlite3" && ! -e "$read_root" &&
-     ! -e "$read_root_two" && ! -e "$outside_bind_file" ]] || exit 1
+  [[ ! -e "$state_dir/claims.sqlite3" && ! -e "$outside_bind_file" ]] || exit 1
 else
   sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$state_dir"
 fi
@@ -112,11 +116,22 @@ cleanup() {
     exit 1
   fi
   sudo -n systemctl reset-failed jdc-authority.service >/dev/null 2>&1 || :
+  # Never recursively delete a mounted protected volume. Both independent
+  # mounts must detach before removing the root-admin-owned mountpoint tree.
+  for domain in "$read_root" "$read_root_two" "$backing_root"; do
+    if findmnt -rn --kernel --mountpoint "$domain" >/dev/null 2>&1; then
+      sudo -n umount -- "$domain" || code=1
+    fi
+    if findmnt -rn --kernel --mountpoint "$domain" >/dev/null 2>&1; then
+      printf '%s\n' 'E_ISSUER_READ_E2E_ISOLATED_ROOT_UNMOUNT_FAILED' >&2
+      exit 1
+    fi
+  done
   sudo -n rm -rf -- "$dropin_dir" "$contract_dir" || code=1
   sudo -n rm -f -- "$service_unit" "$socket_unit" "$installed_probe" || code=1
   sudo -n systemctl daemon-reload || code=1
   sudo -n rm -f -- "$outside_bind_file" || code=1
-  sudo -n rm -rf -- "$admin_dir" "$read_root" "$read_root_two" || code=1
+  sudo -n rm -rf -- "$admin_dir" "$root_parent" || code=1
   sudo -n rm -f -- "$state_dir/claims.sqlite3" "$state_dir/claims.sqlite3-journal" \
     "$state_dir/claims.sqlite3-wal" "$state_dir/claims.sqlite3-shm" || code=1
   if [[ "$state_preexisting" -eq 0 ]]; then
@@ -142,7 +157,33 @@ sudo -n install -d -o root -g root -m 0755 -- "$admin_dir"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$policy_source" "$admin_dir/policy.sqlite3"
 sudo -n install -o root -g jdc-authority -m 0640 -- "$anchor_source" "$admin_dir/policy-anchor"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$replay_source" "$state_dir/claims.sqlite3"
-sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root"
+# Two distinct, real kernel devices are needed: a root inside the service
+# SQLite state tree is NOT a storage-isolated root and must now be denied.
+# The mountpoint parent is controlled by the administrator, never the service.
+sudo -n install -d -o root -g root -m 0711 -- "$root_parent"
+sudo -n install -d -o root -g root -m 0700 -- "$read_root" "$read_root_two" "$backing_root"
+# The backing filesystem is deliberately exposed through a second path in
+# this PRIVILEGED attack fixture: an exterior file and approved root share
+# st_dev while only the approved root is an OS-pinned mountpoint. This tests
+# mount-ID denial without claiming administrator-resistant storage provenance.
+sudo -n mount -t tmpfs -o "size=8m,mode=0700,uid=$service_uid,gid=$service_gid" tmpfs "$backing_root"
+sudo -n -u jdc-authority -- mkdir -- "$backing_root/approved"
+sudo -n -u jdc-authority -- chmod 0700 -- "$backing_root/approved"
+sudo -n mount --bind -- "$backing_root/approved" "$read_root"
+sudo -n mount -t tmpfs -o "size=8m,mode=0700,uid=$service_uid,gid=$service_gid" tmpfs "$read_root_two"
+for domain in "$backing_root" "$read_root" "$read_root_two"; do
+  findmnt -rn --kernel --mountpoint "$domain" >/dev/null || {
+    printf '%s\n' 'E_ISSUER_READ_E2E_PROTECTED_MOUNT_NOT_ACTIVE' >&2; exit 1;
+  }
+  [[ "$(sudo -n stat -c '%u:%g:%a' "$domain")" == "$service_uid:$service_gid:700" ]] || exit 1
+done
+[[ "$(stat -c '%u:%g:%a' "$root_parent")" == '0:0:711' &&
+   "$(stat -c %d "$read_root")" != "$(stat -c %d "$root_parent")" &&
+   "$(stat -c %d "$read_root_two")" != "$(stat -c %d "$root_parent")" &&
+   "$(stat -c %d "$read_root")" != "$(stat -c %d "$read_root_two")" &&
+   "$(stat -c %d "$read_root")" == "$(stat -c %d "$backing_root")" ]] || {
+  printf '%s\n' 'E_ISSUER_READ_E2E_STORAGE_DOMAIN_NOT_ISOLATED' >&2; exit 1;
+}
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/inside.bin"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0700 -- "$read_root/nested"
 sudo -n install -o jdc-authority -g jdc-authority -m 0600 -- "$payload_source" "$read_root/nested/a.txt"

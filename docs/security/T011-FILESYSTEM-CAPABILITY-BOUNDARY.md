@@ -80,6 +80,26 @@ provides the required guarantees on Windows **with junctions and
 case-sensitive directories**, and verify safe handling of Linux mount/symlink
 semantics. Reject the dependency or revise the design if the proof fails.
 
+### Experimental Linux root revalidation
+
+The non-shipping issuer's retained-root comparison must match the kernel
+mount ID as well as device and inode. A real bind mount can present the same
+directory inode and device through a different mount, so those two values alone
+do not show that the reopened policy root is in the original mount. The native
+fixture verifies the identical inode and distinct `statx` mount IDs before
+requiring denial; an unchanged handle is the positive control. A missing mount
+ID is an error and causes the issuer's existing revalidation to revoke. A
+separate sealed-grant test uses two synthetic policy snapshots and real
+bind-mounted handles to verify sticky revocation and a fresh-grant positive
+control; it models the post-substitution state rather than racing a live mount.
+
+The fixture requires a disposable Linux bind mount and is explicitly invoked
+by the existing hosted acceptance script; omission or failure to establish
+the mount is not evidence of denial. This observation does not prove atomic
+revocation, detect every remount or mount-namespace mutation, establish object
+isolation, or enable the deny-only production service. Windows has a separate
+identity model, and #124, #139 and #148 remain release blockers.
+
 ## Implementation sequence and mandatory native gates
 
 **T011-A infrastructure checkpoint (not a security fix):** The new

@@ -23,6 +23,10 @@ attacker="$base/attacker-owned"
 bind_alias=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
+# The mountpoint's immediate parent belongs to the trusted administrator,
+# not to the service or the attacker. Without this, a same-principal process
+# could rename the mountpoint despite the isolated volume's own 0700 mode.
+sudo -n chown root:root "$base"
 sudo -n chown nobody:"$(id -gn nobody)" "$attacker"
 sudo -n chmod 0700 "$attacker"
 cleanup() {
@@ -58,6 +62,99 @@ outside_file="$attacker/outside.bin"
 sudo -n -u jdc-authority -- sh -c 'printf SERVICE_DOMAIN_BYTES > "$1"' sh "$service_file"
 sudo -n -u nobody -- sh -c 'printf OUTSIDE_DOMAIN_SENTINEL_UNCHANGED > "$1"' sh "$outside_file"
 outside_hash="$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)"
+
+# Execute the SAME Rust issuer root-admission implementation under the actual
+# dedicated service UID, without root capabilities or privilege escalation.
+# Never count a synthetic metadata predicate as native positive acceptance.
+test_dir='native/authority-service/target/debug/deps'
+[[ -d "$test_dir" ]] || { echo E_ISSUER_TEST_BINARY_DIR_MISSING >&2; exit 1; }
+issuer_test=''
+matches=0
+while IFS= read -r candidate; do
+  # Consume the whole test listing: grep -q could close its pipe early,
+  # falsely failing the Rust harness under set -o pipefail.
+  if "$candidate" --list 2>/dev/null | grep -F 'issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root:' >/dev/null; then
+    issuer_test="$candidate"
+    matches=$((matches + 1))
+  fi
+done < <(find "$test_dir" -maxdepth 1 -type f -executable -name 'jdc_authority_service-*' | sort)
+[[ "$matches" -eq 1 ]] || { echo E_ISSUER_TEST_BINARY_AMBIGUOUS >&2; exit 1; }
+# Keep the potentially large Rust test harness OUTSIDE the strict 8 MiB
+# protected data volume; pin its checksum and prevent either unprivileged
+# principal from replacing it via the root-admin-owned parent.
+trusted_probe="$base/jdc-issuer-root-admission-test"
+sudo -n install -o root -g root -m 0555 -- "$issuer_test" "$trusted_probe"
+[[ "$(sha256sum "$issuer_test" | cut -d ' ' -f1)" == "$(sudo -n sha256sum "$trusted_probe" | cut -d ' ' -f1)" ]] || {
+  echo E_ISSUER_TEST_BINARY_PROVENANCE_MISMATCH >&2; exit 1;
+}
+sudo -n -u jdc-authority -- setpriv --no-new-privs -- env \
+  JDC_T011_CUSTODIED_ROOT="$isolated" \
+  "$trusted_probe" --ignored --exact \
+  issuer_policy::tests::issuer_issues_only_an_attested_separate_filesystem_root --nocapture
+# Only the dedicated principal may traverse this 0700 mount. Checking
+# from the runner UID would incorrectly turn an enforced denial into a
+# missing-file verdict.
+sudo -n -u jdc-authority -- test -d "$isolated/issuer-custody-positive" || {
+  echo E_ISSUER_POSITIVE_ROOT_OPERATION_MISSING >&2; exit 1;
+}
+if sudo -n -u nobody -- test -d "$isolated/issuer-custody-positive"; then
+  echo E_ISSUER_PROTECTED_ROOT_EXPOSED_TO_ATTACKER >&2; exit 1;
+fi
+echo T011_STORAGE_ISSUER_ROOT_ATTESTATION_PASS
+
+# Exercise real read, in-place rewrite, append, rename and unlink under
+# BOTH valid principals. Without these positive controls, an unavailable
+# executable or broken filesystem could make all adversarial denials look green.
+attacker_control="$attacker/operation-control.bin"
+attacker_source="$attacker/operation-source.bin"
+sudo -n -u nobody -- sh -c 'printf ATTACKER_CONTROL > "$1"' sh "$attacker_control"
+sudo -n -u nobody -- sh -c 'printf ATTACKER_REPLACEMENT > "$1"' sh "$attacker_source"
+sudo -n -u nobody -- cat -- "$attacker_control" >/dev/null
+sudo -n -u nobody -- sh -c 'printf APPENDED >> "$1"' sh "$attacker_control"
+sudo -n -u nobody -- cp -- "$attacker_source" "$attacker_control"
+[[ "$(sudo -n -u nobody -- cat -- "$attacker_control")" == ATTACKER_REPLACEMENT ]] || exit 1
+sudo -n -u nobody -- mv -- "$attacker_control" "$attacker/operation-renamed.bin"
+sudo -n -u nobody -- rm -- "$attacker/operation-renamed.bin"
+service_control="$isolated/service-control.bin"
+sudo -n -u jdc-authority -- cp -- "$service_file" "$service_control"
+sudo -n -u jdc-authority -- cat -- "$service_control" >/dev/null
+sudo -n -u jdc-authority -- sh -c 'printf APPENDED >> "$1"' sh "$service_control"
+sudo -n -u jdc-authority -- cp -- "$service_file" "$service_control"
+sudo -n -u jdc-authority -- mv -- "$service_control" "$isolated/service-renamed.bin"
+sudo -n -u jdc-authority -- rm -- "$isolated/service-renamed.bin"
+[[ "$(sudo -n -u jdc-authority -- cat -- "$service_file")" == SERVICE_DOMAIN_BYTES ]] || exit 1
+service_hash="$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)"
+service_object_id="$(sudo -n stat -c '%d:%i' -- "$service_file")"
+echo 'T011_STORAGE_REAL_OPERATION_POSITIVE_CONTROLS_PASS'
+
+expect_denied() {
+  local operation="$1"
+  shift
+  if "$@" >/dev/null 2>&1; then
+    echo "E_STORAGE_UNAUTHORIZED_$operation" >&2
+    exit 1
+  fi
+}
+expect_denied read sudo -n -u nobody -- cat -- "$service_file"
+expect_denied rewrite sudo -n -u nobody -- sh -c 'printf INJECTED > "$1"' sh "$service_file"
+expect_denied append sudo -n -u nobody -- sh -c 'printf INJECTED >> "$1"' sh "$service_file"
+expect_denied rename sudo -n -u nobody -- mv -- "$service_file" "$attacker/stolen-service.bin"
+expect_denied unlink sudo -n -u nobody -- rm -- "$service_file"
+expect_denied create sudo -n -u nobody -- touch -- "$isolated/injected.bin"
+[[ ! -e "$attacker/stolen-service.bin" && ! -e "$isolated/injected.bin" ]] || {
+  echo 'E_STORAGE_PROTECTED_NAMESPACE_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n -u jdc-authority -- sha256sum "$service_file" | cut -d ' ' -f1)" == "$service_hash" ]] || {
+  echo 'E_STORAGE_PROTECTED_BYTES_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n stat -c '%d:%i' -- "$service_file")" == "$service_object_id" ]] || {
+  echo 'E_STORAGE_PROTECTED_FILE_OBJECT_CHANGED' >&2; exit 1;
+}
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || {
+  echo 'E_STORAGE_EXTERIOR_BYTES_CHANGED' >&2; exit 1;
+}
+echo 'T011_STORAGE_LINUX_READ_REWRITE_APPEND_RENAME_DENIED'
+
 # The attack principal MUST succeed at a same-device hard link first.
 sudo -n -u nobody -- ln -- "$outside_file" "$attacker/positive-link.bin"
 [[ "$(sudo -n stat -c %d:%i "$outside_file")" == "$(sudo -n stat -c %d:%i "$attacker/positive-link.bin")" ]] || exit 1

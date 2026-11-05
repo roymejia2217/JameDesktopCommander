@@ -62,8 +62,19 @@ function Invoke-CIUser([pscredential] $who, [string] $bin, [string[]] $probeArgs
 function Require-UserSuccess([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
     if ((Invoke-CIUser $who $bin $probeArgs) -ne 0) { throw "E_STORAGE_POSITIVE_FAILED_$label" }
 }
-function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
-    if ((Invoke-CIUser $who $bin $probeArgs) -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
+function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs, [int[]] $expectedOsCodes = @(5)) {
+    $stderrFile = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-$label.stderr"
+    try {
+        $process = Start-Process -FilePath $bin -Credential $who -ArgumentList $probeArgs -WorkingDirectory $root -PassThru -Wait -RedirectStandardError $stderrFile
+        if ($null -eq $process.ExitCode) { throw "E_STORAGE_MISSING_PROCESS_VERDICT_$label" }
+        if ($process.ExitCode -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
+        $observed = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction Stop).Trim()
+        $prefix = if ($probeArgs[0] -ceq 'hardlink') { 'E_HARDLINK_OS_ERROR' } else { 'E_PROBE_OS_ERROR' }
+        $accepted = @($expectedOsCodes | ForEach-Object { "${prefix}_$_" })
+        if ($accepted -cnotcontains $observed) { throw "E_STORAGE_WRONG_DENIAL_REASON_$label" }
+    } finally {
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
 }
 function Require-AdminCrossVolumeDenial([string] $label, [string] $from, [string] $to) {
     $stderrFile = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-$label.stderr"
@@ -136,24 +147,127 @@ exit
     $outerDisk = (Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).DiskNumber
     $innerDisk = (Get-Partition -DriveLetter $letter).DiskNumber
     if ($outerDisk -eq $innerDisk) { throw 'E_STORAGE_SAME_WINDOWS_DISK' }
+    if ((Get-Volume -DriveLetter $env:SystemDrive.TrimEnd(':')).FileSystem -ne 'NTFS') {
+        throw 'E_STORAGE_PARENT_NOT_NTFS'
+    }
+    # Validate that the native preflight actually observes two real opened
+    # Windows kernel volume identities. This is NOT a service root grant:
+    # the fixture runs under the disposable runner administrator identity.
+    $env:JDC_T011_WINDOWS_VHD_PARENT = $root
+    $env:JDC_T011_WINDOWS_VHD_ROOT = $volume
+    $testStdout = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stdout"
+    $testStderr = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stderr"
+    # Both real-VHD native tests are mandatory. A test silently filtered or
+    # marked ignored must make the overall acceptance FAIL, not PASS.
+    $nativeTestPrefix = 'windows_policy_root::tests::real_distinct_ntfs_vhd_'
+    $requiredNativeTests = @(
+        'windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight',
+        'windows_policy_root::tests::real_distinct_ntfs_vhd_rooted_read_and_cross_volume_alias_denied'
+    )
+    try {
+        $cargoBinary = (Get-Command cargo.exe -ErrorAction Stop).Source
+        $native = Start-Process -FilePath $cargoBinary -ArgumentList @(
+            '+1.91.1', 'test', '--locked',
+            '--manifest-path', 'native/authority-service/Cargo.toml', '--lib',
+            $nativeTestPrefix, '--', '--ignored', '--nocapture'
+        ) -WorkingDirectory (Get-Location).Path -Wait -PassThru -RedirectStandardOutput $testStdout -RedirectStandardError $testStderr
+        $observedOutput = Get-Content -LiteralPath $testStdout -Raw -ErrorAction Stop
+        Write-Output $observedOutput
+        $complete = ($null -ne $native.ExitCode -and $native.ExitCode -eq 0 -and
+            $observedOutput.Contains('test result: ok. 2 passed; 0 failed; 0 ignored;'))
+        foreach ($requiredTest in $requiredNativeTests) {
+            if (-not $observedOutput.Contains("test $requiredTest ... ok")) {
+                $complete = $false
+            }
+        }
+        if (-not $complete) {
+            throw 'E_STORAGE_NATIVE_WINDOWS_VHD_TWO_REQUIRED_TESTS_DID_NOT_PASS'
+        }
+    } finally {
+        Remove-Item Env:\JDC_T011_WINDOWS_VHD_PARENT -ErrorAction SilentlyContinue
+        Remove-Item Env:\JDC_T011_WINDOWS_VHD_ROOT -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $testStdout, $testStderr -Force -ErrorAction SilentlyContinue
+    }
+    Write-Output 'T011_STORAGE_NATIVE_WINDOWS_VOLUME_HANDLE_IDENTITY_PASS'
     Set-CustodyAcl $volume @(@{ SID = $service.SID; Rights = 'Modify' })
     $serviceFile = Join-Path $volume 'service.bin'
     $outsideFile = Join-Path $outside 'outside.bin'
     Require-UserSuccess 'SERVICE_CAN_WRITE_VOLUME' $service.Credential $probe @('canary', $serviceFile, $serviceFile)
     Require-UserSuccess 'ATTACKER_CAN_WRITE_OWN' $attacker.Credential $probe @('canary', $outsideFile, $outsideFile)
+    # Negative control: a missing target is NOT a security denial, even though
+    # the probe exits nonzero. This must fail the acceptance gate explicitly.
+    $absent = Join-Path $outside 'absent-access-control.bin'
+    if (Test-Path -LiteralPath $absent) { throw 'E_STORAGE_ABSENT_CONTROL_EXISTS' }
+    try {
+        Require-UserDenial 'GATE_REJECTS_MISSING_SOURCE' $attacker.Credential $probe @('read', $absent, $outsideFile)
+        throw 'E_STORAGE_MISSING_SOURCE_FALSE_ACCEPTANCE'
+    } catch {
+        if ($_.Exception.Message -cne 'E_STORAGE_WRONG_DENIAL_REASON_GATE_REJECTS_MISSING_SOURCE') { throw }
+    }
+    Write-Output 'T011_STORAGE_MISSING_SOURCE_DENIAL_FALSE_POSITIVE_REJECTED'
     $before = (Get-FileHash -LiteralPath $outsideFile -Algorithm SHA256).Hash
     $ownLink = Join-Path $outside 'positive.bin'
     Require-UserSuccess 'ATTACKER_OWN_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, $ownLink)
     Require-UserSuccess 'ATTACKER_SAME_OBJECT' $attacker.Credential $probe @('same-object', $outsideFile, $ownLink)
     Remove-Item -LiteralPath $ownLink -Force
+    # Positive real-OS controls: each operation MUST work on attacker-owned
+    # storage and service-owned storage before a denial is accepted as custody.
+    $attackerControl = Join-Path $outside 'operation-control.bin'
+    $attackerSource = Join-Path $outside 'operation-source.bin'
+    Require-UserSuccess 'ATTACKER_CONTROL_WRITE' $attacker.Credential $probe @('canary', $attackerControl, $attackerControl)
+    Require-UserSuccess 'ATTACKER_CONTROL_SOURCE' $attacker.Credential $probe @('canary', $attackerSource, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_READ' $attacker.Credential $probe @('read', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_APPEND' $attacker.Credential $probe @('append', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_REWRITE' $attacker.Credential $probe @('rewrite', $attackerControl, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_RENAME' $attacker.Credential $probe @('rename', $attackerControl, $attackerSource)
+    $attackerRenamed = [IO.Path]::ChangeExtension($attackerControl, '.renamed')
+    if (-not (Test-Path -LiteralPath $attackerRenamed)) { throw 'E_STORAGE_CONTROL_RENAME_NOT_OBSERVED' }
+    Require-UserSuccess 'ATTACKER_CONTROL_UNLINK' $attacker.Credential $probe @('unlink', $attackerRenamed, $attackerSource)
+    Require-UserSuccess 'ATTACKER_CONTROL_CREATE' $attacker.Credential $probe @('create', $attackerControl, $attackerSource)
+    if (-not (Test-Path -LiteralPath (Join-Path $outside 'forged.sqlite3'))) {
+        throw 'E_STORAGE_CONTROL_CREATE_NOT_OBSERVED'
+    }
+    $serviceControl = Join-Path $volume 'service-operation-control.bin'
+    Require-UserSuccess 'SERVICE_CONTROL_WRITE' $service.Credential $probe @('canary', $serviceControl, $serviceControl)
+    Require-UserSuccess 'SERVICE_CONTROL_READ' $service.Credential $probe @('read', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_APPEND' $service.Credential $probe @('append', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_REWRITE' $service.Credential $probe @('rewrite', $serviceControl, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_RENAME' $service.Credential $probe @('rename', $serviceControl, $serviceFile)
+    $serviceRenamed = [IO.Path]::ChangeExtension($serviceControl, '.renamed')
+    if (-not (Test-Path -LiteralPath $serviceRenamed)) { throw 'E_STORAGE_SERVICE_RENAME_NOT_OBSERVED' }
+    Require-UserSuccess 'SERVICE_CONTROL_UNLINK' $service.Credential $probe @('unlink', $serviceRenamed, $serviceFile)
+    Require-UserSuccess 'SERVICE_CONTROL_CREATE' $service.Credential $probe @('create', $serviceControl, $serviceFile)
+    if (-not (Test-Path -LiteralPath (Join-Path $volume 'forged.sqlite3'))) {
+        throw 'E_STORAGE_SERVICE_CREATE_NOT_OBSERVED'
+    }
+    $serviceBefore = (Get-FileHash -LiteralPath $serviceFile -Algorithm SHA256).Hash
+
     $adminLocalLink = Join-Path $volume 'admin-positive.bin'
     $adminPositive = Start-Process -FilePath $probe -ArgumentList @('hardlink', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
     if ($adminPositive.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_LOCAL_HARDLINK_FAILED' }
-    Remove-Item -LiteralPath $adminLocalLink -Force
+    # Keep a kernel-identical, separately named administrator witness until
+    # AFTER all malicious operations. Equal final bytes alone cannot detect
+    # an inode/file-ID substitution.
+    $beforeIdentity = Start-Process -FilePath $probe -ArgumentList @('same-object', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
+    if ($beforeIdentity.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_ORIGINAL_IDENTITY_FAILED' }
     Write-Output 'T011_STORAGE_SAME_VOLUME_HARDLINK_PASS'
-    Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin'))
+    # A cross-volume attempt may fail on the device boundary (17) or the
+    # protected destination ACL (5), but never on a missing source (2).
+    Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin')) @(5, 17)
     Require-UserDenial 'ATTACKER_CANNOT_READ_SERVICE' $attacker.Credential $probe @('read', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_APPEND_SERVICE' $attacker.Credential $probe @('append', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_REWRITE_SERVICE' $attacker.Credential $probe @('rewrite', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_RENAME_SERVICE' $attacker.Credential $probe @('rename', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_UNLINK_SERVICE' $attacker.Credential $probe @('unlink', $serviceFile, $outsideFile)
+    Require-UserDenial 'ATTACKER_CANNOT_CREATE_SERVICE' $attacker.Credential $probe @('create', $serviceFile, $outsideFile)
+    if ((Get-FileHash -LiteralPath $serviceFile -Algorithm SHA256).Hash -ne $serviceBefore -or
+        (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($serviceFile, '.renamed')))) {
+        throw 'E_STORAGE_PROTECTED_OBJECT_CHANGED'
+    }
+    $afterIdentity = Start-Process -FilePath $probe -ArgumentList @('same-object', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
+    if ($afterIdentity.ExitCode -ne 0) { throw 'E_STORAGE_PROTECTED_FILE_OBJECT_CHANGED' }
+    Remove-Item -LiteralPath $adminLocalLink -Force
+    Write-Output 'T011_STORAGE_WINDOWS_READ_REWRITE_APPEND_RENAME_DENIED'
     Require-UserDenial 'ATTACKER_CANNOT_LINK_IN_VOLUME' $attacker.Credential $probe @('hardlink', $serviceFile, (Join-Path $volume 'attacker-internal.bin'))
     # Even an administrator with positive same-volume hardlink rights must
     # receive the kernel's exact cross-device denial, not an unrelated error.

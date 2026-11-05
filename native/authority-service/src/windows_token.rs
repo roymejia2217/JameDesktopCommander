@@ -6,7 +6,7 @@ use crate::token_policy::{
 };
 use std::{collections::HashSet, ffi::c_void, iter, mem, ptr};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE},
+    Foundation::{CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_TOKEN, HANDLE},
     Security::{
         EqualSid, GetTokenInformation, IsWellKnownSid, LookupAccountNameW, LookupPrivilegeNameW,
         TokenGroups, TokenIntegrityLevel, TokenPrimary, TokenPrivileges, TokenRestrictedSids,
@@ -14,7 +14,7 @@ use windows_sys::Win32::{
         SID_AND_ATTRIBUTES, SID_NAME_USE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
         TOKEN_QUERY, TOKEN_TYPE, TOKEN_USER,
     },
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::Threading::{GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken},
 };
 const SERVICE_NAME: &str = "NT SERVICE\\JameDesktopCommanderAuthority";
 const MAX_INFO_BYTES: usize = 16_384;
@@ -312,16 +312,39 @@ fn token_user_matches_service(
     Ok(Some(validated_sid.to_vec()))
 }
 
+/// The process primary token alone does not establish the security context
+/// used for filesystem access: Windows checks an impersonating thread token
+/// instead. Require no thread token at all, including a token that happens to
+/// represent the same user. Any inspection error other than ERROR_NO_TOKEN
+/// is a denial. OpenAsSelf avoids identification-level impersonation hiding
+/// its token behind an access-denied result.
+fn reject_current_thread_impersonation() -> Result<(), TokenUnverifiable> {
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: the kernel receives the current-thread pseudohandle and a
+    // writable HANDLE slot. A successful real token is closed by Handle.
+    let result = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut raw) };
+    if result != 0 {
+        let _token = Handle(raw);
+        return Err(TokenUnverifiable);
+    }
+    if unsafe { GetLastError() } != ERROR_NO_TOKEN {
+        return Err(TokenUnverifiable);
+    }
+    Ok(())
+}
+
 /// Standalone C4g process identity preflight. It never grants access.
 /// Any missing, forged or corrupt identity is rejected without disclosure.
+/// A thread impersonation token overrides the process token for access
+/// checks, so check its absence both before and after inspecting TokenUser.
 pub(crate) fn verify_current_process_identity() -> Result<(), TokenUnverifiable> {
+    reject_current_thread_impersonation()?;
     let token = open_current_process_token()?;
     let expected = service_sid()?;
-    if token_user_matches_service(token.0, &expected)?.is_some() {
-        Ok(())
-    } else {
-        Err(TokenUnverifiable)
+    if token_user_matches_service(token.0, &expected)?.is_none() {
+        return Err(TokenUnverifiable);
     }
+    reject_current_thread_impersonation()
 }
 
 // Sensitive token attributes remain exclusively in this Windows module.
@@ -428,14 +451,19 @@ fn verified_snapshot(
 }
 
 /// Read actual kernel-issued process token; caller cannot supply SID or claims.
-/// SCM attests all attributes on one handle and remains deny-only.
+/// SCM attests all attributes on one handle and remains deny-only. A thread
+/// impersonation token would override the effective access-check identity,
+/// so this diagnostic observer uses the same fail-closed thread-token gate.
 pub fn observe_current_process_token() -> Result<TokenFinding, TokenUnverifiable> {
+    reject_current_thread_impersonation()?;
     let token = open_current_process_token()?;
     let expected = service_sid()?;
     let Some(user_sid) = token_user_matches_service(token.0, &expected)? else {
+        reject_current_thread_impersonation()?;
         return Ok(TokenFinding::IdentityMismatch);
     };
     let snapshot = verified_snapshot(token.0, &expected, user_sid)?;
+    reject_current_thread_impersonation()?;
     Ok(snapshot.classify())
 }
 
@@ -600,6 +628,47 @@ mod tests {
         let user: TOKEN_USER = info.fixed().unwrap();
         assert!(info.sid(user.User.Sid).is_err());
     }
+    #[test]
+    fn current_thread_impersonation_must_deny_even_if_process_token_is_unchanged() {
+        // A separate OS thread keeps impersonation state isolated from the
+        // Rust test runner's worker threads; no process token is replaced.
+        let proof = std::thread::spawn(|| {
+            struct ResetImpersonation;
+            impl Drop for ResetImpersonation {
+                fn drop(&mut self) {
+                    // SAFETY: revert the current test worker's own temporary
+                    // self-impersonation even if an assertion unwinds.
+                    let reverted = unsafe { windows_sys::Win32::Security::RevertToSelf() };
+                    assert_ne!(reverted, 0, "test principal must be restored");
+                }
+            }
+            assert_eq!(reject_current_thread_impersonation(), Ok(()));
+            let started = unsafe {
+                windows_sys::Win32::Security::ImpersonateSelf(
+                    windows_sys::Win32::Security::SecurityImpersonation,
+                )
+            };
+            assert_ne!(
+                started, 0,
+                "real Windows impersonation is a required precondition"
+            );
+            {
+                let _restore = ResetImpersonation;
+                assert_eq!(
+                    reject_current_thread_impersonation(),
+                    Err(TokenUnverifiable),
+                    "even self-impersonation must not satisfy the process-only preflight"
+                );
+            }
+            assert_eq!(
+                reject_current_thread_impersonation(),
+                Ok(()),
+                "real Windows thread must revert to its primary process context"
+            );
+        });
+        proof.join().expect("thread-token gate test panicked");
+    }
+
     #[test]
     fn standalone_preflight_rejects_ordinary_process_identity() {
         // The CI process is not the temporary SCM virtual service account.

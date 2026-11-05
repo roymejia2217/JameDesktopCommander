@@ -99,6 +99,11 @@ impl SealedDirectoryGrant {
                 .map_err(|_| DispatchDenied)?;
             observed
         };
+        #[cfg(all(target_os = "linux", not(test)))]
+        let rooted = policy
+            .open_custodied_root(root_ref)
+            .map_err(|_| DispatchDenied)?;
+        #[cfg(any(test, not(target_os = "linux")))]
         let rooted = policy.open_root(root_ref).map_err(|_| DispatchDenied)?;
         #[cfg(all(target_os = "linux", not(test)))]
         monitor
@@ -135,8 +140,11 @@ impl SealedDirectoryGrant {
             self.revoke();
             return Err(DispatchDenied);
         }
-        let matches = policy
-            .open_root(&self.root_ref)
+        #[cfg(not(test))]
+        let refreshed = policy.open_custodied_root(&self.root_ref);
+        #[cfg(test)]
+        let refreshed = policy.open_root(&self.root_ref);
+        let matches = refreshed
             .and_then(|opened| {
                 self.rooted
                     .same_open_directory(&opened)
@@ -523,6 +531,67 @@ mod tests {
             "uncertain durable claim must revoke the grant"
         );
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires the real bind-mount fixture; mandatory in hosted acceptance"]
+    fn issuer_root_binding_revokes_same_inode_from_another_mount() {
+        use std::os::unix::fs::MetadataExt;
+        use std::path::PathBuf;
+        let fixture_dir = PathBuf::from(
+            std::env::var_os("JDC_T011_MKDIR_MOUNT_FIXTURE")
+                .expect("mandatory real bind-mount fixture was not supplied"),
+        );
+        let original = fixture_dir.join("outside");
+        let alias = fixture_dir.join("allowed/alias");
+        let a = std::fs::metadata(&original).unwrap();
+        let b = std::fs::metadata(&alias).unwrap();
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        let mount_id = |path: &Path| {
+            let dir = std::fs::File::open(path).unwrap();
+            let st = rustix::fs::statx(
+                &dir,
+                "",
+                rustix::fs::AtFlags::EMPTY_PATH,
+                rustix::fs::StatxFlags::MNT_ID,
+            )
+            .unwrap();
+            assert_ne!(st.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits(), 0);
+            assert_ne!(st.stx_mnt_id, 0);
+            st.stx_mnt_id
+        };
+        assert_ne!(
+            mount_id(&original),
+            mount_id(&alias),
+            "distinct mounts are required"
+        );
+        let policy_for = |root: &Path| {
+            let json = serde_json::to_string(root.to_str().unwrap()).unwrap();
+            let bytes = format!(
+                r#"{{"version":1,"mode":"restricted","roots":[{{"rootRef":"{ROOT}","absolutePath":{json}}}]}}"#
+            );
+            crate::issuer_policy::IssuerPolicy::decode_exact_for_test(bytes.as_bytes(), 7, [1; 32])
+                .unwrap()
+        };
+        let original_policy = policy_for(&original);
+        let alias_policy = policy_for(&alias);
+        let mut old = fixture(&original);
+        assert_eq!(old.revalidate_root_binding(&original_policy), Ok(()));
+        let mut fresh = SealedDirectoryGrant::from_issuer_policy(&alias_policy, ROOT).unwrap();
+        assert_eq!(fresh.revalidate_root_binding(&alias_policy), Ok(()));
+        assert_eq!(
+            old.revalidate_root_binding(&alias_policy),
+            Err(DispatchDenied)
+        );
+        assert!(
+            !old.active,
+            "different mount must revoke the retained grant"
+        );
+        assert_eq!(
+            old.revalidate_root_binding(&original_policy),
+            Err(DispatchDenied)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn issuer_root_custody_is_sticky_after_real_rename_and_replacement() {

@@ -10,6 +10,99 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn protected_root_admission_denies_shared_mounts_wrong_principals_and_mutable_parents() {
+        let parent = RootDomainSnapshot {
+            uid: 0,
+            gid: 0,
+            mode: 0o40711,
+            device: 100,
+            mount_id: 10,
+        };
+        let isolated = RootDomainSnapshot {
+            uid: 1001,
+            gid: 1001,
+            mode: 0o40700,
+            device: 200,
+            mount_id: 20,
+        };
+        assert!(admit_protected_root(parent, isolated, 1001, 1001));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                mount_id: 10,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                device: 100,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                uid: 1002,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                gid: 1002,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                mode: 0o40770,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            RootDomainSnapshot {
+                uid: 1001,
+                ..parent
+            },
+            isolated,
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(
+            RootDomainSnapshot {
+                mode: 0o40733,
+                ..parent
+            },
+            isolated,
+            1001,
+            1001
+        ));
+        assert!(!admit_protected_root(parent, isolated, 0, 1001));
+        assert!(!admit_protected_root(parent, isolated, 1001, 0));
+        assert!(!admit_protected_root(
+            parent,
+            RootDomainSnapshot {
+                mount_id: 0,
+                ..isolated
+            },
+            1001,
+            1001
+        ));
+    }
+
     const R: &str = "0123456789abcdef0123456789abcdef";
     const S: &str = "fedcba9876543210fedcba9876543210";
     fn policy(root_ref: &str, path: &str) -> Vec<u8> {
@@ -166,6 +259,49 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn ordinary_admin_policy_root_does_not_prove_dedicated_storage_custody() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("allowed");
+        std::fs::create_dir(&root).unwrap();
+        let policy =
+            IssuerPolicy::decode_exact_for_test(&policy(R, root.to_str().unwrap()), 7, [1; 32])
+                .unwrap();
+        assert!(
+            policy.open_root(R).is_ok(),
+            "root binding alone must succeed"
+        );
+        assert!(
+            policy.open_custodied_root(R).is_err(),
+            "an ordinary user directory is not an attested isolated filesystem"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires isolated mount and real service principal in disposable hosted acceptance"]
+    fn issuer_issues_only_an_attested_separate_filesystem_root() {
+        let approved = std::env::var("JDC_T011_CUSTODIED_ROOT")
+            .expect("the dedicated isolated storage mount must be supplied");
+        crate::verify_service_identity()
+            .expect("fixture must run under the real dedicated service UID/GID and NNP");
+        let policy =
+            IssuerPolicy::decode_exact_for_test(&policy(R, &approved), 7, [1; 32]).unwrap();
+        let root = policy
+            .open_custodied_root(R)
+            .expect("an OS-separated 0700 dedicated root must be accepted");
+        root.create_child("issuer-custody-positive")
+            .expect("an authenticated service may create inside the isolated domain");
+        assert!(std::path::Path::new(&approved)
+            .join("issuer-custody-positive")
+            .is_dir());
+        assert!(
+            policy.open_custodied_root(S).is_err(),
+            "a valid but unrelated root reference cannot reuse the opened domain"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn issuer_does_not_follow_symlink_root() {
         use std::os::unix::fs::symlink;
         let f = tempfile::tempdir().unwrap();
@@ -226,6 +362,78 @@ struct RootWire {
     #[serde(rename = "absolutePath")]
     absolute_path: String,
 }
+// Single opened-handle snapshot, never a pathname or client-provided authority.
+// Linux production populates this only from kernel statx + fstat.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Copy)]
+struct RootDomainSnapshot {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    device: u64,
+    mount_id: u64,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn admit_protected_root(
+    parent: RootDomainSnapshot,
+    root: RootDomainSnapshot,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> bool {
+    // A separately mounted, OS-owned 0700 directory is the only admitted
+    // restricted root. The mountpoint's immediate parent is root-admin-owned
+    // and cannot be renamed by the service or another unprivileged principal.
+    expected_uid != 0
+        && expected_gid != 0
+        && parent.uid == 0
+        && parent.mount_id != 0
+        && (parent.mode & 0o170000) == 0o040000
+        && (parent.mode & 0o022) == 0
+        && root.uid == expected_uid
+        && root.gid == expected_gid
+        && (root.mode & 0o170000) == 0o040000
+        && (root.mode & 0o7777) == 0o700
+        && root.mount_id != 0
+        && root.mount_id != parent.mount_id
+        && root.device != parent.device
+}
+
+// Read root ownership, mode, device and kernel mount from the SAME opened
+// handle. No post-open ambient pathname checks or user-provided metadata.
+#[cfg(target_os = "linux")]
+fn observe_opened_domain(dir: &Dir) -> Result<RootDomainSnapshot, IdentityDenied> {
+    use rustix::fs::{statx, AtFlags, StatxFlags};
+    use std::{mem::MaybeUninit, os::fd::AsRawFd};
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(dir.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(IdentityDenied);
+    }
+    let stat = unsafe { stat.assume_init() };
+    let mount =
+        statx(dir, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).map_err(|_| IdentityDenied)?;
+    if (mount.stx_mask & StatxFlags::MNT_ID.bits()) == 0 || mount.stx_mnt_id == 0 {
+        return Err(IdentityDenied);
+    }
+    Ok(RootDomainSnapshot {
+        uid: stat.st_uid,
+        gid: stat.st_gid,
+        mode: stat.st_mode,
+        device: stat.st_dev,
+        mount_id: mount.stx_mnt_id,
+    })
+}
+
+// Only root-administrated ancestors may bind an isolated mountpoint. On
+// disposable CI runners, /tmp is the conventional root-owned sticky 1777
+// directory; the mounted child's DIRECT parent still must be nonwritable.
+#[cfg(target_os = "linux")]
+fn trusted_root_ancestor(observed: RootDomainSnapshot) -> bool {
+    observed.uid == 0
+        && (observed.mode & 0o170000) == 0o040000
+        && ((observed.mode & 0o022) == 0 || (observed.mode & 0o7777) == 0o1777)
+}
+
 #[cfg(any(test, target_os = "linux"))]
 fn root_components(path: &str) -> Result<(&str, Vec<&str>), IdentityDenied> {
     if path.len() > 4096 || path.chars().any(|c| c as u32 == 0) {
@@ -365,6 +573,61 @@ impl IssuerPolicy {
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }
+    /// Linux-only custody admission: the policy root must be the ROOT of a
+    /// separately mounted filesystem, owned 0700 by the dedicated service UID
+    /// and GID, directly below a root-admin-owned nonwritable parent. All
+    /// preceding pathname components must stay on their original mount and
+    /// be root-controlled (only root-owned sticky /tmp is tolerated).
+    /// This is stricter than mere root-handle binding: it excludes arbitrary
+    /// user-writable or shared-volume roots even when the admin policy is valid.
+    /// Privileged admin namespace replacement remains outside this contract.
+    /// Never accept expected identity or mount metadata from an MCP caller.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_custodied_root(
+        &self,
+        root_ref: &str,
+    ) -> Result<RootedDirectory, IdentityDenied> {
+        #[cfg(not(test))]
+        crate::verify_service_identity()?;
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        if uid == 0 || gid == 0 {
+            return Err(IdentityDenied);
+        }
+        let selected = self
+            .roots
+            .iter()
+            .find(|r| r.root_ref == root_ref)
+            .ok_or(IdentityDenied)?;
+        let (anchor, components) = root_components(&selected.disk_root)?;
+        let mut current =
+            Dir::open_ambient_dir(anchor, ambient_authority()).map_err(|_| IdentityDenied)?;
+        let mut parent = observe_opened_domain(&current)?;
+        if !trusted_root_ancestor(parent) {
+            return Err(IdentityDenied);
+        }
+        for (index, part) in components.iter().enumerate() {
+            let final_part = index + 1 == components.len();
+            let child = current
+                .open_dir_nofollow(part)
+                .map_err(|_| IdentityDenied)?;
+            let next = observe_opened_domain(&child)?;
+            if final_part {
+                if !admit_protected_root(parent, next, uid, gid) {
+                    return Err(IdentityDenied);
+                }
+            } else if !trusted_root_ancestor(next)
+                || next.mount_id != parent.mount_id
+                || next.device != parent.device
+            {
+                return Err(IdentityDenied);
+            }
+            current = child;
+            parent = next;
+        }
+        Ok(RootedDirectory::from_preopened(current))
+    }
+
     /// Reopen no ambient client pathname. A trusted admin policy selects an
     /// absolute root; the OS volume root is the only initial ambient open.
     /// Every other path component is traversed under a capability handle.

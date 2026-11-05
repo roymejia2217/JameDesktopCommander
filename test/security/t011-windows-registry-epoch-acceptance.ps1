@@ -143,7 +143,27 @@ try {
     # parent. Deny twice before the two managed parents are provisioned.
     Set-ExactAdminControlledKey $registryKey $false
     Expect-ScmResult 'UNTRUSTED_REGISTRY_ROOT_ANCESTOR' 52
+    # Before removing inherited rights from the parent, retain administrator
+    # full control as an EXPLICIT child ACE. Then reenable inheritance solely
+    # to exercise the unprotected Authority negative control.
+    Set-ExactAdminControlledKey $registryAuthority $false
+    $authorityAcl = Get-Acl -LiteralPath $registryAuthority -ErrorAction Stop
+    $authorityAcl.SetAccessRuleProtection($false, $false)
+    Set-Acl -LiteralPath $registryAuthority -AclObject $authorityAcl -ErrorAction Stop
+    $observedAuthority = Get-Acl -LiteralPath $registryAuthority -ErrorAction Stop
+    $explicitAdmin = @($observedAuthority.Access | Where-Object {
+        -not $_.IsInherited -and
+        $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $ba.Value -and
+        (([int]$_.RegistryRights -band [int]$all) -eq [int]$all)
+    })
+    if ($observedAuthority.AreAccessRulesProtected -or $explicitAdmin.Count -ne 1) {
+        throw 'E_EPOCH_AUTHORITY_EXPLICIT_ADMIN_RIGHTS_UNPROVEN'
+    }
+    Write-Output 'T011_EPOCH_AUTHORITY_EXPLICIT_ADMIN_RIGHTS'
     Set-ExactAdminControlledKey $registryParent $false
+    if (-not (Test-Path -LiteralPath $registryAuthority -PathType Container -ErrorAction Stop)) {
+        throw 'E_EPOCH_AUTHORITY_CHILD_UNREADABLE_AFTER_PARENT_PROTECTION'
+    }
     Expect-ScmResult 'UNTRUSTED_REGISTRY_AUTHORITY_ANCESTOR' 52
     Set-ExactAdminControlledKey $registryAuthority $false
     Expect-ScmResult 'EXACT_PROTECTED_POLICY_ANCHOR' 51

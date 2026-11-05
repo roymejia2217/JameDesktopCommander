@@ -26,6 +26,15 @@ test('SCM failures preserve primary evidence and report cleanup failures separat
   assert.match(fixture, /if \(-not \$hadPrimaryFailure\)/);
 });
 
+test('admin retains explicit child rights before parent ACL hardening', () => {
+  const child = fixture.indexOf('Set-ExactAdminControlledKey $registryAuthority $false');
+  const parent = fixture.indexOf('Set-ExactAdminControlledKey $registryParent $false');
+  assert.ok(child >= 0 && parent >= 0 && child < parent,
+    'secure the Authority child before the parent DACL is made noninheriting');
+  assert.match(fixture, /SetAccessRuleProtection\(\$false, \$false\)/);
+  assert.match(fixture, /T011_EPOCH_AUTHORITY_EXPLICIT_ADMIN_RIGHTS/);
+});
+
 test('hosted SCM fixture denies leaf-only and partially guarded authority', () => {
   assert.match(fixture, /UNTRUSTED_REGISTRY_ROOT_ANCESTOR/);
   assert.match(fixture, /UNTRUSTED_REGISTRY_AUTHORITY_ANCESTOR/);

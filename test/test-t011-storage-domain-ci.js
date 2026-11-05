@@ -44,7 +44,7 @@ test('CI principals and native probe argument binding preserve positive controls
   assert.match(w, /function Invoke-CIUser\([^\n]*\$probeArgs\)/);
   assert.match(w, /-ArgumentList \$probeArgs\b/);
   assert.match(w, /function Require-UserSuccess\([^\n]*\$probeArgs\)/);
-  assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs\)/);
+  assert.match(w, /function Require-UserDenial\([^\n]*\$probeArgs, \[int\[\]\] \$expectedOsCodes = @\(5\)\)/);
 });
 
 test('Linux administrator bind mount exposes a real outside object, not a second hard link', () => {
@@ -85,4 +85,20 @@ test('Windows admin cross-volume denials must prove the exact OS error', () => {
   assert.match(script, /E_HARDLINK_OS_ERROR_17/);
   assert.match(script, /RedirectStandardError/);
   assert.match(probe, /E_HARDLINK_OS_ERROR_/);
+});
+
+// This static guard supplements (never replaces) the real hosted Windows
+// execution under independent SIDs and the attached NTFS VHD.
+test('Windows custody denial gate rejects unrelated failed probes', () => {
+  const script = fs.readFileSync(windows, 'utf8');
+  const probe = fs.readFileSync(path.join(repo,
+    'native/authority-store/examples/custody_attacker.rs'), 'utf8');
+  assert.match(script, /-RedirectStandardError \$stderrFile/);
+  assert.match(script, /\$accepted -cnotcontains \$observed/);
+  assert.match(script, /E_STORAGE_WRONG_DENIAL_REASON_\$label/);
+  assert.match(script, /GATE_REJECTS_MISSING_SOURCE/);
+  assert.match(script, /T011_STORAGE_MISSING_SOURCE_DENIAL_FALSE_POSITIVE_REJECTED/);
+  assert.match(script, /'ATTACKER_VOLUME_LINK'[^\n]*@\(5, 17\)/);
+  assert.match(probe, /format_probe_os_error/);
+  assert.match(probe, /E_PROBE_OS_ERROR/);
 });

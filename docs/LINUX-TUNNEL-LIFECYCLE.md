@@ -51,6 +51,32 @@ not attest profile contents consumed independently by the official client
 during doctor, installation or service execution, nor do they establish
 publisher identity or eliminate concurrent ancestor replacement.
 
+### Registered credential-file custody preflight (#248, read-only)
+
+On Linux, `desktop-commander tunnel credential-check` examines only the
+official profile selected by the existing JDC-managed `systemd --user` unit.
+The action accepts **no path, token or extra CLI argument**. It requires the
+same registered unit template, currently loaded manager fragment and trusted
+profile directory as `status`, without starting/stopping a service or calling
+the provider. For a `file:` runtime key reference, it opens the referenced
+file without following the final symlink and checks the opened inode: regular
+file, current unprivileged OS user as owner, exactly mode 0600, one hard
+link, 1..8192 bytes, and canonical trusted parent directories/ancestors.
+The file contents are **not read**. Symlinked ancestry, hardlinks, unsafe
+permissions and unavailable files are rejected with a generic error that
+does not disclose the secret path or value. `env:` and unsupported references
+remain `not_checked`; they do not trigger file access.
+
+Results are restricted to source kind, `custody: verified_point_in_time |
+not_checked`, `rotationAuthorized: false` and
+`remoteAuthentication: not_checked`. Even a successful inspection is **not
+a mutation authority**, does not prove that the running process consumed
+the same file, and does not protect against same-UID replacement or changes
+after the file descriptor closes. Actual rotation, credential input,
+recovery, and provider-authenticated proof remain unimplemented. Windows
+ACL/principal verification requires a separate OS-specific adapter; this
+Linux command is not advertised as supported on Windows.
+
 ### Read-only Linux local component diagnostics (#248)
 
 `tunnel diagnose` reuses the validated installed user-systemd definition,

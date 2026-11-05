@@ -9,7 +9,8 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
 $sc = (Get-Command sc.exe -ErrorAction Stop).Source
 $service = 'JameDesktopCommanderAuthority'
 $registryParent = 'HKLM:\SOFTWARE\JameDesktopCommander'
-$registryKey = Join-Path $registryParent 'Authority\EpochAnchor'
+$registryAuthority = Join-Path $registryParent 'Authority'
+$registryKey = Join-Path $registryAuthority 'EpochAnchor'
 if (Get-Service -Name $service -ErrorAction SilentlyContinue) {
     throw 'E_EPOCH_SCM_SERVICE_PREEXISTS'
 }
@@ -29,12 +30,12 @@ $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $all = [System.Security.AccessControl.RegistryRights]::FullControl
 $read = [System.Security.AccessControl.RegistryRights]::ReadKey
 
-function Set-ExactAdminControlledKey([bool] $foreign) {
-    if (-not (Test-Path -LiteralPath $registryKey -PathType Container)) {
+function Set-ExactAdminControlledKey([string] $targetKey, [bool] $foreign) {
+    if (-not (Test-Path -LiteralPath $targetKey -PathType Container)) {
         throw 'E_EPOCH_REGISTRY_KEY_NOT_CREATED'
     }
     # Set-Acl expects descriptor metadata bound to an existing RegistryKey.
-    $security = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
+    $security = Get-Acl -LiteralPath $targetKey -ErrorAction Stop
     $security.SetAccessRuleProtection($true, $false)
     foreach ($oldRule in @($security.Access)) {
         $security.RemoveAccessRuleSpecific($oldRule)
@@ -56,8 +57,8 @@ function Set-ExactAdminControlledKey([bool] $foreign) {
             [System.Security.AccessControl.AccessControlType]::Allow)
         $security.AddAccessRule($rule)
     }
-    Set-Acl -Path $registryKey -AclObject $security -ErrorAction Stop
-    $actual = Get-Acl -LiteralPath $registryKey -ErrorAction Stop
+    Set-Acl -Path $targetKey -AclObject $security -ErrorAction Stop
+    $actual = Get-Acl -LiteralPath $targetKey -ErrorAction Stop
     if (-not $actual.AreAccessRulesProtected -or
         $actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $ba.Value -or
         $actual.Access.Count -ne $rules.Count) {
@@ -126,7 +127,7 @@ try {
 
     New-Item -Path $registryParent -ItemType Key -ErrorAction Stop | Out-Null
     $createdRegistry = $true
-    New-Item -Path (Join-Path $registryParent 'Authority') -ItemType Key -ErrorAction Stop | Out-Null
+    New-Item -Path $registryAuthority -ItemType Key -ErrorAction Stop | Out-Null
     New-Item -Path $registryKey -ItemType Key -ErrorAction Stop | Out-Null
     if (-not (Test-Path -LiteralPath $registryKey -PathType Container)) {
         throw 'E_EPOCH_REGISTRY_KEY_NOT_CREATED'
@@ -136,8 +137,13 @@ try {
     $anchor[7] = 7
     for ($i = 8; $i -lt 40; $i++) { $anchor[$i] = 0xA5 }
     New-ItemProperty -LiteralPath $registryKey -Name PolicyAnchorV1 -PropertyType Binary -Value $anchor -ErrorAction Stop | Out-Null
-    Set-ExactAdminControlledKey $false
-
+    # A protected final key cannot authenticate an independently mutable
+    # parent. Deny twice before the two managed parents are provisioned.
+    Set-ExactAdminControlledKey $registryKey $false
+    Expect-ScmResult 'UNTRUSTED_REGISTRY_ROOT_ANCESTOR' 52
+    Set-ExactAdminControlledKey $registryParent $false
+    Expect-ScmResult 'UNTRUSTED_REGISTRY_AUTHORITY_ANCESTOR' 52
+    Set-ExactAdminControlledKey $registryAuthority $false
     Expect-ScmResult 'EXACT_PROTECTED_POLICY_ANCHOR' 51
     $anchor[7] = 8
     Set-ItemProperty -LiteralPath $registryKey -Name PolicyAnchorV1 -Value $anchor -ErrorAction Stop
@@ -154,7 +160,16 @@ try {
     $anchor[8] = 0xA5
     Set-ItemProperty -LiteralPath $registryKey -Name PolicyAnchorV1 -Value $anchor -ErrorAction Stop
     Expect-ScmResult 'RESTORED_POLICY_DIGEST' 51
-    Set-ExactAdminControlledKey $true
+    # Inject a foreign trustee at each independently checked managed ancestor.
+    Set-ExactAdminControlledKey $registryParent $true
+    Expect-ScmResult 'FOREIGN_REGISTRY_ROOT_ANCESTOR' 52
+    Set-ExactAdminControlledKey $registryParent $false
+    Expect-ScmResult 'RESTORED_REGISTRY_ROOT_ANCESTOR' 51
+    Set-ExactAdminControlledKey $registryAuthority $true
+    Expect-ScmResult 'FOREIGN_REGISTRY_AUTHORITY_ANCESTOR' 52
+    Set-ExactAdminControlledKey $registryAuthority $false
+    Expect-ScmResult 'RESTORED_REGISTRY_AUTHORITY_ANCESTOR' 51
+    Set-ExactAdminControlledKey $registryKey $true
     Expect-ScmResult 'FOREIGN_ACL_TRUSTEE' 52
     Write-Output 'T011 Windows actual SCM independently protected registry epoch: PASS (non-release)'
 }

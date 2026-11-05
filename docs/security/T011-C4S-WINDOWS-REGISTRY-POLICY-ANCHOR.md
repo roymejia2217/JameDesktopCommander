@@ -13,12 +13,16 @@ A single value avoids torn observation of two separately updated registry fields
 
 The kernel service identity is verified first; the key is opened read-only through
 official Win32 `RegOpenKeyExW` with `REG_OPTION_OPEN_LINK` and `KEY_WOW64_64KEY`.
-The opened key is inspected through `GetSecurityInfo(SE_REGISTRY_KEY)` before
-`RegQueryValueExW` reads the binary value. The owner must be SYSTEM or
-Administrators; the DACL must be protected and contain exactly three noninherited
-allow ACEs: SYSTEM and Administrators with exact `KEY_ALL_ACCESS`, and the
-independent service SID with exact `KEY_READ`. All other identities, flags,
-rights, missing/wrong-type/oversized values, epoch zero and all-zero digest deny.
+The service independently opens and checks all three managed keys:
+`HKLM\SOFTWARE\JameDesktopCommander`, its `Authority` child, and the final
+`EpochAnchor`. Each retained OS key handle is inspected through
+`GetSecurityInfo(SE_REGISTRY_KEY)` before `RegQueryValueExW` reads the value.
+For **each** key, the owner must be SYSTEM or Administrators; the DACL must
+be protected and contain exactly three noninherited allow ACEs: SYSTEM and
+Administrators with exact `KEY_ALL_ACCESS`, and the independent service SID
+with exact `KEY_READ`. A protected final key under an unprotected intermediate
+parent is never accepted. All other identities, flags, rights, missing/wrong-
+type/oversized values, epoch zero and all-zero digest deny.
 No error path restores a default or grants permission.
 
 An `ObservedEpochFloor` has private fields and a non-authorizing exact match
@@ -35,8 +39,13 @@ location and descriptor via the OS administrator, registers the canonical
 restricted SCM virtual service account, and runs a debug-only observation example.
 The positive verdict additionally checks the service **cannot open the key for
 write**: `RegOpenKeyExW(KEY_SET_VALUE)` must return real Win32 access denied (5).
-Invalid epoch, wrong digest at identical epoch, missing value and foreign
-registry ACE must each yield a distinct fail-closed observation status.
+In addition to invalid epoch, wrong digest, missing value and a foreign
+trustee on the final key, it first proves that a protected leaf under either
+unprotected managed parent is **denied**. It then provisions both parents
+with the administrator-controlled DACL, demonstrates the positive observation,
+and injects a foreign trustee separately into each parent; both must deny and
+must recover only after administrator restoration. These are real SCM exit
+status assertions, not permission guesses or locally emulated ACLs.
 All resources must be removed even on test failure; no user host is touched.
 
 The test uses synthetic policy digest bytes solely to prove register admission;
@@ -65,9 +74,10 @@ to authorize a client.
   directory/DB handle, signed policy provenance, digest computation or
   transactional high-water update protocol has been integrated.
 - An administrator-controlled registry watermark resists rollback by the
-  **less-privileged service**, assuming the Windows Registry key hierarchy
-  is provisioned and guarded. It does not defend against compromised
-  administrators, offline hive replacement, rollback of the entire OS image,
+  **less-privileged service**, given the explicitly protected three-key
+  managed chain and the OS-controlled `HKLM\SOFTWARE` ancestor. It does not
+  defend against compromised administrators, offline hive replacement,
+  rollback of the entire OS image,
   VM snapshots, compromised kernel, or attacker-controlled trusted updater.
 - Revocation semantics and atomicity between the SQLite transaction and
   the registry update remain to be specified. Until then mismatch **DENIES**;

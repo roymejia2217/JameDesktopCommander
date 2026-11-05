@@ -146,20 +146,31 @@ exit
     $env:JDC_T011_WINDOWS_VHD_ROOT = $volume
     $testStdout = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stdout"
     $testStderr = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-native-volume.stderr"
-    $exactNativeTest = 'windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight'
+    # Both real-VHD native tests are mandatory. A test silently filtered or
+    # marked ignored must make the overall acceptance FAIL, not PASS.
+    $nativeTestPrefix = 'windows_policy_root::tests::real_distinct_ntfs_vhd_'
+    $requiredNativeTests = @(
+        'windows_policy_root::tests::real_distinct_ntfs_vhd_handles_pass_non_authorizing_volume_preflight',
+        'windows_policy_root::tests::real_distinct_ntfs_vhd_rooted_read_and_cross_volume_alias_denied'
+    )
     try {
         $cargoBinary = (Get-Command cargo.exe -ErrorAction Stop).Source
         $native = Start-Process -FilePath $cargoBinary -ArgumentList @(
             '+1.91.1', 'test', '--locked',
             '--manifest-path', 'native/authority-service/Cargo.toml', '--lib',
-            $exactNativeTest, '--', '--ignored', '--exact', '--nocapture'
+            $nativeTestPrefix, '--', '--ignored', '--nocapture'
         ) -WorkingDirectory (Get-Location).Path -Wait -PassThru -RedirectStandardOutput $testStdout -RedirectStandardError $testStderr
         $observedOutput = Get-Content -LiteralPath $testStdout -Raw -ErrorAction Stop
         Write-Output $observedOutput
-        if ($null -eq $native.ExitCode -or $native.ExitCode -ne 0 -or
-            -not $observedOutput.Contains("test $exactNativeTest ... ok") -or
-            -not $observedOutput.Contains('test result: ok. 1 passed; 0 failed; 0 ignored;')) {
-            throw 'E_STORAGE_NATIVE_WINDOWS_VHD_PRECHECK_NOT_ONE_EXECUTED_PASS'
+        $complete = ($null -ne $native.ExitCode -and $native.ExitCode -eq 0 -and
+            $observedOutput.Contains('test result: ok. 2 passed; 0 failed; 0 ignored;'))
+        foreach ($requiredTest in $requiredNativeTests) {
+            if (-not $observedOutput.Contains("test $requiredTest ... ok")) {
+                $complete = $false
+            }
+        }
+        if (-not $complete) {
+            throw 'E_STORAGE_NATIVE_WINDOWS_VHD_TWO_REQUIRED_TESTS_DID_NOT_PASS'
         }
     } finally {
         Remove-Item Env:\JDC_T011_WINDOWS_VHD_PARENT -ErrorAction SilentlyContinue

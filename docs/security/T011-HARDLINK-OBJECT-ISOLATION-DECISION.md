@@ -1300,6 +1300,44 @@ object-integrity acceptance cases. Hosted exact-head Windows/Linux results
 remain mandatory. No installed service/runtime/registry/volume is altered.
 Production release stays **NO-GO**.
 
+### Real-NTFS VHD data-plane read / hard-link boundary (2026-11-05; NON-RELEASE)
+
+To avoid equating compilation or metadata checks with working object
+isolation, the disposable GitHub-hosted Windows storage-domain fixture now
+requires **two** exact native OS-level verdicts on its truly attached
+separately formatted NTFS VHD. The first confirms different opened kernel
+volume identities and same-volume denial. The second, run under the
+disposable runner administrator (not the SCM service), uses the real
+`RootedDirectory::read_bounded_file` method to read known authorized
+bytes from that VHD. It then creates and confirms a real same-volume hard
+link to an exterior host-volume canary, attempts a cross-volume hard link
+to the VHD, and requires **Windows ERROR_NOT_SAME_DEVICE (17)**. The
+attempted VHD alias must not exist; the exterior canary and its valid
+same-volume alias must retain the exact bytes, and the VHD authorized
+read must still succeed afterward.
+
+The runner launches both `real_distinct_ntfs_vhd_*` tests with
+`--ignored` but without `--exact`, then explicitly requires both exact
+names and **2 PASS / 0 FAIL / 0 IGNORED** in the output. Missing
+environment, inaccessible VHD, inability to construct a genuine same-
+volume link, wrong error code, a skipped test, or changed exterior bytes
+all FAIL. The test is `#[ignore]` in the ordinary unit suite because
+it is impossible to execute its real attached-VHD preconditions without
+the disposable GitHub-hosted Windows fixture; compiling the test locally
+is **not** acceptance. The hosted exact-HEAD run is required to validate
+it. No local developer-machine VHD or registry/SCM service is changed.
+
+This is an actual **storage-volume boundary and bounded native-read**
+test, not the approved operational broker: the administrator's positive
+root read does not authenticate the future remote peer, issuer
+permissions, data-plane linearization or actual MCP handlers. An
+attacker with administrator access to the VHD is outside this fixture's
+weaker attacker model; independent review must approve the final
+principal/storage threat model. Four original #147 same-volume hard-link
+attacks still fail on its separately tested historic N-API prototype.
+Passing this new VHD fixture cannot close them or certify #148.
+Release remains **NO-GO**.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

@@ -1463,6 +1463,99 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an attached disposable NTFS VHD and external host volume"]
+    fn real_distinct_ntfs_vhd_rooted_read_and_cross_volume_alias_denied() {
+        use cap_std::fs::Dir;
+        use std::os::windows::fs::OpenOptionsExt;
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let parent_path = std::env::var_os("JDC_T011_WINDOWS_VHD_PARENT")
+            .expect("hosted runner must provide an actual external host-volume root");
+        let volume_path = std::env::var_os("JDC_T011_WINDOWS_VHD_ROOT")
+            .expect("hosted runner must provide an attached distinct NTFS VHD root");
+        let open_dir = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(BACKUP_SEMANTICS)
+                .open(path)
+                .expect("real opened Windows directory required")
+        };
+        let parent_path = std::path::Path::new(&parent_path);
+        let volume_path = std::path::Path::new(&volume_path);
+        let parent = open_dir(parent_path);
+        let root = open_dir(volume_path);
+        assert_eq!(
+            verify_preopened_volume_separation(&parent, &root),
+            Ok(()),
+            "the positive read must be confined to a different actual volume"
+        );
+
+        let inside = tempfile::Builder::new()
+            .prefix("jdc-vhd-rooted-read-")
+            .tempdir_in(volume_path)
+            .expect("create disposable authorized directory on NTFS VHD");
+        let approved = [0x11u8, 0xfe, 0x33, 0x00];
+        std::fs::write(inside.path().join("inside.bin"), approved)
+            .expect("create an actual, readable internal file");
+        let rooted = crate::handle_mkdir::RootedDirectory::from_preopened(Dir::from_std_file(
+            root.try_clone()
+                .expect("duplicate verified VHD root handle"),
+        ));
+        let leaf = inside
+            .path()
+            .file_name()
+            .expect("disposable VHD directory has a final name")
+            .to_str()
+            .expect("fixture directory name must be UTF-8");
+        let inside_relative = format!("{leaf}/inside.bin");
+        assert_eq!(
+            rooted
+                .read_bounded_file(&inside_relative)
+                .expect("approved VHD read must actually succeed"),
+            approved,
+        );
+
+        let foreign = tempfile::Builder::new()
+            .prefix("jdc-vhd-outside-")
+            .tempdir_in(parent_path)
+            .expect("create disposable host-volume attacker directory");
+        let outside = foreign.path().join("outside.bin");
+        let sentinel = [0x00u8, 0xff, 0x81, 0x77, 0x10];
+        std::fs::write(&outside, sentinel).expect("write exterior canary");
+        let same_volume_alias = foreign.path().join("real-host-hardlink.bin");
+        std::fs::hard_link(&outside, &same_volume_alias)
+            .expect("host volume must permit real hard-link attack setup");
+        assert!(
+            same_file::is_same_file(&outside, &same_volume_alias)
+                .expect("kernel file identity check must work"),
+            "positive hard-link control must share an actual file object"
+        );
+        let attempted = inside.path().join("forged-exterior-hardlink.bin");
+        let err = std::fs::hard_link(&outside, &attempted)
+            .expect_err("a VHD boundary must prevent an outside-object hard link");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(17),
+            "only genuine Windows ERROR_NOT_SAME_DEVICE proves cross-volume rejection"
+        );
+        assert!(
+            !attempted.exists(),
+            "cross-volume alias must not be installed"
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            sentinel,
+            "failed alias setup may never alter outside bytes"
+        );
+        assert_eq!(std::fs::read(&same_volume_alias).unwrap(), sentinel);
+        assert_eq!(
+            rooted.read_bounded_file(&inside_relative).unwrap(),
+            approved,
+            "valid authorized read must continue working after rejected attack"
+        );
+    }
+
+    #[test]
     fn interrupted_windows_root_revalidation_must_poison_observation_before_unwind() {
         use std::{
             os::windows::fs::OpenOptionsExt,

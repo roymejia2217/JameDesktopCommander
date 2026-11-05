@@ -127,3 +127,18 @@ test('Linux reports env references unsupported for file rotation, without readin
   });
   assert.doesNotMatch(JSON.stringify(response), /CONTROL_PLANE_API_KEY|\/tmp\/unused/);
 }));
+
+test('Linux help advertises read-only credential-check but no rotation mutation', async () => {
+  const { runTunnel } = await import('../dist/npm-scripts/tunnel.js');
+  const messages = [];
+  const original = console.log;
+  console.log = (message) => messages.push(String(message));
+  try {
+    await runTunnel(['--help'], { platform: 'linux' });
+  } finally {
+    console.log = original;
+  }
+  assert.match(messages.join('\n'),
+    /start \| stop \| restart \| status \| diagnose \| credential-check \| uninstall/);
+  assert.doesNotMatch(messages.join('\n'), /credential-rotate|tunnel rotate/i);
+});

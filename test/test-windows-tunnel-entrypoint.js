@@ -22,7 +22,9 @@ if (process.platform === 'linux') {
   // not Windows Scheduled Tasks or the Windows-only restart supervisor.
   assert.match(result.stdout, /Linux tunnel:/);
   assert.match(result.stdout, /doctor\|install --tunnel-client-bin/);
-  assert.match(result.stdout, /start \| stop \| restart \| status \| diagnose \| uninstall/);
+  assert.match(result.stdout, /start \| stop \| restart \| status \| diagnose \| credential-check \| uninstall/);
+  assert.doesNotMatch(result.stdout, /tunnel rotate|credential-rotate/i,
+    'Read-only credential-check must not advertise mutation');
   assert.doesNotMatch(result.stdout, /Desktop Commander Secure MCP Tunnel lifecycle/);
   assert.doesNotMatch(result.stdout, /restart supervisor/i);
 } else {

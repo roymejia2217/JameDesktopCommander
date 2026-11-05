@@ -62,8 +62,19 @@ function Invoke-CIUser([pscredential] $who, [string] $bin, [string[]] $probeArgs
 function Require-UserSuccess([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
     if ((Invoke-CIUser $who $bin $probeArgs) -ne 0) { throw "E_STORAGE_POSITIVE_FAILED_$label" }
 }
-function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs) {
-    if ((Invoke-CIUser $who $bin $probeArgs) -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
+function Require-UserDenial([string] $label, [pscredential] $who, [string] $bin, [string[]] $probeArgs, [int[]] $expectedOsCodes = @(5)) {
+    $stderrFile = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-$label.stderr"
+    try {
+        $process = Start-Process -FilePath $bin -Credential $who -ArgumentList $probeArgs -WorkingDirectory $root -PassThru -Wait -RedirectStandardError $stderrFile
+        if ($null -eq $process.ExitCode) { throw "E_STORAGE_MISSING_PROCESS_VERDICT_$label" }
+        if ($process.ExitCode -eq 0) { throw "E_STORAGE_UNAUTHORIZED_$label" }
+        $observed = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction Stop).Trim()
+        $prefix = if ($probeArgs[0] -ceq 'hardlink') { 'E_HARDLINK_OS_ERROR' } else { 'E_PROBE_OS_ERROR' }
+        $accepted = @($expectedOsCodes | ForEach-Object { "${prefix}_$_" })
+        if ($accepted -cnotcontains $observed) { throw "E_STORAGE_WRONG_DENIAL_REASON_$label" }
+    } finally {
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
 }
 function Require-AdminCrossVolumeDenial([string] $label, [string] $from, [string] $to) {
     $stderrFile = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-$label.stderr"
@@ -183,6 +194,17 @@ exit
     $outsideFile = Join-Path $outside 'outside.bin'
     Require-UserSuccess 'SERVICE_CAN_WRITE_VOLUME' $service.Credential $probe @('canary', $serviceFile, $serviceFile)
     Require-UserSuccess 'ATTACKER_CAN_WRITE_OWN' $attacker.Credential $probe @('canary', $outsideFile, $outsideFile)
+    # Negative control: a missing target is NOT a security denial, even though
+    # the probe exits nonzero. This must fail the acceptance gate explicitly.
+    $absent = Join-Path $outside 'absent-access-control.bin'
+    if (Test-Path -LiteralPath $absent) { throw 'E_STORAGE_ABSENT_CONTROL_EXISTS' }
+    try {
+        Require-UserDenial 'GATE_REJECTS_MISSING_SOURCE' $attacker.Credential $probe @('read', $absent, $outsideFile)
+        throw 'E_STORAGE_MISSING_SOURCE_FALSE_ACCEPTANCE'
+    } catch {
+        if ($_.Exception.Message -cne 'E_STORAGE_WRONG_DENIAL_REASON_GATE_REJECTS_MISSING_SOURCE') { throw }
+    }
+    Write-Output 'T011_STORAGE_MISSING_SOURCE_DENIAL_FALSE_POSITIVE_REJECTED'
     $before = (Get-FileHash -LiteralPath $outsideFile -Algorithm SHA256).Hash
     $ownLink = Join-Path $outside 'positive.bin'
     Require-UserSuccess 'ATTACKER_OWN_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, $ownLink)
@@ -229,7 +251,9 @@ exit
     $beforeIdentity = Start-Process -FilePath $probe -ArgumentList @('same-object', $serviceFile, $adminLocalLink) -WorkingDirectory $root -Wait -PassThru
     if ($beforeIdentity.ExitCode -ne 0) { throw 'E_STORAGE_ADMIN_ORIGINAL_IDENTITY_FAILED' }
     Write-Output 'T011_STORAGE_SAME_VOLUME_HARDLINK_PASS'
-    Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin'))
+    # A cross-volume attempt may fail on the device boundary (17) or the
+    # protected destination ACL (5), but never on a missing source (2).
+    Require-UserDenial 'ATTACKER_VOLUME_LINK' $attacker.Credential $probe @('hardlink', $outsideFile, (Join-Path $volume 'attacker.bin')) @(5, 17)
     Require-UserDenial 'ATTACKER_CANNOT_READ_SERVICE' $attacker.Credential $probe @('read', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_APPEND_SERVICE' $attacker.Credential $probe @('append', $serviceFile, $outsideFile)
     Require-UserDenial 'ATTACKER_CANNOT_REWRITE_SERVICE' $attacker.Credential $probe @('rewrite', $serviceFile, $outsideFile)

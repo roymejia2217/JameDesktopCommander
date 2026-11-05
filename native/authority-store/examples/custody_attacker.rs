@@ -58,10 +58,40 @@ fn attempt(mode: &str, protected: &Path, auxiliary: &Path) -> io::Result<()> {
     }
 }
 
+// The acceptance runner must distinguish an actual OS permission denial
+// from a missing source or another unrelated execution failure.
+// Do not report paths, credentials or file bytes.
+fn format_probe_os_error(mode: &str, error: &io::Error) -> String {
+    let prefix = if mode == "hardlink" {
+        "E_HARDLINK_OS_ERROR"
+    } else {
+        "E_PROBE_OS_ERROR"
+    };
+    format!("{prefix}_{}", error.raw_os_error().unwrap_or(-1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::attempt;
-    use std::fs;
+    use std::{fs, io};
+
+    #[test]
+    fn probe_error_contract_distinguishes_access_denial_from_missing_source() {
+        let denied = io::Error::from_raw_os_error(5);
+        let missing = io::Error::from_raw_os_error(2);
+        assert_eq!(
+            super::format_probe_os_error("read", &denied),
+            "E_PROBE_OS_ERROR_5"
+        );
+        assert_eq!(
+            super::format_probe_os_error("read", &missing),
+            "E_PROBE_OS_ERROR_2"
+        );
+        assert_eq!(
+            super::format_probe_os_error("hardlink", &denied),
+            "E_HARDLINK_OS_ERROR_5"
+        );
+    }
 
     #[test]
     fn identical_bytes_do_not_prove_identical_file_objects() {
@@ -135,9 +165,7 @@ fn main() -> ExitCode {
             // A generic failure is not evidence of a filesystem boundary.
             // Report only the OS code (no paths) so hosted acceptance can
             // require ERROR_NOT_SAME_DEVICE instead of unrelated ACL errors.
-            if mode == "hardlink" {
-                eprintln!("E_HARDLINK_OS_ERROR_{}", error.raw_os_error().unwrap_or(-1));
-            }
+            eprintln!("{}", format_probe_os_error(mode, &error));
             ExitCode::FAILURE
         }
     }

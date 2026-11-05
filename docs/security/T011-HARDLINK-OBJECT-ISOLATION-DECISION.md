@@ -1338,6 +1338,37 @@ attacks still fail on its separately tested historic N-API prototype.
 Passing this new VHD fixture cannot close them or certify #148.
 Release remains **NO-GO**.
 
+### Evidence-quality gate for distinct-principal denial (2026-11-05; NON-RELEASE)
+
+The Windows disposable-VHD acceptance formerly treated **any nonzero**
+unprivileged probe exit as evidence that an ACL or storage boundary had denied
+an attacker. That conflated authorization failure with a nonexistent target,
+unknown operation or unrelated I/O error. The custody_attacker fixture now
+reports only its numeric kernel error (without paths or object bytes).
+The PowerShell acceptance requires **ERROR_ACCESS_DENIED (5)** for the
+named distinct-SID protected-object operations; the cross-volume unprivileged
+link may return 5 or **ERROR_NOT_SAME_DEVICE (17)**. The independently
+privileged cross-volume control still requires exactly 17.
+
+A real missing-file negative control must produce a failed probe but **must
+not count as a denied protected operation**. Local Windows unit tests,
+probe execution, PowerShell parsing and lint are necessary but not sufficient:
+the new distinct-SID/VHD checks have **not yet received hosted exact-HEAD
+acceptance**. A runner failure is FAIL, never retroactive approval.
+
+| Actor/capability | Tested scope | Invariant O conclusion |
+| --- | --- | --- |
+| Independent unprivileged Windows SID | NTFS ACL and distinct VHD, real file operations | Conditional, pending hosted gate |
+| Windows administrator/SYSTEM | Can operate on protected storage and make same-volume links | Outside the proven attacker boundary |
+| Service's own SID or retained privileged handle | Can potentially create an alias during I/O | Unproven; transient-link RED remains |
+| Independent Linux UID | Separate root ownership, mount and file operations | Prior hosted conditional evidence only |
+| Same Linux UID or mount-capable privileged principal | Can potentially alias/move the authorized object namespace | Unproven; no generic O claim |
+
+The design must still exclude preexisting aliases, same-principal races and
+privileged mount/root substitutions under an independently reviewed deployment
+threat model. None of these fixture changes enable an issuer grant, relax the
+four original #147 RED tests or certify production isolation.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root
@@ -1353,4 +1384,5 @@ Release remains **NO-GO**.
 **Disposition requested from security reviewers:** explicitly select a
 verified Candidate A model with environmental attestations and adversarial
 proof, or approve Candidate B denial behavior for each unsupported operation.
-Until then #148/#139/#124/#80 remain OPEN and T011 stays nonshipping.
+As of 2026-11-05, #80 is CLOSED; that does not approve the stronger
+object-isolation claim. #148/#139/#124 remain OPEN and T011 stays nonshipping.

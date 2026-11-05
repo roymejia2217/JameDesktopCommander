@@ -12,8 +12,10 @@ const nativeWorkflow = fs.readFileSync(path.join(root, '.github/workflows/t011-c
 test('portable package never opts into the unapproved N-API binary', () => {
   assert.match(workflow, /^\s+JDC_CANDIDATE_INCLUDE_NATIVE: '0'$/m);
   assert.doesNotMatch(workflow, /^\s+JDC_CANDIDATE_INCLUDE_NATIVE: '1'$/m);
-  assert.match(workflow, /\bCompile deny-only native addon from locked source\b/);
-  assert.match(workflow, /\bVerify deny-only native addon surface before staging\b/);
+  assert.doesNotMatch(workflow, /\bCompile deny-only native addon from locked source\b/);
+  assert.doesNotMatch(workflow, /\bVerify deny-only native addon surface before staging\b/);
+  assert.doesNotMatch(workflow, /\b(?:rustup toolchain|cargo \+1\.91\.1)\b/,
+    'Portable candidate must not compile an excluded Rust addon');
   assert.doesNotMatch(workflow, /\bStage Node runtime and native capability\b/);
   assert.match(workflow, /node scripts\/distribution-candidate\.mjs verify/);
   assert.match(workflow, /node scripts\/distribution-candidate\.mjs roundtrip/);
@@ -45,4 +47,6 @@ test('separate T011 native feasibility CI still tests deny-only exports across N
   assert.match(nativeWorkflow, /Verify deny-only native exports on Node 22\.19/);
   assert.match(nativeWorkflow, /Verify deny-only native exports on Node 24/);
   assert.match(nativeWorkflow, /capability-default-surface\.test\.cjs/);
+  assert.match(nativeWorkflow, /Build deny-only native Rust Node-API addon/);
+  assert.match(nativeWorkflow, /cargo \+1\.91\.1 build --locked --release --manifest-path native\/capability-probe\/Cargo\.toml/);
 });

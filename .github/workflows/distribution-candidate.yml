@@ -72,20 +72,10 @@ jobs:
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
-      - name: Install exact pinned Rust compiler for the unpublished native addon
-        run: rustup toolchain install 1.91.1 --profile minimal
-
-      - name: Verify committed native dependency lock
-        run: cargo +1.91.1 metadata --locked --no-deps --format-version 1 --manifest-path native/capability-probe/Cargo.toml
-
-      # Retain native denial and FFI-negative checks as CI gates, but never
-      # stage a native addon into a portable candidate while #124 is unresolved.
-      # The broker uses a separate authenticated IPC design, not a JS class.
-      - name: Compile deny-only native addon from locked source
-        run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
-
-      - name: Verify deny-only native addon surface before staging
-        run: node --test test/security/capability-default-surface.test.cjs
+      # Unshipped Rust feasibility belongs exclusively to
+      # t011-capability-feasibility.yml (Windows/Linux, Node 22/24).
+      # This distribution job must prove only the exact packaged Node payload.
+      # Do not remove the native deny-only security checks from T011 CI.
 
       - name: Stage Node runtime without native capability with hashed manifest
         run: node scripts/distribution-candidate.mjs build

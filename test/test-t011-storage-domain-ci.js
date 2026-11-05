@@ -91,6 +91,21 @@ test('Linux custody requires native permission errors, not arbitrary failures', 
   assert.match(script, /expect_native_denied hardlink_destination/);
 });
 
+// Real hosted Linux must hold a service-owned file descriptor open while an
+// independent UID attempts a hardlink; no detached sequential-only proxy.
+test('Linux custody races a foreign hardlink against a pinned service read descriptor', () => {
+  const script = fs.readFileSync(path.join(repo,
+    'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_READY/);
+  assert.match(script, /exec 3<"\$1"/);
+  assert.match(script, /stat -Lc "%d:%i" "\/proc\/\$BASHPID\/fd\/3"/);
+  assert.match(script, /expect_native_denied hardlink_during_open_read hardlink/);
+  assert.match(script, /wait "\$reader_pid"/);
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_EXTERIOR_LINK_DENIED/);
+  assert.match(script, /T011_CUSTODY_OPEN_DESCRIPTOR_BYTES_MATCH/);
+  assert.match(script, /timeout 15s/);
+});
+
 // A failed hard-link operation is not enough: administrative cross-volume
 // controls must identify the Windows kernel's ERROR_NOT_SAME_DEVICE (17).
 test('Windows admin cross-volume denials must prove the exact OS error', () => {

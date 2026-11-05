@@ -1383,10 +1383,31 @@ the attacker-owned canary by the same executable is mandatory first.
 
 Other Linux fixture operations still use generic failure checks; this
 increment does not certify their individual kernel failure causes. The
-new Linux checks require real Ubuntu hosted CI, which is **PENDING** for this
-increment. They prove conditional separate-UID permission behavior only;
-they do not prove same-UID isolation, concurrency safety or a production
-issuer. The original four attacks remain unsatisfied.
+native-denial Linux checks passed on hosted Ubuntu at `e610138` in
+[T011 run 42050443043](https://github.com/roymejia2217/JameDesktopCommander/actions/runs/42050443043);
+the full portable candidates still FAIL on the missing release verifier.
+
+**Open-descriptor interleaving (new non-release acceptance, pending hosted CI):**
+the service-UID subprocess opens the actual protected SQLite file on FD 3,
+records its kernel device/inode identity, signals readiness over a FIFO, and
+blocks before reading. While that descriptor is still open, the independent
+`nobody` UID invokes the native Rust hard-link probe against the same
+object and receives only a recognized Linux EACCES/EPERM denial. The runner
+requires the exterior alias to remain absent, releases the service reader,
+waits for successful completion, and compares the exact SHA-256 bytes read
+*through the retained FD* against the original authorized database. Both
+coordination FIFOs and identity witnesses exist only on disposable hosted
+CI; bounded waits make deadlock a test failure, not a passing skip. No
+production service, mount or permission grant changes.
+
+This staged, deterministic interprocess interleaving is stronger than a
+sequential denial: the file descriptor is genuinely open during the
+attacker's link attempt. It does **not** prove an attempt in the middle of
+the actual read syscall, prevent a same-UID actor from creating aliases, or
+provide a general linearizable read/append/rewrite authorization boundary.
+The next release gate still requires independently reviewed exclusive
+principal/storage custody and positive-capable broker adversarial proof.
+The original four #147 attacks remain unsatisfied.
 
 ## 6. Explicit decisions withheld
 

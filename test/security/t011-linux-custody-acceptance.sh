@@ -211,6 +211,53 @@ if [[ -e "${canary}.protected-alias" ]] ||
   exit 1
 fi
 
+# A real service-UID process opens the protected object BEFORE an independent
+# UID attempts an exterior hard link. Two FIFOs provide deterministic
+# interprocess ordering; no sleeps, shell-inferred denials or mock I/O.
+# The disposable runner owns the coordination; no service/unit is installed.
+handoff="$fixture_dir/open-read-handoff"
+sudo -n -u jdc-authority -- mkdir -m 0700 "$handoff"
+ready_fifo="$handoff/ready"
+release_fifo="$handoff/release"
+opened_identity="$handoff/opened-identity"
+opened_digest="$handoff/opened-sha256"
+sudo -n -u jdc-authority -- mkfifo -m 0600 "$ready_fifo" "$release_fifo"
+sudo -n -u jdc-authority -- timeout 25s bash -c '
+  set -euo pipefail
+  exec 3<"$1"
+  stat -Lc "%d:%i" "/proc/$BASHPID/fd/3" > "$4"
+  printf READY > "$2"
+  IFS= read -r unlock < "$3"
+  [[ "$unlock" == RELEASE ]] || exit 1
+  sha256sum <&3 | cut -d " " -f1 > "$5"
+' _ "$database" "$ready_fifo" "$release_fifo" "$opened_identity" "$opened_digest" &
+reader_pid=$!
+ready_value="$(sudo -n timeout 15s cat "$ready_fifo")"
+if [[ "$ready_value" != READY ]]; then
+  printf '%s\n' 'E_CUSTODY_OPEN_DESCRIPTOR_NOT_READY' >&2
+  exit 1
+fi
+if [[ "$(sudo -n cat "$opened_identity")" != "$(sudo -n -u jdc-authority -- stat -c '%d:%i' "$database")" ]]; then
+  printf '%s\n' 'E_CUSTODY_OPEN_DESCRIPTOR_WRONG_OBJECT' >&2
+  exit 1
+fi
+printf '%s\n' 'T011_CUSTODY_OPEN_DESCRIPTOR_READY'
+live_alias="${canary}.while-read-open"
+expect_native_denied hardlink_during_open_read hardlink "$database" "$live_alias"
+if [[ -e "$live_alias" ]]; then
+  printf '%s\n' 'E_CUSTODY_OPEN_DESCRIPTOR_EXTERIOR_ALIAS_APPEARED' >&2
+  exit 1
+fi
+printf '%s\n' 'T011_CUSTODY_OPEN_DESCRIPTOR_EXTERIOR_LINK_DENIED'
+sudo -n timeout 15s bash -c 'printf "RELEASE\n" > "$1"' _ "$release_fifo"
+wait "$reader_pid"
+if [[ "$(sudo -n cat "$opened_digest")" != "${expected_hash%% *}" ]]; then
+  printf '%s\n' 'E_CUSTODY_OPEN_DESCRIPTOR_BYTES_CHANGED' >&2
+  exit 1
+fi
+printf '%s\n' 'T011_CUSTODY_OPEN_DESCRIPTOR_BYTES_MATCH'
+sudo -n -u jdc-authority -- rm -r -- "$handoff"
+
 # Test the actual prepublication staging namespace, not merely SQLite
 # state. A same-volume owner positive link MUST work before an attacker
 # denial can establish separate-principal custody of this stage object.

@@ -32,6 +32,7 @@ test('admin retains explicit child rights before parent ACL hardening', () => {
   assert.ok(child >= 0 && parent >= 0 && child < parent,
     'secure the Authority child before the parent DACL is made noninheriting');
   assert.match(fixture, /SetAccessRuleProtection\(\$false, \$false\)/);
+  assert.match(fixture, /Set-Acl -Path \$registryAuthority -AclObject \$authorityAcl/);
   assert.match(fixture, /T011_EPOCH_AUTHORITY_EXPLICIT_ADMIN_RIGHTS/);
 });
 

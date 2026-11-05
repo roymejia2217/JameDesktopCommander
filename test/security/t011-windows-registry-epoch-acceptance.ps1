@@ -144,12 +144,13 @@ try {
     Set-ExactAdminControlledKey $registryKey $false
     Expect-ScmResult 'UNTRUSTED_REGISTRY_ROOT_ANCESTOR' 52
     # Before removing inherited rights from the parent, retain administrator
-    # full control as an EXPLICIT child ACE. Then reenable inheritance solely
+    # full control as an EXPLICIT child ACE. Then re-enable inheritance solely
     # to exercise the unprotected Authority negative control.
     Set-ExactAdminControlledKey $registryAuthority $false
     $authorityAcl = Get-Acl -LiteralPath $registryAuthority -ErrorAction Stop
     $authorityAcl.SetAccessRuleProtection($false, $false)
-    Set-Acl -LiteralPath $registryAuthority -AclObject $authorityAcl -ErrorAction Stop
+    # Match the Registry provider assignment used by Set-ExactAdminControlledKey.
+    Set-Acl -Path $registryAuthority -AclObject $authorityAcl -ErrorAction Stop
     $observedAuthority = Get-Acl -LiteralPath $registryAuthority -ErrorAction Stop
     $explicitAdmin = @($observedAuthority.Access | Where-Object {
         -not $_.IsInherited -and

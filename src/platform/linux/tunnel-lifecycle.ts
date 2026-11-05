@@ -1,8 +1,13 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
+import { readTunnelFunctionalDiagnostics, type TunnelFunctionalDiagnostics } from '../tunnel-functional-diagnostics.js';
+import {
+  assessTunnelLocalLifecycle,
+  type TunnelLocalLifecycleObservation,
+} from '../tunnel-local-operability.js';
 
 export const LINUX_TUNNEL_UNIT = 'jame-desktop-commander-tunnel.service';
 const marker = '# Managed by JameDesktopCommander Linux tunnel lifecycle v1';
@@ -14,6 +19,7 @@ export interface LinuxTunnelDependencies {
   uid?: () => number;
   home?: string;
   run?: (executable: string, args: readonly string[]) => Promise<string>;
+  fetchFn?: typeof fetch;
 }
 
 export interface LinuxTunnelStatus {
@@ -22,6 +28,7 @@ export interface LinuxTunnelStatus {
   enabled: boolean;
   healthy: boolean;
   controlPlanePoll: boolean;
+  lifecycleObservation: TunnelLocalLifecycleObservation;
 }
 
 const defaultRun = (executable: string, args: readonly string[]): Promise<string> =>
@@ -146,6 +153,29 @@ async function resolveTrustedProfileDirectory(profileDir: string): Promise<strin
     return canonical;
   } catch {
     throw new Error('Linux tunnel profile directory custody cannot be verified.');
+  }
+}
+
+// A trusted parent does not protect an existing file with unsafe permissions.
+// Read and check the same opened regular file. This is a point-in-time check,
+// not protection against same-user writes or concurrent ancestor replacement.
+async function readTrustedStatusProfile(profileFile: string): Promise<string> {
+  try {
+    await resolveTrustedProfileDirectory(path.dirname(profileFile));
+    const file = await open(profileFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      const uid = process.getuid?.();
+      if (uid === undefined || !info.isFile() || (info.uid !== 0 && info.uid !== uid) ||
+          (info.mode & 0o022) !== 0) {
+        throw new Error('Untrusted profile file');
+      }
+      return await file.readFile('utf8');
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new Error('Linux tunnel status profile custody cannot be verified.');
   }
 }
 
@@ -310,8 +340,18 @@ function parseActivationState(response: string): { active: boolean; enabled: boo
   return { active: activeState === 'active', enabled: unitFileState === 'enabled' };
 }
 
+// JSON/YAML parser diagnostics may quote sensitive input. Keep parse errors
+// distinct by source without forwarding messages, source snippets or causes.
+function parseClientJson(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error('Invalid tunnel ' + label + ' response.');
+  }
+}
+
 function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: boolean } {
-  const parsed: unknown = JSON.parse(value);
+  const parsed = parseClientJson(value, 'health');
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('Invalid tunnel health response.');
   const obj = parsed as Record<string, unknown>;
   function checked(key: string): boolean {
@@ -325,10 +365,78 @@ function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: bo
   return { healthy: obj.result === 'ok' && checked('healthz') && checked('readyz') && poll, controlPlanePoll: poll };
 }
 
+// Resolve only the registered, custody-checked official-client profile.
+// A caller-provided endpoint or a neighboring/symlinked profile cannot
+// select another local service. This remains a point-in-time check.
+async function selectedRegisteredHealthUrlFile(
+  registration: { executable: string; profileDir: string; profile: string },
+  run: (executable: string, args: readonly string[]) => Promise<string>,
+): Promise<string> {
+  const list = parseClientJson(await run(registration.executable,
+    ['profiles', 'list', '--profile-dir', registration.profileDir, '--json']), 'profiles list');
+  if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
+  const matches = list.filter((item) => typeof item === 'object' && item !== null &&
+    !Array.isArray(item) && (item as { name?: unknown }).name === registration.profile);
+  if (matches.length !== 1) throw new Error('Tunnel profile missing or ambiguous.');
+  const entry = matches[0] as { path?: unknown };
+  if (typeof entry.path !== 'string') throw new Error('Tunnel profile not found.');
+  const canonicalProfileDir = await resolveTrustedProfileDirectory(registration.profileDir);
+  if (canonicalProfileDir !== registration.profileDir) {
+    throw new Error('Tunnel registered profile directory changed.');
+  }
+  const profileFile = await realpath(safePath(entry.path)).catch(() => {
+    throw new Error('Linux tunnel status profile is unavailable.');
+  });
+  const relativeProfile = path.relative(canonicalProfileDir, profileFile);
+  if (!relativeProfile || relativeProfile === '..' ||
+      relativeProfile.startsWith('..' + path.sep) ||
+      path.isAbsolute(relativeProfile)) {
+    throw new Error('Tunnel profile is outside registered profile directory.');
+  }
+  const profileText = await readTrustedStatusProfile(profileFile);
+  let profile: { health?: { url_file?: unknown } };
+  try {
+    profile = YAML.parse(profileText) as { health?: { url_file?: unknown } };
+  } catch {
+    throw new Error('Invalid tunnel status profile.');
+  }
+  if (typeof profile?.health?.url_file !== 'string') {
+    throw new Error('Missing tunnel health URL reference.');
+  }
+  return safePath(profile.health.url_file);
+}
+
+// The local admin URL file may live outside profileDir, but only a
+// regular file in OS-principal-controlled ancestry may select a loopback
+// diagnostic endpoint. Handle acquisition and bounded reading prevent
+// final-component symlink substitution and unbounded FIFO blocking.
+async function readTrustedHealthUrlFile(urlFile: string): Promise<string> {
+  try {
+    await resolveTrustedProfileDirectory(path.dirname(urlFile));
+    const file = await open(urlFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      const uid = process.getuid?.();
+      if (uid === undefined || !info.isFile() || (info.uid !== 0 && info.uid !== uid) ||
+          (info.mode & 0o022) !== 0 || info.size === 0 || info.size > 2048) {
+        throw new Error('Untrusted URL file');
+      }
+      const buffer = Buffer.alloc(2049);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      if (bytesRead === 0 || bytesRead > 2048) throw new Error('Invalid URL file size');
+      return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead)).trim();
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new Error('Linux tunnel health URL file custody cannot be verified.');
+  }
+}
+
 export async function runLinuxTunnelCommand(
   args: readonly string[],
   dependencies: LinuxTunnelDependencies = {},
-): Promise<{ action: string; unit: string; status?: LinuxTunnelStatus }> {
+): Promise<{ action: string; unit: string; status?: LinuxTunnelStatus; diagnostics?: TunnelFunctionalDiagnostics }> {
   requireLinux(dependencies);
   const home = safePath(dependencies.home ?? process.env.HOME ?? '');
   const externalRun = dependencies.run ?? defaultRun;
@@ -347,8 +455,8 @@ export async function runLinuxTunnelCommand(
   };
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
-  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'uninstall'].includes(action ?? '')) {
-    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status and uninstall.');
+  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'diagnose', 'uninstall'].includes(action ?? '')) {
+    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, diagnose and uninstall.');
   }
   // Do not mutate files when the user manager or DBus session is absent.
   await systemctl(['show-environment']);
@@ -390,7 +498,7 @@ export async function runLinuxTunnelCommand(
     // Never activate, conditionally restart, or claim health for a unit whose
     // manager-loaded definition differs from the sole JDC-owned fragment.
     // STOP and UNINSTALL remain available to recover a compromised service.
-    if (action === 'start' || action === 'restart' || action === 'status') {
+    if (action === 'start' || action === 'restart' || action === 'status' || action === 'diagnose') {
       await assertTrustedLoadedUnit(home, systemctl);
     }
     if (action === 'start') {
@@ -418,38 +526,32 @@ export async function runLinuxTunnelCommand(
       let health = { healthy: false, controlPlanePoll: false };
       if (active) {
         if (!registration) throw new Error('Linux tunnel registration unavailable.');
-        const list = JSON.parse(await run(registration.executable,
-          ['profiles', 'list', '--profile-dir', registration.profileDir, '--json'])) as unknown;
-        if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
-        // The official client must identify one unambiguous profile.
-        // Selecting the first match can report readiness for the wrong entry.
-        const matches = list.filter((item) => typeof item === 'object' && item !== null &&
-          !Array.isArray(item) && (item as { name?: unknown }).name === registration.profile);
-        if (matches.length !== 1) throw new Error('Tunnel profile missing or ambiguous.');
-        const entry = matches[0] as { path?: unknown };
-        if (typeof entry.path !== 'string') throw new Error('Tunnel profile not found.');
-        // The selected profile must belong to the profile directory
-        // registered at install time. Resolve links before comparing path
-        // components; a text prefix test accepts sibling directories, while
-        // a lexical-only check misses links escaping the registered root.
-        const canonicalProfileDir = await resolveTrustedProfileDirectory(registration.profileDir);
-        if (canonicalProfileDir !== registration.profileDir) {
-          throw new Error('Tunnel registered profile directory changed.');
-        }
-        const profileFile = await realpath(safePath(entry.path));
-        const relativeProfile = path.relative(canonicalProfileDir, profileFile);
-        if (!relativeProfile || relativeProfile === '..' ||
-            relativeProfile.startsWith('..' + path.sep) ||
-            path.isAbsolute(relativeProfile)) {
-          throw new Error('Tunnel profile is outside registered profile directory.');
-        }
-        const profile = YAML.parse(await readFile(profileFile, 'utf8')) as { health?: { url_file?: unknown } };
-        if (typeof profile?.health?.url_file !== 'string') throw new Error('Missing tunnel health URL reference.');
-        const urlFile = safePath(profile.health.url_file);
+        const urlFile = await selectedRegisteredHealthUrlFile(registration, run);
         health = healthFromJson(await run(registration.executable,
           ['health', '--json', '--url-file', urlFile, '--require-control-plane-poll']));
       }
-      return { action, unit, status: { unit, active, enabled, ...health } };
+      return { action, unit, status: {
+        unit, active, enabled, ...health,
+        lifecycleObservation: assessTunnelLocalLifecycle({ active, enabled, ...health }),
+      } };
+    } else if (action === 'diagnose') {
+      const { active } = parseActivationState(await systemctl([
+        'show', unit, '--property=ActiveState', '--property=UnitFileState', '--no-pager',
+      ]));
+      if (!active) {
+        throw new Error('Linux tunnel local diagnostics unavailable: user service is inactive.');
+      }
+      if (!registration) throw new Error('Linux tunnel registration unavailable.');
+      const urlFile = await selectedRegisteredHealthUrlFile(registration, run);
+      const baseUrl = await readTrustedHealthUrlFile(urlFile);
+      try {
+        const diagnostics = await readTunnelFunctionalDiagnostics(baseUrl, dependencies.fetchFn);
+        return { action, unit, diagnostics };
+      } catch {
+        // A malformed local endpoint, refused connection, or JSON parser error
+        // may contain untrusted source text; the CLI reports a fixed category.
+        throw new Error('Linux tunnel local HTTP endpoint is unavailable or invalid.');
+      }
     }
   }
   return { action, unit };

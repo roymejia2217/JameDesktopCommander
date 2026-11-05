@@ -12,6 +12,7 @@ import { cp, chmod, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } f
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseRuntimeBuildIdentity } from '../dist/tools/runtime-build-identity.js';
+import { approvedRuntimeNativeAddon } from './approved-runtime-native-addons.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -92,6 +93,10 @@ async function scanRegularFiles(root, target, nativeAddonIncluded) {
         assert.ok(entry.isFile(), 'Candidate contains link or non-regular entry');
         const record = await fileRecord(root, absolute);
         assert.ok(approvedCandidatePath(record.path, target, nativeAddonIncluded), 'Unapproved candidate root');
+        if (record.path.toLowerCase().endsWith('.node') && record.path !== nativeAddonName) {
+          assert.ok(approvedRuntimeNativeAddon(record.path, target),
+            'Unapproved runtime native addon');
+        }
         const folded = record.path.toLowerCase();
         assert.ok(!seen.has(folded), 'Case-insensitive candidate path collision');
         seen.add(folded);

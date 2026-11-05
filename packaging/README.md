@@ -24,12 +24,56 @@ for platform-specific installable artifacts.
   commit, platform and runtime entrypoint. The validation module in scripts/
   validate-installer-input.mjs is an input guard, **not** a package builder.
 
+## Pinned official OpenAI Secure MCP Tunnel dependency
+
+The Windows x64 and Debian amd64 **unpublished** installer candidates include
+OpenAI's official `tunnel-client 0.0.19` full release bundle. The source is
+`openai/tunnel-client`, not a vendored fork. Version, exact archive filenames
+and SHA-256 digests are pinned in `packaging/tunnel-client-release.json`.
+`scripts/verify-tunnel-client-release.mjs` verifies each downloaded archive
+**before extraction or execution** on disposable hosted runners. The official
+LICENSE, NOTICE and SBOM/license materials remain alongside the executable.
+
+The installed CLI is under `tools/tunnel-client/` within the JDC directory.
+An explicit `--bundled` selection is available for `jdc tunnel install`
+on both supported operating systems (and for read-only `jdc tunnel doctor`
+on Linux). For example:
+
+```text
+jdc tunnel install --bundled --profile-dir <absolute-existing-profile-directory> --profile <existing-profile-name>
+```
+
+This merely resolves the platform-specific installed official executable;
+the normal lifecycle validates the supplied profile and invokes the official
+`doctor` before registering the user-level task/unit. Existing registrations
+are not replaced without the existing explicit replacement authorization.
+The option rejects duplicate or mixed `--tunnel-client-bin` selection;
+there is no fallback to a system-global binary or implicit download.
+A packaged binary is not proof against a same-principal file replacement,
+and installed service custody must still satisfy the platform-specific gates.
+
+Installation does **not** provision authentication, auto-create a tunnel,
+modify Scheduled Tasks/systemd units or restart a running client. The existing
+`jdc tunnel install --tunnel-client-bin <absolute-path> ...` and Linux lifecycle
+commands may target this executable explicitly. A future user-facing guided
+onboarding flow requires its own acceptance and security review; shipping this
+binary alone does not implement that flow. The active Windows host should
+transition only through a separately verified, reversible service cutover.
+
+Verification of release SHA-256 establishes correspondence with the pinned
+GitHub artifact, **not** independent publisher signature/provenance validation.
+The current non-release candidates remain unsigned and fail closed for
+missing/unverified downloads. Release approval still requires independently
+verified provenance, full installer acceptance and all P0 gates below.
+
 ## Production release gate
 
 The only approved release version/tag publisher is the existing
 .github/workflows/release.yml invoking googleapis/release-please-action.
-It currently requires owner approval plus closed security blockers #124,
-#139 and #148; the candidate workflow cannot remove or override that gate.
+It requires explicit owner approval and closure of P0 security blockers
+#124, #139 and #148, Linux runtime/installer acceptance #150, and secure local
+operations and credential recovery #248. Candidate workflows cannot override
+these release-readiness requirements.
 
 Installer artifacts currently carry UNPUBLISHED filenames, are not signed,
 are retained only as short-lived GitHub Actions artifacts, and must not be

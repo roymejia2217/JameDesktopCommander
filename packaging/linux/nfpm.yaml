@@ -26,3 +26,7 @@ contents:
     dst: /usr/bin/jdc
     file_info:
       mode: 0755
+  - src: ${JDC_TUNNEL_CLIENT_SOURCE}/
+    dst: /opt/jame-desktop-commander/tools/tunnel-client
+    type: tree
+    expand: true

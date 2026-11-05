@@ -4,7 +4,7 @@
 does not install a service on a development host and does not authorize
 processing protected or confidential documents.
 
-The JDC CLI exposes `node dist/index.js tunnel doctor|install|start|stop|restart|status|uninstall`
+The JDC CLI exposes `node dist/index.js tunnel doctor|install|start|stop|restart|status|diagnose|uninstall`
 on Linux. It uses **official `systemctl --user`**, without an intermediate
 shell, hand-rolled watchdog, root service or privileged system directory.
 The user must supply the already-installed official tunnel-client absolute
@@ -35,14 +35,42 @@ exactly one official profile matching the registered name from
 profile directory are resolved to canonical paths; files outside that
 directory, including sibling paths with matching text prefixes or
 symlinks escaping the directory, are rejected before YAML loading or
-the official client health request. Only then does it read the selected
+the official client health request. The selected file is opened without
+following its final component, checked as a regular file owned by root or
+the current user and not group/world writable, and read from that same open
+handle. Its canonical parent and ancestors must also pass the existing
+directory custody checks. Only then does it read the selected
 profile's `health.url_file` reference and invoke
 `health --json --url-file ... --require-control-plane-poll`.
 A running unit without liveness, readiness and control-plane poll is
 **not** a healthy tunnel; the CLI exits nonzero. This path-selection
 guard does **not** provide race-free OS-object custody: hard links,
 mounts and same-principal concurrent modification remain outside its
-proof and subject to independent T011 security review.
+proof and subject to independent T011 security review. The status checks do
+not attest profile contents consumed independently by the official client
+during doctor, installation or service execution, nor do they establish
+publisher identity or eliminate concurrent ancestor replacement.
+
+### Read-only Linux local component diagnostics (#248)
+
+`tunnel diagnose` reuses the validated installed user-systemd definition,
+the registered official client/profile selection, and the existing shared
+bounded `/health?details=true` local admin reader used on Windows. An
+inactive unit returns an explicit unavailable error; the command never
+starts or restarts a service. No arbitrary endpoint CLI argument is accepted.
+The profile's `health.url_file` must be a regular non-symlink file under
+OS-principal-controlled directory ancestry. Its opened handle is checked
+for file identity, ownership, permissions and a 2048-byte size limit before
+reading an exact loopback-only HTTP URL; non-loopback and redirected requests
+are denied. The parser returns allowlisted evidence, including confirmed
+current HTTP 401/403/429 categories, local MCP handshake/discovery and
+`remoteRoundTrip: not_observed`, never raw provider messages or secrets.
+
+The URL file and profile custody checks are point-in-time; they do not
+prove same-UID concurrent namespace resistance, key expiry provenance,
+fresh authenticated remote MCP delivery or issuer authority. This is a
+non-operational, read-only improvement for #248, not credential rotation or
+permission to change production tunnel installations.
 
 The unit is **not a privileged filesystem authority**: this feature must
 not be confused with T011's blocked service and OS-principal custody
@@ -111,6 +139,10 @@ messages or causes. External diagnostics may contain absolute profile paths or
 bearer material; operators should use the maintained client's protected
 private diagnostics for detailed troubleshooting rather than public CLI logs.
 The command still exits nonzero and preserves fail-closed behavior on errors.
+Malformed client JSON and profile YAML also receive source-specific generic
+errors: parser messages can otherwise quote sensitive input. No original
+parser exception or cause is forwarded to the CLI. A missing or inaccessible
+selected profile also returns a generic error rather than its local path.
 
 ## Loaded service definition integrity
 

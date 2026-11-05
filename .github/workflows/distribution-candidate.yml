@@ -67,7 +67,7 @@ jobs:
         run: node --test test/test-filesystem-policy-fail-closed.js
 
       - name: Run packaging security regression tests
-        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs
+        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
@@ -147,6 +147,40 @@ jobs:
       - name: Verify installer provenance
         run: node scripts/validate-installer-input.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}" "${{ matrix.target }}" "${{ env.JDC_CANDIDATE_SOURCE_SHA }}"
 
+      # Official external binary is downloaded only on disposable CI runners,
+      # checked against the pinned upstream SHA-256, then bundled without
+      # creating tunnels, credentials, services, or privileged broker routes.
+      - name: Stage verified official Windows tunnel client
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'jdc-official-tunnel-client'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $archive = Join-Path $root 'tunnel-client-v0.0.19-windows-amd64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-v0.0.19-windows-amd64.zip' -OutFile $archive
+          node scripts/verify-tunnel-client-release.mjs win32-x64 $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Official Windows tunnel archive rejected' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          Remove-Item -LiteralPath $archive
+          $version = & (Join-Path $root 'tunnel-client.exe') --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^0\.0\.19') { throw 'Official tunnel version mismatch' }
+
+      - name: Stage verified official Linux tunnel client
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/jdc-official-tunnel-client"
+          mkdir -p "$root"
+          archive="$root/tunnel-client-v0.0.19-linux-amd64.zip"
+          curl --fail --location --retry 3 --max-time 120 --output "$archive" 'https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-v0.0.19-linux-amd64.zip'
+          node scripts/verify-tunnel-client-release.mjs linux-x64 "$archive"
+          unzip -q "$archive" -d "$root"
+          rm "$archive"
+          chmod 0755 "$root/tunnel-client" "$root/cloudflared"
+          "$root/tunnel-client" --version | grep '^0\.0\.19'
+
       # Builds are non-release candidates. Release Please alone controls
       # release versions/tags; no workflow here may publish or sign artifacts.
       - name: Compile Inno Setup installer candidate
@@ -155,6 +189,7 @@ jobs:
         env:
           JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-win32-x64
           JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
+          JDC_TUNNEL_CLIENT_SOURCE: ${{ runner.temp }}/jdc-official-tunnel-client
         run: |
           $ErrorActionPreference = 'Stop'
           $env:JDC_INSTALLER_VERSION = (node -p "require('./package.json').version").Trim()
@@ -189,6 +224,10 @@ jobs:
           & $runtime --version
           if ($LASTEXITCODE -ne 0) { throw 'Installed Node execution failed' }
           if (!(Test-Path (Join-Path $target 'dist/index.js'))) { throw 'Installed MCP entrypoint missing' }
+          $tunnel = Join-Path $target 'tools/tunnel-client/tunnel-client.exe'
+          if (!(Test-Path -LiteralPath $tunnel)) { throw 'Installed tunnel client missing' }
+          $tunnelVersion = & $tunnel --version
+          if ($LASTEXITCODE -ne 0 -or $tunnelVersion -notmatch '^0\.0\.19') { throw 'Installed tunnel client version mismatch' }
           $uninstall = Get-ChildItem -LiteralPath $target -Filter 'unins*.exe' -File | Select-Object -First 1
           if (!$uninstall) { throw 'Expected Inno uninstall executable missing' }
           $result = Start-Process -FilePath $uninstall.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
@@ -200,6 +239,7 @@ jobs:
         env:
           JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-linux-x64
           JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
+          JDC_TUNNEL_CLIENT_SOURCE: ${{ runner.temp }}/jdc-official-tunnel-client
         run: |
           set -euo pipefail
           JDC_INSTALLER_VERSION="$(node -p "require('./package.json').version")"
@@ -230,6 +270,8 @@ jobs:
           test -x /opt/jame-desktop-commander/runtime/node
           /opt/jame-desktop-commander/runtime/node --version
           test -x /usr/bin/jdc
+          test -x /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client
+          /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client --version | grep '^0\.0\.19' # Installed tunnel client
           sudo dpkg -r jame-desktop-commander
           test ! -e /usr/bin/jdc
 

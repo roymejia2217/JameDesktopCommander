@@ -785,6 +785,42 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bounded_native_read_denies_real_ntfs_junction_to_exterior_bytes() {
+        let fixture = tempfile::tempdir().expect("Windows NTFS test root");
+        let allowed = fixture.path().join("allowed");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let secret = outside.join("secret.bin");
+        let original = [0x00u8, 0xff, 0x81, 0x42, 0x7a];
+        std::fs::write(&secret, original).unwrap();
+        std::fs::write(allowed.join("inside.bin"), [0x11u8, 0x22]).unwrap();
+        let junction = allowed.join("outside-alias");
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .expect("NTFS junction creation must actually run");
+        assert!(result.status.success(), "junction failed: {result:?}");
+        assert_eq!(
+            std::fs::read(junction.join("secret.bin")).unwrap(),
+            original,
+            "the attacker alias must resolve to real exterior content"
+        );
+        let cap = RootedDirectory::from_preopened(
+            Dir::open_ambient_dir(&allowed, ambient_authority()).unwrap(),
+        );
+        assert_eq!(cap.read_bounded_file("inside.bin").unwrap(), [0x11, 0x22]);
+        assert!(
+            cap.read_bounded_file("outside-alias/secret.bin").is_err(),
+            "read must reject a real junction to independently named outside bytes"
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), original);
+    }
+
     #[test]
     fn unicode_single_child_and_nested_child_share_canonical_protocol_grammar() {
         let fixture = tempfile::tempdir().unwrap();

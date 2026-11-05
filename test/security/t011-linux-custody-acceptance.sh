@@ -40,7 +40,8 @@ fi
 
 identity_probe="native/authority-service/target/debug/examples/identity_probe"
 store_fixture="native/authority-store/target/debug/examples/custody_fixture"
-[[ -x "$identity_probe" && -x "$store_fixture" ]] || {
+custody_probe="native/authority-store/target/debug/examples/custody_attacker"
+[[ -x "$identity_probe" && -x "$store_fixture" && -x "$custody_probe" ]] || {
   printf '%s\n' 'E_CUSTODY_BINARIES_MISSING' >&2
   exit 1
 }
@@ -105,6 +106,9 @@ if sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"; then
 fi
 sudo -n -u nobody -- touch "$canary"
 sudo -n -u nobody -- test -w "$canary"
+# The same native probe used for denials must successfully read owner bytes.
+# A broken executable must never be credited with an authorization failure.
+sudo -n -u nobody -- "$custody_probe" read "$canary" "$canary"
 # Positive control: the attacker identity really can create a hard link in
 # attacker-owned storage. Otherwise denial could be a broken runner/filesystem.
 attacker_link="${canary}.hardlink"
@@ -131,6 +135,38 @@ sudo -n -u jdc-authority -- "$store_fixture" prove-rollback-journal "$database"
 sudo -n -u jdc-authority -- "$store_fixture" verify-2 "$database"
 expected_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 
+# These exact kernel errors express denied permissions; ENOENT and generic
+# command failure do not. This does not prove same-UID alias isolation.
+is_native_permission_denial() {
+  case "$1:$2" in
+    read:E_PROBE_OS_ERROR_13|read:E_PROBE_OS_ERROR_1|hardlink:E_HARDLINK_OS_ERROR_13|hardlink:E_HARDLINK_OS_ERROR_1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+expect_native_denied() {
+  local label="$1" mode="$2" source="$3" destination="$4" observed
+  if observed="$(sudo -n -u nobody -- "$custody_probe" "$mode" "$source" "$destination" 2>&1)"; then
+    printf 'E_CUSTODY_UNAUTHORIZED_%s\n' "$label" >&2
+    exit 1
+  fi
+  if ! is_native_permission_denial "$mode" "$observed"; then
+    printf 'E_CUSTODY_WRONG_NATIVE_DENIAL_REASON_%s\n' "$label" >&2
+    exit 1
+  fi
+}
+# Fail the experiment if the missing file is misclassified as an ACL denial.
+missing_source="${canary}.must-not-exist"
+[[ ! -e "$missing_source" ]] || { printf '%s\n' 'E_CUSTODY_MISSING_SOURCE_EXISTS' >&2; exit 1; }
+if missing_result="$(sudo -n -u nobody -- "$custody_probe" read "$missing_source" "$canary" 2>&1)"; then
+  printf '%s\n' 'E_CUSTODY_MISSING_SOURCE_UNEXPECTED_SUCCESS' >&2
+  exit 1
+fi
+if [[ "$missing_result" != 'E_PROBE_OS_ERROR_2' ]] || is_native_permission_denial read "$missing_result"; then
+  printf '%s\n' 'E_CUSTODY_MISSING_SOURCE_CLASSIFICATION_FAILED' >&2
+  exit 1
+fi
+printf '%s\n' 'T011_CUSTODY_MISSING_SOURCE_FALSE_POSITIVE_REJECTED'
+
 expect_denied() {
   local operation="$1"
   shift
@@ -141,7 +177,7 @@ expect_denied() {
 }
 expect_denied identity sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"
 expect_denied browse sudo -n -u nobody -- ls -la "$fixture_dir"
-expect_denied read sudo -n -u nobody -- cat "$database"
+expect_native_denied read read "$database" "$canary"
 expect_denied write sudo -n -u nobody -- touch "$database"
 expect_denied create sudo -n -u nobody -- mkdir "$fixture_dir/forged"
 expect_denied overwrite sudo -n -u nobody -- cp "$snapshot" "$database"
@@ -167,8 +203,8 @@ expect_denied parent_rename sudo -n -u nobody -- mv "$fixture_dir" "${fixture_di
 expect_denied parent_chmod sudo -n -u nobody -- chmod 0777 "$fixture_dir"
 # Both hard-link directions must be denied under independent OS principals.
 # This is a protected-domain claim, NOT a same-principal hard-link solution.
-expect_denied hardlink_source sudo -n -u nobody -- ln "$database" "${canary}.protected-alias"
-expect_denied hardlink_destination sudo -n -u nobody -- ln "$canary" "$fixture_dir/forged-hardlink"
+expect_native_denied hardlink_source hardlink "$database" "${canary}.protected-alias"
+expect_native_denied hardlink_destination hardlink "$canary" "$fixture_dir/forged-hardlink"
 if [[ -e "${canary}.protected-alias" ]] ||
     sudo -n -u jdc-authority -- test -e "$fixture_dir/forged-hardlink"; then
   printf '%s\n' 'E_CUSTODY_HARDLINK_ALIAS_CREATED' >&2

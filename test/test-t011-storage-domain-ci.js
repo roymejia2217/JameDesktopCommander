@@ -76,6 +76,21 @@ test('Linux openat2 uses root FD and NO_XDEV to deny a genuine file bind-mount a
   assert.match(l, /T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE/);
 });
 
+// Linux custody must reject missing-file ENOENT as a false positive,
+// and accept only a real kernel permission denial from the native probe.
+test('Linux custody requires native permission errors, not arbitrary failures', () => {
+  const script = fs.readFileSync(path.join(repo,
+    'test/security/t011-linux-custody-acceptance.sh'), 'utf8');
+  assert.match(script, /native\/authority-store\/target\/debug\/examples\/custody_attacker/);
+  assert.match(script, /E_PROBE_OS_ERROR_2/);
+  assert.match(script, /T011_CUSTODY_MISSING_SOURCE_FALSE_POSITIVE_REJECTED/);
+  assert.match(script, /E_PROBE_OS_ERROR_13/);
+  assert.match(script, /E_HARDLINK_OS_ERROR_(?:1|13)/);
+  assert.match(script, /expect_native_denied read/);
+  assert.match(script, /expect_native_denied hardlink_source/);
+  assert.match(script, /expect_native_denied hardlink_destination/);
+});
+
 // A failed hard-link operation is not enough: administrative cross-volume
 // controls must identify the Windows kernel's ERROR_NOT_SAME_DEVICE (17).
 test('Windows admin cross-volume denials must prove the exact OS error', () => {

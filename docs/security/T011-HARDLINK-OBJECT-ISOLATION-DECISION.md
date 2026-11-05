@@ -1369,6 +1369,25 @@ privileged mount/root substitutions under an independently reviewed deployment
 threat model. None of these fixture changes enable an issuer grant, relax the
 four original #147 RED tests or certify production isolation.
 
+### Linux native-denial provenance (2026-11-05; NON-RELEASE)
+
+The existing Linux independent-UID fixture originally used a generic
+nonzero-exit assertion for many attacker operations. An absent source, broken
+invocation or unsupported filesystem operation could consequently masquerade
+as a custody denial. For the protected database read and both hard-link
+directions, the test now invokes the already-governed nonshipping Rust
+custody_attacker executable under the real nobody UID. It accepts only Linux
+EACCES (13) or EPERM (1) for these specified operations and rejects an
+explicit ENOENT (2) missing-source negative control. A successful read of
+the attacker-owned canary by the same executable is mandatory first.
+
+Other Linux fixture operations still use generic failure checks; this
+increment does not certify their individual kernel failure causes. The
+new Linux checks require real Ubuntu hosted CI, which is **PENDING** for this
+increment. They prove conditional separate-UID permission behavior only;
+they do not prove same-UID isolation, concurrency safety or a production
+issuer. The original four attacks remain unsatisfied.
+
 ## 6. Explicit decisions withheld
 
 - **Not established:** that any same-user, same-volume arbitrary allowed-root

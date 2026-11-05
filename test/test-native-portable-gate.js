@@ -27,9 +27,6 @@ test('portable candidates exclude N-API while native denial remains an independe
     ['linux-x64', 'win32-x64']);
   const steps = job.steps;
   const labels = [
-    'Verify committed native dependency lock',
-    'Compile deny-only native addon from locked source',
-    'Verify deny-only native addon surface before staging',
     'Stage Node runtime without native capability with hashed manifest',
     'Independently verify staged bytes and provenance',
     'Smoke test packaged Node and bundled ripgrep',
@@ -39,8 +36,10 @@ test('portable candidates exclude N-API while native denial remains an independe
   assert.deepEqual(indices, [...indices].sort((a, b) => a - b),
     'Authorization, packaging and exact-archive checks must retain order');
   assertNoResearchBuild(steps);
-  assert.match(steps[indices[1]].run, /cargo \+1\.91\.1 build --locked --release/);
-  assert.match(steps[indices[2]].run, /capability-default-surface\.test\.cjs/);
+  assert.ok(steps.every(step => !/\b(?:cargo|rustup)\b/.test(step.run ?? '')),
+    'Portable distribution must not build experimental Rust authority');
+  assert.ok(steps.every(step => !/native addon from locked source|native dependency lock|native addon surface before staging/i.test(step.name ?? '')),
+    'Native ownership proofs belong only to dedicated T011 feasibility CI');
   assert.match(steps[indices.at(-1)].run, /distribution-candidate\.mjs roundtrip/);
 });
 test('native Windows/Linux and Node22/24 matrices reject an unsafe class export', () => {

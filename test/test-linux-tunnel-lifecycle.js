@@ -132,6 +132,18 @@ test('Linux tunnel rejects other platforms and root before external calls', asyn
   assert.equal(count, 0);
 });
 
+test('Linux diagnose rejects caller-selected endpoints before any health lookup', async () => {
+  const invoked = [];
+  const dependencies = {
+    platform: 'linux', uid: () => 1000, home: '/tmp',
+    run: async (bin, args) => { invoked.push([bin, ...args]); return ''; },
+  };
+  await assert.rejects(runLinuxTunnelCommand([
+    'diagnose', '--endpoint', 'http://127.0.0.1:1234/',
+  ], dependencies), /no extra arguments/);
+  assert.deepEqual(invoked, [['systemctl', '--user', 'show-environment']]);
+});
+
 test('Linux systemd user lifecycle and actual health are fail-closed and preserve operator stop', {
   skip: process.platform !== 'linux',
 }, async () => {
@@ -152,6 +164,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   let injectedReload = 'no';
   let injectedActivation = null;
   let profileListOverride = null;
+  let profileListRaw = null;
+  let healthRaw = null;
   const run = async (bin, args) => {
     calls.push([bin, ...args]);
     if (bin === 'systemctl') {
@@ -185,8 +199,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       }
       return '';
     }
-    if (args[0] === 'profiles') return JSON.stringify(profileListOverride ?? [{ name: 'jdc', path: profilePath }]);
-    if (args[0] === 'health') return JSON.stringify({
+    if (args[0] === 'profiles') return profileListRaw ?? JSON.stringify(profileListOverride ?? [{ name: 'jdc', path: profilePath }]);
+    if (args[0] === 'health') return healthRaw ?? JSON.stringify({
       result: healthy ? 'ok' : 'degraded',
       healthz: { ok: true }, readyz: { ok: true },
       control_plane_poll: { ok: healthy },
@@ -336,7 +350,67 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.ok(!calls.slice(beforeDropInRestart).some(c => c[2] === 'try-restart'),
       'Drop-in must block restart before any executable transition');
     injectedDropIn = '';
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const healthyStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    assert.equal(healthyStatus.healthy, true);
+    assert.deepEqual(healthyStatus.lifecycleObservation, {
+      kind: 'local_lifecycle_only', state: 'unverified',
+      reasonCode: 'REMOTE_ROUND_TRIP_UNVERIFIED', remoteRoundTrip: 'not_observed',
+    });
+    // The local admin endpoint is selected only from the installed,
+    // validated profile; callers cannot supply a URL on the command line.
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    let diagnosticRequests = 0;
+    deps.fetchFn = async (url, init) => {
+      diagnosticRequests++;
+      assert.equal(url.toString(), 'http://127.0.0.1:17543/health?details=true');
+      assert.equal(init.method, 'GET');
+      assert.equal(init.redirect, 'error');
+      return Response.json({
+        live: true, ready: true,
+        components: {
+          mcp: { details: { initialize: { ok: false }, tools_list: { complete: false } } },
+          dispatcher: { details: { active: 0 } },
+          queue: { details: { depth: 0 } },
+          'control-plane': {
+            status: 'degraded', reason_code: 'http_error',
+            details: { consecutive_failures: 5, http_status: 401,
+              last_error: 'PRIVATE_BEARER_NEVER_REPORT' },
+          },
+        },
+      });
+    };
+    const diagnosis = await runLinuxTunnelCommand(['diagnose'], deps);
+    assert.equal(diagnosis.action, 'diagnose');
+    assert.equal(diagnosis.diagnostics.operability.reasonCode, 'CONTROL_PLANE_CREDENTIAL_REJECTED');
+    assert.equal(diagnosis.diagnostics.operability.remoteRoundTrip, 'not_observed');
+    assert.doesNotMatch(JSON.stringify(diagnosis), /PRIVATE_BEARER_NEVER_REPORT/);
+    assert.equal(diagnosticRequests, 1);
+    await writeFile(profileUrl, 'http://untrusted-host:17543/\n');
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /local HTTP endpoint/, 'Non-loopback diagnostic endpoints must deny before network I/O');
+    assert.equal(diagnosticRequests, 1);
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n');
+    await chmod(profileUrl, 0o666);
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /URL file custody/, 'Unsafe permissions must reject without fetching');
+    assert.equal(diagnosticRequests, 1);
+    await chmod(profileUrl, 0o600);
+    const unsafeUrl = path.join(home, 'health-forged.url');
+    await writeFile(unsafeUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    await rm(profileUrl);
+    await symlink(unsafeUrl, profileUrl);
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /URL file custody/, 'A symlink URL file must never select a diagnostic endpoint');
+    assert.equal(diagnosticRequests, 1);
+    await rm(profileUrl);
+    await writeFile(profileUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
+    deps.fetchFn = async () => new Response('SENSITIVE_BEARER_NEVER_REPORT', { status: 500 });
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps), error => {
+      assert.equal(error.message, 'Linux tunnel local HTTP endpoint is unavailable or invalid.');
+      assert.doesNotMatch(error.message, /SENSITIVE_BEARER_NEVER_REPORT/);
+      return true;
+    });
+    deps.fetchFn = undefined;
     // A client reporting two entries for one configured profile is ambiguous.
     // Do not select the first entry and claim authenticated readiness.
     for (const duplicate of [
@@ -374,6 +448,53 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
       'The registered in-root profile must remain usable');
 
+    // A protected directory does not protect an existing world-writable file.
+    await chmod(profilePath, 0o666);
+    const beforeWritableProfile = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableProfile).some(c => c[1] === 'health'),
+      'A profile writable by another principal must not select a health endpoint');
+    await chmod(profilePath, 0o600);
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true);
+    const nested = path.join(profiles, 'nested');
+    const nestedProfile = path.join(nested, 'profile.yaml');
+    await mkdir(nested, { mode: 0o700 });
+    await writeFile(nestedProfile, 'health:\n  url_file: ' + profileUrl + '\n', { mode: 0o600 });
+    profileListOverride = [{ name: 'jdc', path: nestedProfile }];
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'A profile in a protected subdirectory remains usable');
+    await chmod(nested, 0o777);
+    const beforeWritableParent = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), /profile.*custody/i);
+    assert.ok(!calls.slice(beforeWritableParent).some(c => c[1] === 'health'),
+      'An attacker-writable intermediate directory must not select a health endpoint');
+    await chmod(nested, 0o700);
+    profileListOverride = null;
+
+    // Parser exceptions can include the offending source line or JSON text.
+    // A malformed profile or client response must never expose its contents.
+    const marker = 'JDC_SYNTHETIC_SECRET_MARKER';
+    const assertRedacted = expected => error => {
+      assert.equal(error.message, expected);
+      assert.doesNotMatch(error.message, new RegExp(marker));
+      assert.equal(error.cause, undefined);
+      return true;
+    };
+    await writeFile(profilePath, `bearer: ${marker}: invalid\n`);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel status profile.'));
+    await writeFile(profilePath, 'health:\n  url_file: ' + profileUrl + '\n');
+    profileListOverride = [{ name: 'jdc', path: path.join(profiles, marker) }];
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Linux tunnel status profile is unavailable.'));
+    profileListOverride = null;
+    profileListRaw = marker;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel profiles list response.'));
+    profileListRaw = null;
+    healthRaw = marker;
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps), assertRedacted('Invalid tunnel health response.'));
+    healthRaw = null;
+    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, true,
+      'Valid profile and client JSON still report health');
+
     const beforeRestart = calls.length;
     assert.equal((await runLinuxTunnelCommand(['restart'], deps)).action, 'restart');
     assert.ok(calls.slice(beforeRestart).some(c =>
@@ -388,11 +509,26 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal(alive, false, 'Stop between state check and restart must remain effective');
     alive = true;
     healthy = false;
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.healthy, false);
+    const degradedStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    assert.equal(degradedStatus.healthy, false);
+    assert.equal(degradedStatus.lifecycleObservation.state, 'unverified');
+    assert.equal(degradedStatus.lifecycleObservation.reasonCode,
+      'CONTROL_PLANE_POLL_UNVERIFIED');
     await assert.rejects(runLinuxTunnelCommand(['restart', '--force'], deps),
       /no extra arguments/, 'Unrecognized restart options must fail closed');
     alive = false;
-    assert.equal((await runLinuxTunnelCommand(['status'], deps)).status.active, false);
+    const inactiveStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
+    const beforeInactiveDiagnosis = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
+      /local diagnostics unavailable.*inactive/,
+      'An inactive service has no verified live diagnostic endpoint');
+    assert.ok(!calls.slice(beforeInactiveDiagnosis).some(c => c[1] === 'health' ||
+      c[1] === 'profiles'), 'Inactive diagnosis must not invoke client health or profile commands');
+    assert.equal(inactiveStatus.active, false);
+    assert.deepEqual(inactiveStatus.lifecycleObservation, {
+      kind: 'local_lifecycle_only', state: 'inactive',
+      reasonCode: 'SERVICE_INACTIVE', remoteRoundTrip: 'not_observed',
+    });
     const beforeRejectedRestart = calls.length;
     await assert.rejects(runLinuxTunnelCommand(['restart'], deps), /enabled, active/);
     assert.ok(!calls.slice(beforeRejectedRestart).some(c => c[2] === 'try-restart' || c[2] === 'restart'),
@@ -496,6 +632,71 @@ test('Linux recovery disables and removes an owned altered JDC unit without runn
       'Unrelated units permit only non-mutating user-manager preflight');
     assert.equal((await stat(unitFile)).isFile(), true);
   } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('Linux profile directory custody denies foreign writes before doctor, activation and health', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'jdc-tunnel-profile-custody-'));
+  const client = path.join(home, 'verified-client');
+  const profiles = path.join(home, 'profiles');
+  const file = path.join(home, '.config', 'systemd', 'user', LINUX_TUNNEL_UNIT);
+  const profileFile = path.join(profiles, 'jdc.yaml');
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push([bin, ...args]);
+    if (bin === 'systemctl' && args[1] === 'show' &&
+        args.includes('--property=FragmentPath')) {
+      return 'FragmentPath=' + file + '\nDropInPaths=\nLoadState=loaded\nNeedDaemonReload=no\n';
+    }
+    if (bin === 'systemctl' && args[1] === 'show') {
+      return 'ActiveState=active\nUnitFileState=enabled\n';
+    }
+    if (bin === client && args[0] === 'profiles') {
+      return JSON.stringify([{ name: 'jdc', path: profileFile }]);
+    }
+    if (bin === client && args[0] === 'health') {
+      return JSON.stringify({ result: 'ok', healthz: { ok: true },
+        readyz: { ok: true }, control_plane_poll: { ok: true } });
+    }
+    return '';
+  };
+  const deps = { platform: 'linux', home, run };
+  const options = ['--tunnel-client-bin', client, '--profile-dir', profiles, '--profile', 'jdc'];
+  try {
+    await mkdir(profiles, { mode: 0o700 });
+    await writeFile(client, 'Non-executed fixture\n', { mode: 0o700 });
+    await writeFile(profileFile, 'health:\n  url_file: /tmp/fixture-url\n', { mode: 0o600 });
+    await chmod(profiles, 0o777);
+    const beforeDoctor = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['doctor', ...options], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    assert.ok(!calls.slice(beforeDoctor).some(call => call[0] === client),
+      'Doctor must not execute a client using an attacker-writable profile directory');
+    await assert.rejects(runLinuxTunnelCommand(['install', ...options], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    await assert.rejects(stat(file), { code: 'ENOENT' },
+      'Unsafe profile custody must be rejected before unit creation');
+
+    await chmod(profiles, 0o700);
+    assert.equal((await runLinuxTunnelCommand(['doctor', ...options], deps)).action, 'doctor');
+    await runLinuxTunnelCommand(['install', ...options], deps);
+    await chmod(profiles, 0o777);
+    const activationStart = calls.length;
+    await assert.rejects(runLinuxTunnelCommand(['start'], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    await assert.rejects(runLinuxTunnelCommand(['status'], deps),
+      /profile directory.*(writ|custod|trust)/i);
+    assert.ok(!calls.slice(activationStart).some(call => call[0] === 'systemctl' &&
+        ['enable', 'start', 'try-restart'].includes(call[2])),
+    'A mutable credential directory must never authorize activation');
+    assert.equal((await runLinuxTunnelCommand(['stop'], deps)).action, 'stop',
+      'Emergency stop remains available even with compromised profile custody');
+    assert.equal((await runLinuxTunnelCommand(['uninstall'], deps)).action, 'uninstall');
+  } finally {
+    await chmod(home, 0o700).catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
 });

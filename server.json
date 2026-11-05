@@ -1,22 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wonderwhy-er/desktop-commander",
-  "title": "Desktop Commander",
+  "name": "io.github.roymejia2217/jame-desktop-commander",
+  "title": "JameDesktopCommander",
   "description": "MCP server for terminal commands, file operations, and process management",
   "repository": {
-    "url": "https://github.com/wonderwhy-er/DesktopCommanderMCP",
+    "url": "https://github.com/roymejia2217/JameDesktopCommander",
     "source": "github"
   },
-  "version": "0.2.52",
-  "packages": [
-    {
-      "registryType": "npm",
-      "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "@wonderwhy-er/desktop-commander",
-      "version": "0.2.52",
-      "transport": {
-        "type": "stdio"
-      }
-    }
-  ]
+  "version": "0.2.52"
 }

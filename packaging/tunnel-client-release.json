@@ -1,0 +1,14 @@
+{
+  "source": "openai/tunnel-client",
+  "version": "0.0.19",
+  "targets": {
+    "win32-x64": {
+      "archive": "tunnel-client-v0.0.19-windows-amd64.zip",
+      "sha256": "1d0ecc3a54f2a51e27a635ac155f40fbb95df58c52cdeddf6c75532cc0bbeb25"
+    },
+    "linux-x64": {
+      "archive": "tunnel-client-v0.0.19-linux-amd64.zip",
+      "sha256": "9ee9448592345a9dd1517fb79791ab54d24f051142eb92bcbe8cd355effc9142"
+    }
+  }
+}

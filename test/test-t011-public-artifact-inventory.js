@@ -28,7 +28,7 @@ function mustReject(title, mutate) {
   });
 }
 
-test('only the two reviewed public artifact upload surfaces are allowed', () => {
+test('only the three explicitly reviewed public artifact upload surfaces are allowed', () => {
   assert.equal(validatePublicArtifactInventory(originals), true);
   const all = Object.entries(originals).flatMap(([file, data]) =>
     Object.entries(data.jobs).flatMap(([job, config]) =>
@@ -36,6 +36,7 @@ test('only the two reviewed public artifact upload surfaces are allowed', () => 
         String(step?.uses ?? '').startsWith('actions/upload-artifact@'))
         .map(() => file + '/' + job)));
   assert.deepEqual(all.sort(), [
+    'distribution-candidate.yml/portable-candidate',
     'distribution-candidate.yml/portable-candidate',
     't011-capability-feasibility.yml/native-probe',
   ]);
@@ -104,4 +105,22 @@ mustReject('rejects upload step named without a pinned action ref', (docs) => {
   docs['ci.yml'].jobs['required-ci'].steps.push({ uses: 'actions/upload-artifact', with: {
     name: 'untrusted', path: 'native/authority-service',
   } });
+});
+const findInstallerUpload = (job) => job.steps.find(step =>
+  String(step?.with?.name ?? '').startsWith('UNPUBLISHED-jdc-installer-'));
+mustReject('reject installer artifact path broadening to runner temp', docs => {
+  findInstallerUpload(candidate(docs)).with.path = '${{ runner.temp }}';
+});
+mustReject('reject installer upload with generic wildcard export', docs => {
+  findInstallerUpload(candidate(docs)).with.path =
+    '${{ runner.temp }}/jdc-installer-output/*';
+});
+mustReject('reject changed installer upload target identity', docs => {
+  findInstallerUpload(candidate(docs)).with.name = 'UNPUBLISHED-other';
+});
+mustReject('reject extended installer retention', docs => {
+  findInstallerUpload(candidate(docs)).with['retention-days'] = 90;
+});
+mustReject('reject unpinned installer artifact upload action', docs => {
+  findInstallerUpload(candidate(docs)).uses = 'actions/upload-artifact@v4';
 });

@@ -1,4 +1,5 @@
 import { MCPDevice, getRemoteDeviceConfigPath } from '../remote-device/device.js';
+import { currentLocalRemoteCommand } from '../remote-device/local-cli-invocation.js';
 import fs from 'fs/promises';
 import os from 'os';
 import { captureRemote } from '../utils/capture.js';
@@ -21,10 +22,13 @@ function printRemoteHeader() {
 
 export async function runRemote() {
     if (process.argv.includes('--help') || process.argv.includes('-h')) {
-        console.log(`Desktop Commander Remote MCP device
+        const run = currentLocalRemoteCommand() ?? 'Launch JDC with its local entrypoint and the remote subcommand';
+        const debug = currentLocalRemoteCommand('--debug') ?? 'Use the local JDC entrypoint with remote --debug';
+        const logout = currentLocalRemoteCommand('--logout') ?? 'Use the local JDC entrypoint with remote --logout';
+        console.log(`JameDesktopCommander Remote MCP device
 
 Usage:
-  desktop-commander remote [options]
+  ${run}
 
 Options:
   --logout              Remove saved local Remote MCP credentials and exit
@@ -34,9 +38,9 @@ Options:
   -h, --help             Show this help
 
 Examples:
-  npx @wonderwhy-er/desktop-commander@latest remote
-  npx @wonderwhy-er/desktop-commander@latest remote --debug
-  npx @wonderwhy-er/desktop-commander@latest remote --logout
+  ${run}
+  ${debug}
+  ${logout}
 
 Note:
   --logout removes local credentials only. Revoke the device in the Remote MCP

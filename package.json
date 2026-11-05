@@ -1,17 +1,17 @@
 {
-  "name": "@wonderwhy-er/desktop-commander",
+  "name": "@roymejia2217/jame-desktop-commander",
   "version": "0.2.52",
-  "description": "Production-grade MCP orchestration for local desktop automation and development.",
-  "mcpName": "io.github.wonderwhy-er/desktop-commander",
+  "description": "JameDesktopCommander MCP runtime for local desktop automation and development.",
+  "mcpName": "io.github.roymejia2217/jame-desktop-commander",
   "license": "MIT",
   "private": true,
   "author": "Eduards Ruzga",
-  "homepage": "https://github.com/wonderwhy-er/DesktopCommanderMCP",
+  "homepage": "https://github.com/roymejia2217/JameDesktopCommander",
   "repository": {
     "type": "git",
-    "url": "https://github.com/wonderwhy-er/DesktopCommanderMCP.git"
+    "url": "https://github.com/roymejia2217/JameDesktopCommander.git"
   },
-  "bugs": "https://github.com/wonderwhy-er/DesktopCommanderMCP/issues",
+  "bugs": "https://github.com/roymejia2217/JameDesktopCommander/issues",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

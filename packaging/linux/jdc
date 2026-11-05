@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /opt/jame-desktop-commander/runtime/node /opt/jame-desktop-commander/dist/index.js "$@"

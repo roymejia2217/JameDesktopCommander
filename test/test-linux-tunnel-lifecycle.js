@@ -382,6 +382,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     const diagnosis = await runLinuxTunnelCommand(['diagnose'], deps);
     assert.equal(diagnosis.action, 'diagnose');
     assert.equal(diagnosis.diagnostics.operability.reasonCode, 'CONTROL_PLANE_CREDENTIAL_REJECTED');
+    assert.match(diagnosis.diagnostics.operatorGuidance, /official provider.*credential/i);
     assert.equal(diagnosis.diagnostics.operability.remoteRoundTrip, 'not_observed');
     assert.doesNotMatch(JSON.stringify(diagnosis), /PRIVATE_BEARER_NEVER_REPORT/);
     assert.equal(diagnosticRequests, 1);

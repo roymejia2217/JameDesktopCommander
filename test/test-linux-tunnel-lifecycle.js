@@ -153,7 +153,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
   const profilePath = path.join(profiles, 'profile.yaml');
   const profileUrl = path.join(home, 'health.url');
   await mkdir(profiles);
-  await writeFile(profilePath, 'health:\n  url_file: ' + profileUrl + '\n');
+  await writeFile(profilePath,
+    'control_plane:\n  api_key: file:/private/runtime.key\nhealth:\n  url_file: ' + profileUrl + '\n');
   const calls = [];
   let alive = true;
   let healthy = true;
@@ -339,6 +340,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
       const status = (await runLinuxTunnelCommand(['status'], deps)).status;
       assert.equal(status.active, active);
       assert.equal(status.enabled, enabled);
+      if (!active) assert.equal(status.credentialSource, 'unverified');
     }
     injectedActivation = null;
     injectedDropIn = path.join(home, 'untrusted-override.conf');
@@ -352,6 +354,8 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     injectedDropIn = '';
     const healthyStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
     assert.equal(healthyStatus.healthy, true);
+    assert.equal(healthyStatus.credentialSource, 'file_reference');
+    assert.doesNotMatch(JSON.stringify(healthyStatus), /private\/runtime\.key/);
     assert.deepEqual(healthyStatus.lifecycleObservation, {
       kind: 'local_lifecycle_only', state: 'unverified',
       reasonCode: 'REMOTE_ROUND_TRIP_UNVERIFIED', remoteRoundTrip: 'not_observed',

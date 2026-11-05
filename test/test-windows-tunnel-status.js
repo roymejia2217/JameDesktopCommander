@@ -93,6 +93,7 @@ assert.deepEqual(status, {
   profile: {
     path: profilePath,
     healthUrlFile,
+    credentialSource: 'file_reference',
   },
   health: {
     result: 'ok',
@@ -144,5 +145,22 @@ await assert.rejects(
   }),
   /health output/i,
 );
+
+// An invalid provider YAML must not echo the malformed source or its secret.
+await assert.rejects(getWindowsTunnelStatus(taskName, {
+  environment: { SystemRoot: 'C:\\Windows' },
+  runExecutable: async (executable, args) => {
+    if (executable.endsWith('schtasks.exe')) return { stdout: taskXml, stderr: '' };
+    if (args[0] === 'profiles') return {
+      stdout: JSON.stringify([{ name: profileName, path: profilePath }]), stderr: '',
+    };
+    throw new Error('Unexpected executable invocation');
+  },
+  readFile: async () => 'control_plane:\n  api_key: SHOULD_NOT_LEAK: invalid\n',
+}), error => {
+  assert.equal(error.message, 'Invalid tunnel status profile.');
+  assert.doesNotMatch(error.message, /SHOULD_NOT_LEAK/);
+  return true;
+});
 
 console.log('Windows tunnel status contract: PASS');

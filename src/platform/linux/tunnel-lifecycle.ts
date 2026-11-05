@@ -3,6 +3,10 @@ import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
+import {
+  classifyTunnelCredentialSource,
+  type TunnelCredentialSource,
+} from '../tunnel-credential-source.js';
 import { readTunnelFunctionalDiagnostics, type TunnelFunctionalDiagnostics } from '../tunnel-functional-diagnostics.js';
 import {
   assessTunnelLocalLifecycle,
@@ -28,6 +32,8 @@ export interface LinuxTunnelStatus {
   enabled: boolean;
   healthy: boolean;
   controlPlanePoll: boolean;
+  /** Reference syntax only; not authorization to rotate a credential. */
+  credentialSource: TunnelCredentialSource;
   lifecycleObservation: TunnelLocalLifecycleObservation;
 }
 
@@ -371,7 +377,7 @@ function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: bo
 async function selectedRegisteredHealthUrlFile(
   registration: { executable: string; profileDir: string; profile: string },
   run: (executable: string, args: readonly string[]) => Promise<string>,
-): Promise<string> {
+): Promise<{ urlFile: string; credentialSource: TunnelCredentialSource }> {
   const list = parseClientJson(await run(registration.executable,
     ['profiles', 'list', '--profile-dir', registration.profileDir, '--json']), 'profiles list');
   if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
@@ -403,7 +409,10 @@ async function selectedRegisteredHealthUrlFile(
   if (typeof profile?.health?.url_file !== 'string') {
     throw new Error('Missing tunnel health URL reference.');
   }
-  return safePath(profile.health.url_file);
+  return {
+    urlFile: safePath(profile.health.url_file),
+    credentialSource: classifyTunnelCredentialSource(profile),
+  };
 }
 
 // The local admin URL file may live outside profileDir, but only a
@@ -524,14 +533,16 @@ export async function runLinuxTunnelCommand(
         await systemctl(['show', unit, '--property=ActiveState', '--property=UnitFileState', '--no-pager']),
       );
       let health = { healthy: false, controlPlanePoll: false };
+      let credentialSource: TunnelCredentialSource = 'unverified';
       if (active) {
         if (!registration) throw new Error('Linux tunnel registration unavailable.');
-        const urlFile = await selectedRegisteredHealthUrlFile(registration, run);
+        const observed = await selectedRegisteredHealthUrlFile(registration, run);
+        credentialSource = observed.credentialSource;
         health = healthFromJson(await run(registration.executable,
-          ['health', '--json', '--url-file', urlFile, '--require-control-plane-poll']));
+          ['health', '--json', '--url-file', observed.urlFile, '--require-control-plane-poll']));
       }
       return { action, unit, status: {
-        unit, active, enabled, ...health,
+        unit, active, enabled, ...health, credentialSource,
         lifecycleObservation: assessTunnelLocalLifecycle({ active, enabled, ...health }),
       } };
     } else if (action === 'diagnose') {
@@ -542,8 +553,8 @@ export async function runLinuxTunnelCommand(
         throw new Error('Linux tunnel local diagnostics unavailable: user service is inactive.');
       }
       if (!registration) throw new Error('Linux tunnel registration unavailable.');
-      const urlFile = await selectedRegisteredHealthUrlFile(registration, run);
-      const baseUrl = await readTrustedHealthUrlFile(urlFile);
+      const observed = await selectedRegisteredHealthUrlFile(registration, run);
+      const baseUrl = await readTrustedHealthUrlFile(observed.urlFile);
       try {
         const diagnostics = await readTunnelFunctionalDiagnostics(baseUrl, dependencies.fetchFn);
         return { action, unit, diagnostics };

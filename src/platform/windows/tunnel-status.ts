@@ -4,6 +4,10 @@ import path from 'node:path';
 
 import { XMLParser } from 'fast-xml-parser';
 import YAML from 'yaml';
+import {
+    classifyTunnelCredentialSource,
+    type TunnelCredentialSource,
+} from '../tunnel-credential-source.js';
 
 import {
     buildSchtasksQueryXmlArgs,
@@ -33,6 +37,8 @@ export interface WindowsTunnelRegistration {
     profile: {
         path: string;
         healthUrlFile: string;
+        /** Syntax only: not proof of file custody or rotation authorization. */
+        credentialSource: TunnelCredentialSource;
     };
 }
 
@@ -178,13 +184,26 @@ function parseProfileList(
     );
 }
 
-function parseHealthUrlFile(profileText: string): string {
-    const profile = requireObject('Tunnel profile', YAML.parse(profileText));
+function parseProfileObservation(profileText: string): {
+    healthUrlFile: string;
+    credentialSource: TunnelCredentialSource;
+} {
+    let parsed: unknown;
+    try {
+        parsed = YAML.parse(profileText);
+    } catch {
+        // YAML parser diagnostics may include raw credential values.
+        throw new Error('Invalid tunnel status profile.');
+    }
+    const profile = requireObject('Tunnel profile', parsed);
     const health = requireObject('Tunnel profile health', profile.health);
-    return requireAbsoluteWindowsPath(
-        'Tunnel profile health.url_file',
-        health.url_file,
-    );
+    return {
+        healthUrlFile: requireAbsoluteWindowsPath(
+            'Tunnel profile health.url_file',
+            health.url_file,
+        ),
+        credentialSource: classifyTunnelCredentialSource(profile),
+    };
 }
 
 export function parseWindowsTunnelTaskEnabled(taskXml: string): boolean {
@@ -279,7 +298,7 @@ export async function getWindowsTunnelRegistration(
         registration.profileName,
     );
     const profileText = await deps.readFile(profilePath);
-    const healthUrlFile = parseHealthUrlFile(profileText);
+    const { healthUrlFile, credentialSource } = parseProfileObservation(profileText);
 
     return {
         taskName,
@@ -292,6 +311,7 @@ export async function getWindowsTunnelRegistration(
         profile: {
             path: profilePath,
             healthUrlFile,
+            credentialSource,
         },
     };
 }

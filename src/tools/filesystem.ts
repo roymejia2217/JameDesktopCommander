@@ -426,7 +426,8 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
             return { content, mimeType: contentType, metadata: { isImage } };
         } else {
             // For text content
-            const content = body.toString('utf8');
+            // Fetch Body.text() uses UTF-8 decoding with BOM handling.
+            const content = new TextDecoder('utf-8').decode(body);
 
             return { content, mimeType: contentType, metadata: { isImage } };
         }

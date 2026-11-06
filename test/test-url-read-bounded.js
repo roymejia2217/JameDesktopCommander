@@ -104,3 +104,13 @@ test('URL reader accepts a response at the exact byte budget', async () => {
     assert.equal(Buffer.byteLength(result.content), MAX_BYTES);
   });
 });
+
+test('URL text preserves Fetch UTF-8 BOM decoding semantics', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('BOM_SAFE_CONTENT')]));
+  }, async (base) => {
+    const result = await readFileFromUrl(base + '/bom');
+    assert.equal(result.content, 'BOM_SAFE_CONTENT');
+  });
+});

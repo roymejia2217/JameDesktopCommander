@@ -10,7 +10,7 @@ import { configManager } from '../config-manager.js';
 import { getFileHandler, TextFileHandler } from '../utils/files/index.js';
 import type { ReadOptions, FileResult, PdfPageItem } from '../utils/files/base.js';
 import { isPdfFile } from "./mime-types.js";
-import { parsePdfToMarkdown, editPdf, PdfOperations, PdfMetadata, parseMarkdownToPdf } from './pdf/index.js';
+import { parsePdfToMarkdown, parsePdfBytesToMarkdown, editPdf, PdfOperations, PdfMetadata, parseMarkdownToPdf } from './pdf/index.js';
 import { isBinaryFile } from 'isbinaryfile';
 
 // CONSTANTS SECTION - Consolidate all timeouts and thresholds
@@ -342,6 +342,35 @@ type PdfPayload = {
 
 type FileResultPayloads = PdfPayload;
 
+// A Content-Length header alone cannot enforce a byte quota: chunked and
+// decompressed bodies can exceed it. Count actual received bytes before decoding.
+const MAX_URL_READ_BYTES = 10 * 1024 * 1024;
+
+async function readBoundedUrlBody(
+    response: Awaited<ReturnType<typeof fetch>>,
+    controller: AbortController,
+): Promise<Buffer> {
+    const declared = response.headers.get('content-length');
+    if (declared !== null && /^\d+$/.test(declared)
+        && Number(declared) > MAX_URL_READ_BYTES) {
+        controller.abort();
+        throw new Error('E_URL_SIZE_DENIED');
+    }
+    if (!response.body) return Buffer.alloc(0);
+    const chunks: Buffer[] = [];
+    let received = 0;
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+        const bytes = Buffer.from(chunk);
+        received += bytes.byteLength;
+        if (received > MAX_URL_READ_BYTES) {
+            controller.abort();
+            throw new Error('E_URL_SIZE_DENIED');
+        }
+        chunks.push(bytes);
+    }
+    return Buffer.concat(chunks, received);
+}
+
 /**
  * Read file content from a URL
  * @param url URL to fetch content from
@@ -360,9 +389,7 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
             signal: controller.signal
         });
 
-        // Clear the timeout since fetch completed
-        clearTimeout(timeoutId);
-
+        // Retain the timeout through body consumption, not just response headers.
         if (!response.ok) {
             throw new Error(`HTTP error! Status: ${response.status}`);
         }
@@ -371,11 +398,13 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
         const contentType = response.headers.get('content-type') || 'text/plain';
         const isImage = isImageFile(contentType);
         const isPdf = isPdfFile(contentType) || url.toLowerCase().endsWith('.pdf');
+        // One bounded download for every MIME type; PDF must not fetch again.
+        const body = await readBoundedUrlBody(response, controller);
+        clearTimeout(timeoutId);
 
-        // NEW: Add PDF handling before image check
+        // PDF parsing consumes the already bounded response body.
         if (isPdf) {
-            // Use URL directly - pdfreader handles URL downloads internally
-            const pdfResult = await parsePdfToMarkdown(url);
+            const pdfResult = await parsePdfBytesToMarkdown(body);
 
             return {
                 content: "",
@@ -392,13 +421,13 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
 
         } else if (isImage) {
             // For images, convert to base64
-            const buffer = await response.arrayBuffer();
-            const content = Buffer.from(buffer).toString('base64');
+            const content = body.toString('base64');
 
             return { content, mimeType: contentType, metadata: { isImage } };
         } else {
             // For text content
-            const content = await response.text();
+            // Fetch Body.text() uses UTF-8 decoding with BOM handling.
+            const content = new TextDecoder('utf-8').decode(body);
 
             return { content, mimeType: contentType, metadata: { isImage } };
         }

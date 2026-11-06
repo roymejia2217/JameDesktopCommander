@@ -20,7 +20,13 @@ env:
   JDC_CANDIDATE_INCLUDE_NATIVE: '0'
 
 jobs:
+  windows-operator-ui:
+    uses: ./.github/workflows/windows-operator-ui-bundle.yml
+    with:
+      source_commit: ${{ github.event.pull_request.head.sha || github.sha }}
+
   portable-candidate:
+    needs: windows-operator-ui
     name: Candidate (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -67,7 +73,7 @@ jobs:
         run: node --test test/test-filesystem-policy-fail-closed.js
 
       - name: Run packaging security regression tests
-        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js
+        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
@@ -173,6 +179,13 @@ jobs:
 
       # Builds are non-release candidates. Release Please alone controls
       # release versions/tags; no workflow here may publish or sign artifacts.
+      - name: Download exact Windows operator UI overlay
+        if: matrix.target == 'win32-x64'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: UNPUBLISHED-jdc-operator-ui-win32-x64
+          path: ${{ runner.temp }}/jdc-operator-ui
+
       - name: Compile Inno Setup installer candidate
         if: matrix.target == 'win32-x64'
         shell: pwsh
@@ -180,8 +193,11 @@ jobs:
           JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-win32-x64
           JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
           JDC_TUNNEL_CLIENT_SOURCE: ${{ runner.temp }}/jdc-official-tunnel-client
+          JDC_OPERATOR_UI_SOURCE: ${{ runner.temp }}/jdc-operator-ui
         run: |
           $ErrorActionPreference = 'Stop'
+          node scripts/windows-operator-ui-bundle.mjs verify $env:JDC_OPERATOR_UI_SOURCE $env:JDC_CANDIDATE_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Native GUI source not verified' }
           $env:JDC_INSTALLER_VERSION = (node -p "require('./package.json').version").Trim()
           $tools = Join-Path $env:RUNNER_TEMP 'inno-pinned'
           New-Item -ItemType Directory -Path $tools -Force | Out-Null
@@ -218,10 +234,20 @@ jobs:
           if (!(Test-Path -LiteralPath $tunnel)) { throw 'Installed tunnel client missing' }
           $tunnelVersion = & $tunnel --version
           if ($LASTEXITCODE -ne 0 -or $tunnelVersion -notmatch '^0\.0\.19') { throw 'Installed tunnel client version mismatch' }
+          $gui = Join-Path $target 'jdc-tunnel-operator-ui.exe'
+          $uiManifest = Join-Path $target 'operator-ui-manifest.json'
+          if (!(Test-Path -LiteralPath $gui -PathType Leaf) -or !(Test-Path -LiteralPath $uiManifest -PathType Leaf)) { throw 'Installed GUI or source manifest missing' }
+          node scripts/windows-operator-ui-bundle.mjs verify-installed $target $env:JDC_CANDIDATE_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Installed GUI or font notices differ from source candidate' }
+          $uiCheck = Start-Process -FilePath $gui -ArgumentList '--check-installation' -WorkingDirectory $target -Wait -PassThru
+          if ($uiCheck.ExitCode -ne 0) { throw "Native operator read-only contract rejected: $($uiCheck.ExitCode)" }
           $uninstall = Get-ChildItem -LiteralPath $target -Filter 'unins*.exe' -File | Select-Object -First 1
           if (!$uninstall) { throw 'Expected Inno uninstall executable missing' }
           $result = Start-Process -FilePath $uninstall.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
           if ($result.ExitCode -ne 0) { throw "Windows uninstall failed: $($result.ExitCode)" }
+          if (Test-Path -LiteralPath $gui) { throw 'GUI remains after uninstall' }
+          if (Test-Path -LiteralPath $uiManifest) { throw 'GUI manifest remains after uninstall' }
+          if (Test-Path -LiteralPath (Join-Path $target 'licenses/operator-ui')) { throw 'Native UI license notices remain after uninstall' }
 
       - name: Build nFPM Debian installer candidate
         if: matrix.target == 'linux-x64'

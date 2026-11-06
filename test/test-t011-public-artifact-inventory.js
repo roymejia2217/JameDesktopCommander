@@ -28,7 +28,7 @@ function mustReject(title, mutate) {
   });
 }
 
-test('only the three explicitly reviewed public artifact upload surfaces are allowed', () => {
+test('only the four explicitly reviewed public artifact upload surfaces are allowed', () => {
   assert.equal(validatePublicArtifactInventory(originals), true);
   const all = Object.entries(originals).flatMap(([file, data]) =>
     Object.entries(data.jobs).flatMap(([job, config]) =>
@@ -39,6 +39,7 @@ test('only the three explicitly reviewed public artifact upload surfaces are all
     'distribution-candidate.yml/portable-candidate',
     'distribution-candidate.yml/portable-candidate',
     't011-capability-feasibility.yml/native-probe',
+    'windows-operator-ui-bundle.yml/native-gui',
   ]);
 });
 mustReject('rejects new upload in previously nonuploading workflow', (docs) => {
@@ -123,4 +124,47 @@ mustReject('reject extended installer retention', docs => {
 });
 mustReject('reject unpinned installer artifact upload action', docs => {
   findInstallerUpload(candidate(docs)).uses = 'actions/upload-artifact@v4';
+});
+
+const operatorUi = docs => docs['windows-operator-ui-bundle.yml'].jobs['native-gui'];
+const operatorUpload = docs => findUpload(operatorUi(docs));
+
+mustReject('reject extra upload from the restricted GUI overlay job', docs => {
+  operatorUi(docs).steps.push(structuredClone(operatorUpload(docs)));
+});
+mustReject('reject broad GUI overlay path that could export unrelated files', docs => {
+  operatorUpload(docs).with.path = '${{ runner.temp }}/';
+});
+mustReject('reject changed GUI overlay artifact identity', docs => {
+  operatorUpload(docs).with.name = 'UNPUBLISHED-jdc-other';
+});
+mustReject('reject unpinned GUI overlay upload action', docs => {
+  operatorUpload(docs).uses = 'actions/upload-artifact@v4';
+});
+mustReject('reject GUI artifact retention beyond its reviewed one day', docs => {
+  operatorUpload(docs).with['retention-days'] = 7;
+});
+mustReject('reject GUI job permissions escalated to contents write', docs => {
+  docs['windows-operator-ui-bundle.yml'].permissions = { contents: 'write' };
+});
+mustReject('reject GUI build sourcing an unreviewed commit', docs => {
+  operatorUi(docs).steps.find(s => s.name === 'Checkout exact native operator source')
+    .with.ref = 'main';
+});
+mustReject('reject GUI artifact upload without prior hash inventory verification', docs => {
+  operatorUi(docs).steps.find(s => s.name === 'Build pinned Windows operator UI')
+    .run = 'cargo +1.95.0 build --release --locked --manifest-path native/tunnel-operator-ui/Cargo.toml';
+});
+mustReject('reject portable candidate that drops the same-run GUI dependency', docs => {
+  delete docs['distribution-candidate.yml'].jobs['portable-candidate'].needs;
+});
+mustReject('reject downloaded GUI overlay from an unrelated artifact name', docs => {
+  const steps = candidate(docs).steps;
+  const download = steps.find(s => s.name === 'Download exact Windows operator UI overlay');
+  download.with.name = 'UNPUBLISHED-untrusted-payload';
+});
+
+mustReject('reject GUI build steps that mask failures', docs => {
+  operatorUi(docs).steps.find(s => s.name === 'Build pinned Windows operator UI')
+    ['continue-on-error'] = true;
 });

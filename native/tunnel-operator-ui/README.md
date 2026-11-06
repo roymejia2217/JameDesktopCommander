@@ -120,3 +120,22 @@ supported alternative). Do not advertise Linux assistive-technology support.
 Each GitHub CI runner audits its own exact target graph without suppressing
 vulnerability or unmaintained advisories; cross-target Cargo.lock entries
 must not be mistaken for shipped libraries. No `advisories.ignore` entries.
+
+## Windows installer candidate (non-release)
+
+A reusable CI workflow builds this crate from the exact checked-out
+commit with Rust 1.95 and the committed Cargo.lock. The Node packaging
+job only downloads this same-run artifact after checking its inventory. It stages
+`jdc-tunnel-operator-ui.exe` next to the installed Node runtime and bundles
+the exact font notices shipped by `epaint_default_fonts=0.37.0` plus the
+`foldhash=0.2.0` Zlib license. The one-purpose
+`scripts/windows-operator-ui-bundle.mjs` records seven allowlisted files and
+SHA-256 byte digests, rejects extra/symlink/tampered inputs, and checks
+installed copy contents before uninstall. Installed GUI remains **read-only**.
+
+A byte inventory is NOT a publisher signature, code-signing certificate,
+Windows identity proof or authorization to rotate credentials. Every CI
+candidate remains **unpublished** with `releaseEligible:false`; P0 security,
+remote ChatGPT MCP evidence, Windows recovery and Linux distribution/GUI
+acceptance remain separate release blockers. The Windows GUI is not included
+in the Linux .deb; do not represent Linux desktop parity as complete.

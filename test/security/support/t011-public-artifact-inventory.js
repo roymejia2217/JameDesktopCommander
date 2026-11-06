@@ -14,6 +14,76 @@ function reject(reason) {
   throw new Error('E_T011_PUBLIC_ARTIFACT: ' + reason);
 }
 
+const SOURCE_SHA = '$' + '{{ github.event.pull_request.head.sha || github.sha }}';
+const CALLED_SHA = '$' + '{{ inputs.source_commit }}';
+const UI_STAGE = '$' + '{{ runner.temp }}' + '/jdc-operator-ui';
+const PINNED_DOWNLOAD = 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093';
+const PINNED_CHECKOUT = 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803';
+const PINNED_NODE = 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38';
+
+function validateOperatorUiArtifactPolicy(nativeUi, portable) {
+  if (!nativeUi || nativeUi.on?.workflow_call?.inputs?.source_commit?.required !== true ||
+      nativeUi.on?.workflow_call?.inputs?.source_commit?.type !== 'string' ||
+      Object.keys(nativeUi.permissions ?? {}).length !== 1 ||
+      nativeUi.permissions?.contents !== 'read') {
+    reject('native UI workflow must be an unprivileged reusable source-locked build');
+  }
+  const job = nativeUi.jobs?.['native-gui'];
+  const steps = job?.steps;
+  if (!Array.isArray(steps) || job.permissions !== undefined ||
+      job['runs-on'] !== 'windows-2025' ||
+      job['continue-on-error'] !== undefined ||
+      steps.some(step => step['continue-on-error'] !== undefined)) {
+    reject('reviewed native UI build job identity or permissions changed');
+  }
+  const checkout = steps.find(step => step.name === 'Checkout exact native operator source');
+  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== CALLED_SHA ||
+      checkout.with?.['persist-credentials'] !== false) {
+    reject('native UI source checkout must be immutable and credential-free');
+  }
+  const allowedActions = new Set([PINNED_CHECKOUT, PINNED_NODE, PINNED_UPLOAD]);
+  if (steps.some(step => step.uses && !allowedActions.has(step.uses))) {
+    reject('native UI workflow may not add unrelated external actions');
+  }
+  const buildIndex = steps.findIndex(step => step.name === 'Build pinned Windows operator UI');
+  const uploadIndex = steps.findIndex(step => step.name ===
+    'Retain immutable, unpublished native GUI overlay for candidate installation');
+  const build = steps[buildIndex];
+  const upload = steps[uploadIndex];
+  if (buildIndex < 0 || uploadIndex <= buildIndex ||
+      !build.run.includes('cargo +1.95.0 build --release --locked --manifest-path native/tunnel-operator-ui/Cargo.toml') ||
+      !build.run.includes('windows-operator-ui-bundle.mjs create') ||
+      !build.run.includes('windows-operator-ui-bundle.mjs verify') ||
+      /native\/(?:capability-probe|authority-service)|research_impl|receiver-test-fixture/.test(build.run)) {
+    reject('native UI build must verify an exact read-only frontend inventory');
+  }
+  const conf = upload.with;
+  if (upload.uses !== PINNED_UPLOAD ||
+      conf?.name !== 'UNPUBLISHED-jdc-operator-ui-win32-x64' ||
+      conf?.path !== UI_STAGE + '/' ||
+      conf?.['if-no-files-found'] !== 'error' ||
+      conf?.['retention-days'] !== 1 ||
+      conf?.['compression-level'] !== 0) {
+    reject('native UI upload is not the narrowly reviewed short-lived overlay');
+  }
+  const caller = portable.jobs?.['windows-operator-ui'];
+  const candidateJob = portable.jobs?.['portable-candidate'];
+  const download = candidateJob?.steps?.find(step =>
+    step.name === 'Download exact Windows operator UI overlay');
+  const inno = candidateJob?.steps?.find(step =>
+    step.name === 'Compile Inno Setup installer candidate');
+  if (caller?.uses !== './.github/workflows/windows-operator-ui-bundle.yml' ||
+      caller.with?.source_commit !== SOURCE_SHA ||
+      candidateJob?.needs !== 'windows-operator-ui' ||
+      download?.uses !== PINNED_DOWNLOAD ||
+      download.if !== "matrix.target == 'win32-x64'" ||
+      download.with?.name !== conf.name ||
+      download.with?.path !== UI_STAGE ||
+      !inno?.run?.includes('windows-operator-ui-bundle.mjs verify')) {
+    reject('native UI download must be same-run, source-bound and verified');
+  }
+}
+
 /** Restrict the known official upload-artifact action throughout all workflows. */
 export function validatePublicArtifactInventory(workflows) {
   if (!workflows || typeof workflows !== 'object' || Array.isArray(workflows)) {
@@ -21,7 +91,8 @@ export function validatePublicArtifactInventory(workflows) {
   }
   const native = workflows['t011-capability-feasibility.yml'];
   const portable = workflows['distribution-candidate.yml'];
-  if (!native || !portable) {
+  const nativeUi = workflows['windows-operator-ui-bundle.yml'];
+  if (!native || !portable || !nativeUi) {
     reject('mandatory reviewed workflows missing');
   }
   // Reuse the stronger dedicated, separately tested native artifact policy.
@@ -60,8 +131,11 @@ export function validatePublicArtifactInventory(workflows) {
   const portableUploads = uploads.filter(entry =>
     entry.workflowName === 'distribution-candidate.yml' &&
     entry.jobName === 'portable-candidate');
-  if (uploads.length !== 3 || nativeUploads.length !== 1 ||
-      portableUploads.length !== 2) {
+  const operatorUploads = uploads.filter(entry =>
+    entry.workflowName === 'windows-operator-ui-bundle.yml' &&
+    entry.jobName === 'native-gui');
+  if (uploads.length !== 4 || nativeUploads.length !== 1 ||
+      portableUploads.length !== 2 || operatorUploads.length !== 1) {
     reject('unreviewed upload action or wrong workflow/job');
   }
   const candidate = portableUploads.find(entry =>
@@ -95,5 +169,6 @@ export function validatePublicArtifactInventory(workflows) {
       installerConf['compression-level'] !== 0) {
     reject('installer upload path or retention differs from reviewed configuration');
   }
+  validateOperatorUiArtifactPolicy(nativeUi, portable);
   return true;
 }

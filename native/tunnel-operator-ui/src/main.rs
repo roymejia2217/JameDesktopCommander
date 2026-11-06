@@ -95,9 +95,9 @@ impl OperatorApp {
     }
     fn show_navigation(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
-            ui.heading("JDC  /  Tunnel Operator");
+            ui.heading("Tunnel Operator");
             ui.separator();
-            ui.weak("LOCAL  ·  READ ONLY");
+            ui.weak("Local - Read-only");
         });
         ui.add_space(14.0);
         ui.horizontal(|ui| {
@@ -108,25 +108,25 @@ impl OperatorApp {
                 self.screen = Screen::Overview;
             }
             if ui
-                .selectable_label(self.screen == Screen::Diagnose, "Diagnose")
+                .selectable_label(self.screen == Screen::Diagnose, "Diagnostics")
                 .clicked()
             {
                 self.screen = Screen::Diagnose;
             }
             ui.separator();
             ui.add_enabled(false, egui::Button::new("Credentials"));
-            ui.add_enabled(false, egui::Button::new("Lifecycle"));
+            ui.add_enabled(false, egui::Button::new("Service"));
             ui.separator();
             let pending = self.receiver.is_some();
             if ui
-                .add_enabled(!pending, egui::Button::new("Refresh observation"))
+                .add_enabled(!pending, egui::Button::new("Refresh"))
                 .clicked()
             {
                 self.refresh(ctx);
             }
         });
         ui.add_space(12.0);
-        ui.weak("No automatic polling. These observations do not authorize service actions or credential changes.");
+        ui.weak("Status is checked only when you select Refresh.");
         ui.separator();
     }
 
@@ -138,21 +138,18 @@ impl OperatorApp {
             egui::Color32::from_rgb(175, 195, 215)
         };
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("LOCAL VERDICT").strong());
+            ui.label(egui::RichText::new("Status").strong());
             ui.colored_label(verdict_color, state.to_uppercase());
         });
         ui.label(guidance(value.reason()));
         ui.add_space(8.0);
-        ui.small(format!("Local backend observed at: {}", value.observed_at));
-        ui.small(format!(
-            "Received in this window {} seconds ago (not a remote proof).",
-            received.elapsed().as_secs()
-        ));
+        ui.small(format!("Checked: {}", value.observed_at));
+        ui.small(format!("Age: {}s", received.elapsed().as_secs()));
         if received.elapsed().as_secs() > 30
             || observation_is_stale(&value.observed_at, OffsetDateTime::now_utc())
         {
             ui.label(
-                egui::RichText::new("Snapshot older than 30 seconds. Refresh to inspect again.")
+                egui::RichText::new("Status may be outdated. Refresh.")
                     .color(egui::Color32::YELLOW),
             );
         }
@@ -163,26 +160,24 @@ impl OperatorApp {
             .spacing([26.0, 13.0])
             .striped(true)
             .show(ui, |ui| {
-                evidence_row(ui, "Installed task registration", &value.task_registration);
-                evidence_row(ui, "Local client readiness", &value.local_health);
-                evidence_row(ui, "MCP initialization", &value.mcp_initialize);
-                evidence_row(ui, "MCP tool discovery", &value.tool_discovery);
-                evidence_row(ui, "Authenticated control plane", &value.control_plane);
-                evidence_row(ui, "Remote ChatGPT delivery", &value.remote_delivery);
+                evidence_row(ui, "Tunnel task", &value.task_registration);
+                evidence_row(ui, "Local health", &value.local_health);
+                evidence_row(ui, "MCP handshake", &value.mcp_initialize);
+                evidence_row(ui, "MCP tools", &value.tool_discovery);
+                evidence_row(ui, "Control plane issue", &value.control_plane);
+                evidence_row(ui, "Remote MCP delivery", &value.remote_delivery);
             });
         ui.add_space(16.0);
         if self.screen == Screen::Diagnose {
-            ui.heading("Diagnostic evidence");
-            ui.monospace(format!("Reason code: {}", value.reason()));
-            ui.weak("A 401 reports rejected credentials; it does not establish their expiry date.");
-            ui.weak("A ready local process does not establish a successful remote MCP request.");
-            ui.weak("No token, source path, provider error body or private URL is displayed.");
+            ui.heading("Diagnostics");
+            ui.monospace(format!("Reason: {}", value.reason()));
+            ui.weak("HTTP 401: credentials rejected. Expiry not confirmed.");
+            ui.weak("Local readiness does not prove remote MCP access.");
+            ui.weak("Sensitive details are hidden.");
         } else {
-            ui.heading("Operational readiness");
-            ui.label(
-                "Use Diagnose to review the source-specific reason and troubleshooting guidance.",
-            );
-            ui.weak("Start, stop, restart and credential rotation are deliberately unavailable.");
+            ui.heading("Next step");
+            ui.label("Open Diagnostics for details.");
+            ui.weak("Service and credential controls are disabled.");
         }
     }
 }
@@ -194,32 +189,16 @@ fn evidence_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 fn guidance(reason: &str) -> &'static str {
     match reason {
-        "CONTROL_PLANE_CREDENTIAL_REJECTED" => {
-            "Control-plane authentication rejected (HTTP 401). Review provider credentials; expiry is unproven."
-        }
-        "CONTROL_PLANE_FORBIDDEN" => {
-            "Control-plane authorization forbidden (HTTP 403). Verify account and profile permissions."
-        }
-        "CONTROL_PLANE_RATE_LIMITED" => {
-            "Provider request rate-limited (HTTP 429). Do not restart repeatedly."
-        }
-        "MCP_TOOLS_LIST_UNVERIFIED" => {
-            "The local MCP tool list was not fully discovered. Remote use remains unverified."
-        }
-        "MCP_HANDSHAKE_UNOBSERVED" => "The MCP initialization handshake has not been observed.",
-        "TASK_STATUS_UNAVAILABLE" => {
-            "The registered tunnel task could not be inspected. Check local installation."
-        }
-        "LOCAL_DIAGNOSTICS_UNAVAILABLE" => {
-            "The local diagnostic endpoint was unavailable. Check the installed client."
-        }
-        "LOCAL_EVIDENCE_CONFLICT" => {
-            "Local observations disagree. Do not assume a healthy installation."
-        }
-        "REMOTE_ROUND_TRIP_UNVERIFIED" => {
-            "Local checks succeeded; an independent remote request has not been observed."
-        }
-        _ => "Operator evidence is incomplete or degraded. Use verified checks before recovery.",
+        "CONTROL_PLANE_CREDENTIAL_REJECTED" => "HTTP 401: credentials rejected. Expiry is unknown.",
+        "CONTROL_PLANE_FORBIDDEN" => "HTTP 403: access denied. Check permissions.",
+        "CONTROL_PLANE_RATE_LIMITED" => "HTTP 429: rate limited. Try again later.",
+        "MCP_TOOLS_LIST_UNVERIFIED" => "MCP tools are incomplete. Remote access is unverified.",
+        "MCP_HANDSHAKE_UNOBSERVED" => "MCP handshake not observed.",
+        "TASK_STATUS_UNAVAILABLE" => "Tunnel task unavailable. Check installation.",
+        "LOCAL_DIAGNOSTICS_UNAVAILABLE" => "Local diagnostics unavailable. Check the client.",
+        "LOCAL_EVIDENCE_CONFLICT" => "Local checks conflict. Status is unverified.",
+        "REMOTE_ROUND_TRIP_UNVERIFIED" => "Local checks passed. Remote request not verified.",
+        _ => "Status is incomplete. Review diagnostics.",
     }
 }
 
@@ -233,24 +212,21 @@ impl eframe::App for OperatorApp {
         match &self.presentation {
             Presentation::Loading => {
                 ui.spinner();
-                ui.label("Inspecting the installed local tunnel...");
+                ui.label("Checking tunnel...");
             }
             Presentation::NoInstallation => {
-                ui.label("This UI is not in the supported installation layout.");
+                ui.label("Installation layout not found.");
             }
             Presentation::Failed(reason) => {
-                ui.label(
-                    egui::RichText::new("OPERATOR EVIDENCE UNAVAILABLE")
-                        .color(egui::Color32::YELLOW),
-                );
+                ui.label(egui::RichText::new("STATUS UNAVAILABLE").color(egui::Color32::YELLOW));
                 ui.label(reason.display());
-                ui.weak("No service state or credential was changed.");
+                ui.weak("No changes were made.");
             }
             Presentation::Snapshot { value, received } => self.show_snapshot(ui, value, *received),
         }
         ui.add_space(22.0);
         ui.separator();
-        ui.weak("Diagnostic preview — no privileged backend operations enabled.");
+        ui.weak("Read-only - service controls unavailable.");
     }
 }
 
@@ -288,7 +264,7 @@ fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title("JameDesktopCommander — Local Tunnel Operator")
+            .with_title("JameDesktopCommander - Tunnel Operator")
             .with_inner_size([930.0, 640.0])
             .with_min_inner_size([650.0, 460.0]),
         ..Default::default()

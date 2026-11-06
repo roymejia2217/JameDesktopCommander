@@ -81,14 +81,14 @@ Do not interpret the absence of production modification as proof that the
 visual journey has been accepted. Acceptance requires an actual window and
 UI Automation evidence, with test process/task cleanup and no driver changes.
 
-### Interactive DX12 validation — PASS for initial display only
+### Interactive DX12 validation - initial display verified
 
 After explicitly selecting Direct3D 12 and using the Windows GUI subsystem,
 the development binary started in the real interactive console session 2.
 Windows UI Automation confirmed a foreground window titled
-`JameDesktopCommander — Local Tunnel Operator` and the actual app controls:
-Overview, Diagnose, enabled Refresh observation, and **disabled** Credentials
-and Lifecycle. The application rendered the backend's real
+`JameDesktopCommander - Tunnel Operator` and the actual app controls:
+Overview, Diagnostics, enabled Refresh, and **disabled** Credentials
+and Service. The application rendered the backend's real
 `UNVERIFIED / MCP_TOOLS_LIST_UNVERIFIED` verdict and distinct local/MCP/
 remote evidence, including a stale-sample warning after 30 seconds.
 The native GUI test task and its one-shot foreground helper were both

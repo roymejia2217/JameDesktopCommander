@@ -278,6 +278,19 @@ mod tests {
     }
 
     #[test]
+    fn operator_interface_copy_uses_plain_punctuation() {
+        for source in [include_str!("main.rs"), include_str!("../README.md")] {
+            for unsupported in ['\u{2013}', '\u{2014}', '\u{00b7}'] {
+                assert!(
+                    !source.contains(unsupported),
+                    "UI copy contains decorative punctuation: U+{:04X}",
+                    unsupported as u32
+                );
+            }
+        }
+    }
+
+    #[test]
     fn renderer_never_enumerates_known_crashing_windows_vulkan_driver() {
         let actual = native_wgpu_backends();
         #[cfg(windows)]

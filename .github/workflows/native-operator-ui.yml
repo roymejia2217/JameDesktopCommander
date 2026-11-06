@@ -1,0 +1,76 @@
+name: Native Operator UI (non-release)
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-operator-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  operator-ui:
+    name: Operator UI (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: win32-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+    steps:
+      - name: Checkout exact source, without credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain for egui (separate from T011 1.91.1)
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Linux system dependencies for supported native window backends
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev
+
+      - name: Verify manifest and immutable dependency lock
+        run: cargo +1.95.0 metadata --locked --no-deps --format-version 1 --manifest-path native/tunnel-operator-ui/Cargo.toml
+      - name: Enforce Rust formatting
+        run: cargo +1.95.0 fmt --all --manifest-path native/tunnel-operator-ui/Cargo.toml -- --check
+
+      - name: Execute bounded contract unit tests
+        run: cargo +1.95.0 test --locked --all-targets --manifest-path native/tunnel-operator-ui/Cargo.toml
+
+      - name: Deny unsafe shortcuts and compiler warnings
+        run: cargo +1.95.0 clippy --locked --all-targets --manifest-path native/tunnel-operator-ui/Cargo.toml -- -D warnings
+
+      - name: Build native read-only frontend without publishing
+        run: cargo +1.95.0 build --locked --manifest-path native/tunnel-operator-ui/Cargo.toml
+
+      - name: Install pinned cargo-deny with checksum verification
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-deny@0.20.2
+          checksum: true
+          fallback: none
+
+      - name: Audit locked advisories, licenses and registry provenance
+        run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/tunnel-operator-ui/Cargo.toml check advisories licenses sources
+
+      # A headless CI runner cannot validate visible window interaction.
+      # This job is only source, native build, contracts and dependency evidence.
+      # No key rotation, local installed task change or release artifact occurs.

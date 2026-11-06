@@ -1,0 +1,18 @@
+[package]
+name = "jdc-tunnel-operator-ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wait-timeout = "0.2"
+time = { version = "0.3", features = ["parsing"] }
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }

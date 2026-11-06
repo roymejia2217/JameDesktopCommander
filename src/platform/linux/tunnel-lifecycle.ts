@@ -26,6 +26,15 @@ export interface LinuxTunnelDependencies {
   fetchFn?: typeof fetch;
 }
 
+/** An OS custody observation, never a grant to rotate credentials. */
+export interface LinuxTunnelCredentialCheck {
+  kind: 'registered_credential_custody_v1';
+  source: TunnelCredentialSource;
+  custody: 'verified_point_in_time' | 'not_checked';
+  rotationAuthorized: false;
+  remoteAuthentication: 'not_checked';
+}
+
 export interface LinuxTunnelStatus {
   unit: string;
   active: boolean;
@@ -377,7 +386,12 @@ function healthFromJson(value: string): { healthy: boolean; controlPlanePoll: bo
 async function selectedRegisteredHealthUrlFile(
   registration: { executable: string; profileDir: string; profile: string },
   run: (executable: string, args: readonly string[]) => Promise<string>,
-): Promise<{ urlFile: string; credentialSource: TunnelCredentialSource }> {
+): Promise<{
+  urlFile: string;
+  credentialSource: TunnelCredentialSource;
+  /** Internal only: never return this raw reference to a CLI or status response. */
+  credentialFile: string | null;
+}> {
   const list = parseClientJson(await run(registration.executable,
     ['profiles', 'list', '--profile-dir', registration.profileDir, '--json']), 'profiles list');
   if (!Array.isArray(list)) throw new Error('Invalid tunnel profiles list.');
@@ -400,7 +414,10 @@ async function selectedRegisteredHealthUrlFile(
     throw new Error('Tunnel profile is outside registered profile directory.');
   }
   const profileText = await readTrustedStatusProfile(profileFile);
-  let profile: { health?: { url_file?: unknown } };
+  let profile: {
+    health?: { url_file?: unknown };
+    control_plane?: { api_key?: unknown };
+  };
   try {
     profile = YAML.parse(profileText) as { health?: { url_file?: unknown } };
   } catch {
@@ -409,10 +426,48 @@ async function selectedRegisteredHealthUrlFile(
   if (typeof profile?.health?.url_file !== 'string') {
     throw new Error('Missing tunnel health URL reference.');
   }
+  const credentialSource = classifyTunnelCredentialSource(profile);
+  const rawReference = profile.control_plane?.api_key;
+  const credentialFile = credentialSource === 'file_reference' &&
+    typeof rawReference === 'string' && rawReference.startsWith('file:/')
+    ? rawReference.slice(5) : null;
   return {
     urlFile: safePath(profile.health.url_file),
-    credentialSource: classifyTunnelCredentialSource(profile),
+    credentialSource,
+    credentialFile,
   };
+}
+
+// Point-in-time proof only: an installed unit's registered profile refers to
+// a regular private file owned by the operator. This MUST NOT authorize a
+// subsequent write: same-UID replacement and changes after close are possible.
+async function verifyRegisteredCredentialFile(filePath: string): Promise<void> {
+  try {
+    const target = safePath(filePath);
+    const parent = path.dirname(target);
+    // Reject symlinked ancestry: canonicalization alone hides replacement.
+    if (await resolveTrustedProfileDirectory(parent) !== parent) {
+      throw new Error('Credential parent is not canonical');
+    }
+    const handle = await open(target,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await handle.stat();
+      const uid = process.getuid?.();
+      if (uid === undefined || uid === 0 ||
+          !info.isFile() || info.isSymbolicLink() ||
+          info.uid !== uid || info.nlink !== 1 ||
+          (info.mode & 0o777) !== 0o600 ||
+          info.size < 1 || info.size > 8192) {
+        throw new Error('Credential file is not private and regular');
+      }
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Never return a credential path, filesystem message or token bytes.
+    throw new Error('Linux tunnel credential file custody cannot be verified.');
+  }
 }
 
 // The local admin URL file may live outside profileDir, but only a
@@ -445,7 +500,13 @@ async function readTrustedHealthUrlFile(urlFile: string): Promise<string> {
 export async function runLinuxTunnelCommand(
   args: readonly string[],
   dependencies: LinuxTunnelDependencies = {},
-): Promise<{ action: string; unit: string; status?: LinuxTunnelStatus; diagnostics?: TunnelFunctionalDiagnostics }> {
+): Promise<{
+  action: string;
+  unit: string;
+  status?: LinuxTunnelStatus;
+  diagnostics?: TunnelFunctionalDiagnostics;
+  credentialCheck?: LinuxTunnelCredentialCheck;
+}> {
   requireLinux(dependencies);
   const home = safePath(dependencies.home ?? process.env.HOME ?? '');
   const externalRun = dependencies.run ?? defaultRun;
@@ -464,8 +525,8 @@ export async function runLinuxTunnelCommand(
   };
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
-  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'diagnose', 'uninstall'].includes(action ?? '')) {
-    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, diagnose and uninstall.');
+  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'diagnose', 'credential-check', 'uninstall'].includes(action ?? '')) {
+    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, diagnose, credential-check and uninstall.');
   }
   // Do not mutate files when the user manager or DBus session is absent.
   await systemctl(['show-environment']);
@@ -507,7 +568,8 @@ export async function runLinuxTunnelCommand(
     // Never activate, conditionally restart, or claim health for a unit whose
     // manager-loaded definition differs from the sole JDC-owned fragment.
     // STOP and UNINSTALL remain available to recover a compromised service.
-    if (action === 'start' || action === 'restart' || action === 'status' || action === 'diagnose') {
+    if (action === 'start' || action === 'restart' || action === 'status' ||
+        action === 'diagnose' || action === 'credential-check') {
       await assertTrustedLoadedUnit(home, systemctl);
     }
     if (action === 'start') {
@@ -528,6 +590,26 @@ export async function runLinuxTunnelCommand(
         await unlink(unitPath(home));
         await systemctl(['daemon-reload']);
       }
+    } else if (action === 'credential-check') {
+      if (!registration) throw new Error('Linux tunnel registration unavailable.');
+      const observed = await selectedRegisteredHealthUrlFile(registration, run);
+      if (observed.credentialSource === 'file_reference') {
+        if (!observed.credentialFile) {
+          throw new Error('Linux tunnel file credential reference is unsupported.');
+        }
+        await verifyRegisteredCredentialFile(observed.credentialFile);
+      }
+      return {
+        action, unit,
+        credentialCheck: {
+          kind: 'registered_credential_custody_v1',
+          source: observed.credentialSource,
+          custody: observed.credentialSource === 'file_reference'
+            ? 'verified_point_in_time' : 'not_checked',
+          rotationAuthorized: false,
+          remoteAuthentication: 'not_checked',
+        },
+      };
     } else if (action === 'status') {
       const { active, enabled } = parseActivationState(
         await systemctl(['show', unit, '--property=ActiveState', '--property=UnitFileState', '--no-pager']),

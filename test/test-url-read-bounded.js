@@ -7,6 +7,33 @@ import { PDFDocument } from 'pdf-lib';
 const { readFileFromUrl } = await import('../dist/tools/filesystem.js');
 const MAX_BYTES = 10 * 1024 * 1024;
 
+test('HTTP error cancels an unfinished response body', async () => {
+  let notifyClosed;
+  const closed = new Promise(resolve => { notifyClosed = resolve; });
+  await withServer((_req, res) => {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.write('server error');
+    const interval = setInterval(() => res.write('more'), 20);
+    res.on('close', () => {
+      clearInterval(interval);
+      notifyClosed();
+    });
+  }, async (base) => {
+    await assert.rejects(readFileFromUrl(base + '/error'), /HTTP error! Status: 500/);
+    let timer;
+    try {
+      await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('response remained open after HTTP error')), 2000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+});
+
 async function withServer(handle, run) {
   const server = createServer(handle);
   server.listen(0, '127.0.0.1');

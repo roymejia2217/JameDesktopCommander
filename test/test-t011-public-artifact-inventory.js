@@ -185,6 +185,16 @@ mustReject('reject Linux GUI artifact retention beyond one day', docs => {
 mustReject('reject Linux GUI artifact with unpinned upload-action', docs => {
   linuxOperatorUpload(docs).uses = 'actions/upload-artifact@v4';
 });
+mustReject('reject Linux UI reusable workflow without a caller event allowlist', docs => {
+  delete linuxOperatorUi(docs).if;
+});
+mustReject('reject Linux UI reusable workflow that skips exact source-ref binding', docs => {
+  linuxOperatorUi(docs).if = "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
+});
+mustReject('reject Linux UI reusable workflow that admits fork source repositories', docs => {
+  linuxOperatorUi(docs).if = String(linuxOperatorUi(docs).if)
+    .replace('github.event.pull_request.head.repo.full_name == github.repository &&', '');
+});
 mustReject('reject Linux GUI build from unreviewed source commit', docs => {
   linuxOperatorUi(docs).steps.find(s => s.name === 'Checkout exact native operator source')
     .with.ref = 'main';

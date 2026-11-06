@@ -94,6 +94,16 @@ function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
     reject('Linux native GUI must remain a source-bound unprivileged build');
   }
   const job = nativeUi.jobs?.['native-gui'];
+  const eventGate = String(job?.if ?? '')
+    .replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '').replace(/\s+/g, '');
+  const expectedEventGate = [
+    "(github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository&&inputs.source_commit==github.event.pull_request.head.sha)",
+    '||',
+    "(github.event_name=='push'&&github.ref=='refs/heads/main'&&inputs.source_commit==github.sha)",
+  ].join('');
+  if (eventGate !== expectedEventGate) {
+    reject('Linux reusable GUI must reject privileged events and mismatched source SHAs');
+  }
   const steps = job?.steps;
   if (job?.['runs-on'] !== 'ubuntu-24.04' ||
       !Array.isArray(steps) || job.permissions !== undefined ||

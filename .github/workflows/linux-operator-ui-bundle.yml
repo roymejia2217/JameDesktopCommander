@@ -12,6 +12,15 @@ permissions:
 
 jobs:
   native-gui:
+    # Reusable workflow: never execute a caller-supplied SHA under privileged events.
+    # This is intentionally restricted to the unprivileged PR build and main push.
+    if: >-
+      ${{ (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           inputs.source_commit == github.event.pull_request.head.sha) ||
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/main' &&
+           inputs.source_commit == github.sha) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

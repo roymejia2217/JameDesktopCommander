@@ -157,6 +157,14 @@ must independently verify installed hashes, the `--check-installation`
 headless probe, executable bits and removal of all UI files. No new
 daemon, systemd activation, postinstall hook or privileged broker is allowed.
 
+The reusable Linux GUI job accepts only an exact-SHA, same-repository
+`pull_request` head or an exact-SHA `push` to protected `main`.
+It excludes fork-sourced heads and privileged event callers, runs on a
+fresh GitHub-hosted Ubuntu runner with read-only repository permissions,
+disables persisted checkout credentials and publishes no release.
+The T011 artifact policy tests reject weakening this event/source boundary.
+These controls limit CI exposure; they do not make arbitrary PR code trusted.
+
 A green headless acceptance does **not** demonstrate a functional Linux
 Wayland/X11 session, screen reader or accessibility support. Linux AT-SPI
 remains disabled pending the separately reviewed upstream dependency path.

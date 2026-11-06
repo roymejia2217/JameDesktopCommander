@@ -86,6 +86,35 @@ fn one_of(value: &str, accepted: &[&str]) -> bool {
     accepted.contains(&value)
 }
 
+/// Local service failures must never be paired with an observation that
+/// claims a working tunnel, active MCP state or a current control-plane error.
+fn linux_service_verdict_consistent(snapshot: &Overview) -> bool {
+    let observational_fields_unverified = snapshot.mcp_initialize == "unverified"
+        && snapshot.tool_discovery == "unverified"
+        && snapshot.control_plane == "unverified";
+    match snapshot.verdict.reason_code.as_str() {
+        "SERVICE_INACTIVE" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "observed"
+                && snapshot.local_health == "not_ready"
+                && snapshot.verdict.state == "degraded"
+        }
+        "SERVICE_NOT_ENABLED" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "observed"
+                && snapshot.local_health == "unverified"
+                && snapshot.verdict.state == "unverified"
+        }
+        "SERVICE_STATUS_UNAVAILABLE" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "unverified"
+                && snapshot.local_health == "unverified"
+                && snapshot.verdict.state == "unverified"
+        }
+        _ => true,
+    }
+}
+
 pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     if raw.is_empty() || raw.len() > MAX_SNAPSHOT_BYTES {
         return Err("Operator response size out of bounds");
@@ -186,15 +215,8 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     {
         return Err("Operator reason does not belong to its platform");
     }
-    if linux
-        && snapshot.verdict.reason_code == "SERVICE_INACTIVE"
-        && (snapshot.task_registration != "observed"
-            || snapshot.local_health != "not_ready"
-            || snapshot.mcp_initialize != "unverified"
-            || snapshot.tool_discovery != "unverified"
-            || snapshot.verdict.state != "degraded")
-    {
-        return Err("An inactive service cannot assert healthy local evidence");
+    if linux && !linux_service_verdict_consistent(&snapshot) {
+        return Err("Linux service status contradicts local evidence");
     }
     if snapshot.task_registration == "unverified"
         && (snapshot.local_health != "unverified"
@@ -297,17 +319,76 @@ mod tests {
         assert_eq!(overview.reason(), "CONTROL_PLANE_CREDENTIAL_REJECTED");
     }
 
-    #[test]
-    fn linux_service_state_reasons_are_supported_without_healthy_promotion() {
-        let inactive = linux_sample()
+    fn inactive_linux_sample() -> String {
+        linux_sample()
             .replace("\"localHealth\":\"ready\"", "\"localHealth\":\"not_ready\"")
             .replace("\"mcpInitialize\":\"observed\"", "\"mcpInitialize\":\"unverified\"")
             .replace("\"toolDiscovery\":\"observed_incomplete\"", "\"toolDiscovery\":\"unverified\"")
+            .replace("\"controlPlane\":\"credential_rejected\"", "\"controlPlane\":\"unverified\"")
             .replace("\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"CONTROL_PLANE_CREDENTIAL_REJECTED\"}",
-                     "\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}");
+                     "\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}")
+    }
+
+    #[test]
+    fn linux_service_state_reasons_are_supported_without_healthy_promotion() {
+        let inactive = inactive_linux_sample();
         let view = parse_overview(inactive.as_bytes()).expect("inactive service is supported");
         assert_eq!(view.reason(), "SERVICE_INACTIVE");
+        assert_eq!(view.control_plane, "unverified");
         assert_eq!(view.remote_delivery, "not_observed");
+    }
+
+    #[test]
+    fn linux_service_inactive_cannot_claim_a_current_credential_error() {
+        let bad = inactive_linux_sample().replace(
+            "\"controlPlane\":\"unverified\"",
+            "\"controlPlane\":\"credential_rejected\"",
+        );
+        assert!(parse_overview(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn linux_not_enabled_cannot_claim_active_service_evidence() {
+        let not_enabled = inactive_linux_sample()
+            .replace(
+                "\"localHealth\":\"not_ready\"",
+                "\"localHealth\":\"unverified\"",
+            )
+            .replace(
+                "\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}",
+                "\"verdict\":{\"state\":\"unverified\", \"reasonCode\":\"SERVICE_NOT_ENABLED\"}",
+            );
+        assert_eq!(
+            parse_overview(not_enabled.as_bytes()).unwrap().reason(),
+            "SERVICE_NOT_ENABLED"
+        );
+        let credential_claim = not_enabled.replace(
+            "\"controlPlane\":\"unverified\"",
+            "\"controlPlane\":\"credential_rejected\"",
+        );
+        assert!(parse_overview(credential_claim.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn linux_service_status_unavailable_cannot_claim_ready_local_health() {
+        let unavailable = inactive_linux_sample()
+            .replace("\"serviceRegistration\":\"observed\"",
+                     "\"serviceRegistration\":\"unverified\"")
+            .replace("\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}",
+                     "\"verdict\":{\"state\":\"unverified\", \"reasonCode\":\"SERVICE_STATUS_UNAVAILABLE\"}");
+        let unavailable = unavailable.replace(
+            "\"localHealth\":\"not_ready\"",
+            "\"localHealth\":\"unverified\"",
+        );
+        assert_eq!(
+            parse_overview(unavailable.as_bytes()).unwrap().reason(),
+            "SERVICE_STATUS_UNAVAILABLE"
+        );
+        let contradictory = unavailable.replace(
+            "\"serviceRegistration\":\"unverified\"",
+            "\"serviceRegistration\":\"observed\"",
+        );
+        assert!(parse_overview(contradictory.as_bytes()).is_err());
     }
 
     #[test]

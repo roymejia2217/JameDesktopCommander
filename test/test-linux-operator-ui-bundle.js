@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, rm, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { parse } from 'yaml';
 import {
   createOperatorUiManifest, verifyOperatorUiBundle, LINUX_OPERATOR_UI_FILES,
 } from '../scripts/operator-ui-bundle.mjs';
@@ -77,6 +78,13 @@ test('Debian UI packaging uses pinned overlay provenance, desktop launcher and u
   const wf = await readFile(new URL('.github/workflows/distribution-candidate.yml', base), 'utf8');
   const native = await readFile(new URL('.github/workflows/linux-operator-ui-bundle.yml', base), 'utf8');
   const desktop = await readFile(new URL('packaging/linux/jdc-tunnel-operator.desktop', base), 'utf8');
+  const spec = parse(nfpm, { uniqueKeys: true });
+  const uiEntries = spec.contents.filter(({src}) =>
+    src?.startsWith('${JDC_OPERATOR_UI_SOURCE}/'));
+  assert.equal(uiEntries.length, 3, 'Expected binary, manifest and license source');
+  for (const item of uiEntries) {
+    assert.equal(item.expand, true, `nFPM must expand env in ${item.src}`);
+  }
   assert.match(nfpm, /JDC_OPERATOR_UI_SOURCE/);
   assert.match(nfpm, /jdc-tunnel-operator-ui/);
   assert.match(nfpm, /operator-ui-manifest\.json/);

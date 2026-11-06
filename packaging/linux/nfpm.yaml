@@ -32,10 +32,12 @@ contents:
     expand: true
   - src: ${JDC_OPERATOR_UI_SOURCE}/jdc-tunnel-operator-ui
     dst: /opt/jame-desktop-commander/jdc-tunnel-operator-ui
+    expand: true
     file_info:
       mode: 0755
   - src: ${JDC_OPERATOR_UI_SOURCE}/operator-ui-manifest.json
     dst: /opt/jame-desktop-commander/operator-ui-manifest.json
+    expand: true
   - src: ${JDC_OPERATOR_UI_SOURCE}/licenses/operator-ui/
     dst: /opt/jame-desktop-commander/licenses/operator-ui
     type: tree

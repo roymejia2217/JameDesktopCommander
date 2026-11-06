@@ -24,6 +24,9 @@ for platform-specific installable artifacts.
   `--check-installation` verifies the installed Node backend contract but is
   **not** a Wayland/X11, screen reader or keyboard usability test.
   No systemd service, daemon or post-install scripts are activated.
+  All three nFPM GUI overlay paths use per-entry `expand: true`, as required
+  for source variables in `contents[].src`; a parsed-YAML regression test
+  rejects missing expansion before an Ubuntu package build is attempted.
 - Each installer input must match the hash-inventoried candidate's source
   commit, platform and runtime entrypoint. The validation module in scripts/
   validate-installer-input.mjs is an input guard, **not** a package builder.

@@ -12,6 +12,9 @@ dist/
 **/bin/
 **/obj/
 
+# Native Rust output (never stage compiled executables)
+**/target/
+
 # IDE and editor files
 .idea/
 .vscode/

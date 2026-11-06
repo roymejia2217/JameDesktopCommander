@@ -263,3 +263,41 @@ fn file_target_name_cannot_contain_control_characters() {
     assert!(LocalFileRotation::begin(&invalid, &mut input).is_err());
     assert!(input.iter().all(|byte| *byte == 0));
 }
+
+#[test]
+fn separate_process_cannot_publish_or_recover_while_exclusive_lease_is_held() {
+    const CHILD: &str = "child_process_competing_writer_fixture";
+    let f = Fixture::new();
+    let mut first = LocalFileRotation::begin(&f.path(), &mut NEW.to_vec()).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(CHILD)
+        .arg("--nocapture")
+        .env("JDC_SYNTHETIC_ROTATION_COMPETE_FILE", f.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "A competing process must fail closed");
+    assert_eq!(fs::read(f.path()).unwrap(), OLD);
+    first.rollback().unwrap();
+    f.clean();
+}
+
+#[test]
+fn child_process_competing_writer_fixture() {
+    let Ok(path) = std::env::var("JDC_SYNTHETIC_ROTATION_COMPETE_FILE") else {
+        return;
+    };
+    let synthetic = std::path::Path::new(&path);
+    assert_eq!(synthetic.file_name().unwrap(), "runtime.key");
+    assert!(synthetic
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("jdc-local-rotation-"));
+    assert_eq!(fs::read(synthetic).unwrap(), OLD);
+    assert!(LocalFileRotation::begin(synthetic, &mut NEW.to_vec()).is_err());
+    assert!(recover_local_file(synthetic).is_err());
+    assert_eq!(fs::read(synthetic).unwrap(), OLD);
+}

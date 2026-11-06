@@ -158,8 +158,9 @@ provider. The Linux kernel/filesystem must support `RENAME_EXCHANGE` or the
 operation fails closed. The old secret inode temporarily exists under a
 private staging name until a successful commit or explicit recovery; this is
 not a durable provider-issued credential vault, and power-loss residue must
-be reconciled before any new rotation. Tests include actual child process
-exit without destructors and interruption-state reconstruction; they do
+be reconciled before any new rotation. Tests include real separate-process lock contention (no competing
+publish or recovery), actual child process exit without destructors and
+interruption-state reconstruction; they do
 **not** simulate power removal from storage hardware or prove device fsync
 honesty. A corrupted or ambiguous journal must fail closed and require
 explicit manual investigation, never guess an old or new key. Storage hardware

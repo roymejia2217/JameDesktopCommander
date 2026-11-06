@@ -390,15 +390,29 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.equal(diagnosis.diagnostics.operability.remoteRoundTrip, 'not_observed');
     assert.doesNotMatch(JSON.stringify(diagnosis), /PRIVATE_BEARER_NEVER_REPORT/);
     assert.equal(diagnosticRequests, 1);
+    const beforeOverview = calls.length;
+    const overview = await runLinuxTunnelCommand(['overview'], deps);
+    assert.equal(overview.overview.kind, 'tunnel_operator_linux_overview_v1');
+    assert.equal(overview.overview.verdict.reasonCode, 'CONTROL_PLANE_CREDENTIAL_REJECTED');
+    assert.equal(overview.overview.remoteDelivery, 'not_observed');
+    assert.equal(overview.overview.serviceRegistration, 'observed');
+    assert.doesNotMatch(JSON.stringify(overview), /PRIVATE_BEARER_NEVER_REPORT|private\/runtime\.key/i);
+    assert.equal(diagnosticRequests, 2, 'Overview uses the registered loopback diagnostic');
+    assert.ok(!calls.slice(beforeOverview).some(c => ['enable','disable','start','restart','try-restart'].includes(c[2])),
+      'Overview must never change service lifecycle');
     await writeFile(profileUrl, 'http://untrusted-host:17543/\n');
     await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
       /local HTTP endpoint/, 'Non-loopback diagnostic endpoints must deny before network I/O');
-    assert.equal(diagnosticRequests, 1);
+    assert.equal(diagnosticRequests, 2);
+    const blockedOverview = await runLinuxTunnelCommand(['overview'], deps);
+    assert.equal(blockedOverview.overview.verdict.reasonCode, 'LOCAL_DIAGNOSTICS_UNAVAILABLE');
+    assert.equal(blockedOverview.overview.remoteDelivery, 'not_observed');
+    assert.equal(diagnosticRequests, 2, 'Untrusted endpoint cannot be queried by overview');
     await writeFile(profileUrl, 'http://127.0.0.1:17543/\n');
     await chmod(profileUrl, 0o666);
     await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
       /URL file custody/, 'Unsafe permissions must reject without fetching');
-    assert.equal(diagnosticRequests, 1);
+    assert.equal(diagnosticRequests, 2);
     await chmod(profileUrl, 0o600);
     const unsafeUrl = path.join(home, 'health-forged.url');
     await writeFile(unsafeUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
@@ -406,7 +420,7 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     await symlink(unsafeUrl, profileUrl);
     await assert.rejects(runLinuxTunnelCommand(['diagnose'], deps),
       /URL file custody/, 'A symlink URL file must never select a diagnostic endpoint');
-    assert.equal(diagnosticRequests, 1);
+    assert.equal(diagnosticRequests, 2);
     await rm(profileUrl);
     await writeFile(profileUrl, 'http://127.0.0.1:17543/\n', { mode: 0o600 });
     deps.fetchFn = async () => new Response('SENSITIVE_BEARER_NEVER_REPORT', { status: 500 });

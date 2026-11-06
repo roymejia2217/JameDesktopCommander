@@ -532,14 +532,14 @@ export async function runTunnel(
     const platform = dependencies.platform ?? process.platform;
     if (platform === 'linux') {
         if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | diagnose | credential-check | uninstall; doctor|install --bundled --profile-dir <absolute> --profile <name>');
+            console.log('Linux tunnel: doctor|install --tunnel-client-bin <absolute> --profile-dir <absolute> --profile <name> | start | stop | restart | status | overview | diagnose | credential-check | uninstall; doctor|install --bundled --profile-dir <absolute> --profile <name>');
             return;
         }
         try {
             // Import only on Linux: Windows lifecycle and existing tests remain untouched.
             const { runLinuxTunnelCommand } = await import('../platform/linux/tunnel-lifecycle.js');
             const result = await runLinuxTunnelCommand(expandBundledTunnelArguments(args, platform), { platform });
-            console.log(JSON.stringify(result, null, 2));
+            console.log(JSON.stringify(result.action === 'overview' ? result.overview : result, null, 2));
             if (result.action === 'status' &&
                 (!result.status?.active || !result.status.enabled || !result.status.healthy ||
                  !result.status.controlPlanePoll)) {

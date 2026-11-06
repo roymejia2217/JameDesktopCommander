@@ -17,6 +17,7 @@ function reject(reason) {
 const SOURCE_SHA = '$' + '{{ github.event.pull_request.head.sha || github.sha }}';
 const CALLED_SHA = '$' + '{{ inputs.source_commit }}';
 const UI_STAGE = '$' + '{{ runner.temp }}' + '/jdc-operator-ui';
+const LINUX_UI_STAGE = '$' + '{{ runner.temp }}' + '/jdc-operator-ui-linux';
 const PINNED_DOWNLOAD = 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093';
 const PINNED_CHECKOUT = 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803';
 const PINNED_NODE = 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38';
@@ -52,8 +53,8 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
   const upload = steps[uploadIndex];
   if (buildIndex < 0 || uploadIndex <= buildIndex ||
       !build.run.includes('cargo +1.95.0 build --release --locked --manifest-path native/tunnel-operator-ui/Cargo.toml') ||
-      !build.run.includes('windows-operator-ui-bundle.mjs create') ||
-      !build.run.includes('windows-operator-ui-bundle.mjs verify') ||
+      !build.run.includes('operator-ui-bundle.mjs create') ||
+      !build.run.includes('operator-ui-bundle.mjs verify') ||
       /native\/(?:capability-probe|authority-service)|research_impl|receiver-test-fixture/.test(build.run)) {
     reject('native UI build must verify an exact read-only frontend inventory');
   }
@@ -74,13 +75,86 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
     step.name === 'Compile Inno Setup installer candidate');
   if (caller?.uses !== './.github/workflows/windows-operator-ui-bundle.yml' ||
       caller.with?.source_commit !== SOURCE_SHA ||
-      candidateJob?.needs !== 'windows-operator-ui' ||
+      JSON.stringify(candidateJob?.needs) !==
+        JSON.stringify(['windows-operator-ui', 'linux-operator-ui']) ||
       download?.uses !== PINNED_DOWNLOAD ||
       download.if !== "matrix.target == 'win32-x64'" ||
       download.with?.name !== conf.name ||
       download.with?.path !== UI_STAGE ||
-      !inno?.run?.includes('windows-operator-ui-bundle.mjs verify')) {
+      !inno?.run?.includes('operator-ui-bundle.mjs verify')) {
     reject('native UI download must be same-run, source-bound and verified');
+  }
+}
+
+function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
+  const input = nativeUi?.on?.workflow_call?.inputs?.source_commit;
+  if (input?.required !== true || input.type !== 'string' ||
+      Object.keys(nativeUi.permissions ?? {}).length !== 1 ||
+      nativeUi.permissions?.contents !== 'read') {
+    reject('Linux native GUI must remain a source-bound unprivileged build');
+  }
+  const job = nativeUi.jobs?.['native-gui'];
+  const steps = job?.steps;
+  if (job?.['runs-on'] !== 'ubuntu-24.04' ||
+      !Array.isArray(steps) || job.permissions !== undefined ||
+      job['continue-on-error'] !== undefined ||
+      steps.some(step => step['continue-on-error'] !== undefined)) {
+    reject('Linux native UI runner or failure handling changed');
+  }
+  const checkout = steps.find(step => step.name === 'Checkout exact native operator source');
+  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== CALLED_SHA ||
+      checkout.with?.['persist-credentials'] !== false ||
+      steps.some(step => step.uses && ![PINNED_CHECKOUT, PINNED_NODE, PINNED_UPLOAD].includes(step.uses))) {
+    reject('Linux operator source checkout or actions are untrusted');
+  }
+  const buildIndex = steps.findIndex(step =>
+    step.name === 'Build pinned Linux operator UI with official Rust toolchain');
+  const uploadIndex = steps.findIndex(step =>
+    step.name === 'Retain exact unpublished Linux GUI overlay');
+  const build = steps[buildIndex];
+  const upload = steps[uploadIndex];
+  if (buildIndex < 0 || uploadIndex <= buildIndex ||
+      !build.run.includes('test "$(git rev-parse HEAD)" = "$JDC_CANDIDATE_SOURCE_SHA"') ||
+      !build.run.includes('cargo +1.95.0 build --release --locked') ||
+      !build.run.includes('epaint_default_fonts') ||
+      !build.run.includes('foldhash') ||
+      !build.run.includes('operator-ui-bundle.mjs create') ||
+      !build.run.includes('operator-ui-bundle.mjs verify') ||
+      !build.run.includes('linux-x64') ||
+      /native\/(?:capability-probe|authority-service)|research_impl|receiver-test-fixture/.test(build.run)) {
+    reject('Linux UI must build exact source and verify closed overlay inventory');
+  }
+  const conf = upload.with;
+  if (upload.uses !== PINNED_UPLOAD ||
+      conf?.name !== 'UNPUBLISHED-jdc-operator-ui-linux-x64' ||
+      conf?.path !== LINUX_UI_STAGE + '/' ||
+      conf?.['if-no-files-found'] !== 'error' ||
+      conf?.['retention-days'] !== 1 ||
+      conf?.['compression-level'] !== 0) {
+    reject('Linux UI upload must be a narrowly reviewed one-day artifact');
+  }
+  const candidate = portable.jobs?.['portable-candidate'];
+  const caller = portable.jobs?.['linux-operator-ui'];
+  const download = candidate?.steps?.find(step =>
+    step.name === 'Download exact Linux operator UI overlay');
+  const nfpm = candidate?.steps?.find(step =>
+    step.name === 'Build nFPM Debian installer candidate');
+  const install = candidate?.steps?.find(step =>
+    step.name === 'Verify Debian install and remove');
+  if (caller?.uses !== './.github/workflows/linux-operator-ui-bundle.yml' ||
+      caller.with?.source_commit !== SOURCE_SHA ||
+      download?.uses !== PINNED_DOWNLOAD ||
+      download.if !== "matrix.target == 'linux-x64'" ||
+      download.with?.name !== conf.name ||
+      download.with?.path !== LINUX_UI_STAGE ||
+      nfpm?.env?.JDC_OPERATOR_UI_SOURCE !== LINUX_UI_STAGE ||
+      !nfpm?.run?.includes('operator-ui-bundle.mjs verify') ||
+      !nfpm?.run?.includes('linux-x64') ||
+      !install?.run?.includes('operator-ui-bundle.mjs verify-installed') ||
+      !install?.run?.includes('linux-x64') ||
+      !install?.run?.includes('--check-installation') ||
+      !install?.run?.includes('dpkg -r jame-desktop-commander')) {
+    reject('Linux overlay must be same-run, installed, checked and uninstalled');
   }
 }
 
@@ -92,7 +166,8 @@ export function validatePublicArtifactInventory(workflows) {
   const native = workflows['t011-capability-feasibility.yml'];
   const portable = workflows['distribution-candidate.yml'];
   const nativeUi = workflows['windows-operator-ui-bundle.yml'];
-  if (!native || !portable || !nativeUi) {
+  const linuxUi = workflows['linux-operator-ui-bundle.yml'];
+  if (!native || !portable || !nativeUi || !linuxUi) {
     reject('mandatory reviewed workflows missing');
   }
   // Reuse the stronger dedicated, separately tested native artifact policy.
@@ -134,8 +209,12 @@ export function validatePublicArtifactInventory(workflows) {
   const operatorUploads = uploads.filter(entry =>
     entry.workflowName === 'windows-operator-ui-bundle.yml' &&
     entry.jobName === 'native-gui');
-  if (uploads.length !== 4 || nativeUploads.length !== 1 ||
-      portableUploads.length !== 2 || operatorUploads.length !== 1) {
+  const linuxUiUploads = uploads.filter(entry =>
+    entry.workflowName === 'linux-operator-ui-bundle.yml' &&
+    entry.jobName === 'native-gui');
+  if (uploads.length !== 5 || nativeUploads.length !== 1 ||
+      portableUploads.length !== 2 || operatorUploads.length !== 1 ||
+      linuxUiUploads.length !== 1) {
     reject('unreviewed upload action or wrong workflow/job');
   }
   const candidate = portableUploads.find(entry =>
@@ -170,5 +249,6 @@ export function validatePublicArtifactInventory(workflows) {
     reject('installer upload path or retention differs from reviewed configuration');
   }
   validateOperatorUiArtifactPolicy(nativeUi, portable);
+  validateLinuxOperatorUiArtifactPolicy(linuxUi, portable);
   return true;
 }

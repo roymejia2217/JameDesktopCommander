@@ -56,11 +56,15 @@ read fails or observations conflict, the result stays unverified.
 It does not include source paths, profile names, secret references,
 raw provider errors, or a claimed remote ChatGPT MCP round trip.
 
-The Windows GUI schema is unchanged. The Rust GUI does **not** yet accept
-the Linux contract and the Linux .deb does **not** package an operator GUI.
-Linux interactive UX, accessibility, authenticated privileged controls,
-live remote acceptance, and full #150/#248 closure remain separate work.
-Never claim Linux desktop parity from the CLI observer alone.
+The Windows GUI schema is unchanged. The Rust GUI now requires the exact
+platform-bound Linux contract before presenting `serviceRegistration`; an
+incompatible Windows/Linux payload is rejected rather than coerced. The
+unpublished Linux .deb candidate includes that read-only GUI and its desktop
+entry, verified by package install/remove and headless CLI evidence tests.
+Actual Linux Wayland/X11 visual usability, screen reader accessibility, and
+independent operator authentication/privileged controls are **not proven**.
+Live remote acceptance and complete #150/#248 closure remain separate work.
+Do not infer interactive Linux parity or release approval from a .deb smoke.
 
 ## User-test milestones and required ordering
 

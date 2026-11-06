@@ -19,6 +19,10 @@ for platform-specific installable artifacts.
 - Debian amd64: **nFPM 2.48.0** reads packaging/linux/nfpm.yaml; its official
   release archive is SHA-256 pinned. An Ubuntu 24.04 runner validates the
   native package fields, package contents and dpkg install/remove cycle.
+  The .deb includes the separately verified read-only native Rust operator
+  GUI, a desktop-menu launcher and its font/hash license notices. A headless
+  `--check-installation` verifies the installed Node backend contract but is
+  **not** a Wayland/X11, screen reader or keyboard usability test.
   No systemd service, daemon or post-install scripts are activated.
 - Each installer input must match the hash-inventoried candidate's source
   commit, platform and runtime entrypoint. The validation module in scripts/

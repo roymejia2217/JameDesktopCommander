@@ -28,7 +28,7 @@ function mustReject(title, mutate) {
   });
 }
 
-test('only the four explicitly reviewed public artifact upload surfaces are allowed', () => {
+test('only the five explicitly reviewed public artifact upload surfaces are allowed', () => {
   assert.equal(validatePublicArtifactInventory(originals), true);
   const all = Object.entries(originals).flatMap(([file, data]) =>
     Object.entries(data.jobs).flatMap(([job, config]) =>
@@ -38,6 +38,7 @@ test('only the four explicitly reviewed public artifact upload surfaces are allo
   assert.deepEqual(all.sort(), [
     'distribution-candidate.yml/portable-candidate',
     'distribution-candidate.yml/portable-candidate',
+    'linux-operator-ui-bundle.yml/native-gui',
     't011-capability-feasibility.yml/native-probe',
     'windows-operator-ui-bundle.yml/native-gui',
   ]);
@@ -167,4 +168,49 @@ mustReject('reject downloaded GUI overlay from an unrelated artifact name', docs
 mustReject('reject GUI build steps that mask failures', docs => {
   operatorUi(docs).steps.find(s => s.name === 'Build pinned Windows operator UI')
     ['continue-on-error'] = true;
+});
+
+const linuxOperatorUi = docs => docs['linux-operator-ui-bundle.yml'].jobs['native-gui'];
+const linuxOperatorUpload = docs => findUpload(linuxOperatorUi(docs));
+
+mustReject('reject unreviewed Linux GUI overlay path', docs => {
+  linuxOperatorUpload(docs).with.path = '${{ runner.temp }}/';
+});
+mustReject('reject Linux GUI artifact whose identity is not source-bound', docs => {
+  linuxOperatorUpload(docs).with.name = 'UNPUBLISHED-jdc-unreviewed';
+});
+mustReject('reject Linux GUI artifact retention beyond one day', docs => {
+  linuxOperatorUpload(docs).with['retention-days'] = 7;
+});
+mustReject('reject Linux GUI artifact with unpinned upload-action', docs => {
+  linuxOperatorUpload(docs).uses = 'actions/upload-artifact@v4';
+});
+mustReject('reject Linux GUI build from unreviewed source commit', docs => {
+  linuxOperatorUi(docs).steps.find(s => s.name === 'Checkout exact native operator source')
+    .with.ref = 'main';
+});
+mustReject('reject Linux GUI build bypassing hashed staging inventory', docs => {
+  linuxOperatorUi(docs).steps.find(s =>
+    s.name === 'Build pinned Linux operator UI with official Rust toolchain')
+    .run = 'cargo +1.95.0 build --release --locked';
+});
+mustReject('reject Linux GUI build allowing job-level privilege escalation', docs => {
+  docs['linux-operator-ui-bundle.yml'].permissions = { contents: 'write' };
+});
+mustReject('reject unrelated external action in Linux GUI build', docs => {
+  linuxOperatorUi(docs).steps.push({
+    uses: 'actions/upload-artifact@v4',
+    with: { name: 'outside', path: 'native/authority-service/target/' },
+  });
+});
+mustReject('reject Linux GUI candidate without same-run build dependency', docs => {
+  candidate(docs).needs = ['windows-operator-ui'];
+});
+mustReject('reject Linux GUI downloaded under unapproved artifact name', docs => {
+  candidate(docs).steps.find(s => s.name === 'Download exact Linux operator UI overlay')
+    .with.name = 'UNPUBLISHED-wrong-source';
+});
+mustReject('reject Linux candidate that skips installed hash verification', docs => {
+  candidate(docs).steps.find(s => s.name === 'Verify Debian install and remove')
+    .run = 'sudo dpkg -i candidate.deb && sudo dpkg -r jame-desktop-commander';
 });

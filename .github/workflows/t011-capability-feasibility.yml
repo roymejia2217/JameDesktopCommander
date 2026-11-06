@@ -63,6 +63,16 @@ jobs:
       - name: Check SQLite epoch backend without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-store/Cargo.toml -- -D warnings
 
+      # Disposable local-file fixtures only. Never execute on a workstation,
+      # service, real installed tunnel, or real provider credential.
+      - name: Prove Linux native staged file exchange and crash recovery
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 test --locked --manifest-path native/tunnel-local-rotation/Cargo.toml
+
+      - name: Deny warnings in native Linux local rotation crate
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/tunnel-local-rotation/Cargo.toml -- -D warnings
+
       - name: Install checksum-verified native cargo-deny for Windows and Linux
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
@@ -78,6 +88,10 @@ jobs:
 
       - name: Audit isolated SQLite epoch dependencies under native policy
         run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/authority-store/Cargo.toml check advisories licenses sources
+
+      - name: Audit locked native local rotation dependencies
+        if: matrix.target == 'linux-x64'
+        run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/tunnel-local-rotation/Cargo.toml check advisories licenses sources
 
       # This Linux-only proof lives inside the already governed native job.
       # It modifies only the ephemeral GitHub-hosted runner.

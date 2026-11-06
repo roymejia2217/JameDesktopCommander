@@ -101,6 +101,35 @@ export function buildLinuxTunnelUnit(executable: string, profileDir: string, pro
   ].join('\n');
 }
 
+/**
+ * Pure, secret-free inspection of the USER systemd manager environment.
+ * Official tunnel-client uses flags > environment > YAML. A registered
+ * file: reference is NOT the effective runtime key if an inherited direct
+ * API key is set in the user manager; even empty assignments are ambiguous.
+ * This is point-in-time only and NEVER permission to rotate a key.
+ */
+export function inspectLinuxManagerRuntimeKeyEnvironment(value: unknown):
+  'no_override_observed' | 'override_present' | 'unverified' {
+  if (typeof value !== 'string' || value.length > 65_536) return 'unverified';
+  const lines = value.replace(/\r\n/g, '\n');
+  if (/\r|[\u0000-\u0009\u000b-\u001f\u007f]/.test(lines)) return 'unverified';
+  const items = lines.endsWith('\n') ? lines.slice(0, -1).split('\n') : lines.split('\n');
+  if (items.length === 1 && items[0] === '') return 'no_override_observed';
+  const names = new Set<string>();
+  let override = false;
+  for (const line of items) {
+    const idx = line.indexOf('=');
+    const name = line.slice(0, idx);
+    if (idx <= 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
+        names.has(name)) return 'unverified';
+    names.add(name);
+    if (name === 'CONTROL_PLANE_API_KEY' || name === 'OPENAI_API_KEY') {
+      override = true;
+    }
+  }
+  return override ? 'override_present' : 'no_override_observed';
+}
+
 // Point-in-time custody check against different-UID path mutation. All
 // executable launches use the canonical path, never the original symlink.
 // This cannot prevent same-UID replacement or a race before systemd exec;
@@ -529,7 +558,7 @@ export async function runLinuxTunnelCommand(
     throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, diagnose, credential-check and uninstall.');
   }
   // Do not mutate files when the user manager or DBus session is absent.
-  await systemctl(['show-environment']);
+  const managerEnvironment = await systemctl(['show-environment']);
   const unit = LINUX_TUNNEL_UNIT;
   if (action === 'install' || action === 'doctor') {
     const parsed = parseOptions(options);
@@ -594,6 +623,11 @@ export async function runLinuxTunnelCommand(
       if (!registration) throw new Error('Linux tunnel registration unavailable.');
       const observed = await selectedRegisteredHealthUrlFile(registration, run);
       if (observed.credentialSource === 'file_reference') {
+        if (inspectLinuxManagerRuntimeKeyEnvironment(managerEnvironment) !==
+            'no_override_observed') {
+          // Never echo the actual manager environment or its secret values.
+          throw new Error('Linux tunnel effective credential source cannot be verified.');
+        }
         if (!observed.credentialFile) {
           throw new Error('Linux tunnel file credential reference is unsupported.');
         }

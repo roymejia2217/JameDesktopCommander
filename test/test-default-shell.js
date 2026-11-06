@@ -9,9 +9,11 @@
  */
 
 import { configManager } from '../dist/config-manager.js';
-import { startProcess, forceTerminate } from '../dist/tools/improved-process-tools.js';
+import { startProcess, readProcessOutput, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
 import os from 'os';
+import path from 'node:path';
+import { after, before, test } from 'node:test';
 
 // We need a wrapper because startProcess in tools/improved-process-tools.js returns a ServerResult
 // but our tests expect to receive the actual command result
@@ -28,41 +30,38 @@ async function executeCommand(command, timeout_ms = 2000, shell = null) {
   return await startProcess(args);
 }
 
+async function runCommandToExit(command, initialTimeoutMs = 2000, shell = null) {
+  const started = await executeCommand(command, initialTimeoutMs, shell);
+  const initial = started.content?.[0]?.text ?? '';
+  assert.notEqual(started.isError, true, initial);
+  const match = initial.match(/Process started with PID (\d+)/);
+  assert.ok(match, `start_process did not return a PID: ${initial}`);
+  const pid = Number(match[1]);
+  const result = await readProcessOutput({
+    pid, timeout_ms: 15000, wait_for: 'exit', offset: -20, length: 20,
+  });
+  const text = result.content?.[0]?.text ?? '';
+  assert.notEqual(result.isError, true, text);
+  if (!/Process completed with exit code \d+/.test(text)) {
+    await forceTerminate({ pid });
+    throw new Error(`Shell command did not finish within the deadline: ${text}`);
+  }
+  return result;
+}
+
 /**
  * Check if a shell is available on the system
  */
 async function isShellAvailable(shellPath) {
-  try {
-    // For Windows shells, use different detection methods
-    if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
-      // On Windows, cmd should always be available
-      if (os.platform() === 'win32') {
-        return true;
-      }
-      return false;
-    }
-    
-    if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      // Check if PowerShell is available
-      try {
-        const result = await executeCommand(`${shellPath} -Command "Get-Host"`, 2000);
-        return result.content && result.content[0] && !result.content[0].text.includes('not found');
-      } catch (error) {
-        return false;
-      }
-    }
-    
-    // For Unix shells, check if the file exists and is executable
-    try {
-      const result = await executeCommand(`test -x "${shellPath}" && echo "available"`, 2000);
-      return result.content && result.content[0] && result.content[0].text.includes('available');
-    } catch (error) {
-      return false;
-    }
-  } catch (error) {
-    console.log(`Could not check availability of ${shellPath}: ${error.message}`);
-    return false;
-  }
+  if (shellPath === 'cmd' || shellPath === 'cmd.exe') return os.platform() === 'win32';
+  const powershell = shellPath === 'pwsh' || shellPath === 'powershell';
+  const command = powershell
+    ? `${shellPath} -NoProfile -Command "Get-Host"`
+    : `test -x "${shellPath}" && echo "available"`;
+  const result = await runCommandToExit(command);
+  const text = result.content?.[0]?.text ?? '';
+  return /Process completed with exit code 0/.test(text)
+    && (powershell || text.includes('available'));
 }
 
 /**
@@ -78,9 +77,9 @@ function getExpectedShellOutput(shellPath) {
     case 'cmd.exe':
       return ['cmd', 'cmd.exe'];
     case 'pwsh':
-      return ['pwsh'];
+      return ['Core'];
     case 'powershell':
-      return ['powershell'];
+      return ['Desktop'];
     default:
       return [shellPath];
   }
@@ -91,31 +90,29 @@ function getExpectedShellOutput(shellPath) {
  */
 async function getShellFromCommand(shellPath = null) {
   try {
-    let command = 'echo $0';
+    let command = 'printf \'JDC_SHELL_VALUE:%s\\n\' "$0"';
     
     // Use different commands for Windows shells
     if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
-      command = 'echo %0';
+      command = 'echo JDC_SHELL_VALUE:%ComSpec%';
     } else if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      command = 'Write-Host $MyInvocation.MyCommand.Name';
+      command = "Write-Output ('JDC_SHELL_VALUE:' + $PSVersionTable.PSEdition)";
     }
     
-    const result = await executeCommand(command, 2000);
+    const result = await runCommandToExit(command);
     
     // Extract shell name from the result
     if (result.content && result.content[0] && result.content[0].text) {
       const output = result.content[0].text;
-      // Look for the shell name in the output, handling both PID line and actual output
-      const lines = output.split('\n').filter(line => line.trim() !== '');
-      
-      // Find the line that contains the actual shell output (not the PID line, Command started, or Initial output)
-      for (const line of lines) {
-        if (!line.includes('PID') && 
-            !line.includes('Command started') && 
-            !line.includes('Initial output:') &&
-            line.trim() !== '') {
-          return line.trim();
-        }
+      assert.match(output, /Process completed with exit code 0/);
+      const match = output.match(/^JDC_SHELL_VALUE:([^\r\n]+)\r?$/m);
+      if (match) {
+        const value = match[1].trim();
+        // CMD expands %ComSpec% to the executable path; unlike %0 this also
+        // works when the command is launched with /c rather than a batch file.
+        return shellPath === 'cmd' || shellPath === 'cmd.exe'
+          ? path.win32.basename(value).toLowerCase()
+          : value;
       }
     }
     
@@ -153,13 +150,13 @@ async function teardown(originalConfig) {
 /**
  * Test setting defaultShell to /bin/sh
  */
-async function testDefaultShellSh() {
+async function testDefaultShellSh(t) {
   console.log('\nTest 1: Setting defaultShell to /bin/sh');
   
   // Check if /bin/sh is available
   const isAvailable = await isShellAvailable('/bin/sh');
   if (!isAvailable) {
-    console.log('⚠️  Skipping /bin/sh test: shell not available on this system');
+    t.skip('/bin/sh is unavailable');
     return;
   }
   
@@ -185,13 +182,13 @@ async function testDefaultShellSh() {
 /**
  * Test setting defaultShell to bash  
  */
-async function testDefaultShellBash() {
+async function testDefaultShellBash(t) {
   console.log('\nTest 2: Setting defaultShell to /bin/bash');
   
   // Check if /bin/bash is available
   const isAvailable = await isShellAvailable('/bin/bash');
   if (!isAvailable) {
-    console.log('⚠️  Skipping /bin/bash test: shell not available on this system');
+    t.skip('/bin/bash is unavailable');
     return;
   }
   
@@ -217,13 +214,13 @@ async function testDefaultShellBash() {
 /**
  * Test setting defaultShell to cmd (Windows Command Prompt)
  */
-async function testDefaultShellCmd() {
+async function testDefaultShellCmd(t) {
   console.log('\nTest 3: Setting defaultShell to cmd');
   
   // Check if cmd is available (Windows only)
   const isAvailable = await isShellAvailable('cmd');
   if (!isAvailable) {
-    console.log('⚠️  Skipping cmd test: shell not available on this system (likely not Windows)');
+    t.skip('cmd is unavailable');
     return;
   }
   
@@ -249,13 +246,13 @@ async function testDefaultShellCmd() {
 /**
  * Test setting defaultShell to pwsh (PowerShell Core)
  */
-async function testDefaultShellPwsh() {
+async function testDefaultShellPwsh(t) {
   console.log('\nTest 4: Setting defaultShell to pwsh');
   
   // Check if pwsh is available
   const isAvailable = await isShellAvailable('pwsh');
   if (!isAvailable) {
-    console.log('⚠️  Skipping pwsh test: PowerShell Core not available on this system');
+    t.skip('PowerShell Core is unavailable');
     return;
   }
   
@@ -280,7 +277,7 @@ async function testDefaultShellPwsh() {
 /**
  * Test switching between different shells
  */
-async function testShellSwitching() {
+async function testShellSwitching(t) {
   console.log('\nTest 5: Testing shell switching');
   
   // Get available shells for switching test
@@ -291,7 +288,7 @@ async function testShellSwitching() {
   if (await isShellAvailable('pwsh')) availableShells.push('pwsh');
   
   if (availableShells.length < 2) {
-    console.log('⚠️  Skipping shell switching test: need at least 2 available shells');
+    t.skip('at least two shells are required');
     return;
   }
   
@@ -331,7 +328,7 @@ async function testShellSwitching() {
 /**
  * Test that configuration changes persist
  */
-async function testConfigurationPersistence() {
+async function testConfigurationPersistence(t) {
   console.log('\nTest 6: Testing configuration persistence');
   
   // Find an available shell for testing
@@ -344,7 +341,7 @@ async function testConfigurationPersistence() {
     } else if (await isShellAvailable('pwsh')) {
       testShell = 'pwsh';
     } else {
-      console.log('⚠️  Skipping persistence test: no available shells found');
+      t.skip('no supported shell is available');
       return;
     }
   }
@@ -364,56 +361,26 @@ async function testConfigurationPersistence() {
   console.log('✓ Test 6 passed: configuration persistence works correctly');
 }
 
-/**
- * Main test function
- */
-async function runDefaultShellTests() {
-  console.log('=== defaultShell Configuration Tests ===\n');
-  console.log(`Platform: ${os.platform()}`);
-  
-  // Test 1: Setting defaultShell to /bin/sh
-  await testDefaultShellSh();
-  
-  // Test 2: Setting defaultShell to /bin/bash
-  await testDefaultShellBash();
-  
-  // Test 3: Setting defaultShell to cmd (Windows)
-  await testDefaultShellCmd();
-  
-  // Test 4: Setting defaultShell to pwsh (PowerShell Core)
-  await testDefaultShellPwsh();
-  
-  // Test 5: Testing shell switching
-  await testShellSwitching();
-  
-  // Test 6: Testing configuration persistence
-  await testConfigurationPersistence();
-  
-  console.log('\n✅ All defaultShell tests completed!');
-}
+let originalConfig;
+before(async () => { originalConfig = await setup(); });
+after(async () => { if (originalConfig) await teardown(originalConfig); });
 
-// Export the main test function
-export default async function runTests() {
-  let originalConfig;
-  try {
-    originalConfig = await setup();
-    await runDefaultShellTests();
-  } catch (error) {
-    console.error('❌ Test failed:', error.message);
-    console.error('Full error:', error);
-    return false;
-  } finally {
-    if (originalConfig) {
-      await teardown(originalConfig);
-    }
-  }
-  return true;
-}
-
-// If this file is run directly (not imported), execute the test
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runTests().catch(error => {
-    console.error('❌ Unhandled error:', error);
-    process.exit(1);
-  });
-}
+test('default shell selects /bin/sh', testDefaultShellSh);
+test('default shell selects /bin/bash', testDefaultShellBash);
+test('default shell selects cmd', testDefaultShellCmd);
+test('default shell selects PowerShell Core', testDefaultShellPwsh);
+test('default shell switching changes the executing shell', testShellSwitching);
+test('default shell configuration persists', testConfigurationPersistence);
+test('delayed shell output is read after the process exits', async () => {
+  const shell = os.platform() === 'win32' ? 'cmd.exe' : '/bin/sh';
+  // Native shell commands avoid nested executable quoting on Windows hosts
+  // where Node is installed beneath a path containing spaces.
+  const command = os.platform() === 'win32'
+    ? 'ping -n 2 127.0.0.1 >nul && echo JDC_DELAYED_SHELL_MARKER'
+    : "sleep 1 && printf 'JDC_DELAYED_SHELL_MARKER\\n'";
+  const result = await runCommandToExit(command, 20, shell);
+  const output = result.content?.[0]?.text ?? '';
+  assert.notEqual(result.isError, true, output);
+  assert.match(output, /Process completed with exit code 0/);
+  assert.match(output, /JDC_DELAYED_SHELL_MARKER/);
+});

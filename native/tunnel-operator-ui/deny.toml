@@ -1,0 +1,33 @@
+# Scope-specific strict supply-chain policy for the native operator GUI.
+# Keep advisory denials strict. Do NOT ignore unmaintained dependencies.
+# Exceptions apply only to reviewed exact crate versions and license identities.
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.8
+
+# The egui 0.37 bundled default typefaces are redistributed with OFL and
+# Ubuntu Font License terms in addition to MIT/Apache for code.
+# Packaging MUST include the corresponding font license notices.
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+version = "=0.37.0"
+allow = ["MIT", "Apache-2.0", "OFL-1.1", "Ubuntu-font-1.0"]
+
+# Exact Zlib-licensed hash dependency used by locked egui/WGPU graph.
+[[licenses.exceptions]]
+name = "foldhash"
+version = "=0.2.0"
+allow = ["Zlib"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

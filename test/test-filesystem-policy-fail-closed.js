@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configManager, ConfigManager } from '../dist/config-manager.js';
@@ -80,4 +80,46 @@ test('failed config watcher reload invalidates the previously accepted allowlist
       await assert.rejects(manager.getAllowedDirectoriesForFilesystem(), /authorization policy unavailable/i);
     } finally { await manager.close(); }
   });
+});
+
+// A configured slash root is a restriction, not an all-volume grant.
+test('configured slash root does not authorize an unrelated Windows volume', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows drive namespaces only');
+    return;
+  }
+  const selectedRoot = await realpath('/');
+  let otherRoot;
+  for (const candidate of ['C:\\', 'D:\\', 'E:\\']) {
+    if (candidate.slice(0, 2).toLowerCase() === selectedRoot.slice(0, 2).toLowerCase()) continue;
+    try {
+      otherRoot = await realpath(candidate);
+      break;
+    } catch {
+      // A nonexistent drive cannot prove cross-volume authorization.
+    }
+  }
+  if (!otherRoot) {
+    t.skip('Requires a second actual Windows volume');
+    return;
+  }
+  const original = configManager.getAllowedDirectoriesForFilesystem;
+  try {
+    for (const policy of [['/'], ['/', selectedRoot]]) {
+      configManager.getAllowedDirectoriesForFilesystem = async () => policy;
+      await assert.doesNotReject(validatePath(selectedRoot),
+        'current volume remains accessible');
+      await assert.rejects(validatePath(otherRoot), /Path not allowed/,
+        'a slash root must not authorize unrelated volumes');
+    }
+    configManager.getAllowedDirectoriesForFilesystem = async () => ['/', otherRoot];
+    await assert.doesNotReject(validatePath(otherRoot),
+      'an explicitly selected second volume must remain accessible');
+    configManager.getAllowedDirectoriesForFilesystem = async () => [];
+    await assert.doesNotReject(validatePath(otherRoot),
+      'the intentional empty unrestricted policy remains unchanged');
+  } finally {
+    if (original === undefined) delete configManager.getAllowedDirectoriesForFilesystem;
+    else configManager.getAllowedDirectoriesForFilesystem = original;
+  }
 });

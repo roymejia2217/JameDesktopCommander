@@ -32,6 +32,10 @@ import {
     type TunnelFunctionalDiagnostics,
 } from '../platform/windows/tunnel-functional-diagnostics.js';
 import {
+    projectWindowsOperatorOverview,
+    type TunnelOperatorOverviewV1,
+} from '../platform/tunnel-operator-overview.js';
+import {
     readWindowsTunnelTaskEvents,
     type WindowsTunnelTaskEvents,
 } from '../platform/windows/tunnel-task-events.js';
@@ -86,6 +90,11 @@ export type WindowsTunnelCommandResult =
         action: 'status';
         taskName: string;
         status: WindowsTunnelStatus;
+    }
+    | {
+        action: 'overview';
+        taskName: string;
+        overview: TunnelOperatorOverviewV1;
     }
     | {
         action: 'diagnose';
@@ -395,6 +404,27 @@ export async function runWindowsTunnelCommand(
                     DEFAULT_WINDOWS_TUNNEL_RESTART_SUPERVISOR_TASK_NAME,
             };
         }
+        case 'overview': {
+            if (actionArgs.length > 0) {
+                throw new Error('Tunnel overview does not accept additional arguments.');
+            }
+            let status: WindowsTunnelStatus | null = null;
+            try {
+                status = await deps.statusTunnel(taskName);
+            } catch {
+                // OS diagnostic text may contain private paths or profile data.
+            }
+            let diagnostic: TunnelFunctionalDiagnostics | null = null;
+            if (status) {
+                try {
+                    diagnostic = await deps.diagnoseLocal(status.health.baseUrl);
+                } catch {
+                    // Unknown is safer than exposing untrusted provider responses.
+                }
+            }
+            return { action, taskName,
+                overview: projectWindowsOperatorOverview(status, diagnostic) };
+        }
         case 'status': {
             if (actionArgs.length > 0) {
                 throw new Error('Tunnel status does not accept additional arguments.');
@@ -461,6 +491,8 @@ export function formatWindowsTunnelCommandResult(
             return `Uninstalled Windows tunnel task "${result.taskName}".`;
         case 'status':
             return JSON.stringify(result.status, null, 2);
+        case 'overview':
+            return JSON.stringify(result.overview, null, 2);
         case 'diagnose':
             return JSON.stringify(result.diagnostics, null, 2);
         case 'events':
@@ -477,6 +509,7 @@ Usage:
   desktop-commander tunnel stop
   desktop-commander tunnel restart
   desktop-commander tunnel status
+  desktop-commander tunnel overview
   desktop-commander tunnel diagnose
   desktop-commander tunnel events
   desktop-commander tunnel uninstall

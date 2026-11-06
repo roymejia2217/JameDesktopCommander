@@ -96,3 +96,27 @@ unregistered, and the development process was terminated without touching
 the installed production tunnel. This is **not** proof of complete keyboard
 navigation, screen reader interaction, safe credential rotation, remote MCP
 round trip, installable packaging or Linux parity. Those remain release gates.
+
+### Dependency and font-license acceptance checkpoint
+
+The first exact-SHA GitHub Windows/Linux supply-chain audits failed legitimately:
+`epaint_default_fonts 0.37.0` combines MIT/Apache code with OFL-1.1 and
+Ubuntu-font-1.0 font licenses; `foldhash 0.2.0` uses Zlib; this local crate
+initially lacked the repository's MIT license declaration. These are
+corrected with the root MIT declaration and a **crate-local exact-version**
+`deny.toml` covering the actual allowed license terms; the repository's
+existing global/native policy remains unchanged. Future installers **MUST**
+carry the precise default-font license notices, verified with the installed
+bundle. A source-only binary CI success is not distribution-law acceptance.
+
+October 2026 RustSec notices RUSTSEC-2026-0370/0371/0372 mark pre-zbus-6
+`zvariant`, `zbus_names`, `zvariant_derive` unmaintained, introduced through
+Linux AccessKit/AT-SPI. To avoid ignoring these notices, Linux native UI
+builds currently **do not enable the accesskit feature**; Windows still does,
+and real Windows UI Automation proved its accessibility tree exists. The
+Linux screen-reader milestone remains **BLOCKED** until the vetted upstream
+AT-SPI adapter migrates to zbus 6 (or an independently security-reviewed
+supported alternative). Do not advertise Linux assistive-technology support.
+Each GitHub CI runner audits its own exact target graph without suppressing
+vulnerability or unmaintained advisories; cross-target Cargo.lock entries
+must not be mistaken for shipped libraries. No `advisories.ignore` entries.

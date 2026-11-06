@@ -25,8 +25,10 @@ jobs:
         include:
           - runner: windows-2025
             target: win32-x64
+            cargo_target: x86_64-pc-windows-msvc
           - runner: ubuntu-24.04
             target: linux-x64
+            cargo_target: x86_64-unknown-linux-gnu
     steps:
       - name: Checkout exact source, without credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -69,7 +71,10 @@ jobs:
           fallback: none
 
       - name: Audit locked advisories, licenses and registry provenance
-        run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/tunnel-operator-ui/Cargo.toml check advisories licenses sources
+        # Audit each actual shipping target separately. Cross-target feature
+        # unification would otherwise scan Linux AT-SPI packages that are
+        # deliberately absent in this Windows-accessible/Linux-headless slice.
+        run: cargo deny --locked --target ${{ matrix.cargo_target }} --config native/tunnel-operator-ui/deny.toml --manifest-path native/tunnel-operator-ui/Cargo.toml check advisories licenses sources
 
       # A headless CI runner cannot validate visible window interaction.
       # This job is only source, native build, contracts and dependency evidence.

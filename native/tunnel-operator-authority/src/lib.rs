@@ -92,3 +92,6 @@ pub fn observe_private_file_custody(
 ) -> Result<FileCustodyEvidence, FileCustodyDenied> {
     file_custody::observe(fixture_root, relative_file)
 }
+
+#[cfg(windows)]
+mod relative_sd;

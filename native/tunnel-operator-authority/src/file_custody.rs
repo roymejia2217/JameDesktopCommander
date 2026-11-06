@@ -14,8 +14,10 @@ use windows_sys::Win32::{
     Foundation::{LocalFree, ERROR_SUCCESS, HANDLE},
     Security::{
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-        GetAce, IsValidSid, IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        CreateWellKnownSid, GetSecurityDescriptorControl, GetSecurityDescriptorLength,
+        IsValidSecurityDescriptor, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SE_SELF_RELATIVE,
+        WELL_KNOWN_SID_TYPE,
     },
     Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
@@ -23,10 +25,6 @@ use windows_sys::Win32::{
         FILE_SHARE_READ, FILE_SHARE_WRITE,
     },
 };
-// Standard ACCESS_ALLOWED_ACE_TYPE and ACCESS_DENIED_ACE_TYPE values (WinNT.h).
-const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-const ACCESS_DENIED_ACE_TYPE: u8 = 1;
-
 fn denied() -> FileCustodyDenied {
     FileCustodyDenied::Unverifiable
 }
@@ -91,84 +89,72 @@ fn open_metadata(path: &Path, directory: bool) -> Result<File, FileCustodyDenied
     Ok(file)
 }
 
-fn sid_allowed(sid: *mut c_void, token_user: &[u8]) -> bool {
-    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
-        return false;
+fn known_windows_sid(kind: WELL_KNOWN_SID_TYPE) -> Result<Vec<u8>, FileCustodyDenied> {
+    let mut buffer = [0u8; 256];
+    let mut received = buffer.len() as u32;
+    // SAFETY: CreateWellKnownSid writes at most the caller-provided buffer size.
+    if unsafe {
+        CreateWellKnownSid(
+            kind,
+            ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut received,
+        )
+    } == 0
+        || !(12..=256).contains(&received)
+    {
+        return Err(denied());
     }
-    // SAFETY: Windows validated the SID and the kernel-supplied byte count.
-    let size = unsafe { windows_sys::Win32::Security::GetLengthSid(sid) } as usize;
-    if !(12..=256).contains(&size) {
-        return false;
+    let sid = &buffer[..received as usize];
+    if !crate::windows::valid_sid_bytes(sid) {
+        return Err(denied());
     }
-    let bytes = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), size) };
-    bytes == token_user
-        || unsafe {
-            IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-        }
+    Ok(sid.to_vec())
 }
+
 fn private_owner_and_dacl(file: &File, token_user: &[u8]) -> Result<(), FileCustodyDenied> {
-    let (mut owner, mut dacl, mut sd) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-    // SAFETY: all outputs are writable; security descriptor is LocalFree-owned.
-    // Security is fetched from the already-opened handle, not a second path.
+    let mut sd: *mut c_void = ptr::null_mut();
+    // SAFETY: all requested fields are returned in one LocalFree-owned descriptor.
+    // Use the already-opened file handle, not another pathname lookup.
     let result = unsafe {
         GetSecurityInfo(
             file.as_raw_handle() as HANDLE,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
             ptr::null_mut(),
-            &mut dacl,
+            ptr::null_mut(),
+            ptr::null_mut(),
             ptr::null_mut(),
             &mut sd,
         )
     };
     let _descriptor = OwnedSecurityDescriptor(sd);
-    if result != ERROR_SUCCESS || sd.is_null() || dacl.is_null() || !sid_allowed(owner, token_user)
+    if result != ERROR_SUCCESS || sd.is_null() {
+        return Err(denied());
+    }
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    // SAFETY: GetSecurityInfo owns a live descriptor until _descriptor drops.
+    if unsafe { IsValidSecurityDescriptor(sd) } == 0
+        || unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0
+        || control & SE_SELF_RELATIVE == 0
     {
         return Err(denied());
     }
-
-    // Fail closed on absent/null or oversized ACLs, including exotic ACEs.
-    let acl: &ACL = unsafe { &*dacl };
-    if (acl.AclSize as usize) < mem::size_of::<ACL>() || acl.AclSize > 8192 || acl.AceCount > 64 {
+    // The Windows API determines the exact allocation length. Refuse oversized
+    // results before copying; the copied descriptor is parsed with safe slices.
+    let length = unsafe { GetSecurityDescriptorLength(sd) } as usize;
+    if !(20..=32768).contains(&length) {
         return Err(denied());
     }
-    for i in 0..u32::from(acl.AceCount) {
-        let mut ace: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut ace) } == 0 || ace.is_null() {
-            return Err(denied());
-        }
-        let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
-        if header.AceSize < mem::size_of::<ACE_HEADER>() as u16 || header.AceSize > acl.AclSize {
-            return Err(denied());
-        }
-        let is_allow = match header.AceType {
-            ACCESS_ALLOWED_ACE_TYPE => true,
-            ACCESS_DENIED_ACE_TYPE => false,
-            _ => return Err(denied()),
-        };
-        let offset = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        let ace_len = header.AceSize as usize;
-        if ace_len < offset + 12 || ace_len > 8192 {
-            return Err(denied());
-        }
-        let raw = unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), ace_len) };
-        let sid_tail = &raw[offset..];
-        if sid_tail[0] != 1 || !(1..=15).contains(&sid_tail[1]) {
-            return Err(denied());
-        }
-        let sid_len = 8 + usize::from(sid_tail[1]) * 4;
-        if sid_len > sid_tail.len() {
-            return Err(denied());
-        }
-        let sid = unsafe { ace.cast::<u8>().add(offset).cast::<c_void>() };
-        if unsafe { IsValidSid(sid) } == 0 {
-            return Err(denied());
-        }
-        if is_allow && !sid_allowed(sid, token_user) {
-            return Err(denied());
-        }
+    let mut owned = vec![0u8; length];
+    // SAFETY: Windows validated the live self-relative descriptor, and the
+    // bounded GetSecurityDescriptorLength result defines the source range.
+    unsafe { ptr::copy_nonoverlapping(sd.cast::<u8>(), owned.as_mut_ptr(), length) };
+    let system = known_windows_sid(WinLocalSystemSid)?;
+    let administrators = known_windows_sid(WinBuiltinAdministratorsSid)?;
+    if !crate::relative_sd::private_acl(&owned, token_user, &system, &administrators) {
+        return Err(denied());
     }
     Ok(())
 }

@@ -83,3 +83,25 @@ service control, broad path IPC or rotation is connected to this module.
 **Increment verdict:** native metadata observation only; #270 T1 remains
 in progress and the product stays release-ineligible. Hosted Windows/Linux
 CI and independent security review must pass before integrating this slice.
+
+## PR #272 CodeQL pointer-safety remediation (non-operational)
+
+The first PR #272 source commit `2fe2bdf70026987b24ef191bc9cf0969211a9a44`
+failed the GitHub Advanced Security CodeQL check with **two HIGH**
+`rust/access-invalid-pointer` findings at direct ACL/ACE pointer reads.
+The PR remains Draft and merge-blocked while reviewed remediation is tested.
+
+The revised Win32 path requests only the live file-handle security descriptor,
+validates it with supported Windows security-descriptor APIs, enforces a
+bounded self-relative length, copies that allocation while the `LocalFree`
+owner remains alive, and parses the **owned bytes** with checked Rust slices.
+No raw ACL/ACE pointer, count or SID offset from an unchecked structure is
+used for memory dereferencing. The parser rejects malformed lengths, offsets,
+null DACLs, unknown ACE types, unexpected owner/ALLOW SIDs and overlap.
+Well-known System and Administrators SIDs come from `CreateWellKnownSid`.
+
+Local Rust unit and genuine NTFS fixture regression tests are necessary but
+not sufficient: **do not close the two HIGH alerts** unless the new commit's
+GitHub Advanced Security result is independently verified. The initial
+historical alerts remain evidence, not a disposition or suppression.
+No installed credentials are read or written, and no operator is authorized.

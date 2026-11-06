@@ -77,6 +77,14 @@ test('missing control-plane poll cannot promote local diagnostics into successfu
   assert.equal(overview.verdict.state, 'unverified');
 });
 
+test('healthy local diagnostics contradict an unhealthy client with a verified poll', () => {
+  const overview = projectLinuxOperatorOverview({
+    ...status, healthy: false, controlPlanePoll: true,
+  }, { ...diagnostics, controlPlaneProblem: 'none' }, now);
+  assert.equal(overview.verdict.reasonCode, 'LOCAL_EVIDENCE_CONFLICT');
+  assert.equal(overview.localHealth, 'unverified');
+});
+
 test('Linux overview rejects extra options without mutating service', async () => {
   const commands = [];
   const deps = { platform: 'linux', uid: () => 1000, home: '/tmp',

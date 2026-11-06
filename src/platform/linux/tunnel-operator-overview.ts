@@ -65,6 +65,8 @@ export function projectLinuxOperatorOverview(
       !allowedPlane.includes(diagnostic.controlPlaneProblem) ||
       ![true, false, null].includes(diagnostic.mcpInitializeObserved) ||
       (status.healthy && diagnostic.localHealth !== 'ready') ||
+      (status.controlPlanePoll && !status.healthy &&
+       diagnostic.localHealth === 'ready' && diagnostic.controlPlaneProblem === 'none') ||
       (diagnostic.toolDiscovery === 'observed_complete' &&
        diagnostic.mcpInitializeObserved !== true)) {
     return unavailable(observedAt, 'LOCAL_EVIDENCE_CONFLICT', 'observed');

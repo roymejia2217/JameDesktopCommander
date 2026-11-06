@@ -1,0 +1,11 @@
+[package]
+name = "tunnel-operator-authority"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_Threading"] }
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }

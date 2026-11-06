@@ -63,6 +63,16 @@ jobs:
       - name: Check SQLite epoch backend without compiler warnings
         run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/authority-store/Cargo.toml -- -D warnings
 
+      # Non-shipping Windows operator identity observation. SID equality is
+      # not interactive consent, credential custody, or permission to rotate.
+      - name: Verify read-only Windows operator identity and Task Scheduler evidence
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --manifest-path native/tunnel-operator-authority/Cargo.toml
+
+      - name: Check Windows operator preflight without warnings
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 clippy --locked --all-targets --manifest-path native/tunnel-operator-authority/Cargo.toml -- -D warnings
+
       # Disposable local-file fixtures only. Never execute on a workstation,
       # service, real installed tunnel, or real provider credential.
       - name: Prove Linux native staged file exchange and crash recovery
@@ -92,6 +102,10 @@ jobs:
       - name: Audit locked native local rotation dependencies
         if: matrix.target == 'linux-x64'
         run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/tunnel-local-rotation/Cargo.toml check advisories licenses sources
+
+      - name: Audit locked Windows operator preflight dependencies
+        if: matrix.target == 'win32-x64'
+        run: cargo deny --config native/capability-probe/deny.toml --manifest-path native/tunnel-operator-authority/Cargo.toml check advisories licenses sources
 
       # This Linux-only proof lives inside the already governed native job.
       # It modifies only the ephemeral GitHub-hosted runner.

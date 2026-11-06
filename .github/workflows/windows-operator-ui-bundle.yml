@@ -67,9 +67,9 @@ jobs:
           $foldDst = Join-Path $stage 'licenses/operator-ui/foldhash-0.2.0'
           New-Item -ItemType Directory -Path $foldDst -Force | Out-Null
           Copy-Item -LiteralPath $foldLicense -Destination (Join-Path $foldDst 'LICENSE')
-          node scripts/windows-operator-ui-bundle.mjs create $stage $env:JDC_CANDIDATE_SOURCE_SHA
+          node scripts/operator-ui-bundle.mjs create $stage $env:JDC_CANDIDATE_SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Native GUI staging rejected' }
-          node scripts/windows-operator-ui-bundle.mjs verify $stage $env:JDC_CANDIDATE_SOURCE_SHA
+          node scripts/operator-ui-bundle.mjs verify $stage $env:JDC_CANDIDATE_SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Native GUI inventory rejected' }
 
       - name: Retain immutable, unpublished native GUI overlay for candidate installation

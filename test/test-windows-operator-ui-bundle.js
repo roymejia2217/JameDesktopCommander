@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import {
   createOperatorUiManifest, verifyOperatorUiBundle, OPERATOR_UI_FILES,
-} from '../scripts/windows-operator-ui-bundle.mjs';
+} from '../scripts/operator-ui-bundle.mjs';
 
 const sha = 'a'.repeat(40);
 async function fixture(callback) {
@@ -98,10 +98,10 @@ test('Windows candidate builds exact locked UI source, checks notices and cleans
   assert.match(native, /cargo \+1\.95\.0 build --release --locked/);
   assert.match(native, /epaint_default_fonts-0\.37\.0/);
   assert.match(native, /foldhash-0\.2\.0/);
-  assert.match(native, /windows-operator-ui-bundle\.mjs create/);
-  assert.match(native, /windows-operator-ui-bundle\.mjs verify/);
+  assert.match(native, /operator-ui-bundle\.mjs create/);
+  assert.match(native, /operator-ui-bundle\.mjs verify/);
   assert.match(native, /JDC_OPERATOR_UI_SOURCE:/);
-  assert.match(wf, /windows-operator-ui-bundle\.mjs verify-installed/);
+  assert.match(wf, /operator-ui-bundle\.mjs verify-installed/);
   assert.match(wf, /JDC_OPERATOR_UI_SOURCE:/);
   assert.match(wf, /jdc-tunnel-operator-ui\.exe/);
   assert.match(wf, /operator-ui-manifest\.json/);
@@ -127,7 +127,7 @@ test('native GUI build is isolated from the restricted portable Node packaging j
   assert.doesNotMatch(candidate, /\b(?:cargo|rustup)\b/,
     'Portable Node candidate must never compile any Rust native authority');
   assert.match(candidate, /uses: \.\/\.github\/workflows\/windows-operator-ui-bundle\.yml/);
-  assert.match(candidate, /needs: windows-operator-ui/);
+  assert.match(candidate, /needs: \[windows-operator-ui, linux-operator-ui\]/);
   assert.match(candidate, /name: UNPUBLISHED-jdc-operator-ui-win32-x64/);
   assert.match(nativeWorkflow, /workflow_call:/);
   assert.match(nativeWorkflow, /Build pinned Windows operator UI/);

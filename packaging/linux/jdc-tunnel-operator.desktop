@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=JameDesktopCommander - Tunnel Operator
+Comment=Inspect local tunnel health without privileged actions
+Exec=/opt/jame-desktop-commander/jdc-tunnel-operator-ui
+Icon=utilities-terminal
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=true

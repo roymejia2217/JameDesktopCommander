@@ -160,7 +160,7 @@ impl OperatorApp {
             .spacing([26.0, 13.0])
             .striped(true)
             .show(ui, |ui| {
-                evidence_row(ui, "Tunnel task", &value.task_registration);
+                evidence_row(ui, value.registration_label(), &value.task_registration);
                 evidence_row(ui, "Local health", &value.local_health);
                 evidence_row(ui, "MCP handshake", &value.mcp_initialize);
                 evidence_row(ui, "MCP tools", &value.tool_discovery);
@@ -195,6 +195,11 @@ fn guidance(reason: &str) -> &'static str {
         "MCP_TOOLS_LIST_UNVERIFIED" => "MCP tools are incomplete. Remote access is unverified.",
         "MCP_HANDSHAKE_UNOBSERVED" => "MCP handshake not observed.",
         "TASK_STATUS_UNAVAILABLE" => "Tunnel task unavailable. Check installation.",
+        "SERVICE_STATUS_UNAVAILABLE" => {
+            "Tunnel service status unavailable. Check your user systemd service."
+        }
+        "SERVICE_INACTIVE" => "Tunnel service is inactive. No remote availability is verified.",
+        "SERVICE_NOT_ENABLED" => "Tunnel service is not enabled for this user.",
         "LOCAL_DIAGNOSTICS_UNAVAILABLE" => "Local diagnostics unavailable. Check the client.",
         "LOCAL_EVIDENCE_CONFLICT" => "Local checks conflict. Status is unverified.",
         "REMOTE_ROUND_TRIP_UNVERIFIED" => "Local checks passed. Remote request not verified.",

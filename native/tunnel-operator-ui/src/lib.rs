@@ -51,6 +51,7 @@ pub struct Overview {
     pub platform: String,
     pub capabilities: String,
     pub observed_at: String,
+    #[serde(alias = "serviceRegistration")]
     pub task_registration: String,
     pub local_health: String,
     pub mcp_initialize: String,
@@ -71,21 +72,82 @@ impl Overview {
     pub fn reason(&self) -> &str {
         &self.verdict.reason_code
     }
+
+    pub fn registration_label(&self) -> &'static str {
+        if self.platform == "linux" {
+            "Tunnel service"
+        } else {
+            "Tunnel task"
+        }
+    }
 }
 
 fn one_of(value: &str, accepted: &[&str]) -> bool {
     accepted.contains(&value)
 }
 
+/// Local service failures must never be paired with an observation that
+/// claims a working tunnel, active MCP state or a current control-plane error.
+fn linux_service_verdict_consistent(snapshot: &Overview) -> bool {
+    let observational_fields_unverified = snapshot.mcp_initialize == "unverified"
+        && snapshot.tool_discovery == "unverified"
+        && snapshot.control_plane == "unverified";
+    match snapshot.verdict.reason_code.as_str() {
+        "SERVICE_INACTIVE" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "observed"
+                && snapshot.local_health == "not_ready"
+                && snapshot.verdict.state == "degraded"
+        }
+        "SERVICE_NOT_ENABLED" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "observed"
+                && snapshot.local_health == "unverified"
+                && snapshot.verdict.state == "unverified"
+        }
+        "SERVICE_STATUS_UNAVAILABLE" => {
+            observational_fields_unverified
+                && snapshot.task_registration == "unverified"
+                && snapshot.local_health == "unverified"
+                && snapshot.verdict.state == "unverified"
+        }
+        _ => true,
+    }
+}
+
 pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     if raw.is_empty() || raw.len() > MAX_SNAPSHOT_BYTES {
         return Err("Operator response size out of bounds");
     }
+    // Deserialize directly first: Serde's struct visitor rejects duplicate
+    // known fields; a Value round-trip would silently keep the last duplicate.
     let snapshot: Overview =
         serde_json::from_slice(raw).map_err(|_| "Invalid operator response schema")?;
-    if snapshot.kind != "tunnel_operator_overview_v1"
-        || snapshot.platform != "win32"
-        || snapshot.capabilities != "read_only"
+    let raw_object: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|_| "Invalid operator response schema")?;
+    let fields = raw_object
+        .as_object()
+        .ok_or("Invalid operator response schema")?;
+    // Do not let aliasing blur the Windows task and Linux service contracts.
+    let linux = match (
+        fields.get("kind").and_then(serde_json::Value::as_str),
+        fields.get("platform").and_then(serde_json::Value::as_str),
+    ) {
+        (Some("tunnel_operator_overview_v1"), Some("win32"))
+            if fields.contains_key("taskRegistration")
+                && !fields.contains_key("serviceRegistration") =>
+        {
+            false
+        }
+        (Some("tunnel_operator_linux_overview_v1"), Some("linux"))
+            if fields.contains_key("serviceRegistration")
+                && !fields.contains_key("taskRegistration") =>
+        {
+            true
+        }
+        _ => return Err("Unsupported operator platform or registration schema"),
+    };
+    if snapshot.capabilities != "read_only"
         || !one_of(&snapshot.task_registration, &["observed", "unverified"])
         || !one_of(
             &snapshot.local_health,
@@ -128,6 +190,9 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
                 "MCP_TOOLS_LIST_UNVERIFIED",
                 "REMOTE_ROUND_TRIP_UNVERIFIED",
                 "TASK_STATUS_UNAVAILABLE",
+                "SERVICE_STATUS_UNAVAILABLE",
+                "SERVICE_INACTIVE",
+                "SERVICE_NOT_ENABLED",
                 "LOCAL_DIAGNOSTICS_UNAVAILABLE",
                 "LOCAL_EVIDENCE_CONFLICT",
             ],
@@ -136,6 +201,22 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
         || OffsetDateTime::parse(&snapshot.observed_at, &Rfc3339).is_err()
     {
         return Err("Unsupported or contradictory operator evidence");
+    }
+    if (linux && snapshot.verdict.reason_code == "TASK_STATUS_UNAVAILABLE")
+        || (!linux
+            && one_of(
+                &snapshot.verdict.reason_code,
+                &[
+                    "SERVICE_STATUS_UNAVAILABLE",
+                    "SERVICE_INACTIVE",
+                    "SERVICE_NOT_ENABLED",
+                ],
+            ))
+    {
+        return Err("Operator reason does not belong to its platform");
+    }
+    if linux && !linux_service_verdict_consistent(&snapshot) {
+        return Err("Linux service status contradicts local evidence");
     }
     if snapshot.task_registration == "unverified"
         && (snapshot.local_health != "unverified"
@@ -219,6 +300,159 @@ mod tests {
       "remoteDelivery":"not_observed",
       "verdict":{"state":"degraded", "reasonCode":"CONTROL_PLANE_CREDENTIAL_REJECTED"}
     }"#;
+
+    fn linux_sample() -> String {
+        GOOD.replace(
+            "tunnel_operator_overview_v1",
+            "tunnel_operator_linux_overview_v1",
+        )
+        .replace("\"platform\":\"win32\"", "\"platform\":\"linux\"")
+        .replace("\"taskRegistration\"", "\"serviceRegistration\"")
+    }
+
+    #[test]
+    fn linux_read_only_contract_accepts_registered_service_without_claiming_remote_success() {
+        let overview = parse_overview(linux_sample().as_bytes()).expect("supported Linux evidence");
+        assert_eq!(overview.platform, "linux");
+        assert_eq!(overview.task_registration, "observed");
+        assert_eq!(overview.remote_delivery, "not_observed");
+        assert_eq!(overview.reason(), "CONTROL_PLANE_CREDENTIAL_REJECTED");
+    }
+
+    fn inactive_linux_sample() -> String {
+        linux_sample()
+            .replace("\"localHealth\":\"ready\"", "\"localHealth\":\"not_ready\"")
+            .replace("\"mcpInitialize\":\"observed\"", "\"mcpInitialize\":\"unverified\"")
+            .replace("\"toolDiscovery\":\"observed_incomplete\"", "\"toolDiscovery\":\"unverified\"")
+            .replace("\"controlPlane\":\"credential_rejected\"", "\"controlPlane\":\"unverified\"")
+            .replace("\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"CONTROL_PLANE_CREDENTIAL_REJECTED\"}",
+                     "\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}")
+    }
+
+    #[test]
+    fn linux_service_state_reasons_are_supported_without_healthy_promotion() {
+        let inactive = inactive_linux_sample();
+        let view = parse_overview(inactive.as_bytes()).expect("inactive service is supported");
+        assert_eq!(view.reason(), "SERVICE_INACTIVE");
+        assert_eq!(view.control_plane, "unverified");
+        assert_eq!(view.remote_delivery, "not_observed");
+    }
+
+    #[test]
+    fn linux_service_inactive_cannot_claim_a_current_credential_error() {
+        let bad = inactive_linux_sample().replace(
+            "\"controlPlane\":\"unverified\"",
+            "\"controlPlane\":\"credential_rejected\"",
+        );
+        assert!(parse_overview(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn linux_not_enabled_cannot_claim_active_service_evidence() {
+        let not_enabled = inactive_linux_sample()
+            .replace(
+                "\"localHealth\":\"not_ready\"",
+                "\"localHealth\":\"unverified\"",
+            )
+            .replace(
+                "\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}",
+                "\"verdict\":{\"state\":\"unverified\", \"reasonCode\":\"SERVICE_NOT_ENABLED\"}",
+            );
+        assert_eq!(
+            parse_overview(not_enabled.as_bytes()).unwrap().reason(),
+            "SERVICE_NOT_ENABLED"
+        );
+        let credential_claim = not_enabled.replace(
+            "\"controlPlane\":\"unverified\"",
+            "\"controlPlane\":\"credential_rejected\"",
+        );
+        assert!(parse_overview(credential_claim.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn linux_service_status_unavailable_cannot_claim_ready_local_health() {
+        let unavailable = inactive_linux_sample()
+            .replace("\"serviceRegistration\":\"observed\"",
+                     "\"serviceRegistration\":\"unverified\"")
+            .replace("\"verdict\":{\"state\":\"degraded\", \"reasonCode\":\"SERVICE_INACTIVE\"}",
+                     "\"verdict\":{\"state\":\"unverified\", \"reasonCode\":\"SERVICE_STATUS_UNAVAILABLE\"}");
+        let unavailable = unavailable.replace(
+            "\"localHealth\":\"not_ready\"",
+            "\"localHealth\":\"unverified\"",
+        );
+        assert_eq!(
+            parse_overview(unavailable.as_bytes()).unwrap().reason(),
+            "SERVICE_STATUS_UNAVAILABLE"
+        );
+        let contradictory = unavailable.replace(
+            "\"serviceRegistration\":\"unverified\"",
+            "\"serviceRegistration\":\"observed\"",
+        );
+        assert!(parse_overview(contradictory.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn reject_cross_platform_schema_confusion_and_untrusted_linux_source_fields() {
+        let linux = linux_sample();
+        assert!(
+            parse_overview(
+                linux
+                    .replace("\"serviceRegistration\"", "\"taskRegistration\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_overview(
+                linux
+                    .replace("\"platform\":\"linux\"", "\"platform\":\"win32\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_overview(
+                GOOD.replace("\"platform\":\"win32\"", "\"platform\":\"linux\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_overview(
+                linux
+                    .replace("\"kind\"", "\"profilePath\":\"secret\",\"kind\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_overview(
+                linux
+                    .replace(
+                        "\"serviceRegistration\"",
+                        "\"taskRegistration\":\"observed\",\"serviceRegistration\""
+                    )
+                    .as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicated_linux_schema_fields_cannot_override_prior_untrusted_values() {
+        let linux = linux_sample();
+        let duplicated_kind = linux.replacen("\"kind\"", "\"kind\":\"untrusted\",\"kind\"", 1);
+        let duplicated_platform =
+            linux.replacen("\"platform\"", "\"platform\":\"win32\",\"platform\"", 1);
+        let duplicated_registration = linux.replacen(
+            "\"serviceRegistration\"",
+            "\"serviceRegistration\":\"unverified\",\"serviceRegistration\"",
+            1,
+        );
+        assert!(parse_overview(duplicated_kind.as_bytes()).is_err());
+        assert!(parse_overview(duplicated_platform.as_bytes()).is_err());
+        assert!(parse_overview(duplicated_registration.as_bytes()).is_err());
+    }
 
     #[test]
     fn valid_live_observation_does_not_promote_remote_health() {

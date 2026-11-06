@@ -25,8 +25,13 @@ jobs:
     with:
       source_commit: ${{ github.event.pull_request.head.sha || github.sha }}
 
+  linux-operator-ui:
+    uses: ./.github/workflows/linux-operator-ui-bundle.yml
+    with:
+      source_commit: ${{ github.event.pull_request.head.sha || github.sha }}
+
   portable-candidate:
-    needs: windows-operator-ui
+    needs: [windows-operator-ui, linux-operator-ui]
     name: Candidate (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -186,6 +191,13 @@ jobs:
           name: UNPUBLISHED-jdc-operator-ui-win32-x64
           path: ${{ runner.temp }}/jdc-operator-ui
 
+      - name: Download exact Linux operator UI overlay
+        if: matrix.target == 'linux-x64'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: UNPUBLISHED-jdc-operator-ui-linux-x64
+          path: ${{ runner.temp }}/jdc-operator-ui-linux
+
       - name: Compile Inno Setup installer candidate
         if: matrix.target == 'win32-x64'
         shell: pwsh
@@ -196,7 +208,7 @@ jobs:
           JDC_OPERATOR_UI_SOURCE: ${{ runner.temp }}/jdc-operator-ui
         run: |
           $ErrorActionPreference = 'Stop'
-          node scripts/windows-operator-ui-bundle.mjs verify $env:JDC_OPERATOR_UI_SOURCE $env:JDC_CANDIDATE_SOURCE_SHA
+          node scripts/operator-ui-bundle.mjs verify $env:JDC_OPERATOR_UI_SOURCE $env:JDC_CANDIDATE_SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Native GUI source not verified' }
           $env:JDC_INSTALLER_VERSION = (node -p "require('./package.json').version").Trim()
           $tools = Join-Path $env:RUNNER_TEMP 'inno-pinned'
@@ -237,7 +249,7 @@ jobs:
           $gui = Join-Path $target 'jdc-tunnel-operator-ui.exe'
           $uiManifest = Join-Path $target 'operator-ui-manifest.json'
           if (!(Test-Path -LiteralPath $gui -PathType Leaf) -or !(Test-Path -LiteralPath $uiManifest -PathType Leaf)) { throw 'Installed GUI or source manifest missing' }
-          node scripts/windows-operator-ui-bundle.mjs verify-installed $target $env:JDC_CANDIDATE_SOURCE_SHA
+          node scripts/operator-ui-bundle.mjs verify-installed $target $env:JDC_CANDIDATE_SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Installed GUI or font notices differ from source candidate' }
           $uiCheck = Start-Process -FilePath $gui -ArgumentList '--check-installation' -WorkingDirectory $target -Wait -PassThru
           if ($uiCheck.ExitCode -ne 0) { throw "Native operator read-only contract rejected: $($uiCheck.ExitCode)" }
@@ -256,8 +268,10 @@ jobs:
           JDC_INSTALLER_SOURCE: ${{ runner.temp }}/jdc-candidate-roundtrip-linux-x64
           JDC_INSTALLER_OUTPUT: ${{ runner.temp }}/jdc-installer-output
           JDC_TUNNEL_CLIENT_SOURCE: ${{ runner.temp }}/jdc-official-tunnel-client
+          JDC_OPERATOR_UI_SOURCE: ${{ runner.temp }}/jdc-operator-ui-linux
         run: |
           set -euo pipefail
+          node scripts/operator-ui-bundle.mjs verify "$JDC_OPERATOR_UI_SOURCE" "$JDC_CANDIDATE_SOURCE_SHA" linux-x64
           JDC_INSTALLER_VERSION="$(node -p "require('./package.json').version")"
           export JDC_INSTALLER_VERSION
           mkdir -p "$RUNNER_TEMP/nfpm-2.48.0" "$JDC_INSTALLER_OUTPUT"
@@ -282,14 +296,24 @@ jobs:
           test "$(dpkg-deb --field "$deb" Version)" = "${version}-1"
           dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/runtime/node' >/dev/null
           dpkg-deb --contents "$deb" | grep -F '/usr/bin/jdc' >/dev/null
+          dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/jdc-tunnel-operator-ui' >/dev/null
+          dpkg-deb --contents "$deb" | grep -F '/usr/share/applications/jdc-tunnel-operator.desktop' >/dev/null
           sudo dpkg -i "$deb"
           test -x /opt/jame-desktop-commander/runtime/node
           /opt/jame-desktop-commander/runtime/node --version
           test -x /usr/bin/jdc
           test -x /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client
           /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client --version | grep '^0\.0\.19' # Installed tunnel client
+          test -x /opt/jame-desktop-commander/jdc-tunnel-operator-ui
+          test -f /opt/jame-desktop-commander/operator-ui-manifest.json
+          test -f /usr/share/applications/jdc-tunnel-operator.desktop
+          node scripts/operator-ui-bundle.mjs verify-installed /opt/jame-desktop-commander "$JDC_CANDIDATE_SOURCE_SHA" linux-x64
+          /opt/jame-desktop-commander/jdc-tunnel-operator-ui --check-installation
           sudo dpkg -r jame-desktop-commander
           test ! -e /usr/bin/jdc
+          test ! -e /opt/jame-desktop-commander/jdc-tunnel-operator-ui
+          test ! -e /opt/jame-desktop-commander/operator-ui-manifest.json
+          test ! -e /usr/share/applications/jdc-tunnel-operator.desktop
 
       - name: Retain unpublished installer candidates
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

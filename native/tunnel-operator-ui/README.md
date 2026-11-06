@@ -1,6 +1,6 @@
 # JDC Native Local Tunnel Operator (development acceptance)
 
-This is the **native Windows read-only UI milestone**, not an installable
+This is the **cross-platform read-only UI candidate**, not a signed production
 release or an authorization primitive. The parent task is #270, with final
 acceptance owned by #248; #124/#139/#148 and Linux #150 remain open gates.
 
@@ -23,7 +23,11 @@ The UI executable must be installed at a **fixed package root** next to
 It invokes the installed backend with literal `tunnel overview` arguments,
 `shell=false`, closed stdin, fixed bounded process timeout and stdout,
 no NODE_OPTIONS/NODE_PATH injection and no stderr/provider text disclosure.
-All displayed fields are validated against `tunnel_operator_overview_v1`.
+Displayed fields require exact platform-bound contracts:
+`tunnel_operator_overview_v1` on Windows with `taskRegistration` and
+`tunnel_operator_linux_overview_v1` on Linux with `serviceRegistration`.
+Cross-platform field substitution, unknown data and invented remote success
+are rejected before the GUI displays any evidence.
 There is no automatic status polling. The operator clicks **Refresh
 observation**; the UI shows the backend observation timestamp and a separate
 local receive age. A missing, invalid, stale or conflicting observation must
@@ -44,10 +48,11 @@ recovery, remote authentication and complete adversarial tests.
 - Prove real GUI startup, keyboard navigation/focus, offline/unavailable state,
   visual legibility and screen reader semantics in a Windows interactive
   session. A running process alone is not proof of usable UX.
-- Add Windows/Linux exact Rust 1.95 source-build CI, test-only real packaged
-  backend probes and .exe/.deb installation/uninstallation checks.
-- Implement separate Linux `overview` projection on native user-systemd;
-  this first Windows adapter must not be advertised as Linux complete.
+- Preserve Windows/Linux exact Rust 1.95 source-build CI and real package
+  installation/uninstallation smoke, independently of any visual acceptance.
+- Prove an actual Linux GUI desktop-session startup, keyboard interaction,
+  application launcher usability and supported assistive technology. The
+  headless `--check-installation` test does not establish these conditions.
 - Only after security review, build and test independently authorized
   lifecycle and transactional one-shot credential recovery backend, then
   enable the matching GUI controls.
@@ -129,13 +134,39 @@ job only downloads this same-run artifact after checking its inventory. It stage
 `jdc-tunnel-operator-ui.exe` next to the installed Node runtime and bundles
 the exact font notices shipped by `epaint_default_fonts=0.37.0` plus the
 `foldhash=0.2.0` Zlib license. The one-purpose
-`scripts/windows-operator-ui-bundle.mjs` records seven allowlisted files and
+`scripts/operator-ui-bundle.mjs` records seven allowlisted files and
 SHA-256 byte digests, rejects extra/symlink/tampered inputs, and checks
 installed copy contents before uninstall. Installed GUI remains **read-only**.
 
 A byte inventory is NOT a publisher signature, code-signing certificate,
 Windows identity proof or authorization to rotate credentials. Every CI
 candidate remains **unpublished** with `releaseEligible:false`; P0 security,
-remote ChatGPT MCP evidence, Windows recovery and Linux distribution/GUI
-acceptance remain separate release blockers. The Windows GUI is not included
-in the Linux .deb; do not represent Linux desktop parity as complete.
+remote ChatGPT MCP evidence, Windows recovery and Linux interactive
+accessibility acceptance remain separate release blockers.
+
+## Linux .deb read-only UI candidate
+
+A separate pinned Rust 1.95 CI build stages the Linux ELF64 AMD64 operator
+interface with the same fixed license notices and a closed, SHA-256-inventoried
+`linux-x64` source overlay. The nFPM .deb includes the binary at
+`/opt/jame-desktop-commander/jdc-tunnel-operator-ui`, a system-menu desktop
+entry, and the exact inventory and font/hash licenses. The native GUI reuses
+the already installed, version-pinned Node backend and reads `tunnel overview`
+without executing local service changes. The .deb install/remove acceptance
+must independently verify installed hashes, the `--check-installation`
+headless probe, executable bits and removal of all UI files. No new
+daemon, systemd activation, postinstall hook or privileged broker is allowed.
+
+The reusable Linux GUI job accepts only an exact-SHA, same-repository
+`pull_request` head or an exact-SHA `push` to protected `main`.
+It excludes fork-sourced heads and privileged event callers, runs on a
+fresh GitHub-hosted Ubuntu runner with read-only repository permissions,
+disables persisted checkout credentials and publishes no release.
+The T011 artifact policy tests reject weakening this event/source boundary.
+These controls limit CI exposure; they do not make arbitrary PR code trusted.
+
+A green headless acceptance does **not** demonstrate a functional Linux
+Wayland/X11 session, screen reader or accessibility support. Linux AT-SPI
+remains disabled pending the separately reviewed upstream dependency path.
+The full feature and security release gates in #124/#139/#148/#248/#270/#150
+remain open.

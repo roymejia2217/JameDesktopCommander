@@ -50,3 +50,36 @@ registration DACL, ancestry, profile and provenance are not established here.
 **NOT PROVEN**: caller origin, file custody, task ownership, rotation or
 service lifecycle authority. #270 and parent #248 remain open; production
 release remains NO-GO independently of #124, #139, #148 and #150.
+
+## Next T1 sub-slice: private file metadata observation (non-operational)
+
+The same crate now has a Windows-only `observe_private_file_custody`
+function for a **caller-provided fixture root and relative path**. This is
+read-only and never opens a credential's content bytes. It acquires Windows
+handles requesting `READ_CONTROL | FILE_READ_ATTRIBUTES` and excluding
+`FILE_SHARE_DELETE`; checks a root and each descendant while handles remain
+open; rejects file/directory type mismatch, reparse-point objects, final
+files with link count other than one, invalid relative paths and DACLs with
+ALLOWED ACEs for principals other than the process TokenUser, LocalSystem
+or builtin Administrators. Owner/DACL are queried on the opened handles,
+not through a separate pathname security query. Errors remain sanitized.
+
+Real Windows fixture tests must prove both an explicitly private NTFS ACL
+and negative hardlink, junction, unsafe child/parent allow ACE and invalid
+path cases. The test fixture itself uses Windows `icacls` on disposable
+objects, not the installed tunnel or its credential reference.
+
+**Limitations that still deny production authority:** the supplied root has
+no independently trusted installation/provenance binding; ancestors above
+that root are not checked; DACL snapshots are conservative but not a proof
+of actual access under every SID, privilege or ACE variant; a valid hardlink
+count at one instant does not prevent a future alias; a same-SID attacker
+may change its own objects, tokens or ACLs. Future operations must be based
+on authenticated local-operator consent, installed task/profile identity,
+handle-bound target and generation fencing. A preflight result cannot be
+cached as a permission or used to bypass further checks. No secret writes,
+service control, broad path IPC or rotation is connected to this module.
+
+**Increment verdict:** native metadata observation only; #270 T1 remains
+in progress and the product stays release-ineligible. Hosted Windows/Linux
+CI and independent security review must pass before integrating this slice.

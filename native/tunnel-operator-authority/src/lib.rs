@@ -63,3 +63,32 @@ pub fn compare_registered_tunnel_task_principal() -> Result<ProcessSidEvidence, 
 {
     compare_registered_task_principal_for_observation("Desktop Commander Windows Tunnel")
 }
+
+/// Structural observations of a *fixture-rooted* Windows file only.
+/// This never authenticates a registered installation, local operator or
+/// permission to read or replace the file's secret bytes.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCustodyEvidence {
+    ObservedOnly,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCustodyDenied {
+    Unverifiable,
+}
+
+#[cfg(windows)]
+mod file_custody;
+
+/// Experimental read-only metadata inspection. The root is supplied by the
+/// caller and is **not** authenticated here. Never use this as an operations
+/// authorization, nor expose arbitrary roots over the MCP or an admin CLI.
+#[cfg(windows)]
+pub fn observe_private_file_custody(
+    fixture_root: &std::path::Path,
+    relative_file: &std::path::Path,
+) -> Result<FileCustodyEvidence, FileCustodyDenied> {
+    file_custody::observe(fixture_root, relative_file)
+}

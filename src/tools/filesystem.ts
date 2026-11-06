@@ -393,6 +393,8 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
 
         // Retain the timeout through body consumption, not just response headers.
         if (!response.ok) {
+            // Close an unfinished error response instead of retaining its stream.
+            controller.abort();
             throw new Error(`HTTP error! Status: ${response.status}`);
         }
 

@@ -83,6 +83,73 @@ A reviewed platform adapter must verify secret ownership, file type, parent cust
 
 Never echo, log, persist in UI state, place in environment dumps, command arguments, URLs, telemetry or support bundles any credential or bearer value. Zero ephemeral buffers where runtime capabilities permit; do not claim complete memory erasure. Provider link targets and any external data are untrusted inputs unless allowlisted. Avoid clipboard handling unless clearly user-authorized.
 
+### S2 transaction coordinator — internal contract, no write adapter yet
+
+`src/platform/tunnel-credential-transaction.ts` defines an **inert**,
+dependency-injected rotation coordinator with versioned, allowlisted
+`local_credential_rotation_v1` receipts. It does not expose a new CLI command,
+web handler, MCP tool, OS filesystem writer or network endpoint. Merely
+implementing its TypeScript interface does **not** provide authorization.
+
+The only legal transition towards a successful receipt is:
+
+1. Consume the operator's one-time byte buffer and reject invalid control
+   characters before the first asynchronous operation; promptly zero the
+   caller-owned and staging buffers (best-effort only in a managed runtime).
+2. Acquire an OS-authenticated **exclusive transaction lease** from the local
+   adapter and verify that the exact registered service/credential generation
+   still belongs to the authorized operator and is intentionally running.
+3. Stage the candidate in the verified storage namespace with restrictive
+   metadata and durable writes; never use a caller-selected arbitrary path.
+4. Recheck registration and fencing epoch while atomically publishing. If
+   an operator STOP, identity mismatch or concurrent write is detected, deny.
+5. Activate **conditionally**, without reviving a deliberately stopped service.
+6. Verify **fresh official control-plane authentication**, not local TCP,
+   readiness, cached health or the existence of a process.
+7. Finalize the durable transaction only after the authenticated provider
+   check. Never confuse it with a fresh ChatGPT MCP request/result.
+
+A failure after staging requests safe restoration from the **OS adapter**.
+The adapter must guard restoration against lost updates and intentional STOP,
+and must durably reconcile pending work after process crash or power loss.
+`prior_credential_restored_unverified` means only that the previous *file
+state* was restored; its provider authentication may still be expired/rejected.
+`recovery_required` means that cleanup, finalization, or lock release cannot
+be trusted. A completed control-plane authentication receipt always includes
+`remoteRoundTrip: not_observed`. No raw exception, secret, path, provider
+message, or credential identifier is part of a public receipt.
+
+**No live storage adapter is present yet.** The coordinator contracts alone
+do not prove crash-safe file replacement, operator SID/UID custody, locked
+generation, service fencing, or provider authentication. Linux
+`credential-check` remains a read-only point-in-time observation.
+Windows requires an authenticated process token SID, the actual Task Scheduler
+principal, file and parent ACL verification, and an explicit decision about
+the supported Win32 replacement/backup protocol. The existing
+`windows-atomic-replace.ts` helper has fallbacks intended for ordinary
+state files and **is not approved** for secret rotation.
+
+### Frontend boundary (future Rust + egui)
+
+Prefer a native local operator control panel backed by the *same reviewed
+OS-specific transaction adapter* as a headless CLI. The panel must remain
+available without ChatGPT/MCP. An egui password text field can mask entry,
+but is not a credential vault: do not persist its text, show it in logs,
+include it in command arguments, prefill it from the existing secret file,
+or present a clipboard-derived value without deliberate user action.
+Use a single explicit confirmation for the currently installed service and
+display distinct steps: authorized, staged, published, reactivated, verified,
+confirmed; on failure, display a sanitized reason and whether restoration is
+verified or a manual recovery is required. Show service lifecycle, authenticated
+provider control plane, and fresh MCP delivery as separate indicators.
+Prefer a shell-free child process of the **installed, version-matched local
+CLI** with a one-shot secret sent only through a bounded private stdin pipe,
+then accept only the typed sanitized receipt on stdout. Do not pass the key
+in argv, environment variables, URLs, IPC endpoints, or persisted UI state.
+This transport still needs a separate operator/session and package-provenance
+review; it is **not implemented** by the coordinator. No listener or remote
+MCP route may invoke the transaction backend.
+
 ## Installer and failure-recovery requirements
 
 Windows `.exe` and Linux `.deb` must ship the approved local management capability and verify release signatures, provenance, dependency/ABI compatibility, installed target identity and supported client versions. Upgrades migrate only authorized state; uninstall/rollback must leave an intentional stop intact, not leak secrets or orphan an uncontrollable task/unit. Linux operation must work through the audited CLI when no graphical session is available. UI must present component-by-component status, action-specific confirmation, copyable *sanitized* incident report and accessible keyboard/navigation states.

@@ -67,6 +67,19 @@ permissions and unavailable files are rejected with a generic error that
 does not disclose the secret path or value. `env:` and unsupported references
 remain `not_checked`; they do not trigger file access.
 
+**Effective source precondition:** official `tunnel-client` configuration
+uses flags > environment > YAML. Before checking a `file:` reference, the
+CLI now examines its already-fetched `systemctl --user show-environment`
+response and denies a direct `CONTROL_PLANE_API_KEY` or fallback
+`OPENAI_API_KEY` assignment, including empty values. Malformed/oversized
+manager environment evidence also denies. The inspection returns only
+`no_override_observed`, `override_present`, or `unverified` internally;
+it never copies values, variable contents or file paths into an error or
+status response. Since manager settings and running process environments can
+change independently, absence of an override at check time **does not prove**
+which credential an already-running client consumed or authorize replacement.
+Actual rotation must recheck the installed runtime at the mutation boundary.
+
 Results are restricted to source kind, `custody: verified_point_in_time |
 not_checked`, `rotationAuthorized: false` and
 `remoteAuthentication: not_checked`. Even a successful inspection is **not

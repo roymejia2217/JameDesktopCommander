@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buildLinuxTunnelUnit, LINUX_TUNNEL_UNIT, runLinuxTunnelCommand } from '../dist/platform/linux/tunnel-lifecycle.js';
 
-async function withRegisteredFixture(runAssertions) {
+async function withRegisteredFixture(runAssertions, { managerEnvironment = '' } = {}) {
   const home = await mkdtemp(path.join(tmpdir(), 'jdc-credential-custody-'));
   const executable = path.join(home, 'tunnel-client');
   const profiles = path.join(home, 'profiles');
@@ -32,7 +32,7 @@ async function withRegisteredFixture(runAssertions) {
       if (bin === executable && args[0] === 'profiles') {
         return JSON.stringify([{ name: 'jdc', path: profilePath }]);
       }
-      if (bin === 'systemctl' && args[1] === 'show-environment') return '';
+      if (bin === 'systemctl' && args[1] === 'show-environment') return managerEnvironment;
       throw new Error('Unexpected executable or lifecycle operation in read-only fixture');
     };
     await runAssertions({
@@ -142,3 +142,38 @@ test('Linux help advertises read-only credential-check but no rotation mutation'
     /start \| stop \| restart \| status \| diagnose \| credential-check \| uninstall/);
   assert.doesNotMatch(messages.join('\n'), /credential-rotate|tunnel rotate/i);
 });
+
+test('Linux file-backed credential check denies effective manager API-key overrides', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  for (const managerEnvironment of [
+    'LANG=C\nCONTROL_PLANE_API_KEY=synthetic-fake-secret\n',
+    'LANG=C\nOPENAI_API_KEY=synthetic-fallback-fake\n',
+    'CONTROL_PLANE_API_KEY=\n',
+    'LANG=C\nBAD USER MANAGER OUTPUT\n',
+  ]) {
+    await withRegisteredFixture(async ({ credentialPath, calls, deps }) => {
+      const before = await readFile(credentialPath);
+      await assert.rejects(runLinuxTunnelCommand(['credential-check'], deps), error => {
+        assert.equal(error.message,
+          'Linux tunnel effective credential source cannot be verified.');
+        assert.doesNotMatch(error.message,
+          /synthetic|CONTROL_PLANE_API_KEY|OPENAI_API_KEY|runtime\.key|credential-custody-/);
+        return true;
+      });
+      assert.deepEqual(await readFile(credentialPath), before);
+      assert.ok(!calls.some(x => x[0].endsWith('tunnel-client') && x[1] === 'health'));
+      assert.ok(!calls.some(x => ['enable', 'disable', 'try-restart'].includes(x[2])));
+    }, { managerEnvironment });
+  }
+});
+
+test('Linux allows no manager override without claiming active key provenance', {
+  skip: process.platform !== 'linux',
+}, async () => withRegisteredFixture(async ({ deps }) => {
+  const result = await runLinuxTunnelCommand(['credential-check'], deps);
+  assert.equal(result.credentialCheck.source, 'file_reference');
+  assert.equal(result.credentialCheck.custody, 'verified_point_in_time');
+  assert.equal(result.credentialCheck.rotationAuthorized, false);
+  assert.equal(result.credentialCheck.remoteAuthentication, 'not_checked');
+}, { managerEnvironment: 'LANG=C\nHOME=/home/operator\n' }));

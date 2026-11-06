@@ -1,0 +1,82 @@
+name: Unpublished Windows Operator UI Bundle
+
+on:
+  workflow_call:
+    inputs:
+      source_commit:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-gui:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      JDC_CANDIDATE_SOURCE_SHA: ${{ inputs.source_commit }}
+    steps:
+      - name: Checkout exact native operator source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up official Node.js 24 runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Build pinned Windows operator UI
+        shell: pwsh
+        env:
+          JDC_OPERATOR_UI_SOURCE: ${{ runner.temp }}/jdc-operator-ui
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:JDC_CANDIDATE_SOURCE_SHA) { throw 'Native GUI source SHA mismatch' }
+          rustup toolchain install 1.95.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain unavailable' }
+          cargo +1.95.0 build --release --locked --manifest-path native/tunnel-operator-ui/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Native UI source build failed' }
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'native/tunnel-operator-ui/target/release/jdc-tunnel-operator-ui.exe'
+          if (!(Test-Path -LiteralPath $binary)) { throw 'Compiled GUI executable missing' }
+          $stage = $env:JDC_OPERATOR_UI_SOURCE
+          if (Test-Path -LiteralPath $stage) { throw 'Refuse existing GUI stage' }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $stage 'jdc-tunnel-operator-ui.exe')
+          $json = cargo +1.95.0 metadata --locked --format-version 1 --manifest-path native/tunnel-operator-ui/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Locked Rust dependency metadata unavailable' }
+          $metadata = $json | ConvertFrom-Json
+          $fonts = @($metadata.packages | Where-Object { $_.name -eq 'epaint_default_fonts' -and $_.version -eq '0.37.0' })
+          $fold = @($metadata.packages | Where-Object { $_.name -eq 'foldhash' -and $_.version -eq '0.2.0' })
+          if ($fonts.Count -ne 1 -or $fold.Count -ne 1) { throw 'Pinned dependency identity mismatch' }
+          if ($fonts[0].license -ne '(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0') { throw 'Bundled font license changed' }
+          if ($fold[0].license -ne 'Zlib') { throw 'Bundled hash license changed' }
+          $fontRoot = Join-Path (Split-Path -Parent $fonts[0].manifest_path) 'fonts'
+          $fontDst = Join-Path $stage 'licenses/operator-ui/epaint_default_fonts-0.37.0'
+          New-Item -ItemType Directory -Path $fontDst -Force | Out-Null
+          foreach ($file in @('Hack-Regular.txt','OFL.txt','UFL.txt','egui-icons.txt','emoji-icon-font-mit-license.txt')) {
+            $source = Join-Path $fontRoot $file
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Font license missing: $file" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $fontDst $file)
+          }
+          $foldRoot = Split-Path -Parent $fold[0].manifest_path
+          $foldLicense = Join-Path $foldRoot 'LICENSE'
+          if (!(Test-Path -LiteralPath $foldLicense -PathType Leaf)) { throw 'Hash license missing' }
+          $foldDst = Join-Path $stage 'licenses/operator-ui/foldhash-0.2.0'
+          New-Item -ItemType Directory -Path $foldDst -Force | Out-Null
+          Copy-Item -LiteralPath $foldLicense -Destination (Join-Path $foldDst 'LICENSE')
+          node scripts/windows-operator-ui-bundle.mjs create $stage $env:JDC_CANDIDATE_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Native GUI staging rejected' }
+          node scripts/windows-operator-ui-bundle.mjs verify $stage $env:JDC_CANDIDATE_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Native GUI inventory rejected' }
+
+      - name: Retain immutable, unpublished native GUI overlay for candidate installation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: UNPUBLISHED-jdc-operator-ui-win32-x64
+          path: ${{ runner.temp }}/jdc-operator-ui/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

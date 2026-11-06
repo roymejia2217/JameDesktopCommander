@@ -123,8 +123,9 @@ must not be mistaken for shipped libraries. No `advisories.ignore` entries.
 
 ## Windows installer candidate (non-release)
 
-The Inno Setup CI candidate now builds this crate from the exact checked-out
-commit with Rust 1.95 and the committed Cargo.lock. It stages
+A reusable CI workflow builds this crate from the exact checked-out
+commit with Rust 1.95 and the committed Cargo.lock. The Node packaging
+job only downloads this same-run artifact after checking its inventory. It stages
 `jdc-tunnel-operator-ui.exe` next to the installed Node runtime and bundles
 the exact font notices shipped by `epaint_default_fonts=0.37.0` plus the
 `foldhash=0.2.0` Zlib license. The one-purpose

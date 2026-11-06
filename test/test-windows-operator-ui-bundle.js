@@ -93,17 +93,19 @@ test('Windows installer uses only the reviewed UI overlay and an explicit GUI sh
 
 test('Windows candidate builds exact locked UI source, checks notices and cleans installed copy', async () => {
   const wf = await readFile(new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8');
-  assert.match(wf, /Build pinned Windows operator UI/);
-  assert.match(wf, /cargo \+1\.95\.0 build --release --locked/);
-  assert.match(wf, /epaint_default_fonts-0\.37\.0/);
-  assert.match(wf, /foldhash-0\.2\.0/);
-  assert.match(wf, /windows-operator-ui-bundle\.mjs create/);
-  assert.match(wf, /windows-operator-ui-bundle\.mjs verify/);
+  const native = await readFile(new URL('../.github/workflows/windows-operator-ui-bundle.yml', import.meta.url), 'utf8');
+  assert.match(native, /Build pinned Windows operator UI/);
+  assert.match(native, /cargo \+1\.95\.0 build --release --locked/);
+  assert.match(native, /epaint_default_fonts-0\.37\.0/);
+  assert.match(native, /foldhash-0\.2\.0/);
+  assert.match(native, /windows-operator-ui-bundle\.mjs create/);
+  assert.match(native, /windows-operator-ui-bundle\.mjs verify/);
+  assert.match(native, /JDC_OPERATOR_UI_SOURCE:/);
   assert.match(wf, /windows-operator-ui-bundle\.mjs verify-installed/);
   assert.match(wf, /JDC_OPERATOR_UI_SOURCE:/);
   assert.match(wf, /jdc-tunnel-operator-ui\.exe/);
   assert.match(wf, /operator-ui-manifest\.json/);
-  assert.match(wf, /test ! -e|Test-Path/);
+  assert.match(wf, /Test-Path/);
   assert.doesNotMatch(wf, /gh release upload|npm publish/);
 });
 
@@ -117,4 +119,18 @@ test('Windows runner accepts equivalent absolute paths with forward slashes', {
       root: portable, expectedCommit: sha,
     })).sourceCommit, sha);
   });
+});
+
+test('native GUI build is isolated from the restricted portable Node packaging job', async () => {
+  const candidate = await readFile(new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8');
+  const nativeWorkflow = await readFile(new URL('../.github/workflows/windows-operator-ui-bundle.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(candidate, /\b(?:cargo|rustup)\b/,
+    'Portable Node candidate must never compile any Rust native authority');
+  assert.match(candidate, /uses: \.\/\.github\/workflows\/windows-operator-ui-bundle\.yml/);
+  assert.match(candidate, /needs: windows-operator-ui/);
+  assert.match(candidate, /name: UNPUBLISHED-jdc-operator-ui-win32-x64/);
+  assert.match(nativeWorkflow, /workflow_call:/);
+  assert.match(nativeWorkflow, /Build pinned Windows operator UI/);
+  assert.match(nativeWorkflow, /cargo \+1\.95\.0 build --release --locked/);
+  assert.doesNotMatch(nativeWorkflow, /capability-probe|napi|research_impl|receiver-test-fixture/);
 });

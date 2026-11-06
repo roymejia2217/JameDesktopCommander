@@ -129,6 +129,48 @@ the supported Win32 replacement/backup protocol. The existing
 `windows-atomic-replace.ts` helper has fallbacks intended for ordinary
 state files and **is not approved** for secret rotation.
 
+### Native Linux atomic file-transaction engine (experimental; non-shipping)
+
+The isolated `native/tunnel-local-rotation` Rust crate implements an actual
+**disposable-file filesystem transaction** using OS-native primitives:
+private directory descriptors and `openat` with `O_NOFOLLOW`, owner/mode/link
+checks, the stable Rust exclusive file lock, mode-0600 staging and file fsync,
+a durable metadata-only journal bound to the exact original filename and
+inode identities, Linux `renameat2(RENAME_EXCHANGE)` for an
+atomic old/new inode swap, parent-directory fsync, and explicit
+`publish`/`rollback`/`confirm`/`recover_local_file` methods. The journal
+distinguishes creating, prepared and durably committed phases. Recovering a
+published but uncommitted state restores the original inode; recovering a
+durably committed state retains the replacement and cleans remaining stage
+artifacts. Every outcome remains **provider-unverified** until the separately
+authorized service layer proves fresh authenticated polling.
+
+This crate is NOT wired to a JDC CLI, UI, MCP tool, Windows service, existing
+protected authority service or an installed tunnel. The test suite operates
+only inside disposable, nonproduction directories and **must pass**
+real hosted Linux CI before the crate is accepted. **No standalone invocation of this crate grants authority**:
+the caller must still prove the selected installed tunnel's effective
+credential source, OS principal, profile ancestry, desired-state generation
+and local operator authorization independently. Linux file locks are advisory
+against uncooperative processes sharing the same UID; a verified directory
+handle cannot prevent all same-UID namespace replacement around the running
+provider. The Linux kernel/filesystem must support `RENAME_EXCHANGE` or the
+operation fails closed. The old secret inode temporarily exists under a
+private staging name until a successful commit or explicit recovery; this is
+not a durable provider-issued credential vault, and power-loss residue must
+be reconciled before any new rotation. Tests include actual child process
+exit without destructors and interruption-state reconstruction; they do
+**not** simulate power removal from storage hardware or prove device fsync
+honesty. A corrupted or ambiguous journal must fail closed and require
+explicit manual investigation, never guess an old or new key. Storage hardware
+may preserve deleted sectors: no secure erase or complete memory erasure is
+claimed.
+
+Windows needs an independently audited SID/ACL and Win32 transaction adapter.
+Neither this crate nor the TypeScript coordinator completes the installed
+cross-platform S2 backend or authorizes displaying an active Rotate button
+in egui.
+
 ### Frontend boundary (future Rust + egui)
 
 Prefer a native local operator control panel backed by the *same reviewed

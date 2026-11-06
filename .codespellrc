@@ -3,4 +3,5 @@
 skip = .git*,*.svg,package-lock.json,*.css,.codespellrc
 check-hidden = true
 # ignore-regex = 
-ignore-words-list = fo,inout
+# Official rustix/POSIX OFlags::WRONLY is an API identifier, not a typo.
+ignore-words-list = fo,inout,wronly

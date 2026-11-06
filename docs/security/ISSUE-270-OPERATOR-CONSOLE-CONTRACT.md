@@ -45,10 +45,23 @@ provider message, raw task XML or account metadata is serialized.
 
 ## Cross-platform compatibility
 
-The initial source-backed observer is Windows only. Linux has existing
-`runLinuxTunnelCommand(status|diagnose)` and native user-systemd inspection,
-but a **separately tested** Linux projection is required before claiming
-that the CLI contract is cross-platform. Do not fake Linux as Windows.
+The Windows GUI consumes `tunnel_operator_overview_v1` with
+`platform: win32`. Linux now exposes an independently versioned, read-only
+CLI projection via `desktop-commander tunnel overview`:
+`tunnel_operator_linux_overview_v1` with `platform: linux`,
+`serviceRegistration` (not the Windows `taskRegistration`),
+and the same bounded observational evidence categories. It reuses
+the existing Linux `status` and `diagnose` custody/OS readers; if a
+read fails or observations conflict, the result stays unverified.
+It does not include source paths, profile names, secret references,
+raw provider errors, or a claimed remote ChatGPT MCP round trip.
+
+The Windows GUI schema is unchanged. The Rust GUI does **not** yet accept
+the Linux contract and the Linux .deb does **not** package an operator GUI.
+Linux interactive UX, accessibility, authenticated privileged controls,
+live remote acceptance, and full #150/#248 closure remain separate work.
+Never claim Linux desktop parity from the CLI observer alone.
+
 ## User-test milestones and required ordering
 
 1. **Read-only real UX early:** ship Windows native Rust/egui Overview and

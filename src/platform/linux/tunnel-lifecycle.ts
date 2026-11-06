@@ -12,6 +12,9 @@ import {
   assessTunnelLocalLifecycle,
   type TunnelLocalLifecycleObservation,
 } from '../tunnel-local-operability.js';
+import {
+  projectLinuxOperatorOverview, type LinuxTunnelOperatorOverviewV1,
+} from './tunnel-operator-overview.js';
 
 export const LINUX_TUNNEL_UNIT = 'jame-desktop-commander-tunnel.service';
 const marker = '# Managed by JameDesktopCommander Linux tunnel lifecycle v1';
@@ -534,6 +537,7 @@ export async function runLinuxTunnelCommand(
   unit: string;
   status?: LinuxTunnelStatus;
   diagnostics?: TunnelFunctionalDiagnostics;
+  overview?: LinuxTunnelOperatorOverviewV1;
   credentialCheck?: LinuxTunnelCredentialCheck;
 }> {
   requireLinux(dependencies);
@@ -554,8 +558,29 @@ export async function runLinuxTunnelCommand(
   };
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);
   const [action, ...options] = args;
-  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'diagnose', 'credential-check', 'uninstall'].includes(action ?? '')) {
-    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, diagnose, credential-check and uninstall.');
+  if (!['doctor', 'install', 'start', 'stop', 'restart', 'status', 'overview', 'diagnose', 'credential-check', 'uninstall'].includes(action ?? '')) {
+    throw new Error('Linux tunnel supports doctor, install, start, stop, restart, status, overview, diagnose, credential-check and uninstall.');
+  }
+  // The observer reuses already reviewed status and diagnostic readers.
+  // Each OS observation is point-in-time; disagreement cannot imply remote success.
+  if (action === 'overview') {
+    if (options.length) throw new Error('Linux tunnel action accepts no extra arguments.');
+    let status: LinuxTunnelStatus | null = null;
+    try {
+      status = (await runLinuxTunnelCommand(['status'], dependencies)).status ?? null;
+    } catch {
+      // Preserve a fixed unavailable reason, never raw provider/OS details.
+    }
+    let diagnostics: TunnelFunctionalDiagnostics | null = null;
+    if (status?.active && status.enabled) {
+      try {
+        diagnostics = (await runLinuxTunnelCommand(['diagnose'], dependencies)).diagnostics ?? null;
+      } catch {
+        // An interrupted or unavailable local probe remains unverified.
+      }
+    }
+    return { action, unit: LINUX_TUNNEL_UNIT,
+      overview: projectLinuxOperatorOverview(status, diagnostics) };
   }
   // Do not mutate files when the user manager or DBus session is absent.
   const managerEnvironment = await systemctl(['show-environment']);

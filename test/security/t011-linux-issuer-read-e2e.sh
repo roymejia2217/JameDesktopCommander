@@ -32,9 +32,12 @@ probe='native/authority-service/target/debug/examples/linux_issuer_read_probe'
 contract_source="$(realpath -e -- dist/security/authority-frame-contract.js)"
 operation_contract_source="$(realpath -e -- dist/security/authority-operation-contract.js)"
 read_client_source="$(realpath -e -- test/security/support/authority-read-client.mjs)"
+mcp_probe_source="$(realpath -e -- test/security/support/t011-official-mcp-issuer-read-e2e.mjs)"
+sdk_entry_source="$(realpath -e -- node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js)"
 [[ -x "$fixture" && -x "$probe" &&
    -r "$contract_source" && -r "$operation_contract_source" &&
-   -r "$read_client_source" ]] || {
+   -r "$read_client_source" && -r "$mcp_probe_source" &&
+   -r "$sdk_entry_source" ]] || {
   printf '%s\n' 'E_ISSUER_READ_E2E_BINARIES_MISSING' >&2
   exit 1
 }
@@ -201,6 +204,8 @@ sudo -n cmp -s -- "$read_client_source" "$installed_read_client"
 sudo -n -u jdc-mcp-client -- test -r "$installed_contract"
 sudo -n -u jdc-mcp-client -- test -r "$installed_operation_contract"
 sudo -n -u jdc-mcp-client -- test -r "$installed_read_client"
+sudo -n -u jdc-mcp-client -- test -r "$mcp_probe_source"
+sudo -n -u jdc-mcp-client -- test -r "$sdk_entry_source"
 [[ "$(stat -c '%U:%G:%a' "$contract_dir")" == 'root:root:755' &&
    "$(stat -c '%U:%G:%a' "$installed_contract")" == 'root:root:644' &&
    "$(stat -c '%U:%G:%a' "$installed_operation_contract")" == 'root:root:644' &&
@@ -225,52 +230,10 @@ sudo -n systemctl start jdc-authority.socket
 [[ "$(stat -c '%U:%G:%a' "$socket_path")" == 'jdc-authority:jdc-mcp-client:660' &&
    "$(stat -c '%U:%G:%a' "$socket_dir")" == 'root:root:755' ]] || exit 1
 
-sudo -n -u jdc-mcp-client -- "$node_binary" --input-type=module - "$read_client" "$installed_contract" "$installed_operation_contract" <<'NODE'
-import assert from 'node:assert/strict';
-import { pathToFileURL } from 'node:url';
-
-const [readClientPath, contractPath, operationContractPath] = process.argv.slice(2);
-assert.equal(process.version, 'v22.19.0', 'E_ISSUER_READ_E2E_NODE_VERSION_MISMATCH');
-const { createIssuerReadClient } =
-  await import(pathToFileURL(readClientPath).href);
-const frameContract = await import(pathToFileURL(contractPath).href);
-const operationContract = await import(pathToFileURL(operationContractPath).href);
-const { requestIssuerOwnedRead, requestIssuerOwnedList } =
-  createIssuerReadClient({ ...frameContract, ...operationContract });
-const request = JSON.parse(
-  '{"version":1,"kind":"read-file","requestId":"11111111-1111-4111-8111-111111111111","expectedEpoch":"1","rootRef":"0123456789abcdef0123456789abcdef","relativePath":"inside.bin"}',
-);
-const reply = await requestIssuerOwnedRead(request);
-assert.equal(reply.status, 'ok');
-if (reply.status !== 'ok') throw new Error('issuer denied canonical read');
-assert.deepEqual(reply.bytes, Buffer.from([0, 255, 0x81, 42, 74, 68, 67, 10]));
-console.log('T011_NODE_MCP_CLIENT_RECEIVED_EXACT_BINARY_READ_REPLY');
-// Same broker process, retained native root and authenticated OS client,
-// but a different canonical read request and independently named file.
-const secondRequest = {
-  ...request,
-  requestId: '22222222-2222-4222-8222-222222222222',
-  relativePath: 'inside2.bin',
-  rootRef: 'fedcba9876543210fedcba9876543210',
-};
-const secondReply = await requestIssuerOwnedRead(secondRequest);
-assert.equal(secondReply.status, 'ok', 'second sequential issuer read denied');
-assert.deepEqual(
-  secondReply.bytes,
-  Buffer.concat([Buffer.from([2, 0, 0x43, 0x2a]), Buffer.from('SECOND\n')]),
-);
-console.log('T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS');
-const listing = await requestIssuerOwnedList({
-  version: 1,
-  kind: 'list-directory',
-  requestId: '33333333-3333-4333-8333-333333333333',
-  expectedEpoch: '1',
-  rootRef: '0123456789abcdef0123456789abcdef',
-  relativePath: 'nested',
-});
-assert.deepEqual(listing, { version: 1, status: 'ok', entries: ['a.txt', 'z.txt'] });
-console.log('T011_ISSUER_READ_E2E_SEQUENTIAL_LIST_PASS');
-NODE
+# Official MCP SDK over stdio under the kernel-authenticated client UID.
+# Only the test server speaks the preexisting Rust issuer IPC protocol.
+sudo -n -u jdc-mcp-client -- env GITHUB_ACTIONS=true RUNNER_OS=Linux \
+  RUNNER_ENVIRONMENT=github-hosted "$node_binary" "$mcp_probe_source" client
 
 sudo -n journalctl --sync
 invocation="$(sudo -n systemctl show -P InvocationID jdc-authority.service)"

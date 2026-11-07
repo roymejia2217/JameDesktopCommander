@@ -64,6 +64,77 @@ test('C4c rejects accessors and inherited request properties without executing t
     Object.assign(Object.create({ kind: 'create-directory' }), valid())), bad);
 });
 
+test('C4c rejects a Proxy request without allowing postvalidation pathname substitution', () => {
+  let pathReads = 0;
+  const input = new Proxy(valid(), {
+    get(target, field, receiver) {
+      if (field === 'relativePath') {
+        pathReads++;
+        return pathReads >= 3 ? '../outside' : target.relativePath;
+      }
+      return Reflect.get(target, field, receiver);
+    },
+  });
+  assert.throws(() => parseCreateDirectoryRequest(input), bad);
+  assert.equal(pathReads, 0, 'No Proxy get trap may execute before rejection');
+
+  let prototypeReads = 0;
+  const spoofed = new Proxy(valid(), {
+    getPrototypeOf() {
+      prototypeReads++;
+      return Object.prototype;
+    },
+  });
+  assert.throws(() => parseCreateDirectoryRequest(spoofed), bad);
+  assert.equal(prototypeReads, 0, 'Reject before consulting a Proxy prototype trap');
+});
+
+test('C4c rejects a Proxy result without allowing postvalidation epoch substitution', () => {
+  const id = valid().requestId;
+  let epochReads = 0;
+  const result = new Proxy({
+    version: 1, kind: 'operation-result', requestId: id,
+    status: 'committed', committedEpoch: '2',
+  }, {
+    get(target, field, receiver) {
+      if (field === 'committedEpoch') {
+        epochReads++;
+        return epochReads >= 3 ? '0' : target.committedEpoch;
+      }
+      return Reflect.get(target, field, receiver);
+    },
+  });
+  assert.throws(() => parseOperationResult(result, id), bad);
+  assert.equal(epochReads, 0, 'No Proxy epoch read may execute before rejection');
+});
+
+test('C4c never invokes an inherited toJSON hook while validating inert data', () => {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+  let invoked = 0;
+  Object.defineProperty(Object.prototype, 'toJSON', {
+    configurable: true,
+    get() {
+      invoked++;
+      return () => 'forged payload';
+    },
+  });
+  try {
+    assert.equal(parseCreateDirectoryRequest(valid()).relativePath, 'project/nuevo');
+    const id = valid().requestId;
+    assert.equal(parseOperationResult({
+      version: 1, kind: 'operation-result', requestId: id,
+      status: 'committed', committedEpoch: '2',
+    }, id).committedEpoch, '2');
+  } finally {
+    if (previous) {
+      Object.defineProperty(Object.prototype, 'toJSON', previous);
+    } else {
+      delete Object.prototype.toJSON;
+    }
+  }
+  assert.equal(invoked, 0, 'Never consult prototype serializers on input');
+});
+
 test('C4c binds results to request identity and forbids replayable path grants', () => {
   const id = valid().requestId;
   const done = { version: 1, kind: 'operation-result', requestId: id,

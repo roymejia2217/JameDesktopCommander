@@ -37,8 +37,13 @@ export function parseFilesystemPolicyCandidate(config: unknown): FilesystemPolic
   if (!present) {
     mode = 'legacy-unset';
     roots = [];
+  } else if (process.platform === 'win32' && (value as string[]).includes('/')) {
+    // '/' selects the current volume on Windows; it is not an all-volume
+    // wildcard. The candidate format cannot represent that ambiguous root
+    // as a stable native capability, so reject instead of widening to [].
+    throw invalid();
   } else if ((value as string[]).length === 0 || (value as string[]).includes('/')) {
-    // An explicit empty list and '/' mean unrestricted access in legacy JDC.
+    // Only [] is universally unrestricted. POSIX '/' names the global root.
     mode = 'unrestricted';
     roots = [];
   } else {

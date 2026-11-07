@@ -161,59 +161,72 @@ class RestrictedCapabilityPolicy {
     return best; // Native path resolution is the actual confinement boundary.
   }
 
-  async readBytes(requestedPath) {
+  // Recheck after awaiting policy verification, immediately before native I/O.
+  // An invalidate() microtask can run after #resolve but before the caller resumes.
+  async #dispatch(requestedPath, invoke) {
+    const generation = this.#generation;
     const { capability, relative } = await this.#resolve(requestedPath);
-    const bytes = capability.readBytes(relative);
-    if (!Buffer.isBuffer(bytes)) { this.invalidate(); throw deny(); }
-    return bytes;
+    if (generation !== this.#generation || this.#state !== 'active' ||
+        this.#permanentlyClosed) throw deny();
+    return invoke(capability, relative); // no await between fence and I/O
+  }
+
+  async readBytes(requestedPath) {
+    return this.#dispatch(requestedPath, (capability, relative) => {
+      const bytes = capability.readBytes(relative);
+      if (!Buffer.isBuffer(bytes)) { this.invalidate(); throw deny(); }
+      return bytes;
+    });
   }
 
   async writeBytes(requestedPath, bytes, mode) {
     if (!Buffer.isBuffer(bytes) || (mode !== 'rewrite' && mode !== 'append')) throw deny();
-    const { capability, relative } = await this.#resolve(requestedPath);
-    capability.writeBytes(relative, bytes, mode);
+    return this.#dispatch(requestedPath,
+      (capability, relative) => capability.writeBytes(relative, bytes, mode));
   }
 
   async stat(requestedPath) {
-    const { capability, relative } = await this.#resolve(requestedPath);
-    const value = capability.statRelative(relative);
-    if (!value || (value.kind !== 'file' && value.kind !== 'directory') ||
-        typeof value.sizeBytes !== 'string' ||
-        !/^(0|[1-9][0-9]{0,19})$/.test(value.sizeBytes) ||
-        BigInt(value.sizeBytes) > 18446744073709551615n) {
-      this.invalidate();
-      throw deny();
-    }
-    return Object.freeze({ kind: value.kind, sizeBytes: value.sizeBytes });
+    return this.#dispatch(requestedPath, (capability, relative) => {
+      const value = capability.statRelative(relative);
+      if (!value || (value.kind !== 'file' && value.kind !== 'directory') ||
+          typeof value.sizeBytes !== 'string' ||
+          !/^(0|[1-9][0-9]{0,19})$/.test(value.sizeBytes) ||
+          BigInt(value.sizeBytes) > 18446744073709551615n) {
+        this.invalidate();
+        throw deny();
+      }
+      return Object.freeze({ kind: value.kind, sizeBytes: value.sizeBytes });
+    });
   }
 
   async listDirectory(requestedPath) {
-    const { capability, relative } = await this.#resolve(requestedPath);
-    const names = capability.listDirectory(relative);
-    if (!Array.isArray(names) || names.length > 4096 ||
-        !Array.from({ length: names.length }, (_, i) => i)
-          .every(i => Object.hasOwn(names, i) && typeof names[i] === 'string' &&
-            names[i].length > 0 && names[i] !== '.' && names[i] !== '..' &&
-            !/[\\/\x00]/.test(names[i]))) {
-      this.invalidate();
-      throw deny();
-    }
-    return Object.freeze([...names]);
+    return this.#dispatch(requestedPath, (capability, relative) => {
+      const names = capability.listDirectory(relative);
+      if (!Array.isArray(names) || names.length > 4096 ||
+          !Array.from({ length: names.length }, (_, i) => i)
+            .every(i => Object.hasOwn(names, i) && typeof names[i] === 'string' &&
+              names[i].length > 0 && names[i] !== '.' && names[i] !== '..' &&
+              !/[\\/\x00]/.test(names[i]))) {
+        this.invalidate();
+        throw deny();
+      }
+      return Object.freeze([...names]);
+    });
   }
 
   async createDirectory(requestedPath) {
-    const { capability, relative } = await this.#resolve(requestedPath);
-    capability.createDirectory(relative);
+    return this.#dispatch(requestedPath,
+      (capability, relative) => capability.createDirectory(relative));
   }
 
   async removeFile(requestedPath) {
-    const { capability, relative } = await this.#resolve(requestedPath);
-    capability.removeFileRelative(relative);
+    return this.#dispatch(requestedPath,
+      (capability, relative) => capability.removeFileRelative(relative));
   }
 
   async removeEmptyDirectory(requestedPath) {
-    const { capability, relative } = await this.#resolve(requestedPath);
-    capability.removeEmptyDirectoryRelative(relative);
+    return this.#dispatch(requestedPath,
+      (capability, relative) => capability.removeEmptyDirectoryRelative(relative));
   }
 
   async move(sourcePath, destinationPath) {

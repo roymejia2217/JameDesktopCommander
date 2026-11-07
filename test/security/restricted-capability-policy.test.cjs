@@ -269,6 +269,73 @@ test('missing new native method fails closed before any capability policy opens'
   }), denied);
 });
 
+test('revocation between verified snapshot and native dispatch denies every single-root operation', async () => {
+  const state = { created: [], closed: [], calls: [], failAt: null };
+  class RecordingCapability extends mockNative(state) {
+    readBytes() { state.calls.push('readBytes'); return Buffer.alloc(0); }
+    writeBytes() { state.calls.push('writeBytes'); }
+    statRelative() { state.calls.push('statRelative'); return { kind: 'file', sizeBytes: '0' }; }
+    listDirectory() { state.calls.push('listDirectory'); return []; }
+    createDirectory() { state.calls.push('createDirectory'); }
+    removeFileRelative() { state.calls.push('removeFileRelative'); }
+    removeEmptyDirectoryRelative() { state.calls.push('removeEmptyDirectoryRelative'); }
+  }
+  const policy = new RestrictedCapabilityPolicy({
+    RootCapability: RecordingCapability,
+    readVerifiedPolicy: async () => ({
+      mode: 'restricted', revision: 'r1', allowedRoots: [ROOT],
+    }),
+  });
+  const inside = name => path.join(ROOT, name);
+  const cases = [
+    ['readBytes', () => policy.readBytes(inside('safe'))],
+    ['writeBytes', () => policy.writeBytes(inside('safe'), Buffer.from('changed'), 'rewrite')],
+    ['stat', () => policy.stat(inside('safe'))],
+    ['listDirectory', () => policy.listDirectory(inside('nested'))],
+    ['createDirectory', () => policy.createDirectory(inside('new'))],
+    ['removeFile', () => policy.removeFile(inside('safe'))],
+    ['removeEmptyDirectory', () => policy.removeEmptyDirectory(inside('nested'))],
+  ];
+  try {
+    for (const [label, operation] of cases) {
+      await policy.reload();
+      const pending = operation();
+      // #resolve resumes first; invalidation is scheduled before the awaiting
+      // public method gets its continuation and can invoke the native object.
+      queueMicrotask(() => policy.invalidate());
+      await assert.rejects(pending, denied, label + ' crossed a revoked generation');
+      assert.deepEqual(state.calls, [], label + ' must never reach the native method');
+    }
+  } finally {
+    policy.close();
+  }
+});
+
+test('close and competing reload fence a verified but not yet dispatched write', async () => {
+  for (const action of ['close', 'reload']) {
+    const state = { created: [], closed: [], calls: [], failAt: null };
+    class ObservedNative extends mockNative(state) {
+      // Deliberately do not check .closed here: the policy must prevent entry.
+      writeBytes() { state.calls.push('stale native write'); }
+    }
+    const policy = new RestrictedCapabilityPolicy({
+      RootCapability: ObservedNative,
+      readVerifiedPolicy: async () => ({
+        mode: 'restricted', revision: 'r1', allowedRoots: [ROOT],
+      }),
+    });
+    await policy.reload();
+    const pending = policy.writeBytes(path.join(ROOT, 'bytes'), Buffer.from('x'), 'rewrite');
+    let next;
+    queueMicrotask(() => { next = action === 'close' ? policy.close() : policy.reload(); });
+    await assert.rejects(pending, denied, action + ' must fence the older generation');
+    if (action === 'reload') await next;
+    assert.deepEqual(state.calls, [], action + ' called a revoked native capability');
+    assert.equal(policy.state, action === 'close' ? 'closed' : 'active');
+    policy.close();
+  }
+});
+
 test('native operations deny while snapshot is revoked during async verification', async () => {
   const { policy, state, setReader } = fixture();
   await policy.reload();

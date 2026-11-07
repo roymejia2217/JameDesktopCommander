@@ -85,8 +85,7 @@ async function setupEdgeCases() {
   console.log(`${colors.blue}Setting up edge case tests...${colors.reset}`);
   
   const originalConfig = await configManager.getConfig();
-  // This functional fixture does not test restricted native filesystem custody.
-  await configManager.setValue('allowedDirectories', []);
+  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
   
   await fs.mkdir(EDGE_CASE_TEST_DIR, { recursive: true });
   

@@ -113,8 +113,7 @@ async function testLFLineEndings() {
   
   try {
     // Allow access to test directory
-    // This functional fixture does not test restricted native filesystem custody.
-  await configManager.setValue('allowedDirectories', []);
+    await configManager.setValue('allowedDirectories', [TEST_DIR]);
     
     // Replace a line using LF line endings in search string
     const result = await handleEditBlock({

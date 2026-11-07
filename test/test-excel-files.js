@@ -56,8 +56,7 @@ async function setup() {
   const originalConfig = await configManager.getConfig();
 
   // Set allowed directories to include our test directory
-  // This functional fixture does not test restricted native filesystem custody.
-  await configManager.setValue('allowedDirectories', []);
+  await configManager.setValue('allowedDirectories', [TEST_DIR]);
   console.log(`✓ Setup: set allowed directories`);
 
   return originalConfig;

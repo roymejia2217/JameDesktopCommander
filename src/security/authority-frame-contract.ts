@@ -56,28 +56,29 @@ function buildFrame(payload: string): Buffer {
 
 function requestJSON(req: Readonly<CreateDirectoryAuthorityRequest>): string {
   assertWellFormedValues(req);
-  return JSON.stringify({
+  // Null-prototype output never consults an inherited Object.prototype.toJSON.
+  return JSON.stringify(Object.assign(Object.create(null), {
     version: req.version,
     kind: req.kind,
     requestId: req.requestId,
     expectedEpoch: req.expectedEpoch,
     rootRef: req.rootRef,
     relativePath: req.relativePath,
-  });
+  }));
 }
 
 function resultJSON(reply: AuthorityOperationResult): string {
   assertWellFormedValues(reply);
   if (reply.status === 'committed') {
-    return JSON.stringify({
+    return JSON.stringify(Object.assign(Object.create(null), {
       version: reply.version, kind: reply.kind, requestId: reply.requestId,
       status: reply.status, committedEpoch: reply.committedEpoch,
-    });
+    }));
   }
-  return JSON.stringify({
+  return JSON.stringify(Object.assign(Object.create(null), {
     version: reply.version, kind: reply.kind, requestId: reply.requestId,
     status: reply.status, errorCode: reply.errorCode,
-  });
+  }));
 }
 /** Encode only validated data, in a single deterministic property order. */
 export function encodeAuthorityRequestFrame(input: unknown): Buffer {

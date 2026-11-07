@@ -104,6 +104,31 @@ test('C4d refuses ambiguous Unicode and forged response metadata', () => {
     request().requestId), bad);
 });
 
+test('C4d canonical framing never invokes inherited JSON serializers', () => {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+  let invoked = 0;
+  Object.defineProperty(Object.prototype, 'toJSON', {
+    configurable: true,
+    get() {
+      invoked++;
+      return () => 'forged';
+    },
+  });
+  try {
+    const req = encodeAuthorityRequestFrame(request());
+    const result = encodeAuthorityResultFrame(committed(), request().requestId);
+    assert.equal(invoked, 0, 'Encoder must not consult global prototype toJSON hooks');
+    assert.deepEqual(decodeAuthorityRequestFrame(req), request());
+    assert.deepEqual(decodeAuthorityResultFrame(result, request().requestId), committed());
+  } finally {
+    if (previous) {
+      Object.defineProperty(Object.prototype, 'toJSON', previous);
+    } else {
+      delete Object.prototype.toJSON;
+    }
+  }
+});
+
 test('C4d fails closed before invoking untrusted serializers or prototype hooks', () => {
   let executed = 0;
   const unsafe = { ...request(), relativePath: { toJSON() { executed++; return 'ok'; } } };

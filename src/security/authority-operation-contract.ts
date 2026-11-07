@@ -3,6 +3,8 @@
  * This validator is NOT an authority, a credential, an IPC transport, or a
  * revocation protocol. Never use its output to reopen filesystem pathnames.
  */
+import { types as utilTypes } from 'node:util';
+
 export const AUTHORITY_PROTOCOL_VERSION = 1 as const;
 const MAX_MESSAGE_BYTES = 8192;
 const MAX_RELATIVE_BYTES = 4096;
@@ -50,7 +52,10 @@ export class AuthorityContractError extends Error {
 }
 
 function record(input: unknown, expected: readonly string[]): Record<string, unknown> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+  // A Proxy can change values between descriptor inspection, validation and copy.
+  // Reject before any user-defined prototype/property trap is invoked.
+  if (input === null || typeof input !== 'object' ||
+      utilTypes.isProxy(input) || Array.isArray(input)) {
     throw new AuthorityContractError();
   }
   const prototype = Object.getPrototypeOf(input);
@@ -69,11 +74,15 @@ function record(input: unknown, expected: readonly string[]): Record<string, unk
       throw new AuthorityContractError();
     }
   }
-  const source = input as Record<string, unknown>;
-  if (Buffer.byteLength(JSON.stringify(source), 'utf8') > MAX_MESSAGE_BYTES) {
+  // Serialize an inert, null-prototype snapshot of checked descriptors.
+  // JSON.stringify(input) can otherwise invoke an inherited toJSON hook, and
+  // later reads from input need not match the values we inspected.
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of expected) snapshot[key] = entries[key]!.value;
+  if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MAX_MESSAGE_BYTES) {
     throw new AuthorityContractError();
   }
-  return source;
+  return snapshot;
 }
 
 function canonicalEpoch(value: unknown): value is string {
@@ -116,7 +125,9 @@ export function parseOperationResult(
 ): AuthorityOperationResult {
   try {
     if (!requestId(expectedRequestId)) throw new AuthorityContractError();
-    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    // Reject Proxy results before reading their status descriptor.
+    if (input === null || typeof input !== 'object' ||
+        utilTypes.isProxy(input) || Array.isArray(input)) {
       throw new AuthorityContractError();
     }
     const status = Object.getOwnPropertyDescriptor(input, 'status');

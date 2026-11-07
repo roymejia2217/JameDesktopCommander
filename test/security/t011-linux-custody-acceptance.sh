@@ -55,9 +55,21 @@ sudo -n chown jdc-authority:jdc-authority "$fixture_dir"
 sudo -n chmod 0700 "$fixture_dir"
 sudo -n chown nobody:"$attacker_group" "$canary"
 
-# PROVE both identities can actually execute commands; do not misinterpret
-# a broken sudo invocation as protection.
-sudo -n -u jdc-authority -- "$identity_probe"
+# Positive identity MUST run with the exact NNP kernel requirement used by
+# the protected systemd service. Never weaken the Rust identity preflight.
+if ! command -v setpriv >/dev/null; then
+  printf '%s\n' 'E_CUSTODY_SETPRIV_UNAVAILABLE' >&2
+  exit 1
+fi
+service_nnp="$(sudo -n -u jdc-authority -- setpriv --no-new-privs -- awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
+if [[ "$service_nnp" != '1' ]]; then
+  printf '%s\n' 'E_CUSTODY_NO_NEW_PRIVS_NOT_PROVEN' >&2
+  exit 1
+fi
+if ! sudo -n -u jdc-authority -- setpriv --no-new-privs -- "$identity_probe"; then
+  printf '%s\n' 'E_CUSTODY_DEDICATED_IDENTITY_POSITIVE_FAILED' >&2
+  exit 1
+fi
 
 # Adversarial REAL token: same service UID and primary GID, but a foreign
 # supplementary group injected by the disposable runner administrator.
@@ -69,32 +81,39 @@ if [[ "$service_gid" -eq "$attacker_gid" || "$attacker_gid" -eq 0 ]]; then
   printf '%s\n' 'E_CUSTODY_GROUPS_NOT_DISTINCT' >&2
   exit 1
 fi
-if ! command -v setpriv >/dev/null; then
-  printf '%s\n' 'E_CUSTODY_SETPRIV_UNAVAILABLE' >&2
-  exit 1
-fi
-identity_uid="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -u)"
-identity_groups="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- id -G)"
+identity_uid="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- id -u)"
+identity_groups="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- id -G)"
 # Verify real/effective/saved credentials independently via Linux procfs.
 # Otherwise an unrelated UID mismatch could masquerade as group rejection.
-uid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Uid:/ {print $2, $3, $4}' /proc/self/status)"
-gid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- awk '/^Gid:/ {print $2, $3, $4}' /proc/self/status)"
+uid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^Uid:/ {print $2, $3, $4}' /proc/self/status)"
+gid_triplet="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^Gid:/ {print $2, $3, $4}' /proc/self/status)"
+identity_nnp="$(sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- awk '/^NoNewPrivs:/ {print $2}' /proc/self/status)"
 if [[ "$identity_uid" != "$service_uid" || " $identity_groups " != *" $attacker_gid "* ||
       "$uid_triplet" != "$service_uid $service_uid $service_uid" ||
-      "$gid_triplet" != "$service_gid $service_gid $service_gid" ]]; then
+      "$gid_triplet" != "$service_gid $service_gid $service_gid" ||
+      "$identity_nnp" != '1' ]]; then
   printf '%s\n' 'E_CUSTODY_GROUP_INJECTION_NOT_PROVEN' >&2
   exit 1
 fi
-if sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" -- "$identity_probe"; then
+if sudo -n setpriv --reuid "$service_uid" --regid "$service_gid" --groups "$service_gid,$attacker_gid" --no-new-privs -- "$identity_probe"; then
   printf '%s\n' 'E_CUSTODY_SUPPLEMENTARY_GROUP_ACCEPTED' >&2
   exit 1
 fi
-if sudo -n -u nobody -- "$identity_probe"; then
+if sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"; then
   printf '%s\n' 'E_CUSTODY_IDENTITY_SPOOF' >&2
   exit 1
 fi
 sudo -n -u nobody -- touch "$canary"
 sudo -n -u nobody -- test -w "$canary"
+# Positive control: the attacker identity really can create a hard link in
+# attacker-owned storage. Otherwise denial could be a broken runner/filesystem.
+attacker_link="${canary}.hardlink"
+sudo -n -u nobody -- ln "$canary" "$attacker_link"
+if [[ "$(stat -c '%d:%i' "$canary")" != "$(stat -c '%d:%i' "$attacker_link")" ]]; then
+  printf '%s\n' 'E_CUSTODY_POSITIVE_HARDLINK_WRONG_OBJECT' >&2
+  exit 1
+fi
+sudo -n -u nobody -- rm "$attacker_link"
 sudo -n -u jdc-authority -- "$store_fixture" init "$database"
 sudo -n -u jdc-authority -- chmod 0600 "$database"
 if [[ "$(sudo -n -u jdc-authority -- stat -c '%a' "$database")" != "600" ]]; then
@@ -107,6 +126,8 @@ fi
 # permissions, even if the contents of the old snapshot are known.
 sudo -n install -m 0600 -o nobody -g "$attacker_group" "$database" "$snapshot"
 sudo -n -u jdc-authority -- "$store_fixture" advance "$database"
+# SQLite itself must create and remove a DELETE-mode rollback journal.
+sudo -n -u jdc-authority -- "$store_fixture" prove-rollback-journal "$database"
 sudo -n -u jdc-authority -- "$store_fixture" verify-2 "$database"
 expected_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 
@@ -118,7 +139,7 @@ expect_denied() {
     exit 1
   fi
 }
-expect_denied identity sudo -n -u nobody -- "$identity_probe"
+expect_denied identity sudo -n -u nobody -- setpriv --no-new-privs -- "$identity_probe"
 expect_denied browse sudo -n -u nobody -- ls -la "$fixture_dir"
 expect_denied read sudo -n -u nobody -- cat "$database"
 expect_denied write sudo -n -u nobody -- touch "$database"
@@ -127,8 +148,32 @@ expect_denied overwrite sudo -n -u nobody -- cp "$snapshot" "$database"
 expect_denied rename sudo -n -u nobody -- mv "$database" "$fixture_dir/renamed.sqlite3"
 expect_denied unlink sudo -n -u nobody -- rm "$database"
 expect_denied replay sudo -n -u nobody -- mv "$snapshot" "$database"
+# Verify the actual protected directory's ownership of all SQLite auxiliary
+# namespaces. WAL/SHM cases are namespace probes, not active WAL tests.
+for suffix in -journal -wal -shm; do
+  sidecar="${database}${suffix}"
+  sudo -n -u jdc-authority -- touch "$sidecar"
+  sudo -n -u jdc-authority -- test -f "$sidecar"
+  expect_denied sidecar_read sudo -n -u nobody -- cat "$sidecar"
+  expect_denied sidecar_write sudo -n -u nobody -- touch "$sidecar"
+  sudo -n -u jdc-authority -- rm "$sidecar"
+  expect_denied sidecar_create sudo -n -u nobody -- touch "$sidecar"
+  if [[ -e "$sidecar" ]]; then
+    printf '%s\n' 'E_CUSTODY_UNAUTHORIZED_SIDECAR_CREATED' >&2
+    exit 1
+  fi
+done
 expect_denied parent_rename sudo -n -u nobody -- mv "$fixture_dir" "${fixture_dir}-replaced"
 expect_denied parent_chmod sudo -n -u nobody -- chmod 0777 "$fixture_dir"
+# Both hard-link directions must be denied under independent OS principals.
+# This is a protected-domain claim, NOT a same-principal hard-link solution.
+expect_denied hardlink_source sudo -n -u nobody -- ln "$database" "${canary}.protected-alias"
+expect_denied hardlink_destination sudo -n -u nobody -- ln "$canary" "$fixture_dir/forged-hardlink"
+if [[ -e "${canary}.protected-alias" ]] ||
+    sudo -n -u jdc-authority -- test -e "$fixture_dir/forged-hardlink"; then
+  printf '%s\n' 'E_CUSTODY_HARDLINK_ALIAS_CREATED' >&2
+  exit 1
+fi
 
 actual_hash="$(sudo -n -u jdc-authority -- sha256sum "$database")"
 if [[ "$actual_hash" != "$expected_hash" ]]; then

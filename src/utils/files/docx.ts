@@ -177,6 +177,17 @@ async function readBoundedDocxFile(filePath: string): Promise<Buffer> {
     }
 }
 
+/**
+ * Search-only ZIP handoff. Both the compressed-source bound and every ZIP
+ * inflation budget must pass before a general-purpose parser sees the bytes.
+ * This is a resource limit, not an allowedDirectories authorization grant.
+ */
+export async function openValidatedDocxSearchArchive(filePath: string): Promise<PizZip> {
+    const bytes = await readBoundedDocxFile(filePath);
+    await validateDocxZipBudget(bytes);
+    return new PizZip(bytes);
+}
+
 function loadDocxZip(buf: Buffer): DocxZipContents {
     const zip = new PizZip(buf);
     const docFile = zip.file('word/document.xml');

@@ -1,7 +1,7 @@
 //! Experimental in-process ordering primitive, not an OS-protected authority.
 //! There is NO trusted epoch store, native capability binding or IPC peer identity.
 
-use std::sync::Mutex;
+use std::{cell::RefCell, sync::Mutex};
 
 /// Denial by an in-process sequencing gate; not an OS authorization verdict.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -34,6 +34,51 @@ pub struct EpochArbiter {
     state: Mutex<State>,
 }
 
+// A recursive call from an operation callback on the SAME thread would
+// otherwise wait forever on this arbiter's non-reentrant mutex. Track only
+// the identity of in-flight instances; another thread may still queue on the
+// mutex, and callbacks using an independent arbiter remain valid.
+thread_local! {
+    static ACTIVE_ARBITERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+fn callback_active(arbiter: &EpochArbiter) -> bool {
+    let identity = arbiter as *const EpochArbiter as usize;
+    ACTIVE_ARBITERS.with(|active| {
+        active
+            .try_borrow()
+            .map_or(true, |items| items.contains(&identity))
+    })
+}
+
+struct ActiveCallback {
+    identity: usize,
+}
+
+impl ActiveCallback {
+    fn enter(arbiter: &EpochArbiter) -> Result<Self, Denied> {
+        let identity = arbiter as *const EpochArbiter as usize;
+        ACTIVE_ARBITERS.with(|active| {
+            let mut items = active.try_borrow_mut().map_err(|_| Denied)?;
+            if items.contains(&identity) {
+                return Err(Denied);
+            }
+            items.push(identity);
+            Ok(Self { identity })
+        })
+    }
+}
+
+impl Drop for ActiveCallback {
+    fn drop(&mut self) {
+        ACTIVE_ARBITERS.with(|active| {
+            active
+                .borrow_mut()
+                .retain(|identity| *identity != self.identity);
+        });
+    }
+}
+
 impl Default for EpochArbiter {
     fn default() -> Self {
         Self::new()
@@ -58,6 +103,9 @@ impl EpochArbiter {
     // from passing arbitrary epochs as if they were independently attested.
     #[allow(dead_code)]
     pub(crate) fn accept_externally_committed_epoch(&self, epoch: u64) -> Result<(), Denied> {
+        if callback_active(self) {
+            return Err(Denied);
+        }
         let mut state = self.state.lock().map_err(|_| Denied)?;
         if state.phase != Phase::Unavailable || epoch == 0 || epoch <= state.last_epoch {
             return Err(Denied);
@@ -69,6 +117,9 @@ impl EpochArbiter {
 
     /// Revoke and retain the process-local high-water epoch.
     pub fn revoke(&self) -> Result<(), Denied> {
+        if callback_active(self) {
+            return Err(Denied);
+        }
         let mut state = self.state.lock().map_err(|_| Denied)?;
         if state.phase == Phase::Closed {
             return Err(Denied);
@@ -79,6 +130,9 @@ impl EpochArbiter {
 
     /// Permanently deny this process-local gate instance.
     pub fn close(&self) -> Result<(), Denied> {
+        if callback_active(self) {
+            return Err(Denied);
+        }
         let mut state = self.state.lock().map_err(|_| Denied)?;
         state.phase = Phase::Closed;
         Ok(())
@@ -94,6 +148,7 @@ impl EpochArbiter {
         expected_epoch: u64,
         operation: impl FnOnce() -> Result<T, E>,
     ) -> Result<Result<T, E>, Denied> {
+        let _callback_scope = ActiveCallback::enter(self)?;
         let state = self.state.lock().map_err(|_| Denied)?;
         if expected_epoch == 0 || state.phase != Phase::Active || state.last_epoch != expected_epoch
         {
@@ -109,6 +164,45 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn recursive_calls_on_same_arbiter_deny_without_deadlocking() {
+        let gate = EpochArbiter::new();
+        assert_eq!(gate.accept_externally_committed_epoch(1), Ok(()));
+        assert_eq!(
+            gate.execute(1, || {
+                let mut nested_operation_ran = false;
+                assert_eq!(
+                    gate.execute(1, || {
+                        nested_operation_ran = true;
+                        Ok::<_, ()>(())
+                    }),
+                    Err(Denied),
+                );
+                assert!(!nested_operation_ran);
+                assert_eq!(gate.revoke(), Err(Denied));
+                assert_eq!(gate.close(), Err(Denied));
+                assert_eq!(gate.accept_externally_committed_epoch(2), Err(Denied));
+                Ok::<_, ()>(())
+            }),
+            Ok(Ok(())),
+        );
+        assert_eq!(gate.execute(1, || Ok::<_, ()>(42)), Ok(Ok(42)));
+        assert_eq!(gate.revoke(), Ok(()));
+        assert_eq!(gate.execute(1, || Ok::<_, ()>(42)), Err(Denied));
+    }
+
+    #[test]
+    fn nested_operations_on_different_arbiters_preserve_independent_authority() {
+        let first = EpochArbiter::new();
+        let second = EpochArbiter::new();
+        assert_eq!(first.accept_externally_committed_epoch(1), Ok(()));
+        assert_eq!(second.accept_externally_committed_epoch(7), Ok(()));
+        assert_eq!(
+            first.execute(1, || second.execute(7, || Ok::<_, ()>(9))),
+            Ok(Ok(Ok(9))),
+        );
+    }
 
     #[test]
     fn defaults_to_deny_and_rejects_stale_or_equal_epochs() {

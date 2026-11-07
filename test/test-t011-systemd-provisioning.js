@@ -16,6 +16,7 @@ test('Linux authority uses standard systemd account and deny-only service config
   const service = fs.readFileSync(path.join(repo, unit), 'utf8');
   for (const entry of [
     'Type=exec', 'User=jdc-authority', 'Group=jdc-authority',
+    'ConditionFileIsExecutable=/usr/libexec/jdc/jdc-authority-service',
     'ExecStart=/usr/libexec/jdc/jdc-authority-service',
     'StateDirectory=jdc-authority', 'StateDirectoryMode=0700',
     'RuntimeDirectory=jdc-authority', 'RuntimeDirectoryMode=0700',
@@ -25,6 +26,7 @@ test('Linux authority uses standard systemd account and deny-only service config
     'StandardOutput=journal', 'StandardError=journal',
     'Restart=no',
   ]) assert.ok(service.split(/\r?\n/).includes(entry), `Missing explicit hardening directive: ${entry}`);
+  assert.doesNotMatch(service, /^ConditionPathIsExecutable=/m, 'unsupported systemd condition must never be reintroduced');
   assert.doesNotMatch(service, /^\[Install\]$/m, 'experimental service must not be enabled on boot');
   assert.doesNotMatch(service, /^\s*(?:ExecStartPre|ExecStartPost|ExecStopPost|ReadWritePaths)=/m);
 });
@@ -43,4 +45,22 @@ test('official systemd validators run within the existing Linux native CI gate',
     'systemd-sysusers --dry-run "$sysusers_file"',
     'systemd-analyze verify "$unit_file"',
   ]) assert.ok(workflow.includes(marker), `Missing official CI validation: ${marker}`);
+});
+
+
+test('real admitted MCP socket client must demonstrate systemd activation still denies C4d', () => {
+  const acceptance = fs.readFileSync(path.join(repo,
+    'test/security/t011-systemd-socket-custody-acceptance.sh'), 'utf8');
+  assert.match(acceptance, /SEPARATE_MCP_CLIENT_CONNECT_POSITIVE_NOT_AUTHORIZATION/,
+    'retain positive independently provisioned client principal');
+  assert.match(acceptance, /client\.sendall\(frame\)/,
+    'admitted client must transmit a complete canonical C4d frame');
+  assert.match(acceptance, /_SYSTEMD_INVOCATION_ID/,
+    'journal evidence must be scoped to the actual activated service invocation');
+  assert.match(acceptance, /E_POLICY_UNAVAILABLE/,
+    'an admitted C4d client must not produce an authorized broker action');
+  assert.match(acceptance, /ExecMainStatus/,
+    'the kernel-activated service must exit with the expected failure');
+  assert.match(acceptance, /NRestarts/,
+    'failing startup must not cause an automatic privileged restart');
 });

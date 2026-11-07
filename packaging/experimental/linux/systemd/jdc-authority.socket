@@ -1,0 +1,20 @@
+# T011-C4n experimental: root-managed filesystem AF_UNIX socket only.
+# NO [Install] section: never enabled by a release or user login.
+# jdc-authority.service still denies ALL startup and never dispatches I/O.
+# Client group gates local connect() only, never grants filesystem authority.
+# The paired service still terminates with E_POLICY_UNAVAILABLE.
+[Unit]
+Description=JDC experimental deny-only native authority socket
+Documentation=https://github.com/roymejia2217/JameDesktopCommander
+After=local-fs.target
+
+[Socket]
+ListenStream=/run/jdc-authority-ipc/authority.sock
+FileDescriptorName=jdc-authority-ipc
+SocketUser=jdc-authority
+SocketGroup=jdc-mcp-client
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+Service=jdc-authority.service
+RemoveOnStop=yes

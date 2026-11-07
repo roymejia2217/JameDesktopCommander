@@ -17,6 +17,24 @@ fn digest(value: u8) -> [u8; 32] {
 }
 
 #[test]
+fn sqlite_readwrite_fallback_must_not_admit_readonly_store() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("readonly.sqlite3");
+    fixture(&db);
+    let original = std::fs::metadata(&db).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&db, readonly).unwrap();
+    // Always restore before asserting, including when the contract is RED.
+    let admitted = EpochStore::open_existing(&db).is_ok();
+    std::fs::set_permissions(&db, original).unwrap();
+    assert!(
+        !admitted,
+        "SQLite's READWRITE flag can fall back to readonly"
+    );
+}
+
+#[test]
 fn store_fails_closed_if_unprovisioned_or_malformed() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.sqlite3");
@@ -42,6 +60,226 @@ fn reopening_retains_epoch_and_rejects_old_or_equal_commit() {
     assert_eq!(reopened.read_epoch().unwrap(), 8);
     assert!(reopened.commit_after(7, 9, digest(13)).is_err());
     assert!(reopened.commit_after(8, 9, digest(14)).is_ok());
+}
+
+#[test]
+fn snapshot_preserves_exact_epoch_and_digest_without_granting_authority() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    assert!(
+        store.read_snapshot().is_err(),
+        "unprovisioned all-zero fixture must deny"
+    );
+    assert!(store.commit_after(0, 7, [0xA5; 32]).is_ok());
+    let snapshot = store.read_snapshot().unwrap();
+    assert_eq!(snapshot.epoch(), 7);
+    assert_eq!(snapshot.digest(), &[0xA5; 32]);
+    // Matching a synthetic witness is data comparison only. No OS evidence.
+    assert_eq!((snapshot.epoch(), snapshot.digest()), (7, &[0xA5; 32]));
+}
+
+#[test]
+fn database_replay_and_same_epoch_digest_change_do_not_match_separate_witness() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    let saved = dir.path().join("saved.sqlite3");
+    fixture(&db);
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(0, 1, [1; 32]).unwrap();
+    }
+    std::fs::copy(&db, &saved).unwrap();
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(1, 2, [2; 32]).unwrap();
+        let current = store.read_snapshot().unwrap();
+        assert_eq!((current.epoch(), current.digest()), (2, &[2; 32]));
+    }
+    std::fs::copy(&saved, &db).unwrap();
+    let rollback = EpochStore::open_existing(&db)
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    assert_ne!((rollback.epoch(), rollback.digest()), (2, &[2; 32]));
+    // A digest-only substitution at the same epoch must not be accepted.
+    {
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        store.commit_after(1, 2, [0xA6; 32]).unwrap();
+    }
+    let forged = EpochStore::open_existing(&db)
+        .unwrap()
+        .read_snapshot()
+        .unwrap();
+    assert_eq!(forged.epoch(), 2);
+    assert_ne!(forged.digest(), &[2; 32]);
+}
+
+#[test]
+fn corrupted_previous_policy_must_not_be_laundered_by_epoch_advance() {
+    for (previous_epoch, corrupt_digest) in [(0_u64, [7_u8; 32]), (1_u64, [0_u8; 32])] {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("state.sqlite3");
+        fixture(&db);
+        if previous_epoch == 1 {
+            EpochStore::open_existing(&db)
+                .unwrap()
+                .commit_after(0, 1, [1_u8; 32])
+                .unwrap();
+        }
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE protected_policy SET digest=?1 WHERE slot=1",
+            [corrupt_digest.as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            store
+                .commit_after(previous_epoch, previous_epoch + 1, [2_u8; 32])
+                .is_err(),
+            "updater must never overwrite an invalid prior row"
+        );
+        assert!(
+            store.read_epoch().is_err(),
+            "corrupt predecessor cannot be read"
+        );
+        let raw: Vec<u8> = Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT epoch FROM protected_policy WHERE slot=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            raw,
+            previous_epoch.to_be_bytes(),
+            "denied write must preserve epoch"
+        );
+    }
+}
+
+#[test]
+fn schema_change_after_open_must_deny_before_writing() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    let attacker = Connection::open(&db).unwrap();
+    attacker
+        .execute_batch(
+            "CREATE TRIGGER unexpected AFTER UPDATE ON protected_policy BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    drop(attacker);
+    assert!(
+        store.commit_after(0, 1, [2_u8; 32]).is_err(),
+        "after-open trigger change must be rejected, never used as an update side effect"
+    );
+    assert!(
+        store.read_epoch().is_err(),
+        "schema drift must deny all store readers"
+    );
+    let raw_epoch: Vec<u8> = Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT epoch FROM protected_policy WHERE slot=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        raw_epoch, [0_u8; 8],
+        "rejected write must preserve original epoch"
+    );
+}
+
+#[test]
+fn opened_reader_must_refuse_post_open_schema_mutation() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    store.commit_after(0, 1, [5_u8; 32]).unwrap();
+    assert_eq!(store.read_snapshot().unwrap().epoch(), 1);
+    let other = Connection::open(&db).unwrap();
+    other
+        .execute_batch(
+            "CREATE TRIGGER unexpected AFTER UPDATE ON protected_policy BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+    drop(other);
+    assert!(store.read_epoch().is_err(), "read_epoch must reject drift");
+    assert!(
+        store.read_snapshot().is_err(),
+        "read_snapshot must reject drift"
+    );
+}
+
+#[test]
+fn malformed_epoch_digest_relationship_denies_open_read_and_update() {
+    for (epoch, digest) in [(0_u64, [0xA5_u8; 32]), (1_u64, [0_u8; 32])] {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("state.sqlite3");
+        fixture(&db);
+        let mut store = EpochStore::open_existing(&db).unwrap();
+        let attacker = Connection::open(&db).unwrap();
+        attacker
+            .execute(
+                "UPDATE protected_policy SET epoch=?1, digest=?2 WHERE slot=1",
+                rusqlite::params![epoch.to_be_bytes().as_slice(), digest.as_slice()],
+            )
+            .unwrap();
+        drop(attacker);
+        assert!(
+            store.read_epoch().is_err(),
+            "invalid relationship was read as valid epoch"
+        );
+        assert!(store.read_snapshot().is_err());
+        assert!(store.commit_after(epoch, epoch + 1, [3_u8; 32]).is_err());
+        drop(store);
+        assert!(
+            EpochStore::open_existing(&db).is_err(),
+            "reopened invalid state accepted"
+        );
+    }
+}
+
+#[test]
+fn malformed_oversized_blob_and_nonblob_epoch_must_fail_closed() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    conn.execute(
+        "UPDATE protected_policy SET digest=zeroblob(1048576) WHERE slot=1",
+        [],
+    )
+    .unwrap();
+    assert!(EpochStore::open_existing(&db).is_err());
+    conn.execute(
+        "UPDATE protected_policy SET digest=zeroblob(32), epoch=?1 WHERE slot=1",
+        [b"00000000".as_slice()],
+    )
+    .unwrap();
+    // BLOB bit patterns can be valid bytes; a TEXT SQLite value cannot.
+    conn.execute(
+        "UPDATE protected_policy SET epoch=CAST(?1 AS TEXT) WHERE slot=1",
+        [b"00000000".as_slice()],
+    )
+    .unwrap();
+    assert!(EpochStore::open_existing(&db).is_err());
+}
+
+#[test]
+fn store_refuses_to_commit_all_zero_policy_digest() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    fixture(&db);
+    let mut store = EpochStore::open_existing(&db).unwrap();
+    assert!(store.commit_after(0, 1, [0; 32]).is_err());
+    assert_eq!(store.read_epoch().unwrap(), 0);
 }
 
 #[test]

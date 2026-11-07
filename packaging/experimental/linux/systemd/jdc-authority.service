@@ -5,7 +5,7 @@
 Description=JDC experimental deny-only filesystem authority
 Documentation=https://github.com/roymejia2217/JameDesktopCommander
 After=local-fs.target
-ConditionPathIsExecutable=/usr/libexec/jdc/jdc-authority-service
+ConditionFileIsExecutable=/usr/libexec/jdc/jdc-authority-service
 
 [Service]
 Type=exec

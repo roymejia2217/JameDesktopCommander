@@ -3,9 +3,71 @@
 //! grant filesystem operations, or start a service.
 
 pub mod token_policy;
+// Shared canonical epoch/digest data decoder; not an authorization grant.
+mod epoch_anchor_wire;
+
+// Internal handle-bound directory operation. No IPC or policy grant yet.
+#[cfg(any(windows, target_os = "linux"))]
+pub mod handle_mkdir;
+// No Windows production dispatch surface: tests retain the synthetic
+// model, while Linux can only dispatch typed kernel-authenticated frames.
+// Still no independently approved bootstrap or production IPC grant.
+#[cfg(any(target_os = "linux", test))]
+pub mod sealed_dispatch;
+
+// Experimental anchored Linux policy directory observer. No policy grant.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_root;
+
+// Independent root-admin-owned Linux epoch witness, observation only.
+#[cfg(target_os = "linux")]
+pub mod linux_epoch_anchor;
+
+// Root-only durable intent primitive; deliberately cannot complete an update,
+// publish policy, issue a capability, or be called by the service principal.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_publisher;
+
+// Process-local sticky revocation of independently witnessed policy generations.
+// Data-only, no grant/issuer or IPC entry point.
+#[cfg(target_os = "linux")]
+pub mod linux_policy_epoch_monitor;
+
+// C4d native transport framing only, not an authenticated listener or authority.
+pub mod frame_reader;
+
+// C4d request data validator only; no trusted IPC client or operation grant.
+pub mod canonical_request;
+
+// Never enable an IPC listener solely because peer credentials are observable.
+// This module only reads kernel-verified Unix peer metadata; it grants nothing.
+#[cfg(any(target_os = "linux", test))]
+mod peer_contract;
+// Pure structural gate; no authority or listener ownership granted.
+#[cfg(any(target_os = "linux", test))]
+mod activation_contract;
+#[cfg(target_os = "linux")]
+pub mod unix_peer;
+// Linux only: bounded data-only observation. Never a service authority grant.
+#[cfg(target_os = "linux")]
+pub mod unix_session;
+// Experimental named AF_UNIX acceptance: data observation, never a grant.
+#[cfg(target_os = "linux")]
+pub mod unix_accept;
+// Inspect borrowed Linux listener descriptor shape, no systemd identity grant.
+#[cfg(target_os = "linux")]
+pub mod unix_activation;
 
 #[cfg(windows)]
 pub mod windows_token;
+
+// Read-only, non-authorizing Windows kernel handle/DACL observation.
+#[cfg(windows)]
+pub mod windows_policy_root;
+
+// Independently administered Windows registry epoch watermark (observation only).
+#[cfg(windows)]
+pub mod windows_epoch_anchor;
 
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +98,31 @@ fn only_dedicated_supplementary_groups(groups: &[u32], expected_gid: u32) -> boo
     expected_gid != 0 && groups.len() <= 32 && groups.iter().all(|&gid| gid == expected_gid)
 }
 
+// Linux filesystem permission checks use FSUID/FSGID, which can differ from
+// the real/effective/saved triples even when those triples appear dedicated.
+#[cfg(any(target_os = "linux", test))]
+fn matches_linux_filesystem_identity(fsuid: u32, fsgid: u32, expected: (u32, u32)) -> bool {
+    expected.0 != 0 && expected.1 != 0 && fsuid == expected.0 && fsgid == expected.1
+}
+
+// A dedicated service needs zero effective/permitted/inheritable capabilities
+// AND kernel-enforced no_new_privs, so exec cannot restore privilege.
+#[cfg(any(target_os = "linux", test))]
+fn linux_service_has_no_extra_capabilities(
+    effective: u64,
+    permitted: u64,
+    inheritable: u64,
+    no_new_privs: bool,
+) -> bool {
+    no_new_privs && effective == 0 && permitted == 0 && inheritable == 0
+}
+
 #[cfg(target_os = "linux")]
 mod linux_identity {
-    use super::{only_dedicated_supplementary_groups, IdentityDenied};
+    use super::{
+        linux_service_has_no_extra_capabilities, matches_linux_filesystem_identity,
+        only_dedicated_supplementary_groups, IdentityDenied,
+    };
     use std::{mem::MaybeUninit, ptr};
     // Provisioning MUST be performed by a distinct system administrator.
     const SERVICE_NAME: &[u8] = b"jdc-authority\0";
@@ -85,6 +169,25 @@ mod linux_identity {
         if !matches_dedicated_ids([ru, eu, su], [rg, eg, sg], (pwd.pw_uid, pwd.pw_gid)) {
             return Err(IdentityDenied);
         }
+        // Linux setfsuid(-1)/setfsgid(-1) are documented non-mutating
+        // credential queries. A divergent filesystem identity must deny.
+        let fsuid = unsafe { libc::setfsuid(!0) } as libc::uid_t;
+        let fsgid = unsafe { libc::setfsgid(!0) } as libc::gid_t;
+        if !matches_linux_filesystem_identity(fsuid, fsgid, (pwd.pw_uid, pwd.pw_gid)) {
+            return Err(IdentityDenied);
+        }
+        // capget(2) is read-only; deny any latent permitted, inheritable or
+        // currently effective privilege before using a filesystem handle.
+        let caps = rustix::thread::capabilities(None).map_err(|_| IdentityDenied)?;
+        let no_new_privs = rustix::thread::no_new_privs().map_err(|_| IdentityDenied)?;
+        if !linux_service_has_no_extra_capabilities(
+            caps.effective.bits(),
+            caps.permitted.bits(),
+            caps.inheritable.bits(),
+            no_new_privs,
+        ) {
+            return Err(IdentityDenied);
+        }
 
         // getresgid(2) does not report supplementary groups. Retaining a
         // foreign group can silently expand access despite matching UIDs.
@@ -114,6 +217,27 @@ mod linux_identity {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn querying_kernel_filesystem_ids_preserves_current_thread_credentials() {
+            let uid_before = unsafe { libc::setfsuid(!0) } as libc::uid_t;
+            let gid_before = unsafe { libc::setfsgid(!0) } as libc::gid_t;
+            assert_eq!(uid_before, unsafe { libc::setfsuid(!0) } as libc::uid_t);
+            assert_eq!(gid_before, unsafe { libc::setfsgid(!0) } as libc::gid_t);
+            assert_eq!(uid_before, unsafe { libc::geteuid() });
+            assert_eq!(gid_before, unsafe { libc::getegid() });
+        }
+        #[test]
+        fn kernel_capability_observer_reports_current_thread_without_mutation() {
+            let before = rustix::thread::capabilities(None).unwrap();
+            let after = rustix::thread::capabilities(None).unwrap();
+            assert_eq!(before, after);
+            // Query (not set) the kernel thread flag; runner may not have NNP.
+            let nnp = rustix::thread::no_new_privs().unwrap();
+            assert_eq!(nnp, rustix::thread::no_new_privs().unwrap());
+            assert_eq!(before.effective.bits(), 0);
+            assert_eq!(before.permitted.bits(), 0);
+            assert_eq!(before.inheritable.bits(), 0);
+        }
         #[test]
         fn dedicated_uid_gid_required_in_all_real_effective_saved_slots() {
             assert!(matches_dedicated_ids(
@@ -163,5 +287,53 @@ mod supplemental_group_tests {
         assert!(!only_dedicated_supplementary_groups(&[0], 2002));
         assert!(!only_dedicated_supplementary_groups(&[2002], 0));
         assert!(!only_dedicated_supplementary_groups(&[2002; 33], 2002));
+    }
+}
+
+#[cfg(test)]
+mod filesystem_identity_tests {
+    use super::matches_linux_filesystem_identity;
+
+    #[test]
+    fn filesystem_ids_must_match_the_dedicated_nonroot_account() {
+        assert!(matches_linux_filesystem_identity(2001, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(0, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 0, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2003, 2002, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2003, (2001, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2002, (0, 2002)));
+        assert!(!matches_linux_filesystem_identity(2001, 2002, (2001, 0)));
+    }
+}
+
+#[cfg(test)]
+mod linux_capability_contract_tests {
+    use super::linux_service_has_no_extra_capabilities;
+
+    #[test]
+    fn any_effective_permitted_or_inheritable_linux_capability_denies() {
+        // A zero capability set does not authorize a service without NNP.
+        assert!(!linux_service_has_no_extra_capabilities(0, 0, 0, false));
+        assert!(linux_service_has_no_extra_capabilities(0, 0, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(1 << 1, 0, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(0, 1 << 7, 0, true));
+        assert!(!linux_service_has_no_extra_capabilities(
+            0,
+            0,
+            1 << 21,
+            true
+        ));
+        assert!(!linux_service_has_no_extra_capabilities(
+            0,
+            0,
+            1 << 40,
+            true
+        ));
+        assert!(!linux_service_has_no_extra_capabilities(
+            1 << 63,
+            0,
+            0,
+            true
+        ));
     }
 }

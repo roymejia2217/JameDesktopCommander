@@ -43,6 +43,7 @@ test('C4c rejects traversal, Windows device/ADS paths and oversized requests', (
     '', '.', '..', 'a/../b', '/absolute', '//server/share', 'C:/drive',
     'a\\b', 'a//b', 'a/./b', 'a/', 'a:b', 'a?b', 'a*', 'a|b', 'a<b',
     'CON', 'con.txt', 'a/PRN', 'a/com1.log', 'LPT¹.log',
+    'CONIN$', 'CONOUT$.txt', 'a/CONIN$',
     'trailing.', 'trailing ', 'a/space .', 'a/\u0000',
     'a'.repeat(256), 'a'.repeat(4097), 'a/'.repeat(65) + 'z',
   ]) assert.throws(() => parseCreateDirectoryRequest({ ...valid(), relativePath }), bad,

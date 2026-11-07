@@ -152,6 +152,13 @@ fn query(token: HANDLE, kind: i32) -> Result<RawInfo, TokenUnverifiable> {
         used: received as usize,
     })
 }
+// Reuse the existing bounded, kernel-verified SID lookup; do not duplicate
+// SID parsers or expose a public authorization token to MCP callers.
+pub(crate) fn service_sid_bytes() -> Result<Vec<u8>, TokenUnverifiable> {
+    let owner = service_sid()?;
+    Ok(owner.sid(owner.words.as_ptr().cast_mut().cast())?.to_vec())
+}
+
 fn service_sid() -> Result<RawInfo, TokenUnverifiable> {
     let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(iter::once(0)).collect();
     let (mut sid_bytes, mut domain_chars, mut use_type) = (0u32, 0u32, 0 as SID_NAME_USE);

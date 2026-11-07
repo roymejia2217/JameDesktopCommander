@@ -123,6 +123,25 @@ try {
     Require-Success 'OWNER_INIT' $service.Credential $fixture @('init', $db)
     Copy-Item -LiteralPath $db -Destination $snapshot -ErrorAction Stop
     Require-Success 'ATTACKER_CANARY' $attacker.Credential $probe @('canary', $db, $canary)
+    $attackerOwnedAlias = Join-Path $public 'own-hardlink-canary.txt'
+    Require-Success 'ATTACKER_HARDLINK_OWN' $attacker.Credential $probe @('hardlink', $canary, $attackerOwnedAlias)
+    if (-not (Test-Path -LiteralPath $attackerOwnedAlias -PathType Leaf)) {
+        throw 'E_CUSTODY_POSITIVE_HARDLINK_MISSING'
+    }
+    if ((Get-FileHash -LiteralPath $attackerOwnedAlias -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $canary -Algorithm SHA256).Hash) {
+        throw 'E_CUSTODY_POSITIVE_HARDLINK_BYTES_MISMATCH'
+    }
+    # Byte equality is insufficient: positively prove identity from OS file handles.
+    Require-Success 'ATTACKER_HARDLINK_SAME_OBJECT' $attacker.Credential $probe @('same-object', $canary, $attackerOwnedAlias)
+    $equalBytesCopy = Join-Path $public 'identical-bytes-independent-file.txt'
+    Copy-Item -LiteralPath $canary -Destination $equalBytesCopy -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $equalBytesCopy -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $canary -Algorithm SHA256).Hash) {
+        throw 'E_CUSTODY_IDENTITY_NEGATIVE_CONTROL_BYTES_DIFFER'
+    }
+    Require-Success 'ATTACKER_CAN_READ_COPIED_FILE' $attacker.Credential $probe @('read', $equalBytesCopy, $canary)
+    Require-Denied 'ATTACKER_IDENTICAL_BYTES_NOT_SAME_OBJECT' $attacker.Credential $probe @('same-object', $canary, $equalBytesCopy)
     Require-Success 'ATTACKER_READS_OLD_SNAPSHOT' $attacker.Credential $probe @('read', $snapshot, $canary)
     if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
         throw 'E_CUSTODY_MISSING_ATTACKER_CANARY'
@@ -141,11 +160,33 @@ try {
     $grantTarget = "$env:COMPUTERNAME\" + $attackerName + ':(OI)(CI)F'
     Require-Success 'ATTACKER_CAN_CHANGE_OWN_DACL' $attacker.Credential $icacls @($public, '/grant', $grantTarget)
     Require-Success 'OWNER_ADVANCE' $service.Credential $fixture @('advance', $db)
+    # Genuine SQLite DELETE-mode journal: created during a transaction,
+    # removed by rollback, and the stored epoch must remain unchanged.
+    Require-Success 'OWNER_SQLITE_JOURNAL_LIFECYCLE' $service.Credential $fixture @('prove-rollback-journal', $db)
     Require-Success 'OWNER_READ' $service.Credential $fixture @('verify-2', $db)
     $before = (Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash
 
     foreach ($operation in @('read', 'append', 'rename', 'unlink', 'create', 'parent-rename')) {
         Require-Denied $operation $attacker.Credential $probe @($operation, $db, $snapshot)
+    }
+    # Ancillary SQLite names share the protected directory's OS custody.
+    # The -journal file above is created by SQLite; the following probes
+    # cover namespace access for -journal/-wal/-shm, not live WAL semantics.
+    foreach ($suffix in @('-journal', '-wal', '-shm')) {
+        $sidecar = $db + $suffix
+        Require-Success 'OWNER_CREATE_SIDECAR' $service.Credential $probe @('canary', $db, $sidecar)
+        Require-Denied 'ATTACKER_READ_SIDECAR' $attacker.Credential $probe @('read', $sidecar, $snapshot)
+        Require-Denied 'ATTACKER_OVERWRITE_SIDECAR' $attacker.Credential $probe @('overwrite', $sidecar, $snapshot)
+        Require-Success 'OWNER_REMOVE_SIDECAR' $service.Credential $probe @('unlink', $sidecar, $snapshot)
+        Require-Denied 'ATTACKER_CREATE_SIDECAR' $attacker.Credential $probe @('canary', $db, $sidecar)
+        if (Test-Path -LiteralPath $sidecar) { throw 'E_CUSTODY_UNAUTHORIZED_SIDECAR_CREATED' }
+    }
+    $exfiltrationAlias = Join-Path $public 'protected-object-hardlink.txt'
+    $injectedAlias = Join-Path $state 'attacker-owned-hardlink.txt'
+    Require-Denied 'HARDLINK_FROM_PROTECTED' $attacker.Credential $probe @('hardlink', $db, $exfiltrationAlias)
+    Require-Denied 'HARDLINK_INTO_PROTECTED' $attacker.Credential $probe @('hardlink', $canary, $injectedAlias)
+    if ((Test-Path -LiteralPath $exfiltrationAlias) -or (Test-Path -LiteralPath $injectedAlias)) {
+        throw 'E_CUSTODY_HARDLINK_ALIAS_CREATED'
     }
     Require-Denied 'replay' $attacker.Credential $probe @('overwrite', $db, $snapshot)
     # The same validated icacls invocation must now fail on protected state.

@@ -9,7 +9,7 @@ use jdc_tunnel_operator_ui::{
     observation_is_stale, startup_mode,
 };
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -26,6 +26,26 @@ enum Presentation {
     },
     Failed(BackendError),
     NoInstallation,
+}
+
+// Status always reflects the current freshness of a read-only observation.
+// A stale last-known result cannot be presented as a live tunnel verdict.
+fn snapshot_stale(value: &Overview, received_age: Duration, now: OffsetDateTime) -> bool {
+    received_age > Duration::from_secs(30) || observation_is_stale(&value.observed_at, now)
+}
+
+fn snapshot_status_label(
+    value: &Overview,
+    received_age: Duration,
+    now: OffsetDateTime,
+) -> &'static str {
+    if snapshot_stale(value, received_age, now) {
+        "STALE DATA"
+    } else if value.verdict.state == "degraded" {
+        "DEGRADED"
+    } else {
+        "UNVERIFIED"
+    }
 }
 
 struct OperatorApp {
@@ -131,25 +151,32 @@ impl OperatorApp {
     }
 
     fn show_snapshot(&self, ui: &mut egui::Ui, value: &Overview, received: Instant) {
-        let state = &value.verdict.state;
-        let verdict_color = if state == "degraded" {
+        // Repaint only the local age/staleness presentation, never the child
+        // backend. A network/diagnostic refresh still requires user action.
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        let age = received.elapsed();
+        let status_label = snapshot_status_label(value, age, OffsetDateTime::now_utc());
+        let stale = status_label == "STALE DATA";
+        let verdict_color = if stale || value.verdict.state == "degraded" {
             egui::Color32::from_rgb(250, 180, 90)
         } else {
             egui::Color32::from_rgb(175, 195, 215)
         };
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Status").strong());
-            ui.colored_label(verdict_color, state.to_uppercase());
+            ui.colored_label(verdict_color, status_label);
         });
-        ui.label(guidance(value.reason()));
+        if stale {
+            ui.label(format!("Last observed: {}", guidance(value.reason())));
+        } else {
+            ui.label(guidance(value.reason()));
+        }
         ui.add_space(8.0);
         ui.small(format!("Checked: {}", value.observed_at));
-        ui.small(format!("Age: {}s", received.elapsed().as_secs()));
-        if received.elapsed().as_secs() > 30
-            || observation_is_stale(&value.observed_at, OffsetDateTime::now_utc())
-        {
+        ui.small(format!("Age: {}s", age.as_secs()));
+        if stale {
             ui.label(
-                egui::RichText::new("Status may be outdated. Refresh.")
+                egui::RichText::new("Last observation is outdated. Refresh to verify.")
                     .color(egui::Color32::YELLOW),
             );
         }
@@ -171,7 +198,7 @@ impl OperatorApp {
         if self.screen == Screen::Diagnose {
             ui.heading("Diagnostics");
             ui.monospace(format!("Reason: {}", value.reason()));
-            ui.weak("HTTP 401: credentials rejected. Expiry not confirmed.");
+
             ui.weak("Local readiness does not prove remote MCP access.");
             ui.weak("Sensitive details are hidden.");
         } else {
@@ -283,4 +310,77 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(OperatorApp::new(&cc.egui_ctx)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn sample() -> Overview {
+        jdc_tunnel_operator_ui::parse_overview(
+            br#"{"kind":"tunnel_operator_overview_v1","platform":"win32","capabilities":"read_only","observedAt":"2026-11-06T15:00:00Z","taskRegistration":"observed","localHealth":"not_ready","mcpInitialize":"not_observed","toolDiscovery":"unverified","controlPlane":"unverified","remoteDelivery":"not_observed","verdict":{"state":"degraded","reasonCode":"LOCAL_NOT_READY"}}"#,
+        )
+        .expect("valid read-only fixture")
+    }
+
+    #[test]
+    fn stale_snapshot_is_not_presented_as_current_health() {
+        let value = sample();
+        let recent = OffsetDateTime::parse(
+            "2026-11-06T15:00:10Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(!snapshot_stale(&value, Duration::from_secs(10), recent));
+        assert!(snapshot_stale(&value, Duration::from_secs(31), recent));
+        let old = OffsetDateTime::parse(
+            "2026-11-06T15:00:31Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(snapshot_stale(&value, Duration::ZERO, old));
+        assert_eq!(
+            snapshot_status_label(&value, Duration::from_secs(31), recent),
+            "STALE DATA"
+        );
+    }
+
+    #[test]
+    fn diagnostics_do_not_report_401_without_credential_rejection_evidence() {
+        assert!(guidance("SERVICE_INACTIVE").contains("inactive"));
+        assert!(!guidance("SERVICE_INACTIVE").contains("401"));
+        assert!(guidance("CONTROL_PLANE_CREDENTIAL_REJECTED").contains("401"));
+        assert!(guidance("CONTROL_PLANE_FORBIDDEN").contains("403"));
+        assert!(guidance("CONTROL_PLANE_RATE_LIMITED").contains("429"));
+    }
+
+    #[test]
+    fn visible_snapshot_requests_periodic_repaint_without_polling_backend() {
+        let app = OperatorApp {
+            layout: None,
+            screen: Screen::Overview,
+            presentation: Presentation::NoInstallation,
+            receiver: None,
+        };
+        let ctx = egui::Context::default();
+        let requested = Arc::new(Mutex::new(Vec::<Duration>::new()));
+        ctx.set_repaint_observer({
+            let requested = requested.clone();
+            move |info| requested.lock().unwrap().push(info.delay)
+        });
+        let value = sample();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            app.show_snapshot(ui, &value, Instant::now());
+        });
+        output.drop_without_applying_deltas();
+        assert!(
+            requested.lock().unwrap().iter().any(|delay| {
+                *delay >= Duration::from_millis(900) && *delay <= Duration::from_secs(1)
+            }),
+            "the visible observation must refresh age/staleness each second"
+        );
+        assert!(app.receiver.is_none(), "repaint must not poll the backend");
+    }
 }

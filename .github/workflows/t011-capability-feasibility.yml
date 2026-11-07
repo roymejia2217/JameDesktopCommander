@@ -194,6 +194,7 @@ jobs:
 
       - name: Prove Windows isolated NTFS VHD, ACL denial and outside-byte integrity
         if: matrix.target == 'win32-x64'
+        shell: pwsh
         run: |
           $tokens = $null
           $errors = $null

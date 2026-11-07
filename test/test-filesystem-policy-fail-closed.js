@@ -83,7 +83,7 @@ test('failed config watcher reload invalidates the previously accepted allowlist
 });
 
 // A configured slash root is a restriction, not an all-volume grant.
-test('configured slash root does not authorize an unrelated Windows volume', async t => {
+test('configured Windows slash roots require native authority even on the selected volume', async t => {
   if (process.platform !== 'win32') {
     t.skip('Windows drive namespaces only');
     return;
@@ -105,16 +105,13 @@ test('configured slash root does not authorize an unrelated Windows volume', asy
   }
   const original = configManager.getAllowedDirectoriesForFilesystem;
   try {
-    for (const policy of [['/'], ['/', selectedRoot]]) {
+    for (const policy of [['/'], ['/', selectedRoot], ['/', otherRoot]]) {
       configManager.getAllowedDirectoriesForFilesystem = async () => policy;
-      await assert.doesNotReject(validatePath(selectedRoot),
-        'current volume remains accessible');
-      await assert.rejects(validatePath(otherRoot), /Path not allowed/,
-        'a slash root must not authorize unrelated volumes');
+      await assert.rejects(validatePath(selectedRoot), /E_CAPABILITY_UNAVAILABLE/,
+        'current volume also requires the native broker for a restricted policy');
+      await assert.rejects(validatePath(otherRoot), /E_CAPABILITY_UNAVAILABLE/,
+        'no unrelated volume may be authorized by pathnames');
     }
-    configManager.getAllowedDirectoriesForFilesystem = async () => ['/', otherRoot];
-    await assert.doesNotReject(validatePath(otherRoot),
-      'an explicitly selected second volume must remain accessible');
     configManager.getAllowedDirectoriesForFilesystem = async () => [];
     await assert.doesNotReject(validatePath(otherRoot),
       'the intentional empty unrestricted policy remains unchanged');

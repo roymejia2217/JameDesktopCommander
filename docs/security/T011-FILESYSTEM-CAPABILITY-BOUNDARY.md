@@ -1,9 +1,28 @@
 # T011 — Race-resistant filesystem capability boundary
 
-**Status:** Proposed architecture and mandatory release blocker, **not implemented or accepted**.
+**Status:** Native protected broker and object-isolation architecture remain mandatory release blockers, **not implemented or accepted**.
 **Platforms in scope:** Windows x64 and Linux x64; native CI and unpublished portable candidate.
 **Baseline:** `4c30d5a36e5f3ba52344f8edee783f1cc7197c55` (T010 accepted after independent postmerge artifact audit).
 
+## Interim deny-only restricted-path admission (pending independent review)
+
+The fail-closed candidate in issue #139 refuses local pathname reads, writes,
+listings, edits, directory creation, moves and new searches when the persisted
+`allowedDirectories` policy is nonempty. The old lexical allowlist is NOT
+an acceptable substitute for a native OS-bound file capability. The error
+`E_CAPABILITY_UNAVAILABLE` identifies this missing broker; it must not prompt
+an automatic retry through ambient Node filesystem calls. Invalid persisted
+policy data also denies. Only successfully loaded explicit `[]` retains the
+legacy **unrestricted, unsandboxed** behavior, including URL reads independent
+of the local filesystem policy.
+
+This is a **deliberate feature-availability break** for restricted-directory
+users, not a security-complete replacement for the broker. It has no OS
+object-origin protection, does not atomically revoke work already in flight,
+and does not sandbox terminal/OpenCode/other tools with ambient authority.
+No default setting, release or installer should silently relax restrictions
+to recover functionality. Native read/write/search migration, Windows/Linux
+adversarial acceptance, and #124/#148 still gate production readiness.
 ## Evidence and threat model
 
 JDC currently resolves and authorizes a pathname using `validatePath()`, then

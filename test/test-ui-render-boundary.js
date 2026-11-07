@@ -117,9 +117,9 @@ await client.connect(transport);
 try {
   const allowed = await client.callTool({
     name: 'set_config_value',
-    arguments: { key: 'allowedDirectories', value: [isolatedHome], origin: 'llm' },
+    arguments: { key: 'allowedDirectories', value: [], origin: 'llm' },
   });
-  assert.ok(!allowed.isError, 'isolated test directory should be allowed');
+  assert.ok(!allowed.isError, 'explicit unrestricted UI test fixture should be accepted');
 
   const { tools } = await client.listTools();
   const byName = new Map(tools.map((tool) => [tool.name, tool]));

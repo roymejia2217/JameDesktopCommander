@@ -101,7 +101,8 @@ async function run() {
       await fsp.writeFile(tmpFile, 'line1\nMARKER runWithAbortableTimeout\nline3\n');
 
       try {
-        await configManager.setValue('allowedDirectories', [tmpDir]);
+        // Abort semantics are tested under the explicit legacy unrestricted mode.
+        await configManager.setValue('allowedDirectories', []);
         const res = await readFile(tmpFile, { offset: 0, length: 5 });
         const text = typeof res.content === 'string'
           ? res.content

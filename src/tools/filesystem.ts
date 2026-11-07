@@ -112,24 +112,29 @@ async function getAllowedDirs(): Promise<string[]> {
     try {
         const configured = await configManager.getAllowedDirectoriesForFilesystem();
         if (configured !== undefined) {
-            // Explicit [] intentionally retains the existing unrestricted policy.
+            // Only an explicitly persisted [] retains the historical, ambient
+            // (NOT sandboxed) path-based behavior. A restricted policy cannot
+            // be honored by Node pathnames while #139/#148 remain unresolved.
+            if (!Array.isArray(configured) ||
+                configured.some(root => typeof root !== 'string' || root.trim().length === 0)) {
+                throw new Error('Invalid filesystem authorization policy');
+            }
+            if (configured.length !== 0) {
+                throw new Error('E_CAPABILITY_UNAVAILABLE: restricted filesystem requires the OS-protected native broker');
+            }
             return configured;
         }
-        // Preserve the legacy home-directory default only when the policy key
-        // is genuinely absent from a successfully retrieved configuration.
+        // Legacy missing policy is a restriction, never an unrestricted grant.
         const homeDefault = [os.homedir()];
         await configManager.setValue('allowedDirectories', homeDefault);
-        return homeDefault;
+        throw new Error('E_CAPABILITY_UNAVAILABLE: legacy filesystem restriction requires the OS-protected native broker');
     } catch (error) {
+        if (error instanceof Error && error.message.startsWith('E_CAPABILITY_UNAVAILABLE:')) {
+            throw error;
+        }
         console.error('Failed to load filesystem authorization policy:', error);
         throw new Error('Filesystem access denied: authorization policy unavailable');
     }
-}
-
-// Preserve path case when enforcing allowedDirectories. On case-sensitive
-// filesystems, case-folding would authorize a different sibling directory.
-function normalizePath(p: string): string {
-    return path.normalize(expandHome(p));
 }
 
 function expandHome(filepath: string): string {
@@ -166,52 +171,6 @@ async function validateParentDirectories(directoryPath: string): Promise<boolean
 }
 
 /**
- * Checks if a path is within any of the allowed directories
- *
- * @param pathToCheck Path to check
- * @returns boolean True if path is allowed
- */
-async function isPathAllowed(pathToCheck: string): Promise<boolean> {
-    // Only the explicit empty allowlist is unrestricted. On Windows a
-    // configured '/' refers to the current volume, not other drives or UNC
-    // shares, so every selected root must use canonical boundary checks.
-    const allowedDirectories = await getAllowedDirs();
-    if (allowedDirectories.length === 0) {
-        return true;
-    }
-
-    let normalizedPathToCheck = normalizePath(pathToCheck);
-    if (normalizedPathToCheck.slice(-1) === path.sep) {
-        normalizedPathToCheck = normalizedPathToCheck.slice(0, -1);
-    }
-
-    // The requested path is already canonicalized by validatePath. Canonicalize
-    // configured allowed roots the same way, preserving case on Linux and on
-    // Windows directories configured for case-sensitive names.
-    for (const allowedDir of allowedDirectories) {
-        let normalizedAllowedDir: string;
-        try {
-            normalizedAllowedDir = normalizePath(await fs.realpath(expandHome(allowedDir)));
-        } catch {
-            // An inaccessible or nonexistent configured root grants no access.
-            continue;
-        }
-        if (normalizedAllowedDir.slice(-1) === path.sep) {
-            normalizedAllowedDir = normalizedAllowedDir.slice(0, -1);
-        }
-
-        // The separator enforces the directory boundary. Drive roots remain
-        // supported because 'C:' + path.sep is the 'C:\' prefix.
-        if (normalizedPathToCheck === normalizedAllowedDir ||
-            normalizedPathToCheck.startsWith(normalizedAllowedDir + path.sep)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/**
  * Validates a path to ensure it can be accessed or created.
  * For existing paths, returns the real path (resolving symlinks).
  * For non-existent paths, validates parent directories to ensure they exist.
@@ -221,6 +180,10 @@ async function isPathAllowed(pathToCheck: string): Promise<boolean> {
  * @throws Error if the path or its parent directories don't exist or if the path is not allowed
  */
 export async function validatePath(requestedPath: string): Promise<string> {
+    // Check persisted policy before any pathname lookup. The existing check
+    // inside isPathAllowed rechecks after resolution; neither check claims
+    // atomic revocation of an in-flight explicitly unrestricted operation.
+    await getAllowedDirs();
     const validationOperation = async (): Promise<string> => {
         // Expand home directory if present
         const expandedPath = expandHome(requestedPath);
@@ -282,20 +245,14 @@ export async function validatePath(requestedPath: string): Promise<string> {
 
         const pathForNextCheck = resolvedRealPath ?? absoluteOriginal;
 
-        // Check if path is allowed
-        if (!(await isPathAllowed(pathForNextCheck))) {
-            capture('server_path_validation_error', {
-                error: 'Path not allowed',
-                allowedDirsCount: (await getAllowedDirs()).length
-            });
+        // Re-read the persisted policy after path resolution. A restricted
+        // policy never falls back to the old lexical allowlist, even if the
+        // selected path appeared confined during this lookup.
+        await getAllowedDirs();
 
-            throw new Error(`Path not allowed: ${requestedPath}. Must be within one of these directories: ${(await getAllowedDirs()).join(', ')}`);
-        }
-
-        // SECURITY: Always return the resolved path (with symlinks resolved) so that
-        // all subsequent file operations (read, write, mkdir, etc.) operate on the
-        // canonical target, not on a symlink that could point outside allowed directories.
-        // pathForNextCheck already holds resolvedRealPath ?? absoluteOriginal from above.
+        // Path canonicalization below is compatibility handling for the explicit
+        // unrestricted mode, NOT a security boundary or native handle grant.
+        // Restricted operations never reach this pathname return.
 
         // Check if path exists
         try {

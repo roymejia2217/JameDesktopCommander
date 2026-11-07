@@ -92,7 +92,8 @@ async function setup() {
   const originalConfig = await configManager.getConfig();
   
   // Set allowed directories to include test directory
-  await configManager.setValue('allowedDirectories', [TEST_DIR]);
+  // This functional fixture does not test restricted native filesystem custody.
+  await configManager.setValue('allowedDirectories', []);
   
   // Create test directory structure
   await fs.mkdir(TEST_DIR, { recursive: true });

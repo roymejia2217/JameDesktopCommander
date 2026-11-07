@@ -52,14 +52,37 @@ test('direct persisted reads deny externally modified roots without a matching g
   });
 });
 
-test('explicit empty and root marker remain unrestricted, not a sandbox', async () => {
+test('explicit empty is unrestricted; slash root sentinel is POSIX-only', async () => {
   await withManager(async ({ home, manager }) => {
     assert.equal((await manager.getFilesystemPolicyCandidateSnapshot()).mode, 'unrestricted');
     await manager.setValue('allowedDirectories', [home, '/']);
-    const marker = await manager.getFilesystemPolicyCandidateSnapshot();
-    assert.equal(marker.mode, 'unrestricted');
-    assert.deepEqual(marker.allowedRoots, []);
+    if (process.platform === 'win32') {
+      await assert.rejects(
+        manager.getFilesystemPolicyCandidateSnapshot(),
+        /Invalid persisted filesystem policy candidate/,
+        'Windows slash root selects only one volume and must never become an all-volume grant',
+      );
+    } else {
+      const marker = await manager.getFilesystemPolicyCandidateSnapshot();
+      assert.equal(marker.mode, 'unrestricted');
+      assert.deepEqual(marker.allowedRoots, []);
+    }
   });
+});
+
+test('Windows rejects ambiguous slash-root policy candidates in any allowlist position', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const selectedRoot = path.join(path.parse(process.cwd()).root, 'configured');
+  for (const roots of [['/'], ['/', selectedRoot], [selectedRoot, '/']]) {
+    assert.throws(
+      () => parseFilesystemPolicyCandidate({ allowedDirectories: roots }),
+      /Invalid persisted filesystem policy candidate/,
+      'slash on Windows must never remove a concrete directory restriction',
+    );
+  }
+  assert.equal(parseFilesystemPolicyCandidate({ allowedDirectories: [] }).mode, 'unrestricted');
+  assert.equal(parseFilesystemPolicyCandidate({ allowedDirectories: [selectedRoot] }).mode, 'restricted');
 });
 
 test('a missing policy key remains distinguishable from explicit unrestricted', async () => {

@@ -6,13 +6,15 @@ const workflowPath = '.github/workflows/t011-capability-feasibility.yml';
 const acceptancePath = 'test/security/t011-linux-issuer-read-e2e.sh';
 const serviceProbePath = 'native/authority-service/examples/linux_issuer_read_probe.rs';
 const fixturePath = 'native/authority-store/examples/issuer_read_fixture.rs';
+const mcpBridgePath = 'test/security/support/t011-official-mcp-issuer-read-e2e.mjs';
 
 test('T011 Linux issuer read E2E is wired to real OS principals without production activation', async () => {
-  const [workflow, acceptance, probe, fixture] = await Promise.all([
+  const [workflow, acceptance, probe, fixture, mcpBridge] = await Promise.all([
     readFile(workflowPath, 'utf8'),
     readFile(acceptancePath, 'utf8'),
     readFile(serviceProbePath, 'utf8'),
     readFile(fixturePath, 'utf8'),
+    readFile(mcpBridgePath, 'utf8'),
   ]);
 
   assert.match(workflow, /shellcheck --severity=warning test\/security\/t011-linux-issuer-read-e2e\.sh/);
@@ -45,10 +47,19 @@ test('T011 Linux issuer read E2E is wired to real OS principals without producti
   assert.match(probe, /dispatch_one_inherited_readonly_reply/);
   assert.doesNotMatch(probe, /dispatch_one_inherited_read_reply/);
   assert.match(probe, /for _ in 0\.\.3/);
-  assert.match(acceptance, /T011_ISSUER_READ_E2E_SEQUENTIAL_SECOND_READ_PASS/);
-  assert.match(acceptance, /requestIssuerOwnedList/);
-  assert.match(acceptance, /T011_ISSUER_READ_E2E_SEQUENTIAL_LIST_PASS/);
-  assert.match(acceptance, /22222222-2222-4222-8222-222222222222/);
+  assert.match(acceptance, /mcp_probe_source=.*t011-official-mcp-issuer-read-e2e[.]mjs/);
+  assert.match(acceptance, /RUNNER_ENVIRONMENT=github-hosted "\$node_binary" "\$mcp_probe_source" client/);
+  assert.match(acceptance, /sudo -n -u jdc-mcp-client -- test -r "\$sdk_entry_source"/);
+  assert.match(mcpBridge, /new McpServer\(/);
+  assert.match(mcpBridge, /new StdioServerTransport\(/);
+  assert.match(mcpBridge, /new StdioClientTransport\(/);
+  assert.match(mcpBridge, /sdkClient[.]callTool\(/);
+  assert.match(mcpBridge, /requestIssuerOwnedRead/);
+  assert.match(mcpBridge, /requestIssuerOwnedList/);
+  assert.match(mcpBridge, /T011_OFFICIAL_MCP_SDK_NATIVE_READ_EXACT_BYTES_PASS/);
+  assert.match(mcpBridge, /T011_OFFICIAL_MCP_SDK_NATIVE_SECOND_ROOT_READ_PASS/);
+  assert.match(mcpBridge, /T011_OFFICIAL_MCP_SDK_NATIVE_LIST_PASS/);
+  assert.match(mcpBridge, /22222222-2222-4222-8222-222222222222/);
   assert.match(acceptance, /second_payload_source/);
   assert.match(acceptance, /inside2\.bin/);
   assert.match(fixture, /fedcba9876543210fedcba9876543210/);

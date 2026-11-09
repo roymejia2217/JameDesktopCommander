@@ -29,14 +29,15 @@ test('an opt-in boot trigger repeats without a parallel process', () => {
   assert.doesNotMatch(rootXml, /<Repetition>/);
 });
 
-test('Task Scheduler enabled state is explicit, parsed, and fails closed on ambiguity', () => {
+test('Task Scheduler normalizes omitted Enabled to the documented true default and preserves explicit false', () => {
   assert.equal(parseWindowsTunnelTaskEnabled(rootXml), true);
   const disabled = rootXml.replace('<Enabled>true</Enabled>\r\n    <Hidden>',
     '<Enabled>false</Enabled>\r\n    <Hidden>');
   assert.equal(parseWindowsTunnelTaskEnabled(disabled), false);
-  assert.throws(() => parseWindowsTunnelTaskEnabled(
+  assert.equal(parseWindowsTunnelTaskEnabled(
     rootXml.replace('    <Enabled>true</Enabled>\r\n    <Hidden>',
-      '    <Hidden>')), /enabled state/i);
+      '    <Hidden>')), true,
+    'an authenticated Task Scheduler XML export omits the schema-default true value');
   assert.throws(() => parseWindowsTunnelTaskEnabled(
     '<Task><Settings><Enabled>maybe</Enabled></Settings></Task>'), /enabled state/i);
 });

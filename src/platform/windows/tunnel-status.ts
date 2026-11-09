@@ -214,6 +214,12 @@ export function parseWindowsTunnelTaskEnabled(taskXml: string): boolean {
     const document = requireObject('Task XML document', parser.parse(taskXml));
     const task = requireObject('Task XML Task', document.Task);
     const settings = requireObject('Task XML Settings', task.Settings);
+    // The Microsoft Task Scheduler settingsType schema defines Enabled as
+    // optional with default=true. Windows omits that default in real exports;
+    // an operator-disabled task is serialized with explicit Enabled=false.
+    if (!Object.prototype.hasOwnProperty.call(settings, 'Enabled')) {
+        return true;
+    }
     if (settings.Enabled !== true && settings.Enabled !== 'true' &&
         settings.Enabled !== false && settings.Enabled !== 'false') {
         throw new Error('Task Scheduler enabled state must be explicit.');

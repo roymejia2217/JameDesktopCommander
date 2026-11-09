@@ -85,6 +85,24 @@ test('Windows installer stays per-user with separate launcher and no service tak
   assert.match(cmd, /runtime\\node\.exe/);
   assert.match(cmd, /dist\\index\.js/);
 });
+test('Windows hosted installer checks full registered package lifecycle, not only GUI files', async () => {
+  const workflow = await readFile(resolve(root,'.github/workflows/distribution-candidate.yml'),'utf8');
+  const windows = workflow.split('name: Verify Windows installer install and uninstall')[1]
+    ?.split('name: Build nFPM Debian installer candidate')[0];
+  assert.ok(windows, 'real Windows installer acceptance job must remain present');
+  for (const required of [
+    'Installed JDC uninstall registration missing',
+    'JDC uninstall registration remains after uninstall',
+    'Windows launcher shortcut remains after uninstall',
+    'Installed Node runtime remains after uninstall',
+    'Bundled tunnel client remains after uninstall',
+    'Installer directory remains after uninstall',
+    'Unexpected JDC Scheduled Task added by installer',
+  ]) {
+    assert.ok(windows.includes(required), `Missing executable Windows installer gate: ${required}`);
+  }
+});
+
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {
   const config = await readFile(resolve(root,'packaging/linux/nfpm.yaml'),'utf8');
   const launch = await readFile(resolve(root,'packaging/linux/jdc'),'utf8');

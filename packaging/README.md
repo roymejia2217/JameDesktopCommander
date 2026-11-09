@@ -73,6 +73,35 @@ The current non-release candidates remain unsigned and fail closed for
 missing/unverified downloads. Release approval still requires independently
 verified provenance, full installer acceptance and all P0 gates below.
 
+## Windows package ownership and uninstall boundary
+
+The current per-user Inno Setup installer owns its installed directory,
+HKCU Add/Remove Programs entry and two Start-menu shortcuts. Uninstall removes
+those resources; it does **not** install, stop, delete or migrate an independently
+provisioned Secure MCP Tunnel task, restart supervisor, UI bridge service/task,
+credential profile, protected secret store or operator rollback data. Those
+resources may remain in use by an existing remotely connected JDC instance.
+Removing them implicitly would risk deleting credentials or cutting off the
+only recovery route. This is a **package-only** uninstall, not a whole-system
+deprovisioning workflow.
+
+The Windows candidate CI now checks the registry, shortcuts, installed Node
+runtime, bundled official tunnel-client and GUI before and after uninstall.
+It also checks that a pre-existing profile stays byte-identical and that no
+JDC task or SCM service is added or replaced by this per-user package.
+A real Windows host exercised the exact CI install/uninstall step on a
+disposable installation directory against the verified unpublished candidate
+from `main` at `9cddd01496cb92b68cc987e09415c6e33d972e23`.
+Installer and uninstaller both exited successfully, and the pre-existing
+remote tunnel/MCP connection remained healthy. These checks do **not**
+demonstrate an install/upgrade/uninstall of *managed* service components.
+
+#248 and #270 own the outstanding explicit operator-authorized service
+provisioning, update/migration, preserve-vs-purge, authenticated local
+management and full-system deprovisioning acceptance. Do not enable an
+automatic system-wide cleanup or claim an integrated release until those
+contracts and independent Windows/Linux adversarial tests are complete.
+
 ## Production release gate
 
 The only approved release version/tag publisher is the existing

@@ -128,8 +128,13 @@ export function parseWindowsTunnelTaskRegistration(
     const document = requireObject('Task XML document', parser.parse(taskXml));
     const task = requireObject('Task XML Task', document.Task);
     const actions = requireObject('Task XML Actions', task.Actions);
+    // Task Scheduler permits heterogeneous actions. A single Exec element is
+    // insufficient when ComHandler/other actions can also run. Reject the
+    // complete registration before invoking any task-selected executable.
     const execAction = actions.Exec;
-    if (Array.isArray(execAction)) {
+    if (Object.keys(actions).length !== 1 ||
+        !Object.prototype.hasOwnProperty.call(actions, 'Exec') ||
+        Array.isArray(execAction)) {
         throw new Error('Tunnel task must contain exactly one Exec action.');
     }
     const execNode = requireObject('Task XML Exec', execAction);

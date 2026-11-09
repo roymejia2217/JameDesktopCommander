@@ -75,6 +75,8 @@ verified provenance, full installer acceptance and all P0 gates below.
 
 ## Windows package ownership and uninstall boundary
 
+See [cross-platform resource inventory and full decommissioning contract](../docs/governance/INSTALL-UNINSTALL-RESOURCE-OWNERSHIP.md) for the installation/deletion diagrams, exact OS-owned resources, residual checks, and pending release acceptance.
+
 The current per-user Inno Setup installer owns its installed directory,
 HKCU Add/Remove Programs entry and two Start-menu shortcuts. Uninstall removes
 those resources; it does **not** install, stop, delete or migrate an independently

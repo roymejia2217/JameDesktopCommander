@@ -1,7 +1,9 @@
 //! Read-only local Task Scheduler COM principal observation.
 //! The registered task definition remains untrusted for *authorization* until
 //! installed executable, owner, task ACL and operator-origin gates are proven.
-use crate::{compare_current_process_user_sid, ProcessSidEvidence, SidObservationError};
+use crate::{
+    compare_current_process_user_sid, ProcessSidEvidence, SidObservationError, TaskOwnerEvidence,
+};
 use std::{ffi::c_void, iter, mem, ptr};
 use windows::{
     core::BSTR,
@@ -10,15 +12,20 @@ use windows::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
             COINIT_APARTMENTTHREADED,
         },
-        TaskScheduler::{ITaskService, TaskScheduler},
+        TaskScheduler::{IRegisteredTask, ITaskService, TaskScheduler},
         Variant::VARIANT,
     },
 };
 use windows_sys::Win32::{
     Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER},
     Security::{
-        Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
-        GetLengthSid, LookupAccountNameW,
+        Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            ConvertStringSidToSidW,
+        },
+        GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, IsValidAcl,
+        IsValidSecurityDescriptor, IsValidSid, IsWellKnownSid, LookupAccountNameW,
+        WinBuiltinAdministratorsSid, ACL,
     },
 };
 
@@ -29,7 +36,12 @@ impl Drop for ComApartment {
         unsafe { CoUninitialize() };
     }
 }
-fn registered_user_id(task_name: &str) -> Result<String, SidObservationError> {
+// Both synchronous observers return owned results before the COM apartment
+// ends. Share the same local-only name validation, routing and cleanup.
+fn with_registered_task<T>(
+    task_name: &str,
+    read: impl FnOnce(&IRegisteredTask) -> Result<T, SidObservationError>,
+) -> Result<T, SidObservationError> {
     // No arbitrary path, hierarchy traversal, or remote Task Scheduler host.
     if task_name.is_empty()
         || task_name.len() > 128
@@ -41,46 +53,120 @@ fn registered_user_id(task_name: &str) -> Result<String, SidObservationError> {
     {
         return Err(SidObservationError::Unverifiable);
     }
-    // SAFETY: initialize COM in the current thread; all interfaces are dropped
+    // SAFETY: initialize COM in this thread. Live interfaces are dropped
     // before ComApartment calls CoUninitialize on this same thread.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
         .ok()
         .map_err(|_| SidObservationError::Unverifiable)?;
     let _apartment = ComApartment;
-    // SAFETY: local in-process COM activation, no remote server supplied.
     let service: ITaskService =
         unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| SidObservationError::Unverifiable)?;
     let empty = VARIANT::default();
-    // SAFETY: empty variants instruct the official service to use the local host.
     unsafe { service.Connect(&empty, &empty, &empty, &empty) }
         .map_err(|_| SidObservationError::Unverifiable)?;
     let root = unsafe { service.GetFolder(&BSTR::from("\\")) }
         .map_err(|_| SidObservationError::Unverifiable)?;
     let task = unsafe { root.GetTask(&BSTR::from(task_name)) }
         .map_err(|_| SidObservationError::Unverifiable)?;
-    let definition = unsafe { task.Definition() }.map_err(|_| SidObservationError::Unverifiable)?;
-    let principal =
-        unsafe { definition.Principal() }.map_err(|_| SidObservationError::Unverifiable)?;
-    let mut user = BSTR::new();
-    // SAFETY: the official COM interface initializes the output BSTR and
-    // its wrapper releases the allocation when dropped.
-    unsafe { principal.UserId(&mut user) }.map_err(|_| SidObservationError::Unverifiable)?;
-    let name = user.to_string();
-    if name.is_empty() || name.len() > 512 || name.contains('\0') {
-        return Err(SidObservationError::Unverifiable);
-    }
-    Ok(name)
+    read(&task)
+}
+
+fn registered_user_id(task_name: &str) -> Result<String, SidObservationError> {
+    with_registered_task(task_name, |task| {
+        let definition =
+            unsafe { task.Definition() }.map_err(|_| SidObservationError::Unverifiable)?;
+        let principal =
+            unsafe { definition.Principal() }.map_err(|_| SidObservationError::Unverifiable)?;
+        let mut user = BSTR::new();
+        unsafe { principal.UserId(&mut user) }.map_err(|_| SidObservationError::Unverifiable)?;
+        let name = user.to_string();
+        if name.is_empty() || name.len() > 512 || name.contains('\0') {
+            return Err(SidObservationError::Unverifiable);
+        }
+        Ok(name)
+    })
 }
 
 struct OwnedLocalAllocation(*mut c_void);
 impl Drop for OwnedLocalAllocation {
     fn drop(&mut self) {
-        // SAFETY: SID conversion APIs return LocalFree-owned allocations.
+        // SAFETY: Windows allocations returned by the conversion APIs use LocalFree.
         if !self.0.is_null() {
             unsafe { LocalFree(self.0) };
         }
     }
+}
+
+// Classify *owner identity only* from a native-validated SDDL descriptor.
+// A valid ACL can still grant access to untrusted principals. This is never
+// sufficient for task custody, authorization, or install provenance.
+fn classify_task_owner_sddl(sddl: &str) -> Result<TaskOwnerEvidence, SidObservationError> {
+    if sddl.is_empty() || sddl.len() > 16384 || sddl.contains('\0') {
+        return Err(SidObservationError::Unverifiable);
+    }
+    let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
+    let mut descriptor: *mut c_void = ptr::null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: Windows validates the bounded NUL-terminated SDDL and allocates
+    // a self-relative security descriptor freed by the local allocation guard.
+    let result = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide.as_ptr(),
+            1,
+            &mut descriptor,
+            &mut bytes,
+        )
+    };
+    let _owned = OwnedLocalAllocation(descriptor);
+    if result == 0
+        || descriptor.is_null()
+        || !(20..=32768).contains(&bytes)
+        || unsafe { IsValidSecurityDescriptor(descriptor) } == 0
+    {
+        return Err(SidObservationError::Unverifiable);
+    }
+    let mut owner: *mut c_void = ptr::null_mut();
+    let mut owner_defaulted = 0i32;
+    let mut dacl_present = 0i32;
+    let mut dacl_defaulted = 0i32;
+    let mut dacl: *mut ACL = ptr::null_mut();
+    // SAFETY: Both API calls examine fields of the same live validated SD;
+    // the SID and ACL pointers remain borrowed until _owned drops.
+    if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) } == 0
+        || owner.is_null()
+        || unsafe { IsValidSid(owner) } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        } == 0
+        || dacl_present == 0
+        || dacl.is_null()
+        || unsafe { IsValidAcl(dacl) } == 0
+    {
+        return Err(SidObservationError::Unverifiable);
+    }
+    if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } != 0 {
+        return Ok(TaskOwnerEvidence::BuiltinAdministrators);
+    }
+    let owner_len = unsafe { GetLengthSid(owner) } as usize;
+    if !(12..=256).contains(&owner_len) {
+        return Err(SidObservationError::Unverifiable);
+    }
+    // SAFETY: IsValidSid succeeded and GetLengthSid is bounded; the owner
+    // remains allocated with the security descriptor until this scope exits.
+    let owner_bytes = unsafe { std::slice::from_raw_parts(owner.cast::<u8>(), owner_len) };
+    if !crate::windows::valid_sid_bytes(owner_bytes) {
+        return Err(SidObservationError::Unverifiable);
+    }
+    Ok(match compare_current_process_user_sid(owner_bytes)? {
+        ProcessSidEvidence::SameAccount => TaskOwnerEvidence::CurrentUser,
+        ProcessSidEvidence::DifferentAccount => TaskOwnerEvidence::DifferentOwner,
+    })
 }
 
 fn resolve_registered_user_sid(name: &str) -> Result<Vec<u8>, SidObservationError> {
@@ -200,9 +286,74 @@ pub(super) fn compare_registered_task_principal(
     compare_current_process_user_sid(&sid)
 }
 
+/// Reads actual registered task owner + non-null DACL evidence through COM.
+/// Same user/group ownership is not proof of a JDC-controlled registration.
+pub(super) fn observe_registered_task_owner(
+    task_name: &str,
+) -> Result<TaskOwnerEvidence, SidObservationError> {
+    with_registered_task(task_name, |task| {
+        // OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION = 0x5.
+        // Read only: no Group/SACL query, elevation or task registration.
+        let sddl = unsafe { task.GetSecurityDescriptor(5) }
+            .map_err(|_| SidObservationError::Unverifiable)?;
+        classify_task_owner_sddl(&sddl.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_task_owner_is_distinct_from_execution_principal() {
+        // BUILTIN\\Administrators owns a real-world S4U user task.
+        assert_eq!(
+            classify_task_owner_sddl("O:BAG:BAD:(A;;FA;;;BA)"),
+            Ok(crate::TaskOwnerEvidence::BuiltinAdministrators)
+        );
+        // The DACL granting administrators access does not change SYSTEM ownership.
+        assert_eq!(
+            classify_task_owner_sddl("O:SYG:SYD:(A;;FA;;;BA)"),
+            Ok(crate::TaskOwnerEvidence::DifferentOwner)
+        );
+    }
+
+    #[test]
+    fn current_token_owner_is_not_confused_with_builtin_admins() {
+        let current = crate::observe_current_process_user_sid().expect("real TokenUser");
+        let authority = current[2..8]
+            .iter()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+        let mut sid_text = format!("S-{}-{authority}", current[0]);
+        for part in current[8..].chunks_exact(4) {
+            sid_text.push_str(&format!(
+                "-{}",
+                u32::from_le_bytes(part.try_into().expect("four SID bytes"))
+            ));
+        }
+        let sddl = format!("O:{sid_text}G:BAD:(A;;FA;;;BA)");
+        assert_eq!(
+            classify_task_owner_sddl(&sddl),
+            Ok(TaskOwnerEvidence::CurrentUser)
+        );
+    }
+
+    #[test]
+    fn task_owner_observation_fails_closed_on_missing_or_invalid_dacl() {
+        for descriptor in [
+            "O:BA",
+            "O:BAG:BA",
+            "O:BAG:BAD:NO_ACCESS_CONTROL",
+            "not-a-sddl",
+            "",
+        ] {
+            assert_eq!(
+                classify_task_owner_sddl(descriptor),
+                Err(SidObservationError::Unverifiable),
+                "incomplete security descriptor must not yield owner evidence"
+            );
+        }
+    }
 
     #[test]
     fn registered_principal_sid_string_resolves_to_kernel_token_identity() {

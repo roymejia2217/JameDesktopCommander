@@ -45,6 +45,28 @@ pub fn compare_current_process_user_sid(
 #[cfg(windows)]
 mod task_scheduler;
 
+/// Identity class of the *security-descriptor owner* on a registered task.
+/// The owner's SID is not the scheduled execution principal's SID. This
+/// observation does not grant access, establish installer provenance or prove
+/// the task's DACL safely restricts access.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOwnerEvidence {
+    CurrentUser,
+    BuiltinAdministrators,
+    DifferentOwner,
+}
+
+/// Reads task security descriptor owner from local Windows Task Scheduler COM.
+/// Requires a syntactically valid descriptor with explicit, non-null DACL.
+/// Never use as authorization; an admin-owned task is not necessarily ours.
+#[cfg(windows)]
+pub fn observe_registered_task_owner_for_observation(
+    task_name: &str,
+) -> Result<TaskOwnerEvidence, SidObservationError> {
+    task_scheduler::observe_registered_task_owner(task_name)
+}
+
 /// Reads a real Task Scheduler registration through local COM and compares
 /// its principal with the process TokenUser. Never an authorization grant.
 /// This public observer accepts only single-component task names; an installed

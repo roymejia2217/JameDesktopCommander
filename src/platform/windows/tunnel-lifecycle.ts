@@ -83,5 +83,10 @@ export async function uninstallWindowsTunnelTask(
     taskName: string,
     dependencies: WindowsTunnelLifecycleDependencies = {},
 ): Promise<RunExecutableResult> {
+    // Task Scheduler /Delete removes registration but does not end a running
+    // program. Persist the stopped state before ending this task; if either
+    // operation fails, retain its registration so incomplete cleanup is visible.
+    await runWindowsScheduledTaskAction('disable', taskName, dependencies);
+    await runWindowsScheduledTaskAction('stop', taskName, dependencies);
     return runWindowsScheduledTaskAction('uninstall', taskName, dependencies);
 }

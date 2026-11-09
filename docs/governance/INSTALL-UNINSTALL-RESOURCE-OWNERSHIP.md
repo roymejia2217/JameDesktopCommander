@@ -63,6 +63,12 @@ flowchart TD
 7. Run normal OS package uninstall; prove removal and no residue. Test wrong owner, modified unit, symlink/junction, active tunnel, locked file, partial failure, power loss, repeated uninstall, downgrade, lost user bus, and delayed remote disconnect in isolated real Windows/Linux OS fixtures.
 8. Re-scan before and after, including exact environment/startup/firewall rules and active network endpoints. Any unverified resource or provider credential means **NO-GO**; exit code zero from the package manager is insufficient.
 
+## Verified native Task Scheduler stop-before-delete contract
+
+Microsoft documents that `schtasks /Delete` unregisters a task **without stopping its running program**. Previously the Windows CLI called task deletion directly for both the tunnel and recovery supervisor. The reviewed native lifecycle now uses `/Change /DISABLE`, then `/End`, then `/Delete`, and **aborts deletion on any failed stop**. A disposable scheduled task running a loopback-only process was started and torn down by the actual compiled JDC method on Windows; its process disappeared before task deletion. A second inactive fixture completed successfully. The genuine remote tunnel and its credentials were not modified.
+
+This closes only the missing Task Scheduler stop-before-delete transition. It **does not prove** that the target task belongs to the active JDC installation, that detached children are gone, that the network listener is closed in all crash cases, that the secret store is wiped, or that the provider has revoked credentials. Those acceptance gates remain in #248 and block a claimed complete uninstall.
+
 ## Verified today: package-level boundary
 
 The GitHub Actions Windows candidate installs and removes a real Inno EXE, checking installed payload, Add/Remove Programs key, shortcuts, task/service preservation, a synthetic pre-existing profile, startup registration, environment, firewall and running installed-root processes. The Debian job uses real dpkg install and purge, checks package registration and file-tree removal, and compares user-systemd and environment sources without printing them.

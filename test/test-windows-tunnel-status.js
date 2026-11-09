@@ -106,6 +106,40 @@ assert.deepEqual(status, {
 
 assert.doesNotMatch(JSON.stringify(status), /runtime\.key|api_key/i);
 
+// Task Scheduler can hold multiple *types* of actions. One visible Exec
+// alongside any other action is not a single-action tunnel registration.
+// A read-only overview must not spawn a binary derived from such a task.
+for (const [label, injected] of [
+  ['COM handler after Exec', '<ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler>'],
+  ['COM handler before Exec', '<ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler>'],
+  ['second Exec', '<Exec><Command>C:/Untrusted/runner.exe</Command></Exec>'],
+]) {
+  const hostileXml = label === 'COM handler before Exec'
+    ? taskXml.replace('<Exec>', injected + '<Exec>')
+    : taskXml.replace('</Exec>', '</Exec>' + injected);
+  const attempted = [];
+  await assert.rejects(
+    getWindowsTunnelStatus(taskName, {
+      environment: { SystemRoot: 'C:/Windows' },
+      runExecutable: async (executable, args) => {
+        attempted.push([executable, ...args]);
+        if (executable.endsWith('schtasks.exe')) {
+          return { stdout: hostileXml, stderr: '' };
+        }
+        throw new Error('untrusted task-selected binary was executed');
+      },
+      readFile: async () => {
+        throw new Error('untrusted task-selected profile was read');
+      },
+    }),
+    /exactly one Exec action/i,
+    label,
+  );
+  assert.deepEqual(attempted, [
+    [calls[0].executable, '/Query', '/TN', taskName, '/XML'],
+  ], label);
+}
+
 await assert.rejects(
   getWindowsTunnelStatus(taskName, {
     environment: { SystemRoot: 'C:\\Windows' },

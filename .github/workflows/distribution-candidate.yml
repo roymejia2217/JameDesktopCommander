@@ -238,6 +238,69 @@ jobs:
           $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C812A487-AF99-4640-9F77-31DD4A9A7F12}_is1'
           $launcher = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\JameDesktopCommander (MCP console).lnk'
           $operatorShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\JameDesktopCommander - Tunnel Operator.lnk'
+          # Installation must not add autoruns, environment entries or firewall exceptions.
+          # Observe complete native registry/firewall state, but never print their values.
+          $startupKeys = @(
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+          )
+          $environmentKeys = @('HKCU:\Environment', 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+          function Get-RegistrySnapshot([string[]]$keys) {
+            $snapshot = foreach ($key in $keys) {
+              if (!(Test-Path -LiteralPath $key)) { "$key|absent"; continue }
+              $values = Get-ItemProperty -LiteralPath $key
+              $fields = @($values.PSObject.Properties |
+                Where-Object { $_.Name -notin @('PSPath','PSParentPath','PSChildName','PSDrive','PSProvider') } |
+                Sort-Object Name | ForEach-Object { $_.Name + '=' + [string]$_.Value })
+              $key + '|' + ($fields -join [char]10)
+            }
+            return ($snapshot -join [char]10)
+          }
+          function Get-StartupFilesSnapshot {
+            $locations = @(
+              (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),
+              (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup')
+            )
+            $entries = foreach ($location in $locations) {
+              if (!(Test-Path -LiteralPath $location)) { "$location|absent"; continue }
+              Get-ChildItem -LiteralPath $location -File -Recurse |
+                Sort-Object FullName | ForEach-Object {
+                  $_.FullName + '|' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                }
+            }
+            return ($entries -join [char]10)
+          }
+          function Get-FirewallSnapshot {
+            $rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
+              Sort-Object Name | ForEach-Object {
+                $_.Name + '|' + $_.DisplayName + '|' + $_.Enabled + '|' + $_.Direction + '|' + $_.Action
+              })
+            $ports = @(Get-NetFirewallPortFilter -PolicyStore PersistentStore -ErrorAction Stop |
+              Sort-Object InstanceID | ForEach-Object {
+                $_.InstanceID + '|' + $_.Protocol + '|' + ($_.LocalPort -join ',') + '|' + ($_.RemotePort -join ',')
+              })
+            $applications = @(Get-NetFirewallApplicationFilter -PolicyStore PersistentStore -ErrorAction Stop |
+              Sort-Object InstanceID | ForEach-Object { $_.InstanceID + '|' + $_.Program })
+            return ((@($rules) + @($ports) + @($applications)) -join [char]10)
+          }
+          $startupBefore = Get-RegistrySnapshot $startupKeys
+          $startupFilesBefore = Get-StartupFilesSnapshot
+          $environmentBefore = Get-RegistrySnapshot $environmentKeys
+          $firewallBefore = Get-FirewallSnapshot
+          function Assert-HostPackageBoundary {
+            if ((Get-RegistrySnapshot $startupKeys) -cne $startupBefore -or
+                (Get-StartupFilesSnapshot) -cne $startupFilesBefore) {
+              throw 'Pre-existing Windows startup registration modified by installer'
+            }
+            if ((Get-RegistrySnapshot $environmentKeys) -cne $environmentBefore) {
+              throw 'Windows environment registration modified by installer'
+            }
+            if ((Get-FirewallSnapshot) -cne $firewallBefore) {
+              throw 'Windows firewall rules modified by installer'
+            }
+          }
           $taskNamesBefore = @(Get-ScheduledTask | Where-Object { $_.TaskName -match 'JameDesktop|Desktop Commander' } |
             Sort-Object TaskName | ForEach-Object { $_.TaskName + '|' + $_.Actions[0].Execute })
           $servicesBefore = @(Get-CimInstance Win32_Service | Where-Object { $_.Name -match 'JameDesktop|DesktopCommander|JDC' } |
@@ -274,6 +337,7 @@ jobs:
           if ((Get-FileHash $profileSentinel -Algorithm SHA256).Hash -ne $profileHash) {
             throw 'Pre-existing tunnel profile modified by installer'
           }
+          Assert-HostPackageBoundary
           $runtime = Join-Path $target 'runtime/node.exe'
           if (!(Test-Path -LiteralPath $runtime)) { throw 'Installed runtime missing' }
           & $runtime --version
@@ -314,6 +378,13 @@ jobs:
           if ((Get-FileHash $profileSentinel -Algorithm SHA256).Hash -ne $profileHash) {
             throw 'Pre-existing tunnel profile modified by uninstaller'
           }
+          Assert-HostPackageBoundary
+          $ownedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith(
+              ($target + [IO.Path]::DirectorySeparatorChar),
+              [StringComparison]::OrdinalIgnoreCase)
+          })
+          if ($ownedProcesses.Count -ne 0) { throw 'JDC process remains after uninstall' }
           Remove-Item -LiteralPath $profileSentinel -Force
           if (Test-Path -LiteralPath $gui) { throw 'GUI remains after uninstall' }
           if (Test-Path -LiteralPath $uiManifest) { throw 'GUI manifest remains after uninstall' }
@@ -350,6 +421,58 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           deb="$RUNNER_TEMP/jdc-installer-output/UNPUBLISHED-jdc-installer-linux-x64.deb"
+          # Hash local systemd and environment configuration without printing secrets.
+          linux_systemd_snapshot() {
+            if [ ! -d "$HOME/.config/systemd/user" ]; then
+              printf '%s\n' '<absent>'
+            else
+              find "$HOME/.config/systemd/user" -mindepth 1 -printf '%y|%m|%u|%g|%p|%l\n' | LC_ALL=C sort
+              find "$HOME/.config/systemd/user" -type f -print0 |
+                sort -z | xargs -0 -r sha256sum
+            fi
+          }
+          linux_environment_snapshot() {
+            for item in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.pam_environment" \
+                        "$HOME/.config/environment.d" /etc/environment /etc/profile; do
+              if [ -f "$item" ]; then
+                stat -c '%n|%a|%U|%G' "$item"
+                sha256sum "$item"
+              elif [ -d "$item" ]; then
+                find "$item" -mindepth 0 -printf '%y|%m|%u|%g|%p|%l\n' | LC_ALL=C sort
+                find "$item" -type f -print0 | sort -z | xargs -0 -r sha256sum
+              else
+                printf '%s|absent\n' "$item"
+              fi
+            done
+          }
+          systemd_before="$(linux_systemd_snapshot | sha256sum)"
+          environment_before="$(linux_environment_snapshot | sha256sum)"
+          assert_linux_host_boundary() {
+            if [ "$(linux_systemd_snapshot | sha256sum)" != "$systemd_before" ]; then
+              echo 'Pre-existing Linux systemd-user configuration modified' >&2
+              exit 1
+            fi
+            if [ "$(linux_environment_snapshot | sha256sum)" != "$environment_before" ]; then
+              echo 'Pre-existing Linux environment configuration modified' >&2
+              exit 1
+            fi
+          }
+          if dpkg-deb --ctrl-tarfile "$deb" | tar -tf - |
+            grep -E '(^|/)(preinst|postinst|prerm|postrm)$'; then
+            echo 'Debian package has unreviewed maintainer hooks' >&2
+            exit 1
+          fi
+          assert_no_linux_package_process() {
+            for proc in /proc/[0-9]*/exe; do
+              exe="$(readlink "$proc" 2>/dev/null || true)"
+              case "$exe" in
+                /opt/jame-desktop-commander/*)
+                  echo 'Linux installed process remains after package lifecycle' >&2
+                  exit 1
+                  ;;
+              esac
+            done
+          }
           test "$(dpkg-deb --field "$deb" Architecture)" = 'amd64'
           test "$(dpkg-deb --field "$deb" Version)" = "${version}-1"
           dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/runtime/node' >/dev/null
@@ -357,6 +480,8 @@ jobs:
           dpkg-deb --contents "$deb" | grep -F '/opt/jame-desktop-commander/jdc-tunnel-operator-ui' >/dev/null
           dpkg-deb --contents "$deb" | grep -F '/usr/share/applications/jdc-tunnel-operator.desktop' >/dev/null
           sudo dpkg -i "$deb"
+          assert_linux_host_boundary
+          assert_no_linux_package_process
           test -x /opt/jame-desktop-commander/runtime/node
           /opt/jame-desktop-commander/runtime/node --version
           test -x /usr/bin/jdc
@@ -368,6 +493,17 @@ jobs:
           node scripts/operator-ui-bundle.mjs verify-installed /opt/jame-desktop-commander "$JDC_CANDIDATE_SOURCE_SHA" linux-x64
           /opt/jame-desktop-commander/jdc-tunnel-operator-ui --check-installation
           sudo dpkg -r jame-desktop-commander
+          sudo dpkg --purge jame-desktop-commander
+          if dpkg-query -W jame-desktop-commander >/dev/null 2>&1; then
+            echo 'Debian package remains registered after purge' >&2
+            exit 1
+          fi
+          if [ -e /opt/jame-desktop-commander ]; then
+            echo 'Linux application directory remains after remove' >&2
+            exit 1
+          fi
+          assert_linux_host_boundary
+          assert_no_linux_package_process
           test ! -e /usr/bin/jdc
           test ! -e /opt/jame-desktop-commander/jdc-tunnel-operator-ui
           test ! -e /opt/jame-desktop-commander/operator-ui-manifest.json

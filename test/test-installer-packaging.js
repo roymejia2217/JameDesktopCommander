@@ -103,6 +103,30 @@ test('Windows hosted installer checks full registered package lifecycle, not onl
   }
 });
 
+test('packaged lifecycle denies residual startup, environment, firewall and owned processes', async () => {
+  const workflow = await readFile(resolve(root,'.github/workflows/distribution-candidate.yml'),'utf8');
+  const windows = workflow.split('name: Verify Windows installer install and uninstall')[1]
+    ?.split('name: Build nFPM Debian installer candidate')[0];
+  const linux = workflow.split('name: Verify Debian install and remove')[1]
+    ?.split('name: Retain unpublished installer candidates')[0];
+  assert.ok(windows && linux, 'both real OS lifecycle acceptance steps are required');
+  for (const contract of [
+    'Pre-existing Windows startup registration modified by installer',
+    'Windows environment registration modified by installer',
+    'Windows firewall rules modified by installer',
+    'JDC process remains after uninstall',
+  ]) assert.ok(windows.includes(contract), `Missing native Windows residual gate: ${contract}`);
+  for (const contract of [
+    'sudo dpkg --purge jame-desktop-commander',
+    'Pre-existing Linux systemd-user configuration modified',
+    'Pre-existing Linux environment configuration modified',
+    'Linux application directory remains after remove',
+    'Debian package remains registered after purge',
+    'Debian package has unreviewed maintainer hooks',
+    'Linux installed process remains after package lifecycle',
+  ]) assert.ok(linux.includes(contract), `Missing native Linux residual gate: ${contract}`);
+});
+
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {
   const config = await readFile(resolve(root,'packaging/linux/nfpm.yaml'),'utf8');
   const launch = await readFile(resolve(root,'packaging/linux/jdc'),'utf8');

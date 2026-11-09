@@ -41,5 +41,9 @@ export async function uninstallWindowsTunnelRestartSupervisorTask(
     taskName: string,
     dependencies: WindowsScheduledTaskDependencies = {},
 ): Promise<RunExecutableResult> {
+    // Removing a registered task does not terminate a running instance.
+    // Fence new starts and end any active supervisor before unregistering.
+    await runWindowsScheduledTaskAction('disable', taskName, dependencies);
+    await runWindowsScheduledTaskAction('stop', taskName, dependencies);
     return runWindowsScheduledTaskAction('uninstall', taskName, dependencies);
 }

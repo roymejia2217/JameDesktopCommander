@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   buildSchtasksLifecycleArgs,
   installWindowsTunnelTask,
+  uninstallWindowsTunnelTask,
   resolveSchtasksExecutable,
 } from '../dist/platform/windows/tunnel-lifecycle.js';
+import { uninstallWindowsTunnelRestartSupervisorTask } from '../dist/platform/windows/tunnel-restart-lifecycle.js';
 
 const task = {
   author: 'DESKTOP-TEST\\Roy',
@@ -135,5 +137,50 @@ await assert.rejects(
   /synthetic schtasks failure/,
 );
 assert.deepEqual(cleanupAfterFailure, ['C:\\Temp\\jdc-task-failure']);
+
+const cleanupCalls = [];
+await uninstallWindowsTunnelTask('JDC-ISOLATED-FIXTURE', {
+  environment: { SystemRoot: 'C:\\Windows' },
+  runExecutable: async (_executable, args) => {
+    cleanupCalls.push([...args]);
+    return { stdout: '', stderr: '' };
+  },
+});
+assert.deepEqual(cleanupCalls, [
+  ['/Change', '/TN', 'JDC-ISOLATED-FIXTURE', '/DISABLE'],
+  ['/End', '/TN', 'JDC-ISOLATED-FIXTURE'],
+  ['/Delete', '/TN', 'JDC-ISOLATED-FIXTURE', '/F'],
+], 'uninstall must stop the actual scheduled program before removing task registration');
+
+const failedStopCalls = [];
+await assert.rejects(
+  uninstallWindowsTunnelTask('JDC-ISOLATED-FIXTURE', {
+    environment: { SystemRoot: 'C:\\Windows' },
+    runExecutable: async (_executable, args) => {
+      failedStopCalls.push([...args]);
+      if (args[0] === '/End') throw new Error('synthetic failure to stop running instance');
+      return { stdout: '', stderr: '' };
+    },
+  }),
+  /synthetic failure to stop/,
+);
+assert.deepEqual(failedStopCalls, [
+  ['/Change', '/TN', 'JDC-ISOLATED-FIXTURE', '/DISABLE'],
+  ['/End', '/TN', 'JDC-ISOLATED-FIXTURE'],
+], 'failure to end a running tunnel must block task removal and remain observable');
+
+const supervisorCalls = [];
+await uninstallWindowsTunnelRestartSupervisorTask('JDC-ISOLATED-SUPERVISOR', {
+  environment: { SystemRoot: 'C:\\Windows' },
+  runExecutable: async (_exe, args) => {
+    supervisorCalls.push([...args]);
+    return { stdout: '', stderr: '' };
+  },
+});
+assert.deepEqual(supervisorCalls, [
+  ['/Change', '/TN', 'JDC-ISOLATED-SUPERVISOR', '/DISABLE'],
+  ['/End', '/TN', 'JDC-ISOLATED-SUPERVISOR'],
+  ['/Delete', '/TN', 'JDC-ISOLATED-SUPERVISOR', '/F'],
+], 'supervisor must be stopped and disabled before registration removal');
 
 console.log('Windows tunnel lifecycle contract: PASS');

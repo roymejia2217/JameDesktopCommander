@@ -285,14 +285,26 @@ jobs:
               Sort-Object InstanceID | ForEach-Object { $_.InstanceID + '|' + $_.Program })
             return ((@($rules) + @($ports) + @($applications)) -join [char]10)
           }
-          $startupBefore = Get-RegistrySnapshot $startupKeys
+          $startupBefore = @{}
+          foreach ($key in $startupKeys) {
+            $startupBefore[$key] = Get-RegistrySnapshot @($key)
+          }
           $startupFilesBefore = Get-StartupFilesSnapshot
           $environmentBefore = Get-RegistrySnapshot $environmentKeys
           $firewallBefore = Get-FirewallSnapshot
           function Assert-HostPackageBoundary {
-            if ((Get-RegistrySnapshot $startupKeys) -cne $startupBefore -or
-                (Get-StartupFilesSnapshot) -cne $startupFilesBefore) {
-              throw 'Pre-existing Windows startup registration modified by installer'
+            $changedStartupKeys = @(
+              foreach ($key in $startupKeys) {
+                if ((Get-RegistrySnapshot @($key)) -cne $startupBefore[$key]) { $key }
+              }
+            )
+            if ($changedStartupKeys.Count -ne 0) {
+              # Only names of fixed, known registry keys; never emit registry values.
+              throw ('Pre-existing Windows startup registration modified by installer: ' +
+                ($changedStartupKeys -join ', '))
+            }
+            if ((Get-StartupFilesSnapshot) -cne $startupFilesBefore) {
+              throw 'Pre-existing Windows startup folder files modified by installer'
             }
             if ((Get-RegistrySnapshot $environmentKeys) -cne $environmentBefore) {
               throw 'Windows environment registration modified by installer'

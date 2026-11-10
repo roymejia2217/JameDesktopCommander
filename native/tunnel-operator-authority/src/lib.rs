@@ -117,3 +117,28 @@ pub fn observe_private_file_custody(
 
 #[cfg(windows)]
 mod relative_sd;
+
+#[cfg(windows)]
+mod system_executable;
+
+/// Read-only identity evidence from a native Windows file handle.
+/// This is NOT a signed-publisher verification, a protected installation
+/// record, an executable launch token or an authorization decision.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsSystemExecutableObservation {
+    pub path: std::path::PathBuf,
+    pub volume_serial: u32,
+    pub file_index: u64,
+    pub link_count: u32,
+}
+
+/// Observe the OS-reported System32 schtasks.exe with Win32 APIs and a file
+/// handle, without consulting SystemRoot, PATH, task XML, CLI or environment.
+/// The handle is closed before return. Do not use the returned path as a
+/// permission to start a subprocess; reverify custody at the launch boundary.
+#[cfg(windows)]
+pub fn observe_os_schtasks_for_observation(
+) -> Result<OsSystemExecutableObservation, SidObservationError> {
+    system_executable::observe()
+}

@@ -118,19 +118,45 @@ function nativeWindowsSystemDirectory(): string {
     return observed.replace(/\\system32$/i, '\\System32');
 }
 
+/** Only fixed OS utilities; no caller-supplied path or executable names. */
+export type WindowsSystemTool = 'schtasks' | 'powershell' | 'taskkill';
+
+export function resolveWindowsSystemTool(
+    tool: WindowsSystemTool,
+    environment: Record<string, string | undefined> = process.env,
+): string {
+    // On actual Windows, SystemRoot, PATH and dependency overrides are untrusted.
+    // Non-Windows fallback exists only for cross-platform synthetic fixtures.
+    let systemDirectory: string;
+    if (process.platform === 'win32') {
+        systemDirectory = nativeWindowsSystemDirectory();
+    } else {
+        const systemRoot = environment.SystemRoot?.trim();
+        if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
+            throw new Error('SystemRoot must contain an absolute Windows path.');
+        }
+        systemDirectory = path.win32.join(systemRoot, 'System32');
+    }
+    switch (tool) {
+        case 'schtasks':
+            return path.win32.join(systemDirectory, 'schtasks.exe');
+        case 'taskkill':
+            return path.win32.join(systemDirectory, 'taskkill.exe');
+        case 'powershell':
+            return path.win32.join(
+                systemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe',
+            );
+        default: {
+            const exhaustiveCheck: never = tool;
+            throw new Error(`Unsupported Windows system tool: ${exhaustiveCheck}`);
+        }
+    }
+}
+
 export function resolveSchtasksExecutable(
     environment: Record<string, string | undefined> = process.env,
 ): string {
-    // Non-Windows invocation is retained only for synthetic cross-platform tests.
-    // On Windows the environment is *never* authority for a child-process path.
-    if (process.platform === 'win32') {
-        return path.win32.join(nativeWindowsSystemDirectory(), 'schtasks.exe');
-    }
-    const systemRoot = environment.SystemRoot?.trim();
-    if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
-        throw new Error('SystemRoot must contain an absolute Windows path.');
-    }
-    return path.win32.join(systemRoot, 'System32', 'schtasks.exe');
+    return resolveWindowsSystemTool('schtasks', environment);
 }
 
 export function buildSchtasksQueryXmlArgs(taskName: string): string[] {

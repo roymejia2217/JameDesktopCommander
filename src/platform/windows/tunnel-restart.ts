@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import {
     resolveSchtasksExecutable,
+    resolveWindowsSystemTool,
     type RunExecutable,
     type RunExecutableResult,
 } from './scheduled-task.js';
@@ -77,38 +78,6 @@ const defaultRunExecutable: RunExecutable = async (executable, args) =>
             },
         );
     });
-
-function requireSystemRoot(
-    environment: Record<string, string | undefined>,
-): string {
-    const systemRoot = environment.SystemRoot?.trim();
-    if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
-        throw new Error('SystemRoot must contain an absolute Windows path.');
-    }
-    return path.win32.normalize(systemRoot);
-}
-
-function resolvePowerShellExecutable(
-    environment: Record<string, string | undefined>,
-): string {
-    return path.win32.join(
-        requireSystemRoot(environment),
-        'System32',
-        'WindowsPowerShell',
-        'v1.0',
-        'powershell.exe',
-    );
-}
-
-function resolveTaskkillExecutable(
-    environment: Record<string, string | undefined>,
-): string {
-    return path.win32.join(
-        requireSystemRoot(environment),
-        'System32',
-        'taskkill.exe',
-    );
-}
 
 function normalizeWindowsPath(value: string): string {
     return path.win32.normalize(value).toLowerCase();
@@ -257,7 +226,7 @@ async function listWindowsProcesses(
     const script = buildWindowsProcessInventoryPowerShell();
     const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
     const result = await runExecutable(
-        resolvePowerShellExecutable(environment),
+        resolveWindowsSystemTool('powershell', environment),
         [
             '-NoLogo',
             '-NoProfile',
@@ -318,7 +287,7 @@ function resolveDependencies(
         terminateProcessTree:
             dependencies.terminateProcessTree ??
             ((pid) =>
-                runExecutable(resolveTaskkillExecutable(environment), [
+                runExecutable(resolveWindowsSystemTool('taskkill', environment), [
                     '/PID',
                     String(pid),
                     '/T',

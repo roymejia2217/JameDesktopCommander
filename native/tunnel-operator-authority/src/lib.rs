@@ -45,6 +45,27 @@ pub fn compare_current_process_user_sid(
 #[cfg(windows)]
 mod task_scheduler;
 
+/// Untrusted data copied from one local Task Scheduler COM Exec action.
+/// It has NOT been authenticated against an installed client, publisher,
+/// protected receipt, ACL, opened file object, or interactive operator.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrustedRegisteredExecObservation {
+    pub executable: std::path::PathBuf,
+    pub arguments: String,
+    pub working_directory: Option<std::path::PathBuf>,
+}
+
+/// Observe the shape and contents of a single registered Exec action using
+/// native Task Scheduler COM. Does not register, start, stop or execute tasks.
+/// Neither a valid path nor action count grants execution authorization.
+#[cfg(windows)]
+pub fn observe_registered_exec_action_for_observation(
+    task_name: &str,
+) -> Result<UntrustedRegisteredExecObservation, SidObservationError> {
+    task_scheduler::observe_registered_exec_action(task_name)
+}
+
 /// Identity class of the *security-descriptor owner* on a registered task.
 /// The owner's SID is not the scheduled execution principal's SID. This
 /// observation does not grant access, establish installer provenance or prove

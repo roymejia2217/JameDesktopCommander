@@ -110,6 +110,11 @@ test('packaged lifecycle denies residual startup, environment, firewall and owne
   const linux = workflow.split('name: Verify Debian install and remove')[1]
     ?.split('name: Retain unpublished installer candidates')[0];
   assert.ok(windows && linux, 'both real OS lifecycle acceptance steps are required');
+  // Fail-closed detection must also classify private registry changes without
+  // logging registry value names or startup command lines.
+  assert.ok(windows.includes('Get-RegistrySnapshotDetail -Key $key'));
+  assert.ok(windows.includes('Get-RegistryChangeSummary -Before'));
+  assert.ok(windows.includes('test-windows-installer-registry-drift-evidence.ps1'));
   for (const contract of [
     'Windows startup registry drift during installer acceptance (cause unverified)',
     'Windows environment registration modified by installer',

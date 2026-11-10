@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import koffi from 'koffi';
 
 export type WindowsScheduledTaskLifecycleAction = 'start' | 'stop' | 'enable' | 'disable' | 'uninstall';
 
@@ -91,9 +92,40 @@ export function buildSchtasksCreateArgs(
     return args;
 }
 
+type GetSystemDirectoryW = (buffer: Buffer, capacity: number) => number;
+let getSystemDirectoryW: GetSystemDirectoryW | undefined;
+
+function nativeWindowsSystemDirectory(): string {
+    // Query Windows, never the caller's SystemRoot or PATH.
+    if (!getSystemDirectoryW) {
+        getSystemDirectoryW = koffi.load('kernel32.dll').func(
+            '__stdcall', 'GetSystemDirectoryW', 'uint32_t',
+            ['uint16_t *', 'uint32_t'],
+        ) as GetSystemDirectoryW;
+    }
+    const capacity = 32768; // Windows maximum extended path, in UTF-16 units.
+    const buffer = Buffer.alloc(capacity * 2);
+    const length = getSystemDirectoryW(buffer, capacity);
+    if (!Number.isInteger(length) || length === 0 || length >= capacity) {
+        throw new Error('Windows system directory could not be determined.');
+    }
+    const observed = buffer.toString('utf16le', 0, length * 2);
+    if (!/^[A-Za-z]:\\/.test(observed) ||
+        observed.includes('\0') ||
+        path.win32.normalize(observed) !== observed) {
+        throw new Error('Windows returned an invalid system directory.');
+    }
+    return observed.replace(/\\system32$/i, '\\System32');
+}
+
 export function resolveSchtasksExecutable(
     environment: Record<string, string | undefined> = process.env,
 ): string {
+    // Non-Windows invocation is retained only for synthetic cross-platform tests.
+    // On Windows the environment is *never* authority for a child-process path.
+    if (process.platform === 'win32') {
+        return path.win32.join(nativeWindowsSystemDirectory(), 'schtasks.exe');
+    }
     const systemRoot = environment.SystemRoot?.trim();
     if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
         throw new Error('SystemRoot must contain an absolute Windows path.');

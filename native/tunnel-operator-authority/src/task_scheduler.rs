@@ -300,9 +300,253 @@ pub(super) fn observe_registered_task_owner(
     })
 }
 
+// This lexical check rejects task-provided UNC, device namespace, environment,
+// traversal and ADS spellings. It is deliberately NOT file-object validation.
+fn untrusted_local_drive_path(raw: &str) -> Result<std::path::PathBuf, SidObservationError> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 4
+        || bytes.len() > 4096
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || bytes[2] != b'\\'
+        || raw[3..]
+            .split('\\')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        || raw[3..].contains(':')
+        || raw.chars().any(|c| c.is_control() || c == '%' || c == '"')
+    {
+        return Err(SidObservationError::Unverifiable);
+    }
+    let path = std::path::PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(SidObservationError::Unverifiable);
+    }
+    Ok(path)
+}
+
+fn observe_single_exec_action(
+    actions: &windows::Win32::System::TaskScheduler::IActionCollection,
+) -> Result<crate::UntrustedRegisteredExecObservation, SidObservationError> {
+    use windows::{
+        core::Interface,
+        Win32::System::TaskScheduler::{IExecAction, TASK_ACTION_EXEC, TASK_ACTION_TYPE},
+    };
+    let mut count = 0i32;
+    unsafe { actions.Count(&mut count) }.map_err(|_| SidObservationError::Unverifiable)?;
+    if count != 1 {
+        return Err(SidObservationError::Unverifiable);
+    }
+    // Task Scheduler's IActionCollection is one-based.
+    let action = unsafe { actions.get_Item(1) }.map_err(|_| SidObservationError::Unverifiable)?;
+    let mut kind = TASK_ACTION_TYPE(-1);
+    unsafe { action.Type(&mut kind) }.map_err(|_| SidObservationError::Unverifiable)?;
+    if kind != TASK_ACTION_EXEC {
+        return Err(SidObservationError::Unverifiable);
+    }
+    let exec: IExecAction = action
+        .cast()
+        .map_err(|_| SidObservationError::Unverifiable)?;
+    let (mut path, mut args, mut directory) = (BSTR::new(), BSTR::new(), BSTR::new());
+    unsafe { exec.Path(&mut path) }.map_err(|_| SidObservationError::Unverifiable)?;
+    unsafe { exec.Arguments(&mut args) }.map_err(|_| SidObservationError::Unverifiable)?;
+    unsafe { exec.WorkingDirectory(&mut directory) }
+        .map_err(|_| SidObservationError::Unverifiable)?;
+    // Bound untrusted COM BSTR data before UTF-16 conversion and allocation.
+    if path.len() > 4096 || args.len() > 8192 || directory.len() > 4096 {
+        return Err(SidObservationError::Unverifiable);
+    }
+    // Strict UTF-16: do not silently coerce an unpaired surrogate to U+FFFD.
+    let path = String::from_utf16(&path).map_err(|_| SidObservationError::Unverifiable)?;
+    let args = String::from_utf16(&args).map_err(|_| SidObservationError::Unverifiable)?;
+    let directory =
+        String::from_utf16(&directory).map_err(|_| SidObservationError::Unverifiable)?;
+    if args.len() > 8192 || args.chars().any(char::is_control) {
+        return Err(SidObservationError::Unverifiable);
+    }
+    let working_directory = if directory.is_empty() {
+        None
+    } else {
+        Some(untrusted_local_drive_path(&directory)?)
+    };
+    Ok(crate::UntrustedRegisteredExecObservation {
+        executable: untrusted_local_drive_path(&path)?,
+        arguments: args,
+        working_directory,
+    })
+}
+
+/// OS-local COM observation, not publisher, installer, rights or client proof.
+/// Never pass executable directly to a process-launch API.
+pub(super) fn observe_registered_exec_action(
+    task_name: &str,
+) -> Result<crate::UntrustedRegisteredExecObservation, SidObservationError> {
+    with_registered_task(task_name, |task| {
+        let definition =
+            unsafe { task.Definition() }.map_err(|_| SidObservationError::Unverifiable)?;
+        let actions =
+            unsafe { definition.Actions() }.map_err(|_| SidObservationError::Unverifiable)?;
+        observe_single_exec_action(&actions)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::core::Interface;
+    use windows::Win32::System::TaskScheduler::{
+        IActionCollection, IExecAction, TASK_ACTION_COM_HANDLER, TASK_ACTION_EXEC,
+    };
+
+    // In-memory task definitions only: no RegisterTaskDefinition, no mutation
+    // of any real scheduled task, service, credential or installed binary.
+    fn with_fixture_actions<T>(test: impl FnOnce(&IActionCollection) -> T) -> T {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .expect("fixture COM apartment");
+        let _apartment = ComApartment;
+        let service: ITaskService =
+            unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
+                .expect("fixture COM service");
+        let empty = VARIANT::default();
+        unsafe { service.Connect(&empty, &empty, &empty, &empty) }.expect("connect local fixture");
+        let definition =
+            unsafe { service.NewTask(0) }.expect("unregistered in-memory task definition");
+        let actions = unsafe { definition.Actions() }.expect("new task action collection");
+        test(&actions)
+    }
+
+    fn add_exec(actions: &IActionCollection, executable: &str) {
+        let action = unsafe { actions.Create(TASK_ACTION_EXEC) }.expect("fixture Exec action");
+        let exec: IExecAction = action.cast().expect("IExecAction");
+        unsafe { exec.SetPath(&BSTR::from(executable)) }.expect("set in-memory fixture path");
+        unsafe { exec.SetArguments(&BSTR::from("run --profile fixture")) }
+            .expect("set in-memory fixture arguments");
+    }
+
+    #[test]
+    fn in_memory_com_exec_action_is_observed_as_untrusted_data() {
+        with_fixture_actions(|actions| {
+            add_exec(actions, r"C:\Program Files\OpenAI\tunnel-client.exe");
+            let evidence =
+                observe_single_exec_action(actions).expect("one Exec action should be observable");
+            assert_eq!(
+                evidence.executable,
+                std::path::PathBuf::from(r"C:\Program Files\OpenAI\tunnel-client.exe")
+            );
+            assert_eq!(evidence.arguments, "run --profile fixture");
+            assert_eq!(evidence.working_directory, None);
+        });
+    }
+
+    #[test]
+    fn in_memory_com_rejects_zero_extra_or_non_exec_actions() {
+        with_fixture_actions(|actions| {
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+            add_exec(actions, r"C:\Program Files\OpenAI\tunnel-client.exe");
+            assert!(observe_single_exec_action(actions).is_ok());
+            unsafe { actions.Create(TASK_ACTION_COM_HANDLER) }.expect("COM handler fixture");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+        with_fixture_actions(|actions| {
+            add_exec(actions, r"C:\One\a.exe");
+            add_exec(actions, r"C:\Two\b.exe");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+        with_fixture_actions(|actions| {
+            unsafe { actions.Create(TASK_ACTION_COM_HANDLER) }.expect("COM-only fixture");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+    }
+
+    #[test]
+    fn in_memory_com_preserves_independent_working_directory() {
+        with_fixture_actions(|actions| {
+            let action = unsafe { actions.Create(TASK_ACTION_EXEC) }.expect("Exec");
+            let exec: IExecAction = action.cast().expect("Exec interface");
+            unsafe { exec.SetPath(&BSTR::from(r"C:\Tools\node.exe")) }.expect("path");
+            unsafe { exec.SetWorkingDirectory(&BSTR::from(r"D:\JDC\Runtime")) }
+                .expect("different trusted-by-nobody working directory");
+            let observed = observe_single_exec_action(actions).expect("valid shape");
+            assert_eq!(
+                observed.working_directory,
+                Some(std::path::PathBuf::from(r"D:\JDC\Runtime"))
+            );
+        });
+        with_fixture_actions(|actions| {
+            let action = unsafe { actions.Create(TASK_ACTION_EXEC) }.expect("Exec");
+            let exec: IExecAction = action.cast().expect("Exec interface");
+            unsafe { exec.SetPath(&BSTR::from(r"C:\Tools\node.exe")) }.expect("path");
+            unsafe { exec.SetWorkingDirectory(&BSTR::from(r"..\relative")) }
+                .expect("in-memory task permits relative path until registration");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+    }
+
+    #[test]
+    fn in_memory_com_rejects_untrusted_control_arguments() {
+        with_fixture_actions(|actions| {
+            let action = unsafe { actions.Create(TASK_ACTION_EXEC) }.expect("Exec");
+            let exec: IExecAction = action.cast().expect("Exec interface");
+            unsafe { exec.SetPath(&BSTR::from(r"C:\Tools\node.exe")) }.expect("path");
+            unsafe { exec.SetArguments(&BSTR::from("run\nsecond")) }.expect("in-memory args");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+    }
+
+    #[test]
+    fn in_memory_com_rejects_oversized_arguments_before_utf16_copy() {
+        with_fixture_actions(|actions| {
+            let action = unsafe { actions.Create(TASK_ACTION_EXEC) }.expect("Exec");
+            let exec: IExecAction = action.cast().expect("Exec interface");
+            unsafe { exec.SetPath(&BSTR::from(r"C:\Tools\node.exe")) }.expect("path");
+            let excessive = "x".repeat(8193);
+            unsafe { exec.SetArguments(&BSTR::from(excessive.as_str())) }
+                .expect("in-memory oversized command");
+            assert_eq!(
+                observe_single_exec_action(actions),
+                Err(SidObservationError::Unverifiable)
+            );
+        });
+    }
+
+    #[test]
+    fn in_memory_com_rejects_invalid_exec_paths() {
+        for bad in [
+            "relative.exe",
+            r"\\remote\share\untrusted.exe",
+            r"C:\temp\..\other.exe",
+            r"C:\bad\evil.exe:ads",
+            r"\\?\C:\extended.exe",
+            "",
+        ] {
+            with_fixture_actions(|actions| {
+                add_exec(actions, bad);
+                assert_eq!(
+                    observe_single_exec_action(actions),
+                    Err(SidObservationError::Unverifiable),
+                    "untrusted path shape must be rejected"
+                );
+            });
+        }
+    }
 
     #[test]
     fn registered_task_owner_is_distinct_from_execution_principal() {

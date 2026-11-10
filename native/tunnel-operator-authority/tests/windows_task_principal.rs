@@ -2,6 +2,7 @@
 mod windows {
     use tunnel_operator_authority::{
         compare_registered_task_principal_for_observation,
+        observe_registered_exec_action_for_observation,
         observe_registered_task_owner_for_observation, SidObservationError,
     };
 
@@ -32,6 +33,24 @@ mod windows {
             ),
             Err(SidObservationError::Unverifiable)
         );
+    }
+
+    #[test]
+    fn exec_observer_rejects_invalid_or_missing_registered_tasks() {
+        for task in [
+            "JDC-issue270-unregistered-test-only-task-5738731",
+            "",
+            "..",
+            "\\OtherFolder\\Task",
+            "Task/Name",
+            "Nul\0Name",
+        ] {
+            assert_eq!(
+                observe_registered_exec_action_for_observation(task),
+                Err(SidObservationError::Unverifiable),
+                "unregistered or path-traversing task names are never observed"
+            );
+        }
     }
 
     #[test]

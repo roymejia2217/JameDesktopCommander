@@ -608,7 +608,7 @@ mod tests {
     fn broad_task_acl_grants_are_not_reported_as_private() {
         for sddl in [
             "O:BAG:BAD:(A;;FA;;;WD)",
-            "O:BAG:BAD:(A;;FR;;;BU)",
+            "O:BAG:BAD:(A;;FR;;;S-1-5-32-545)",
             "O:BAG:BAD:(A;;FA;;;BA)(A;;FR;;;AU)",
             "O:BAG:BAD:(A;;FA;;;BA)(A;;FA;;;WD)",
         ] {

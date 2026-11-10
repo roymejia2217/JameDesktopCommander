@@ -98,34 +98,53 @@ impl Drop for OwnedLocalAllocation {
     }
 }
 
+// One owned, bounded self-relative descriptor for all read-only task probes.
+struct ValidatedTaskDescriptor {
+    allocation: OwnedLocalAllocation,
+    bytes: usize,
+}
+impl ValidatedTaskDescriptor {
+    fn from_sddl(sddl: &str) -> Result<Self, SidObservationError> {
+        if sddl.is_empty() || sddl.len() > 16384 || sddl.contains('\0') {
+            return Err(SidObservationError::Unverifiable);
+        }
+        let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
+        let mut ptr: *mut c_void = ptr::null_mut();
+        let mut size = 0u32;
+        // SAFETY: Windows validates SDDL and owns the allocated self-relative SD.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                1,
+                &mut ptr,
+                &mut size,
+            )
+        };
+        let allocation = OwnedLocalAllocation(ptr);
+        if ok == 0
+            || ptr.is_null()
+            || !(20..=32768).contains(&size)
+            || unsafe { IsValidSecurityDescriptor(ptr) } == 0
+        {
+            return Err(SidObservationError::Unverifiable);
+        }
+        Ok(Self {
+            allocation,
+            bytes: size as usize,
+        })
+    }
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the OS-sized allocation remains owned for this borrow.
+        unsafe { std::slice::from_raw_parts(self.allocation.0.cast(), self.bytes) }
+    }
+}
+
 // Classify *owner identity only* from a native-validated SDDL descriptor.
 // A valid ACL can still grant access to untrusted principals. This is never
 // sufficient for task custody, authorization, or install provenance.
 fn classify_task_owner_sddl(sddl: &str) -> Result<TaskOwnerEvidence, SidObservationError> {
-    if sddl.is_empty() || sddl.len() > 16384 || sddl.contains('\0') {
-        return Err(SidObservationError::Unverifiable);
-    }
-    let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
-    let mut descriptor: *mut c_void = ptr::null_mut();
-    let mut bytes = 0u32;
-    // SAFETY: Windows validates the bounded NUL-terminated SDDL and allocates
-    // a self-relative security descriptor freed by the local allocation guard.
-    let result = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            wide.as_ptr(),
-            1,
-            &mut descriptor,
-            &mut bytes,
-        )
-    };
-    let _owned = OwnedLocalAllocation(descriptor);
-    if result == 0
-        || descriptor.is_null()
-        || !(20..=32768).contains(&bytes)
-        || unsafe { IsValidSecurityDescriptor(descriptor) } == 0
-    {
-        return Err(SidObservationError::Unverifiable);
-    }
+    let _owned = ValidatedTaskDescriptor::from_sddl(sddl)?;
+    let descriptor = _owned.allocation.0;
     let mut owner: *mut c_void = ptr::null_mut();
     let mut owner_defaulted = 0i32;
     let mut dacl_present = 0i32;
@@ -297,6 +316,35 @@ pub(super) fn observe_registered_task_owner(
         let sddl = unsafe { task.GetSecurityDescriptor(5) }
             .map_err(|_| SidObservationError::Unverifiable)?;
         classify_task_owner_sddl(&sddl.to_string())
+    })
+}
+
+/// Conservative structure check: this is not effective rights evaluation.
+fn classify_task_acl_sddl(sddl: &str) -> Result<crate::TaskAclEvidence, SidObservationError> {
+    let descriptor = ValidatedTaskDescriptor::from_sddl(sddl)?;
+    let token_user = crate::observe_current_process_user_sid()?;
+    // Fixed Windows well-known SID strings are resolved by native APIs.
+    let system = resolve_registered_user_sid("S-1-5-18")?;
+    let administrators = resolve_registered_user_sid("S-1-5-32-544")?;
+    if !crate::relative_sd::private_acl(
+        descriptor.as_bytes(),
+        &token_user,
+        &system,
+        &administrators,
+    ) {
+        return Err(SidObservationError::Unverifiable);
+    }
+    Ok(crate::TaskAclEvidence::AllowlistedPrincipalsOnly)
+}
+
+pub(super) fn observe_registered_task_acl(
+    task_name: &str,
+) -> Result<crate::TaskAclEvidence, SidObservationError> {
+    with_registered_task(task_name, |task| {
+        // OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION. Read-only.
+        let sddl = unsafe { task.GetSecurityDescriptor(5) }
+            .map_err(|_| SidObservationError::Unverifiable)?;
+        classify_task_acl_sddl(&sddl.to_string())
     })
 }
 
@@ -545,6 +593,45 @@ mod tests {
                     "untrusted path shape must be rejected"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn private_task_acl_requires_only_owner_system_or_administrators() {
+        assert_eq!(
+            classify_task_acl_sddl("O:BAG:BAD:(A;;FA;;;BA)(A;;FR;;;SY)"),
+            Ok(crate::TaskAclEvidence::AllowlistedPrincipalsOnly),
+        );
+    }
+
+    #[test]
+    fn broad_task_acl_grants_are_not_reported_as_private() {
+        for sddl in [
+            "O:BAG:BAD:(A;;FA;;;WD)",
+            "O:BAG:BAD:(A;;FR;;;S-1-5-32-545)",
+            "O:BAG:BAD:(A;;FA;;;BA)(A;;FR;;;AU)",
+            "O:BAG:BAD:(A;;FA;;;BA)(A;;FA;;;WD)",
+        ] {
+            assert_eq!(
+                classify_task_acl_sddl(sddl),
+                Err(SidObservationError::Unverifiable)
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_task_acl_is_never_observed_as_private() {
+        for sddl in [
+            "",
+            "O:BA",
+            "O:BAG:BAD:NO_ACCESS_CONTROL",
+            "O:BAG:BAD:(A;;FA;;;WD",
+            "not-a-sddl",
+        ] {
+            assert_eq!(
+                classify_task_acl_sddl(sddl),
+                Err(SidObservationError::Unverifiable)
+            );
         }
     }
 

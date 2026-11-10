@@ -88,6 +88,27 @@ pub fn observe_registered_task_owner_for_observation(
     task_scheduler::observe_registered_task_owner(task_name)
 }
 
+/// Observed SDDL shape: every ALLOW ACE names TokenUser, LOCAL SYSTEM, or
+/// BUILTIN\\Administrators. This is NOT an AccessCheck, a file/task ownership
+/// proof, an installer receipt, or permission to invoke lifecycle operations.
+/// ACE effects, token groups, concurrent mutation and signed client custody
+/// require independently verified launch-time authority.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskAclEvidence {
+    AllowlistedPrincipalsOnly,
+}
+
+/// Bounded read-only COM observation of a registered Task Scheduler DACL.
+/// Reject malformed/null DACL and any foreign ALLOW trustee, including read.
+/// No task, process or credential is modified. Never treat OK as a capability.
+#[cfg(windows)]
+pub fn observe_registered_task_acl_for_observation(
+    task_name: &str,
+) -> Result<TaskAclEvidence, SidObservationError> {
+    task_scheduler::observe_registered_task_acl(task_name)
+}
+
 /// Reads a real Task Scheduler registration through local COM and compares
 /// its principal with the process TokenUser. Never an authorization grant.
 /// This public observer accepts only single-component task names; an installed

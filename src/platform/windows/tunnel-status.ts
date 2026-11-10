@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { readFile as readTextFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { XMLParser } from 'fast-xml-parser';
@@ -24,6 +23,12 @@ export interface WindowsTunnelTaskRegistration {
     executable: string;
     profileDir: string;
     profileName: string;
+}
+
+/** Task Scheduler configuration is untrusted observation, never a launch grant. */
+export interface UntrustedWindowsTunnelTaskObservation {
+    kind: 'untrusted_task_registration_v1';
+    registration: WindowsTunnelTaskRegistration;
 }
 
 export interface WindowsTunnelRegistration {
@@ -68,7 +73,6 @@ export function isWindowsTunnelHealthReady(
 export interface WindowsTunnelStatusDependencies {
     environment?: Record<string, string | undefined>;
     runExecutable?: RunExecutable;
-    readFile?: (filePath: string) => Promise<string>;
 }
 
 const defaultRunExecutable: RunExecutable = async (executable, args) =>
@@ -161,7 +165,7 @@ export function parseWindowsTunnelTaskRegistration(
     return { executable, profileDir, profileName };
 }
 
-function parseProfileList(
+export function parseWindowsTunnelProfileList(
     rawJson: string,
     profileName: string,
 ): string {
@@ -189,7 +193,7 @@ function parseProfileList(
     );
 }
 
-function parseProfileObservation(profileText: string): {
+export function parseWindowsTunnelProfileObservation(profileText: string): {
     healthUrlFile: string;
     credentialSource: TunnelCredentialSource;
 } {
@@ -244,7 +248,7 @@ export async function getWindowsTunnelTaskEnabled(
     return parseWindowsTunnelTaskEnabled(task.stdout);
 }
 
-function parseHealthOutput(rawJson: string): WindowsTunnelStatus['health'] {
+export function parseWindowsTunnelHealthOutput(rawJson: string): WindowsTunnelStatus['health'] {
     let parsed: unknown;
     try {
         parsed = JSON.parse(rawJson);
@@ -280,74 +284,42 @@ function resolveDependencies(
     return {
         environment: dependencies.environment ?? process.env,
         runExecutable: dependencies.runExecutable ?? defaultRunExecutable,
-        readFile:
-            dependencies.readFile ??
-            ((filePath) => readTextFile(filePath, { encoding: 'utf8' })),
     };
 }
+export async function observeWindowsTunnelTaskRegistration(
+    taskName: string,
+    dependencies: WindowsTunnelStatusDependencies = {},
+): Promise<UntrustedWindowsTunnelTaskObservation> {
+    const deps = resolveDependencies(dependencies);
+    const taskQuery = await deps.runExecutable(
+        resolveSchtasksExecutable(deps.environment),
+        buildSchtasksQueryXmlArgs(taskName),
+    );
+    return {
+        kind: 'untrusted_task_registration_v1',
+        registration: parseWindowsTunnelTaskRegistration(taskQuery.stdout),
+    };
+}
+
+/**
+ * A task XML Exec path is not installed-client provenance.
+ * No caller-supplied runExecutable, user path or matching SID authorizes it.
+ * This must remain fail-closed until an independently authenticated native
+ * launcher is integrated at the actual process-creation boundary.
+ */
 export async function getWindowsTunnelRegistration(
     taskName: string,
     dependencies: WindowsTunnelStatusDependencies = {},
 ): Promise<WindowsTunnelRegistration> {
-    const deps = resolveDependencies(dependencies);
-    const schtasksExecutable = resolveSchtasksExecutable(deps.environment);
-    const taskQuery = await deps.runExecutable(
-        schtasksExecutable,
-        buildSchtasksQueryXmlArgs(taskName),
-    );
-    const registration = parseWindowsTunnelTaskRegistration(taskQuery.stdout);
-
-    const profileList = await deps.runExecutable(registration.executable, [
-        'profiles',
-        'list',
-        '--profile-dir',
-        registration.profileDir,
-        '--json',
-    ]);
-    const profilePath = parseProfileList(
-        profileList.stdout,
-        registration.profileName,
-    );
-    const profileText = await deps.readFile(profilePath);
-    const { healthUrlFile, credentialSource } = parseProfileObservation(profileText);
-
-    return {
-        taskName,
-        task: {
-            registered: true,
-            executable: registration.executable,
-            profileDir: registration.profileDir,
-            profileName: registration.profileName,
-        },
-        profile: {
-            path: profilePath,
-            healthUrlFile,
-            credentialSource,
-        },
-    };
+    await observeWindowsTunnelTaskRegistration(taskName, dependencies);
+    throw new Error('Tunnel client executable is not independently verified.');
 }
 
 export async function getWindowsTunnelStatus(
     taskName: string,
     dependencies: WindowsTunnelStatusDependencies = {},
 ): Promise<WindowsTunnelStatus> {
-    const deps = resolveDependencies(dependencies);
-    const registration = await getWindowsTunnelRegistration(
-        taskName,
-        dependencies,
-    );
-
-    const healthProbe = await deps.runExecutable(registration.task.executable, [
-        'health',
-        '--json',
-        '--url-file',
-        registration.profile.healthUrlFile,
-        '--require-control-plane-poll',
-    ]);
-    const health = parseHealthOutput(healthProbe.stdout);
-
-    return {
-        ...registration,
-        health,
-    };
+    // Explicit denied status: never run the client observed in task XML.
+    await observeWindowsTunnelTaskRegistration(taskName, dependencies);
+    throw new Error('Tunnel client executable is not independently verified.');
 }

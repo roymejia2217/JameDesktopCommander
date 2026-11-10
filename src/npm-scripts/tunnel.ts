@@ -15,7 +15,9 @@ import {
 } from '../platform/windows/tunnel-lifecycle.js';
 import {
     getWindowsTunnelStatus,
+    observeWindowsTunnelTaskRegistration,
     isWindowsTunnelHealthReady,
+    type UntrustedWindowsTunnelTaskObservation,
     type WindowsTunnelStatus,
 } from '../platform/windows/tunnel-status.js';
 import {
@@ -63,6 +65,8 @@ export interface WindowsTunnelCommandDependencies {
     stopTask?: (taskName: string) => Promise<RunExecutableResult>;
     uninstallTask?: (taskName: string) => Promise<RunExecutableResult>;
     statusTunnel?: (taskName: string) => Promise<WindowsTunnelStatus>;
+    /** Read-only OS task observation. Never authorizes task-selected binaries. */
+    observeTask?: (taskName: string) => Promise<UntrustedWindowsTunnelTaskObservation>;
     diagnoseLocal?: (baseUrl: string) => Promise<TunnelFunctionalDiagnostics>;
     taskEvents?: (taskName: string) => Promise<WindowsTunnelTaskEvents>;
     nodeExecutable?: () => string;
@@ -297,6 +301,9 @@ function resolveDependencies(
         statusTunnel:
             dependencies.statusTunnel ??
             ((taskName) => getWindowsTunnelStatus(taskName)),
+        observeTask:
+            dependencies.observeTask ??
+            ((taskName) => observeWindowsTunnelTaskRegistration(taskName)),
         diagnoseLocal:
             dependencies.diagnoseLocal ??
             ((baseUrl) => readTunnelFunctionalDiagnostics(baseUrl)),
@@ -409,10 +416,24 @@ export async function runWindowsTunnelCommand(
                 throw new Error('Tunnel overview does not accept additional arguments.');
             }
             let status: WindowsTunnelStatus | null = null;
-            try {
-                status = await deps.statusTunnel(taskName);
-            } catch {
-                // OS diagnostic text may contain private paths or profile data.
+            // Production has no independently authenticated client executor.
+            // Test-only injected status data is not an OS authorization grant.
+            if (dependencies.statusTunnel) {
+                try {
+                    status = await deps.statusTunnel(taskName);
+                } catch {
+                    // OS diagnostic text may contain private paths or profile data.
+                }
+            }
+            let taskObservedWithoutClient = false;
+            if (!status && (!dependencies.statusTunnel || dependencies.observeTask)) {
+                try {
+                    const observed = await deps.observeTask(taskName);
+                    taskObservedWithoutClient =
+                        observed.kind === 'untrusted_task_registration_v1';
+                } catch {
+                    // Untrusted XML and OS errors cannot become a positive badge.
+                }
             }
             let diagnostic: TunnelFunctionalDiagnostics | null = null;
             if (status) {
@@ -423,7 +444,9 @@ export async function runWindowsTunnelCommand(
                 }
             }
             return { action, taskName,
-                overview: projectWindowsOperatorOverview(status, diagnostic) };
+                overview: projectWindowsOperatorOverview(
+                    status, diagnostic, new Date(), taskObservedWithoutClient,
+                ) };
         }
         case 'status': {
             if (actionArgs.length > 0) {

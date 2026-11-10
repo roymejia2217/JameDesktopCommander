@@ -40,10 +40,12 @@ export function projectWindowsOperatorOverview(
     status: WindowsTunnelStatus | null,
     diagnostic: TunnelFunctionalDiagnostics | null,
     now: Date = new Date(),
+    taskObservedWithoutClient = false,
 ): TunnelOperatorOverviewV1 {
     const observedAt = now.toISOString();
     if (!status || status.task?.registered !== true) {
-        return unavailable(observedAt, 'TASK_STATUS_UNAVAILABLE', 'unverified', 'unverified');
+        return unavailable(observedAt, 'TASK_STATUS_UNAVAILABLE',
+            taskObservedWithoutClient ? 'observed' : 'unverified', 'unverified');
     }
     const health = status.health;
     const localHealth: TunnelOperatorOverviewV1['localHealth'] =

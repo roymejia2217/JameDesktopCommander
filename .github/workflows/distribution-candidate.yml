@@ -250,6 +250,7 @@ jobs:
           # Type- and byte-aware registry evidence; no startup values leave CI logs.
           . (Join-Path $PWD 'scripts/windows-registry-snapshot.ps1')
           & (Join-Path $PWD 'test/security/test-windows-installer-registry-snapshot.ps1')
+          & (Join-Path $PWD 'test/security/test-windows-installer-registry-drift-evidence.ps1')
           function Get-StartupFilesSnapshot {
             $locations = @(
               (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),
@@ -279,7 +280,7 @@ jobs:
           }
           $startupBefore = @{}
           foreach ($key in $startupKeys) {
-            $startupBefore[$key] = Get-RegistrySnapshot @($key)
+            $startupBefore[$key] = Get-RegistrySnapshotDetail -Key $key
           }
           $startupFilesBefore = Get-StartupFilesSnapshot
           $environmentBefore = Get-RegistrySnapshot $environmentKeys
@@ -287,7 +288,11 @@ jobs:
           function Assert-HostPackageBoundary {
             $changedStartupKeys = @(
               foreach ($key in $startupKeys) {
-                if ((Get-RegistrySnapshot @($key)) -cne $startupBefore[$key]) { $key }
+                $after = Get-RegistrySnapshotDetail -Key $key
+                if ($after.Snapshot -cne $startupBefore[$key].Snapshot) {
+                  $counts = Get-RegistryChangeSummary -Before $startupBefore[$key] -After $after
+                  "$key ($counts)"
+                }
               }
             )
             if ($changedStartupKeys.Count -ne 0) {

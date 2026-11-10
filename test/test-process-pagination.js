@@ -155,10 +155,13 @@ async function testRuntimeInfo() {
   const pid = extractPid(startResult);
   assert(pid, 'Should get PID');
   
-  // Wait for process to complete
-  await wait(1000);
-  
-  const read = await readProcessOutput({ pid, timeout_ms: 1000 });
+  // Wait for the actual terminal event instead of assuming the shell
+  // and child process will both exit within a fixed wall-clock sleep.
+  const read = await readProcessOutput({
+    pid,
+    wait_for: 'exit',
+    timeout_ms: 15_000,
+  });
   assert(!read.isError, 'Read should succeed');
   assert(read.content[0].text.includes('runtime:'), 'Should show runtime');
   assert(read.content[0].text.includes('Process completed'), 'Should show completion');

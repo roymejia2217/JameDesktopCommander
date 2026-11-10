@@ -125,3 +125,27 @@ test('tool discovery without positive initialize proof stays unverified', async 
   assert.equal(result.overview.verdict.reasonCode, 'LOCAL_EVIDENCE_CONFLICT');
   assert.equal(result.overview.toolDiscovery, 'unverified');
 });
+
+test('task-only overview remains useful without executing an unverified client', async () => {
+  let observations = 0;
+  let diagnosticInvocations = 0;
+  const result = await runWindowsTunnelCommand(['overview'], dependencies({
+    statusTunnel: async () => {
+      throw new Error('Client executable is not independently verified');
+    },
+    observeTask: async () => {
+      observations += 1;
+      return { kind: 'untrusted_task_registration_v1',
+        registration: { executable: 'C:\\PRIVATE_UNTRUSTED.exe',
+          profileDir: 'C:\\PRIVATE', profileName: 'profile' } };
+    },
+    diagnoseLocal: async () => { diagnosticInvocations++; throw new Error('UNSAFE'); },
+  }));
+  assert.equal(observations, 1);
+  assert.equal(diagnosticInvocations, 0);
+  assert.equal(result.overview.taskRegistration, 'observed');
+  assert.equal(result.overview.localHealth, 'unverified');
+  assert.equal(result.overview.verdict.reasonCode, 'TASK_STATUS_UNAVAILABLE');
+  assert.equal(result.overview.remoteDelivery, 'not_observed');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|UNSAFE/);
+});

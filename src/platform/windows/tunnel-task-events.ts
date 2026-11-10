@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import path from 'node:path';
+import { resolveWindowsSystemTool } from './scheduled-task.js';
 
 /** Historical Task Scheduler events are observations, not restart authorization. */
 export interface WindowsTunnelTaskEvent {
@@ -147,14 +147,6 @@ export function buildWindowsTunnelTaskEventsPowerShell(taskName: string): string
     ].join('\r\n');
 }
 
-function systemPowerShell(environment: Record<string, string | undefined>): string {
-    const root = environment.SystemRoot?.trim();
-    if (!root || !path.win32.isAbsolute(root)) {
-        throw new Error('SystemRoot must contain an absolute Windows path.');
-    }
-    return path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-}
-
 const defaultRun = (executable: string, args: readonly string[]) =>
     new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
         execFile(executable, [...args], {
@@ -174,7 +166,9 @@ export async function readWindowsTunnelTaskEvents(
     if ((dependencies.platform ?? process.platform) !== 'win32') {
         throw new Error('Windows tunnel event diagnostics are available only on Windows.');
     }
-    const executable = systemPowerShell(dependencies.environment ?? process.env);
+    const executable = resolveWindowsSystemTool(
+        'powershell', dependencies.environment ?? process.env,
+    );
     const encoded = Buffer.from(
         buildWindowsTunnelTaskEventsPowerShell(taskName), 'utf16le',
     ).toString('base64');

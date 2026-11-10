@@ -116,14 +116,19 @@ test('only OS PowerShell is used, with a bounded single invocation', async () =>
     assert.deepEqual(found, fixture);
 });
 
-test('reject unsupported OS and invalid SystemRoot before any invocation', async () => {
+test('reject unsupported OS and invalid synthetic SystemRoot before invocation', async () => {
     let calls = 0;
     const run = async () => { calls++; return { stdout: '{}', stderr: '' }; };
-    for (const deps of [
+    await assert.rejects(readWindowsTunnelTaskEvents(
+        'Desktop Commander Windows Tunnel',
         { platform: 'linux', environment: { SystemRoot: 'C:\\Windows' }, run },
-        { platform: 'win32', environment: { SystemRoot: 'Windows' }, run },
-    ]) {
-        await assert.rejects(readWindowsTunnelTaskEvents('Desktop Commander Windows Tunnel', deps));
+    ));
+    if (process.platform !== 'win32') {
+        // Only the synthetic non-Windows fixture reads SystemRoot.
+        await assert.rejects(readWindowsTunnelTaskEvents(
+            'Desktop Commander Windows Tunnel',
+            { platform: 'win32', environment: { SystemRoot: 'Windows' }, run },
+        ));
     }
     assert.equal(calls, 0);
 });

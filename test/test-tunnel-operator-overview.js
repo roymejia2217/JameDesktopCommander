@@ -145,7 +145,30 @@ test('task-only overview remains useful without executing an unverified client',
   assert.equal(diagnosticInvocations, 0);
   assert.equal(result.overview.taskRegistration, 'observed');
   assert.equal(result.overview.localHealth, 'unverified');
-  assert.equal(result.overview.verdict.reasonCode, 'TASK_STATUS_UNAVAILABLE');
+  assert.equal(result.overview.verdict.reasonCode, 'CLIENT_PROVENANCE_UNVERIFIED');
   assert.equal(result.overview.remoteDelivery, 'not_observed');
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE|UNSAFE/);
+});
+
+test('observed Windows task with unverified client reports provenance, not missing task', async () => {
+  const result = await runWindowsTunnelCommand(['overview'], dependencies({
+    statusTunnel: async () => { throw new Error('CLIENT_NOT_AUTHENTICATED'); },
+    observeTask: async () => ({
+      kind: 'untrusted_task_registration_v1',
+      registration: {
+        executable: 'C:\\PRIVATE\\unknown.exe',
+        profileDir: 'C:\\PRIVATE\\profiles',
+        profileName: 'private',
+      },
+    }),
+  }));
+  assert.equal(result.overview.taskRegistration, 'observed');
+  assert.equal(result.overview.localHealth, 'unverified');
+  assert.equal(result.overview.mcpInitialize, 'unverified');
+  assert.equal(result.overview.remoteDelivery, 'not_observed');
+  assert.deepEqual(result.overview.verdict, {
+    state: 'unverified',
+    reasonCode: 'CLIENT_PROVENANCE_UNVERIFIED',
+  });
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|CLIENT_NOT_AUTHENTICATED/);
 });

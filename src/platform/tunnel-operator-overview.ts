@@ -16,12 +16,13 @@ export interface TunnelOperatorOverviewV1 {
     remoteDelivery: 'not_observed';
     verdict: { state: 'degraded' | 'unverified';
         reasonCode: TunnelLocalReasonCode | 'TASK_STATUS_UNAVAILABLE' |
+            'CLIENT_PROVENANCE_UNVERIFIED' |
             'LOCAL_DIAGNOSTICS_UNAVAILABLE' | 'LOCAL_EVIDENCE_CONFLICT' };
 }
 function unavailable(
     observedAt: string,
-    reasonCode: 'TASK_STATUS_UNAVAILABLE' | 'LOCAL_DIAGNOSTICS_UNAVAILABLE' |
-        'LOCAL_EVIDENCE_CONFLICT',
+    reasonCode: 'TASK_STATUS_UNAVAILABLE' | 'CLIENT_PROVENANCE_UNVERIFIED' |
+        'LOCAL_DIAGNOSTICS_UNAVAILABLE' | 'LOCAL_EVIDENCE_CONFLICT',
     taskRegistration: TunnelOperatorOverviewV1['taskRegistration'],
     localHealth: TunnelOperatorOverviewV1['localHealth'],
 ): TunnelOperatorOverviewV1 {
@@ -44,8 +45,9 @@ export function projectWindowsOperatorOverview(
 ): TunnelOperatorOverviewV1 {
     const observedAt = now.toISOString();
     if (!status || status.task?.registered !== true) {
-        return unavailable(observedAt, 'TASK_STATUS_UNAVAILABLE',
-            taskObservedWithoutClient ? 'observed' : 'unverified', 'unverified');
+        return unavailable(observedAt, taskObservedWithoutClient
+            ? 'CLIENT_PROVENANCE_UNVERIFIED' : 'TASK_STATUS_UNAVAILABLE',
+        taskObservedWithoutClient ? 'observed' : 'unverified', 'unverified');
     }
     const health = status.health;
     const localHealth: TunnelOperatorOverviewV1['localHealth'] =

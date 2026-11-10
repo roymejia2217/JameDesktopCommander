@@ -190,6 +190,7 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
                 "MCP_TOOLS_LIST_UNVERIFIED",
                 "REMOTE_ROUND_TRIP_UNVERIFIED",
                 "TASK_STATUS_UNAVAILABLE",
+                "CLIENT_PROVENANCE_UNVERIFIED",
                 "SERVICE_STATUS_UNAVAILABLE",
                 "SERVICE_INACTIVE",
                 "SERVICE_NOT_ENABLED",
@@ -214,6 +215,20 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
             ))
     {
         return Err("Operator reason does not belong to its platform");
+    }
+    // A registered Windows task without a verified client is not a missing
+    // task; no local, MCP, or control-plane readiness follows from its XML.
+    if snapshot.verdict.reason_code == "CLIENT_PROVENANCE_UNVERIFIED"
+        && (linux
+            || snapshot.task_registration != "observed"
+            || snapshot.local_health != "unverified"
+            || snapshot.mcp_initialize != "unverified"
+            || snapshot.tool_discovery != "unverified"
+            || snapshot.control_plane != "unverified"
+            || snapshot.remote_delivery != "not_observed"
+            || snapshot.verdict.state != "unverified")
+    {
+        return Err("Unverified client cannot claim operational evidence");
     }
     if linux && !linux_service_verdict_consistent(&snapshot) {
         return Err("Linux service status contradicts local evidence");
@@ -308,6 +323,53 @@ mod tests {
         )
         .replace("\"platform\":\"win32\"", "\"platform\":\"linux\"")
         .replace("\"taskRegistration\"", "\"serviceRegistration\"")
+    }
+
+    const UNVERIFIED_CLIENT: &str = r#"{
+      "kind":"tunnel_operator_overview_v1",
+      "platform":"win32",
+      "capabilities":"read_only",
+      "observedAt":"2026-11-10T12:00:00Z",
+      "taskRegistration":"observed",
+      "localHealth":"unverified",
+      "mcpInitialize":"unverified",
+      "toolDiscovery":"unverified",
+      "controlPlane":"unverified",
+      "remoteDelivery":"not_observed",
+      "verdict":{"state":"unverified","reasonCode":"CLIENT_PROVENANCE_UNVERIFIED"}
+    }"#;
+
+    #[test]
+    fn windows_client_provenance_reason_requires_observed_task_and_unknown_health() {
+        let observed = parse_overview(UNVERIFIED_CLIENT.as_bytes())
+            .expect("registered task with unverified client is valid evidence");
+        assert_eq!(observed.reason(), "CLIENT_PROVENANCE_UNVERIFIED");
+        assert_eq!(observed.task_registration, "observed");
+
+        for (field, value) in [
+            ("taskRegistration", "unverified"),
+            ("localHealth", "ready"),
+            ("mcpInitialize", "observed"),
+            ("controlPlane", "none"),
+        ] {
+            let mut contradictory: serde_json::Value =
+                serde_json::from_str(UNVERIFIED_CLIENT).unwrap();
+            contradictory[field] = serde_json::Value::String(value.into());
+            let bytes = serde_json::to_vec(&contradictory).unwrap();
+            assert!(parse_overview(&bytes).is_err(), "{field}={value}");
+        }
+
+        let linux = UNVERIFIED_CLIENT
+            .replace(
+                "tunnel_operator_overview_v1",
+                "tunnel_operator_linux_overview_v1",
+            )
+            .replace("\"platform\":\"win32\"", "\"platform\":\"linux\"")
+            .replace("\"taskRegistration\"", "\"serviceRegistration\"");
+        assert!(
+            parse_overview(linux.as_bytes()).is_err(),
+            "Windows-only client reason must not be accepted on Linux"
+        );
     }
 
     #[test]

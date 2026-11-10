@@ -222,6 +222,9 @@ fn guidance(reason: &str) -> &'static str {
         "MCP_TOOLS_LIST_UNVERIFIED" => "MCP tools are incomplete. Remote access is unverified.",
         "MCP_HANDSHAKE_UNOBSERVED" => "MCP handshake not observed.",
         "TASK_STATUS_UNAVAILABLE" => "Tunnel task unavailable. Check installation.",
+        "CLIENT_PROVENANCE_UNVERIFIED" => {
+            "Tunnel task observed; client provenance unverified. Client-backed checks unavailable."
+        }
         "SERVICE_STATUS_UNAVAILABLE" => {
             "Tunnel service status unavailable. Check your user systemd service."
         }
@@ -354,6 +357,17 @@ mod tests {
         assert!(guidance("CONTROL_PLANE_CREDENTIAL_REJECTED").contains("401"));
         assert!(guidance("CONTROL_PLANE_FORBIDDEN").contains("403"));
         assert!(guidance("CONTROL_PLANE_RATE_LIMITED").contains("429"));
+    }
+
+    #[test]
+    fn unverified_client_provenance_guides_operator_without_unsafe_action() {
+        let message = guidance("CLIENT_PROVENANCE_UNVERIFIED");
+        assert!(message.contains("task"));
+        assert!(message.contains("client"));
+        assert!(message.contains("checks unavailable"));
+        assert!(!message.contains("401"));
+        assert!(!message.contains("restart"));
+        assert!(!message.contains("rotate"));
     }
 
     #[test]

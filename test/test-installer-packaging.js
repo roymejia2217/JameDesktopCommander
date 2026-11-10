@@ -111,7 +111,7 @@ test('packaged lifecycle denies residual startup, environment, firewall and owne
     ?.split('name: Retain unpublished installer candidates')[0];
   assert.ok(windows && linux, 'both real OS lifecycle acceptance steps are required');
   for (const contract of [
-    'Pre-existing Windows startup registration modified by installer',
+    'Windows startup registry drift during installer acceptance (cause unverified)',
     'Windows environment registration modified by installer',
     'Windows firewall rules modified by installer',
     'JDC process remains after uninstall',

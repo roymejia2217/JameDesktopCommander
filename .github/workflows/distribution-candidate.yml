@@ -247,17 +247,9 @@ jobs:
             'HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
           )
           $environmentKeys = @('HKCU:\Environment', 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
-          function Get-RegistrySnapshot([string[]]$keys) {
-            $snapshot = foreach ($key in $keys) {
-              if (!(Test-Path -LiteralPath $key)) { "$key|absent"; continue }
-              $values = Get-ItemProperty -LiteralPath $key
-              $fields = @($values.PSObject.Properties |
-                Where-Object { $_.Name -notin @('PSPath','PSParentPath','PSChildName','PSDrive','PSProvider') } |
-                Sort-Object Name | ForEach-Object { $_.Name + '=' + [string]$_.Value })
-              $key + '|' + ($fields -join [char]10)
-            }
-            return ($snapshot -join [char]10)
-          }
+          # Type- and byte-aware registry evidence; no startup values leave CI logs.
+          . (Join-Path $PWD 'scripts/windows-registry-snapshot.ps1')
+          & (Join-Path $PWD 'test/security/test-windows-installer-registry-snapshot.ps1')
           function Get-StartupFilesSnapshot {
             $locations = @(
               (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),
@@ -300,7 +292,7 @@ jobs:
             )
             if ($changedStartupKeys.Count -ne 0) {
               # Only names of fixed, known registry keys; never emit registry values.
-              throw ('Pre-existing Windows startup registration modified by installer: ' +
+              throw ('Windows startup registry drift during installer acceptance (cause unverified): ' +
                 ($changedStartupKeys -join ', '))
             }
             if ((Get-StartupFilesSnapshot) -cne $startupFilesBefore) {

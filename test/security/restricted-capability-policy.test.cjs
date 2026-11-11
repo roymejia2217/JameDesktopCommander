@@ -145,6 +145,24 @@ test('partial native root-open failure closes earlier roots and publishes no pol
   assert.equal(state.calls.length, 0);
 });
 
+test('unnormalized allowlist roots are denied before opening native handles', async () => {
+  const unnormalized = [
+    ROOT + path.sep + '..' + path.sep + path.basename(OTHER),
+    ROOT + path.sep + '.',
+    ROOT + path.sep,
+  ];
+  for (const candidate of unnormalized) {
+    assert.notEqual(path.resolve(candidate), candidate,
+      'fixture must prove the stored root was not normalized');
+    const { policy, state, set } = fixture();
+    set({ mode: 'restricted', revision: 'r1', allowedRoots: [candidate] });
+    await assert.rejects(policy.reload(), denied);
+    assert.equal(policy.state, 'revoked');
+    assert.equal(state.created.length, 0,
+      'a malformed allowlist must not instantiate a native root capability');
+  }
+});
+
 test('invalid input is denied before a native write call', async () => {
   const { policy, state } = fixture();
   await policy.reload();

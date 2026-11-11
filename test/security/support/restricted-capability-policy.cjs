@@ -35,7 +35,9 @@ function validateSnapshot(value) {
       throw deny();
     }
     const absolute = path.resolve(root);
-    if (absolute === path.parse(absolute).root) throw deny();
+    // The persisted policy candidate requires exact normalized roots. Do not
+    // silently redirect a native capability to another root via '..' or '.'.
+    if (absolute !== root || absolute === path.parse(absolute).root) throw deny();
     if (seen.has(absolute)) throw deny();
     seen.add(absolute);
     roots.push(absolute);

@@ -102,6 +102,7 @@ test('basic edit denies an outside-root file and preserves its bytes', async () 
     file_path: outsidePath, old_string: 'Protected',
     new_string: 'Should not write', expected_replacements: 1,
   });
-  assert.match(responseText(result), /Access denied|not allowed|outside/i);
+  assert.equal(result.isError, true, 'outside-root edits must return an error');
+  assert.match(responseText(result), /^Error: Path not allowed: /);
   assert.deepEqual(await fs.readFile(outsidePath), beforeBytes);
 });

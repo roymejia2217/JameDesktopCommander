@@ -115,6 +115,8 @@ jobs:
         with:
           # Bind this round trip to the exact immutable object finalized above.
           artifact-ids: ${{ steps.portable_tar_upload.outputs.artifact-id }}
+          # One immutable artifact ID: extract its TAR at the existing verifier path.
+          merge-multiple: true
           path: ${{ runner.temp }}/jdc-roundtrip-download/
 
       - name: Verify downloaded TAR and smoke extracted native runtime

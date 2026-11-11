@@ -94,6 +94,8 @@ test('portable round-trip retrieves the exact immutable artifact uploaded in the
   assert.ok(upload && download, 'both original upload and identity-bound round-trip must be present');
   assert.match(upload, /^\s+id: portable_tar_upload\s*$/m);
   assert.match(download, /artifact-ids:\s*\$\{\{\s*steps\.portable_tar_upload\.outputs\.artifact-id\s*\}\}/);
+  assert.match(download, /^\s+merge-multiple:\s*true\s*$/m,
+    'the single exact-ID artifact must extract directly into the existing round-trip path');
   assert.doesNotMatch(download, /^\s+name:\s*UNPUBLISHED-jdc-portable-/m,
     'do not resolve an immutable just-uploaded artifact by eventual-consistency name search');
   assert.ok(download.includes('path: ${{ runner.temp }}/jdc-roundtrip-download/'));

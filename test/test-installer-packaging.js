@@ -85,6 +85,20 @@ test('Windows installer stays per-user with separate launcher and no service tak
   assert.match(cmd, /runtime\\node\.exe/);
   assert.match(cmd, /dist\\index\.js/);
 });
+test('portable round-trip retrieves the exact immutable artifact uploaded in the same job', async () => {
+  const workflow = await readFile(resolve(root, '.github/workflows/distribution-candidate.yml'), 'utf8');
+  const upload = workflow.split('name: Retain unpublished candidate as a short-lived CI artifact')[1]
+    ?.split('name: Download original uploaded candidate for round-trip acceptance')[0];
+  const download = workflow.split('name: Download original uploaded candidate for round-trip acceptance')[1]
+    ?.split('name: Verify downloaded TAR and smoke extracted native runtime')[0];
+  assert.ok(upload && download, 'both original upload and identity-bound round-trip must be present');
+  assert.match(upload, /^\s+id: portable_tar_upload\s*$/m);
+  assert.match(download, /artifact-ids:\s*\$\{\{\s*steps\.portable_tar_upload\.outputs\.artifact-id\s*\}\}/);
+  assert.doesNotMatch(download, /^\s+name:\s*UNPUBLISHED-jdc-portable-/m,
+    'do not resolve an immutable just-uploaded artifact by eventual-consistency name search');
+  assert.ok(download.includes('path: ${{ runner.temp }}/jdc-roundtrip-download/'));
+});
+
 test('Windows hosted installer checks full registered package lifecycle, not only GUI files', async () => {
   const workflow = await readFile(resolve(root,'.github/workflows/distribution-candidate.yml'),'utf8');
   const windows = workflow.split('name: Verify Windows installer install and uninstall')[1]

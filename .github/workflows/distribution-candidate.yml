@@ -230,6 +230,19 @@ jobs:
           & $compiler /Qp 'packaging/windows/JameDesktopCommander.iss'
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
 
+      # One diagnostic-only PR branch. Does not run on main or other PRs.
+      - name: Validate exact Sysmon key filtering without installing a driver
+        if: ${{ matrix.target == 'win32-x64' && github.head_ref == 'diagnostics/issue270-sysmon-runkey-attribution-20261111' && github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: pwsh
+        run: |
+          & ./test/security/test-windows-sysmon-registry-attribution.ps1
+
+      - name: Start verified Microsoft Sysmon Run-key attribution
+        if: ${{ matrix.target == 'win32-x64' && github.head_ref == 'diagnostics/issue270-sysmon-runkey-attribution-20261111' && github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: pwsh
+        run: |
+          & ./scripts/windows-sysmon-registry-diagnostic.ps1 -Mode Start
+
       - name: Verify Windows installer install and uninstall
         if: matrix.target == 'win32-x64'
         shell: pwsh
@@ -325,6 +338,9 @@ jobs:
           [IO.File]::WriteAllText($profileSentinel, 'JDC_PREEXISTING_PROFILE_UNTOUCHED')
           $profileHash = (Get-FileHash $profileSentinel -Algorithm SHA256).Hash
           $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
+          if ($env:GITHUB_HEAD_REF -ceq 'diagnostics/issue270-sysmon-runkey-attribution-20261111') {
+            [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'jdc-sysmon-attribution/installer-pid.txt'), [string]$result.Id)
+          }
           if ($result.ExitCode -ne 0) { throw "Windows install failed: $($result.ExitCode)" }
           if (!(Test-Path $uninstallKey)) { throw 'Installed JDC uninstall registration missing' }
           $registered = Get-ItemProperty $uninstallKey
@@ -402,6 +418,18 @@ jobs:
           if (Test-Path -LiteralPath $gui) { throw 'GUI remains after uninstall' }
           if (Test-Path -LiteralPath $uiManifest) { throw 'GUI manifest remains after uninstall' }
           if (Test-Path -LiteralPath (Join-Path $target 'licenses/operator-ui')) { throw 'Native UI license notices remain after uninstall' }
+
+      - name: Report exact-path Sysmon actor evidence without registry values
+        if: ${{ always() && matrix.target == 'win32-x64' && github.head_ref == 'diagnostics/issue270-sysmon-runkey-attribution-20261111' && github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: pwsh
+        run: |
+          & ./scripts/windows-sysmon-registry-diagnostic.ps1 -Mode Report
+
+      - name: Uninstall diagnostic Sysmon service and driver
+        if: ${{ always() && matrix.target == 'win32-x64' && github.head_ref == 'diagnostics/issue270-sysmon-runkey-attribution-20261111' && github.event.pull_request.head.repo.full_name == github.repository }}
+        shell: pwsh
+        run: |
+          & ./scripts/windows-sysmon-registry-diagnostic.ps1 -Mode Stop
 
       - name: Build nFPM Debian installer candidate
         if: matrix.target == 'linux-x64'

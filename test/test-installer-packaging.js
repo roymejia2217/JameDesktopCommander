@@ -106,6 +106,8 @@ test('Windows hosted installer checks full registered package lifecycle, not onl
   const windows = workflow.split('name: Verify Windows installer install and uninstall')[1]
     ?.split('name: Build nFPM Debian installer candidate')[0];
   assert.ok(windows, 'real Windows installer acceptance job must remain present');
+  assert.match(windows, /windows-installer-acceptance-runner[.]ps1/);
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
   for (const required of [
     'Installed JDC uninstall registration missing',
     'JDC uninstall registration remains after uninstall',
@@ -115,7 +117,7 @@ test('Windows hosted installer checks full registered package lifecycle, not onl
     'Installer directory remains after uninstall',
     'Unexpected JDC Scheduled Task added by installer',
   ]) {
-    assert.ok(windows.includes(required), `Missing executable Windows installer gate: ${required}`);
+    assert.ok(lifecycle.includes(required), `Missing executable Windows installer gate: ${required}`);
   }
 });
 
@@ -126,17 +128,19 @@ test('packaged lifecycle denies residual startup, environment, firewall and owne
   const linux = workflow.split('name: Verify Debian install and remove')[1]
     ?.split('name: Retain unpublished installer candidates')[0];
   assert.ok(windows && linux, 'both real OS lifecycle acceptance steps are required');
-  // Fail-closed detection must also classify private registry changes without
+  assert.match(windows, /windows-installer-acceptance-runner[.]ps1/);
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  // Fail-closed detection must classify private registry changes without
   // logging registry value names or startup command lines.
-  assert.ok(windows.includes('Get-RegistrySnapshotDetail -Key $key'));
-  assert.ok(windows.includes('Get-RegistryChangeSummary -Before'));
-  assert.ok(windows.includes('test-windows-installer-registry-drift-evidence.ps1'));
+  assert.ok(lifecycle.includes('Get-RegistrySnapshotDetail -Key $key'));
+  assert.ok(lifecycle.includes('Get-RegistryChangeSummary -Before'));
+  assert.ok(lifecycle.includes('test-windows-installer-registry-drift-evidence.ps1'));
   for (const contract of [
     'Windows startup registry drift during installer acceptance (cause unverified)',
     'Windows environment registration modified by installer',
     'Windows firewall rules modified by installer',
     'JDC process remains after uninstall',
-  ]) assert.ok(windows.includes(contract), `Missing native Windows residual gate: ${contract}`);
+  ]) assert.ok(lifecycle.includes(contract), `Missing native Windows residual gate: ${contract}`);
   for (const contract of [
     'sudo dpkg --purge jame-desktop-commander',
     'Pre-existing Linux systemd-user configuration modified',
@@ -146,6 +150,23 @@ test('packaged lifecycle denies residual startup, environment, firewall and owne
     'Debian package has unreviewed maintainer hooks',
     'Linux installed process remains after package lifecycle',
   ]) assert.ok(linux.includes(contract), `Missing native Linux residual gate: ${contract}`);
+});
+
+test('Windows installer acceptance uses a real isolated non-admin profile and preserves fail-closed evidence', async () => {
+  const workflow = await readFile(resolve(root,'.github/workflows/distribution-candidate.yml'),'utf8');
+  const runner = await readFile(resolve(root,'test/security/windows-installer-acceptance-runner.ps1'),'utf8');
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  assert.match(workflow, /windows-installer-acceptance-runner[.]ps1/);
+  for (const expected of [
+    'New-LocalUser', '-Credential', '-LoadUserProfile', 'Remove-LocalUser',
+    'Get-LocalGroupMember', 'RUNNER_ENVIRONMENT', 'github-hosted',
+  ]) assert.ok(runner.includes(expected), 'Missing isolated runner control: ' + expected);
+  assert.match(lifecycle, /WindowsIdentity\]::GetCurrent/);
+  assert.match(lifecycle, /ExpectedSid/);
+  assert.match(lifecycle, /Assert-HostPackageBoundary/);
+  assert.match(lifecycle, /Get-RegistryChangeSummary/);
+  assert.match(lifecycle, /Get-StartupFilesSnapshot/);
+  assert.match(lifecycle, /Get-FirewallSnapshot/);
 });
 
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {

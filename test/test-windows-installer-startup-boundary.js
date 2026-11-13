@@ -8,8 +8,11 @@ const workflow = YAML.parse(readFileSync(
   new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8'));
 const run = workflow.jobs['portable-candidate'].steps.find(
   (step) => step.name === 'Verify Windows installer install and uninstall').run;
-const gate = run.match(/^function Assert-HostPackageBoundary \{[\s\S]*?^\}/m)?.[0];
-const baseline = run.match(/^\$startupBefore[\s\S]*?(?=^\$environmentBefore)/m)?.[0];
+assert.match(run, /windows-installer-acceptance-runner[.]ps1/);
+const acceptance = readFileSync(
+  new URL('./security/windows-installer-acceptance.ps1', import.meta.url), 'utf8');
+const gate = acceptance.match(/^function Assert-HostPackageBoundary \{[\s\S]*?^\}/m)?.[0];
+const baseline = acceptance.match(/^\$startupBefore[\s\S]*?(?=^\$environmentBefore)/m)?.[0];
 assert.ok(gate && baseline, 'Windows installer boundary must be present');
 
 function invokeFixture(kind) {

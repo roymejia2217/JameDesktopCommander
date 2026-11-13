@@ -163,6 +163,9 @@ test('Windows installer acceptance uses a real isolated non-admin profile and pr
   ]) assert.ok(runner.includes(expected), 'Missing isolated runner control: ' + expected);
   assert.match(lifecycle, /WindowsIdentity\]::GetCurrent/);
   assert.match(lifecycle, /ExpectedSid/);
+  assert.match(lifecycle, /ProfileList/);
+  assert.match(lifecycle, /User Shell Folders/);
+  assert.match(lifecycle, /ExpandEnvironmentVariables/);
   assert.match(lifecycle, /Assert-HostPackageBoundary/);
   assert.match(lifecycle, /Get-RegistryChangeSummary/);
   assert.match(lifecycle, /Get-StartupFilesSnapshot/);

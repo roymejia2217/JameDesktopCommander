@@ -24,16 +24,36 @@ if ($identity.User.Value -cne $ExpectedSid -or
 if (!(Test-Path -LiteralPath ("Registry::HKEY_USERS\" + $ExpectedSid))) {
   throw 'E_INSTALLER_TEST_USER_PROFILE_HIVE_NOT_LOADED'
 }
-$profile = [Environment]::GetFolderPath('UserProfile')
-$expectedAppData = [Environment]::GetFolderPath('ApplicationData')
-$expectedLocal = [Environment]::GetFolderPath('LocalApplicationData')
-if (!$profile -or !$expectedAppData -or !$expectedLocal -or
-    $env:APPDATA -ine $expectedAppData -or
-    $env:LOCALAPPDATA -ine $expectedLocal -or
-    $env:USERPROFILE -ine $profile -or
+# Start-Process -Credential can inherit the hosting runner's process environment.
+# Bind it to the SID-specific, OS-maintained profile and HKCU shell folders.
+# Never reuse USERPROFILE/APPDATA/LOCALAPPDATA inherited from runneradmin.
+$profileKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$ExpectedSid"
+$profileRecord = Get-ItemProperty -LiteralPath $profileKey -Name ProfileImagePath -ErrorAction Stop
+$profileRaw = [Environment]::ExpandEnvironmentVariables([string]$profileRecord.ProfileImagePath)
+if (!$profileRaw -or ![IO.Path]::IsPathRooted($profileRaw)) {
+  throw 'E_INSTALLER_TEST_USER_PROFILE_OS_SOURCE_INVALID'
+}
+$profile = [IO.Path]::GetFullPath($profileRaw).TrimEnd('\')
+if (!(Test-Path -LiteralPath $profile -PathType Container)) {
+  throw 'E_INSTALLER_TEST_USER_PROFILE_NOT_PROVISIONED'
+}
+$env:USERPROFILE = $profile
+$userShellKey = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+$folders = Get-ItemProperty -LiteralPath $userShellKey -Name 'AppData','Local AppData' -ErrorAction Stop
+$roamingRaw = [Environment]::ExpandEnvironmentVariables([string]$folders.AppData)
+$localRaw = [Environment]::ExpandEnvironmentVariables([string]$folders.'Local AppData')
+if (!$roamingRaw -or !$localRaw -or
+    ![IO.Path]::IsPathRooted($roamingRaw) -or ![IO.Path]::IsPathRooted($localRaw)) {
+  throw 'E_INSTALLER_TEST_USER_SHELL_FOLDERS_INVALID'
+}
+$expectedAppData = [IO.Path]::GetFullPath($roamingRaw).TrimEnd('\')
+$expectedLocal = [IO.Path]::GetFullPath($localRaw).TrimEnd('\')
+if (!$expectedAppData.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase) -or
     !$expectedLocal.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase)) {
   throw 'E_INSTALLER_TEST_USER_PROFILE_ENVIRONMENT_MISMATCH'
 }
+$env:APPDATA = $expectedAppData
+$env:LOCALAPPDATA = $expectedLocal
 if (!(Test-Path -LiteralPath $InstallerPath -PathType Leaf) -or
     !(Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
   throw 'E_INSTALLER_VERIFIED_INPUT_UNAVAILABLE'

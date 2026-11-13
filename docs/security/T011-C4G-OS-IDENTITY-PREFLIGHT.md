@@ -109,3 +109,40 @@ References: Microsoft Windows service user accounts and token
 authentication guidance; Windows API `LookupAccountNameW`,
 `GetTokenInformation`; POSIX/Linux `getpwnam_r`, `getresuid` and
 `getresgid` manuals.
+
+## T011-C4p — Linux kernel Unix-peer observation checkpoint (non-shipping)
+
+The separately tracked #139 peer-identity slice adds
+`native/authority-service/src/linux_peer.rs` and a private, cross-platform
+`peer_policy.rs`. These are **non-authorizing** building blocks. The service
+binary still checks its **own** identity and terminates with
+`E_POLICY_UNAVAILABLE`; no listener, socket path, policy bootstrap, root
+capability, administrator account or filesystem operation has been added.
+
+On Linux, a socket's `SO_PEERCRED` is read using the existing pinned `libc`
+dependency. A failed kernel call, incomplete `ucred` structure or nonpositive
+PID denies observation. In private tests, the expected UID/GID are separate
+from the authority's UID and primary GID, nonzero and paired with an independently observed
+positive PID. The candidate additionally denies a peer with the service's
+primary GID even if its UID differs; shared group DAC could otherwise expose
+service-owned state. A **synthetic** positive comparison is a contract test, **not**
+proof that an administrative client identity exists on any deployment.
+No identity claim in a socket payload, JSON field, environment variable or
+process title becomes a grant.
+
+Important unsatisfied proofs remain: the kernel reports peer credentials from
+**connection time**; passing or reusing a file descriptor may require stronger
+session/channel custody and request authentication. No independently protected
+client-principal lookup or policy revision/epoch binding is implemented. No
+supplementary-group, privileged-helper, mount, ACL, hard-link or operation
+revocation guarantees follow from these tests. Windows named-pipe peer token
+and impersonation review remains entirely separate. The first real-host
+Linux cross-process check runs in the existing native T011 CI matrix and
+is independent of the Windows-only Rust policy tests. It proves a
+separate PID but **not** a distinct client UID in the current fixture;
+independent cross-principal admission and process-descriptor custody
+remain pending OS acceptance gates.
+
+**Do not treat this checkpoint as a remediation** for #124, #139 or #148 or
+change `releaseEligible:false`. Production code must not import the isolated
+experiment; missing OS-backed authority and pinned handles continue to deny.

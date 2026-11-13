@@ -147,6 +147,22 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: bash test/security/t011-linux-custody-acceptance.sh
 
+      # Explicitly run the ignored fixture only after sysusers and the real
+      # Linux cross-principal custody test succeeded on a disposable runner.
+      - name: Prove Linux Unix-socket peer identity across distinct OS users
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted"
+          log="$(mktemp -p "$RUNNER_TEMP" jdc-linux-peer.XXXXXXXX)"
+          trap 'rm -f -- "$log"' EXIT
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib \
+            linux_cross_principal::distinct_os_user_socket_credentials_match_kernel_not_payload \
+            -- --ignored --exact --nocapture 2>&1 | tee "$log"
+          grep -Fq 'LINUX_DISTINCT_USER_SOCKET_KERNEL_TEST=PASS' "$log"
+          grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
+
       - name: Prove Linux isolated volume, bind alias rejection and outside-byte integrity
         if: matrix.target == 'linux-x64'
         run: |

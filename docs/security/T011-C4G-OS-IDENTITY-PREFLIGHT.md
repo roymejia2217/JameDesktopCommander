@@ -146,3 +146,37 @@ remain pending OS acceptance gates.
 **Do not treat this checkpoint as a remediation** for #124, #139 or #148 or
 change `releaseEligible:false`. Production code must not import the isolated
 experiment; missing OS-backed authority and pinned handles continue to deny.
+
+## T011-C4q — CI-only Linux peer identity across distinct operating-system principals
+
+A dedicated ignored Rust test in `native/authority-service/src/linux_cross_principal.rs`
+runs only when explicitly invoked after the existing native T011 Linux
+systemd-sysusers and cross-principal custody checks. It refuses non-GitHub,
+non-Linux or non-hosted environments. The test runner is a non-root
+principal; the client connects via the established system account `nobody`
+using standard, non-interactive `sudo`. `/usr/bin/id` obtains the
+independent operating-system UID/GID, and the kernel-issued `SO_PEERCRED`
+identifies the connecting PID, UID and primary GID. A byte message reporting
+the child's PID is **not** an authentication input: it is compared against
+the separately observed kernel PID. The private classifier rejects the
+wrong account and any client sharing the authority's primary GID.
+
+The socket is test-only, single-use, owned under the disposable runner's
+temporary directory, with a randomized pathname and deliberately relaxed
+write permission solely to test a cross-UID connection. A disposable
+copy of the compiled Rust test executable is placed in an owner-controlled
+directory the foreign UID can traverse but cannot modify; a real
+`sudo -u nobody` executable-access preflight fails before connection attempts. It handles no file
+or policy operations, has a bounded listener and read timeout, and removes
+its endpoint and terminates its subprocess on exit. The explicit workflow
+step requires a positive test marker **and exactly one executed passing
+test**; a missing ignored test or a zero-tests match must fail the job.
+
+**Scope limitation:** this demonstrates a real connection across different
+UID/GID accounts, with the runner acting as the test server and `nobody`
+as the client. It does **not** establish a protected production client
+identity, the dedicated `jdc-authority` service as the listening server,
+supplementary-group confinement, executable custody, FD-passing/reuse
+safety, session authentication, durable policy epochs or handle-bound
+filesystem operations. The authority remains `E_POLICY_UNAVAILABLE`.
+`releaseEligible:false` and P0 #124/#139/#148 are unchanged.

@@ -150,6 +150,7 @@ mod tests {
                     gid: observed.gid
                 },
                 observed.uid,
+                observed.gid,
                 unsafe { libc::getpid() },
             ),
             Err(IdentityDenied)

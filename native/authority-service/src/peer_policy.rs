@@ -26,6 +26,7 @@ pub(crate) fn verify_distinct_peer(
     peer: KernelPeer,
     account: DedicatedAccount,
     service_uid: u32,
+    service_gid: u32,
     service_pid: i32,
 ) -> Result<(), IdentityDenied> {
     if peer.pid <= 0
@@ -34,7 +35,9 @@ pub(crate) fn verify_distinct_peer(
         || peer.uid == 0
         || peer.gid == 0
         || service_uid == 0
+        || service_gid == 0
         || peer.uid == service_uid
+        || peer.gid == service_gid
         || account.uid == 0
         || account.gid == 0
         || peer.uid != account.uid
@@ -67,7 +70,7 @@ mod tests {
     #[test]
     fn provisioned_distinct_client_can_pass_only_when_all_credentials_match() {
         assert_eq!(
-            verify_distinct_peer(peer(), expected(), 23003, 41002),
+            verify_distinct_peer(peer(), expected(), 23003, 23005, 41002),
             Ok(())
         );
     }
@@ -89,7 +92,7 @@ mod tests {
             KernelPeer { pid: -1, ..peer() },
         ] {
             assert_eq!(
-                verify_distinct_peer(observation, expected(), 23003, 41002),
+                verify_distinct_peer(observation, expected(), 23003, 23005, 41002),
                 Err(IdentityDenied)
             );
         }
@@ -98,11 +101,21 @@ mod tests {
     #[test]
     fn must_not_accept_same_principal_or_pid_as_authority() {
         assert_eq!(
-            verify_distinct_peer(peer(), expected(), peer().uid, 41002),
+            verify_distinct_peer(peer(), expected(), peer().uid, 23005, 41002),
             Err(IdentityDenied)
         );
         assert_eq!(
-            verify_distinct_peer(peer(), expected(), 23003, peer().pid),
+            verify_distinct_peer(peer(), expected(), 23003, 23005, peer().pid),
+            Err(IdentityDenied)
+        );
+    }
+
+    #[test]
+    fn distinct_uid_with_service_primary_group_must_still_deny() {
+        // The client cannot inherit the authority's primary group even
+        // when its UID differs: group DAC can still expose protected state.
+        assert_eq!(
+            verify_distinct_peer(peer(), expected(), 23003, 23002, 41002),
             Err(IdentityDenied)
         );
     }
@@ -122,16 +135,20 @@ mod tests {
             },
         ] {
             assert_eq!(
-                verify_distinct_peer(peer(), account, 23003, 41002),
+                verify_distinct_peer(peer(), account, 23003, 23005, 41002),
                 Err(IdentityDenied)
             );
         }
         assert_eq!(
-            verify_distinct_peer(peer(), expected(), 0, 41002),
+            verify_distinct_peer(peer(), expected(), 0, 23005, 41002),
             Err(IdentityDenied)
         );
         assert_eq!(
-            verify_distinct_peer(peer(), expected(), 23003, -1),
+            verify_distinct_peer(peer(), expected(), 23003, 0, 41002),
+            Err(IdentityDenied)
+        );
+        assert_eq!(
+            verify_distinct_peer(peer(), expected(), 23003, 23005, -1),
             Err(IdentityDenied)
         );
     }

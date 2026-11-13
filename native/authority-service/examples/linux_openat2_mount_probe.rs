@@ -37,7 +37,7 @@ fn main() -> std::process::ExitCode {
     let observed = openat2(
         &root_dir,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
     );

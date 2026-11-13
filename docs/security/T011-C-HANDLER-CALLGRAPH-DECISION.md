@@ -134,6 +134,11 @@ its own exact HEAD and examine all new provider/preview/adapter entrypoints.
    sentinels. Record the exact SHA, primary CI, native adversarial runners,
    artifact provenance, and required independent reviews.
 
+A subsequent [out-of-process broker boundary review](T011-C4-BROKER-BOUNDARY-REVIEW.md)
+records the proposed one-read protocol, actual-service-principal proof,
+restart/revocation and cross-platform object-isolation gates against protected
+`main` `a2c660aab9b3268ae525ccd1ccb4b2798318de47`. It is not an approval.
+
 **Until these decisions and acceptance gates close, T011-C remains
 non-shipping.** This is a technical review artifact; it does not alter MCP
 tool routing, grant filesystem access, close #124/#139/#148/#80, or authorize a

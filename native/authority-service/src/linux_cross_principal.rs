@@ -18,10 +18,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-struct OwnedSocket(PathBuf);
-impl Drop for OwnedSocket {
+struct OwnedFixtureDir(PathBuf);
+impl Drop for OwnedFixtureDir {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -76,25 +76,47 @@ fn distinct_os_user_socket_credentials_match_kernel_not_payload() {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch");
-    let path = env::temp_dir().join(format!(
-        "jdc-t011-foreign-peer-{}-{}.sock",
+    let fixture_dir = env::temp_dir().join(format!(
+        "jdc-t011-peer-{}-{}",
         std::process::id(),
         timestamp.as_nanos()
     ));
+    fs::create_dir(&fixture_dir).expect("create unique test-owned directory");
+    let _cleanup = OwnedFixtureDir(fixture_dir.clone());
+    // Other test principal can traverse, but cannot enumerate or write here.
+    fs::set_permissions(&fixture_dir, fs::Permissions::from_mode(0o711))
+        .expect("restrict test-owned directory");
+
+    // CI checkout and Rust target directories can be private to runner UID.
+    // Place an immutable-for-client copy in our owned executable fixture.
+    let executable = env::current_exe().expect("current test harness path");
+    let client_executable = fixture_dir.join("peer-client-test");
+    fs::copy(&executable, &client_executable).expect("copy owned test-only binary");
+    fs::set_permissions(&client_executable, fs::Permissions::from_mode(0o755))
+        .expect("make owned test binary executable for foreign UID");
+    let reachable = Command::new("/usr/bin/sudo")
+        .args(["-n", "-u", "nobody", "--", "/usr/bin/test", "-x"])
+        .arg(&client_executable)
+        .status()
+        .expect("test executable preflight for distinct UID");
+    assert!(
+        reachable.success(),
+        "foreign principal cannot execute owned test binary"
+    );
+
+    let path = fixture_dir.join("peer.sock");
     let listener = UnixListener::bind(&path).expect("bind unique test-only socket");
-    let _cleanup = OwnedSocket(path.clone());
     // A randomized, no-operation test socket must accept a different UID.
     // This is NOT a production service endpoint or an authorization policy.
     fs::set_permissions(&path, fs::Permissions::from_mode(0o722))
         .expect("permit test-only cross-UID connection");
     listener.set_nonblocking(true).expect("bounded accept");
 
-    let executable = env::current_exe().expect("current test harness path");
     let path_arg = format!("JDC_PEER_FOREIGN_SOCKET={}", path.display());
     let child = Command::new("/usr/bin/sudo")
         .args(["-n", "-u", "nobody", "--", "/usr/bin/env"])
         .arg(&path_arg)
-        .arg(&executable)
+        .arg(&client_executable)
         .args([
             "--ignored",
             "--exact",
@@ -113,7 +135,14 @@ fn distinct_os_user_socket_credentials_match_kernel_not_payload() {
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {
-                thread::sleep(Duration::from_millis(25));
+                match _child.0.try_wait() {
+                    Ok(Some(exit)) => panic!(
+                        "foreign client exited without connecting (exit code {:?})",
+                        exit.code()
+                    ),
+                    Ok(None) => thread::sleep(Duration::from_millis(25)),
+                    Err(_) => panic!("failed to observe foreign client process"),
+                }
             }
             Err(e) => panic!("bounded cross-principal accept failed: {e}"),
         }
@@ -154,6 +183,10 @@ fn distinct_os_user_socket_credentials_match_kernel_not_payload() {
         Err(IdentityDenied)
     );
     assert!(_child.0.wait().expect("foreign client completes").success());
+    drop(accepted);
+    drop(listener);
+    fs::remove_dir_all(&fixture_dir).expect("remove test-only socket and executable");
+    assert!(!fixture_dir.exists(), "owned test fixture must be absent");
     println!("LINUX_DISTINCT_USER_SOCKET_KERNEL_TEST=PASS");
 }
 

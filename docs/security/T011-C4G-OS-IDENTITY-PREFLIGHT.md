@@ -163,7 +163,10 @@ wrong account and any client sharing the authority's primary GID.
 
 The socket is test-only, single-use, owned under the disposable runner's
 temporary directory, with a randomized pathname and deliberately relaxed
-write permission solely to test a cross-UID connection. It handles no file
+write permission solely to test a cross-UID connection. A disposable
+copy of the compiled Rust test executable is placed in an owner-controlled
+directory the foreign UID can traverse but cannot modify; a real
+`sudo -u nobody` executable-access preflight fails before connection attempts. It handles no file
 or policy operations, has a bounded listener and read timeout, and removes
 its endpoint and terminates its subprocess on exit. The explicit workflow
 step requires a positive test marker **and exactly one executed passing

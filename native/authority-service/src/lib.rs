@@ -10,6 +10,9 @@ mod peer_policy;
 #[cfg(target_os = "linux")]
 mod linux_peer;
 
+#[cfg(all(target_os = "linux", test))]
+mod linux_cross_principal;
+
 #[cfg(windows)]
 pub mod windows_token;
 

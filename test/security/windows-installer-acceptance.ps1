@@ -83,6 +83,7 @@ $startupKeys = @(
 )
 $environmentKeys = @('HKCU:\Environment', 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
 # Type- and byte-aware registry evidence; no startup values leave CI logs.
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_REGISTRY_TESTS'
 . (Join-Path $PWD 'scripts/windows-registry-snapshot.ps1')
 & (Join-Path $PWD 'test/security/test-windows-installer-registry-snapshot.ps1')
 & (Join-Path $PWD 'test/security/test-windows-installer-registry-drift-evidence.ps1')
@@ -113,12 +114,16 @@ function Get-FirewallSnapshot {
     Sort-Object InstanceID | ForEach-Object { $_.InstanceID + '|' + $_.Program })
   return ((@($rules) + @($ports) + @($applications)) -join [char]10)
 }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_REGISTRY_STARTUP'
 $startupBefore = @{}
 foreach ($key in $startupKeys) {
   $startupBefore[$key] = Get-RegistrySnapshotDetail -Key $key
 }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_STARTUP_FILES'
 $startupFilesBefore = Get-StartupFilesSnapshot
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_ENVIRONMENT'
 $environmentBefore = Get-RegistrySnapshot $environmentKeys
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_FIREWALL'
 $firewallBefore = Get-FirewallSnapshot
 function Assert-HostPackageBoundary {
   $changedStartupKeys = @(
@@ -145,10 +150,13 @@ function Assert-HostPackageBoundary {
     throw 'Windows firewall rules modified by installer'
   }
 }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_TASKS'
 $taskNamesBefore = @(Get-ScheduledTask | Where-Object { $_.TaskName -match 'JameDesktop|Desktop Commander' } |
   Sort-Object TaskName | ForEach-Object { $_.TaskName + '|' + $_.Actions[0].Execute })
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_SERVICES'
 $servicesBefore = @(Get-CimInstance Win32_Service | Where-Object { $_.Name -match 'JameDesktop|DesktopCommander|JDC' } |
   Sort-Object Name | ForEach-Object { $_.Name + '|' + $_.PathName })
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_SENTINEL'
 $profileSentinel = Join-Path $env:LOCALAPPDATA 'OpenAI\tunnel-client\profiles\jdc-ci-uninstall-sentinel.txt'
 if (Test-Path $uninstallKey) { throw 'Refusing to overwrite an existing JDC installation' }
 if (Test-Path $profileSentinel) { throw 'Refusing to overwrite existing operator profile' }

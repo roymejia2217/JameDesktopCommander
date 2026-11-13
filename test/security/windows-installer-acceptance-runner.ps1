@@ -107,7 +107,7 @@ try {
     # The child emits exactly one bounded stage code before failing closed.
     $diagnostics = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue)
     $phase = @($diagnostics | Where-Object {
-      $_ -cmatch '^E_INSTALLER_ACCEPTANCE_PHASE_(PROFILE|BASELINE|INSTALL|INSTALLED_ASSERTIONS|UNINSTALL|UNINSTALLED_ASSERTIONS)$'
+      $_ -cmatch '^E_INSTALLER_ACCEPTANCE_PHASE_(PROFILE|BASELINE|BASELINE_REGISTRY_TESTS|BASELINE_REGISTRY_STARTUP|BASELINE_STARTUP_FILES|BASELINE_ENVIRONMENT|BASELINE_FIREWALL|BASELINE_TASKS|BASELINE_SERVICES|BASELINE_SENTINEL|INSTALL|INSTALLED_ASSERTIONS|UNINSTALL|UNINSTALLED_ASSERTIONS)$'
     } | Select-Object -Last 1)
     if ($phase.Count -eq 1) {
       Write-Output $phase[0]

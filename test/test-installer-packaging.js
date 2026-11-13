@@ -179,8 +179,11 @@ test('isolated Windows installer failures disclose only fixed phase codes, not u
   assert.match(runner, /Get-Content -LiteralPath \$stdout/);
   assert.match(runner, /\^E_INSTALLER_ACCEPTANCE_PHASE_/);
   assert.doesNotMatch(runner, /Write-Output \$stderr|Write-Output \$_[.]Exception/);
-  for (const phase of ['PROFILE', 'BASELINE', 'INSTALL', 'INSTALLED_ASSERTIONS',
-                       'UNINSTALL', 'UNINSTALLED_ASSERTIONS']) {
+  for (const phase of ['PROFILE', 'BASELINE', 'BASELINE_REGISTRY_TESTS',
+                       'BASELINE_REGISTRY_STARTUP', 'BASELINE_STARTUP_FILES',
+                       'BASELINE_ENVIRONMENT', 'BASELINE_FIREWALL', 'BASELINE_TASKS',
+                       'BASELINE_SERVICES', 'BASELINE_SENTINEL',
+                       'INSTALL', 'INSTALLED_ASSERTIONS', 'UNINSTALL', 'UNINSTALLED_ASSERTIONS']) {
     assert.match(lifecycle, new RegExp('E_INSTALLER_ACCEPTANCE_PHASE_' + phase));
   }
   assert.match(lifecycle, /trap \{/);

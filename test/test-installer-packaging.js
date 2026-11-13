@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -225,15 +225,71 @@ test('an early installer child failure yields only a fixed phase code', {
   const dir = await mkdtemp(join(tmpdir(), 'jdc-installer-evidence-'));
   try {
     const evidence = join(dir, 'stderr.txt');
-    await writeFile(evidence, 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL\nSECRET_CANARY_PRIVATE_PATH\n');
+    await writeFile(evidence, 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL\n' +
+      'E_INSTALLER_INNO_EXIT_CODE_7\nSECRET_CANARY_PRIVATE_PATH\n');
     const script = [fn, "Write-SanitizedChildEvidence -ErrorPath '" +
       evidence.replaceAll("'", "''") + "'"].join('\n');
     const result = spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-Command',script],
       {encoding:'utf8',timeout:12000});
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /E_INSTALLER_ACCEPTANCE_PHASE_INSTALL/);
+    assert.match(result.stdout, /E_INSTALLER_INNO_EXIT_CODE_7/);
     assert.doesNotMatch(result.stdout + result.stderr, /SECRET_CANARY/);
   } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('isolated installer binds writable TEMP and TMP to the verified profile, not runner admin', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  const helper = lifecycle.match(/^function Set-VerifiedProfileTemporaryDirectory \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(helper, 'Missing tested profile-temp initialization');
+  assert.match(lifecycle, /Set-VerifiedProfileTemporaryDirectory -Profile \$profile -LocalAppData \$expectedLocal/);
+  const rootDir = await mkdtemp(join(tmpdir(), 'jdc-isolated-temp-fixture-'));
+  try {
+    const profile = join(rootDir,'user');
+    const local = join(profile,'AppData','Local');
+    await mkdir(local,{recursive:true});
+    const q = value => value.replaceAll("'", "''");
+    const ps = [helper,
+      "$env:TEMP = 'C:\\Windows\\Temp\\inherited-host'",
+      "$env:TMP = 'C:\\Windows\\Temp\\inherited-host'",
+      "Set-VerifiedProfileTemporaryDirectory -Profile '" + q(profile) +
+        "' -LocalAppData '" + q(local) + "'",
+      "if ($env:TEMP -cne (Join-Path '" + q(local) + "' 'Temp') -or " +
+        "$env:TMP -cne $env:TEMP -or !(Test-Path -LiteralPath $env:TEMP -PathType Container)) " +
+        "{ throw 'TEMP_NOT_BOUND_TO_VERIFIED_PROFILE' }",
+      "Write-Output 'ISOLATED_TEMP_BINDING_PASS'",
+    ].join('\n');
+    const result = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',ps],
+      {encoding:'utf8',timeout:12000});
+    assert.equal(result.status,0,result.stderr);
+    assert.match(result.stdout,/ISOLATED_TEMP_BINDING_PASS/);
+    const negative = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
+      [helper,"Set-VerifiedProfileTemporaryDirectory -Profile '" +
+        q(profile) + "' -LocalAppData '" + q(rootDir) + "'"].join('\n')],
+      {encoding:'utf8',timeout:12000});
+    assert.notEqual(negative.status,0,'outside the verified profile must fail closed');
+  } finally { await rm(rootDir,{recursive:true,force:true}); }
+});
+
+test('real Inno exit status is disclosed as a bounded numeric code without installation secrets', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  const runner = await readFile(resolve(root,'test/security/windows-installer-acceptance-runner.ps1'),'utf8');
+  const helper = lifecycle.match(/^function Assert-InnoInstallerExitCode \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(helper, 'Inno exit status must not be reduced to phase-only evidence');
+  assert.match(runner, /E_INSTALLER_INNO_EXIT_CODE_/);
+  const reject = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
+    [helper,'Assert-InnoInstallerExitCode -ExitCode 7'].join('\n')],
+    {encoding:'utf8',timeout:12000});
+  assert.equal(reject.status,1);
+  assert.match(reject.stderr,/E_INSTALLER_INNO_EXIT_CODE_7/);
+  const accept = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
+    [helper,'Assert-InnoInstallerExitCode -ExitCode 0'].join('\n')],
+    {encoding:'utf8',timeout:12000});
+  assert.equal(accept.status,0,accept.stderr);
 });
 
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {

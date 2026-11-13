@@ -63,6 +63,37 @@ if (!$expectedAppData.StartsWith($profile + '\', [StringComparison]::OrdinalIgno
 }
 $env:APPDATA = $expectedAppData
 $env:LOCALAPPDATA = $expectedLocal
+# An alternate-credential process may inherit TEMP/TMP from the runner admin.
+# Inno Setup requires a writable temporary directory under the actual user.
+function Set-VerifiedProfileTemporaryDirectory {
+  param(
+    [Parameter(Mandatory)][string]$Profile,
+    [Parameter(Mandatory)][string]$LocalAppData
+  )
+  $root = [IO.Path]::GetFullPath($Profile).TrimEnd('\')
+  $local = [IO.Path]::GetFullPath($LocalAppData).TrimEnd('\')
+  if (!$local.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'E_INSTALLER_USER_TEMP_PROFILE_BOUNDARY_INVALID'
+  }
+  $temp = [IO.Path]::GetFullPath((Join-Path $local 'Temp')).TrimEnd('\')
+  New-Item -ItemType Directory -Path $temp -Force -ErrorAction Stop | Out-Null
+  $item = Get-Item -LiteralPath $temp -Force -ErrorAction Stop
+  if (!$item.PSIsContainer -or
+      ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'E_INSTALLER_USER_TEMP_NOT_OWNED_DIRECTORY'
+  }
+  $probe = Join-Path $temp ('jdc-ci-' + [guid]::NewGuid().ToString('N'))
+  try {
+    $stream = [IO.File]::Open($probe, [IO.FileMode]::CreateNew,
+      [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $stream.Dispose()
+  } finally {
+    if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Force }
+  }
+  $env:TEMP = $temp
+  $env:TMP = $temp
+}
+Set-VerifiedProfileTemporaryDirectory -Profile $profile -LocalAppData $expectedLocal
 if (!(Test-Path -LiteralPath $InstallerPath -PathType Leaf) -or
     !(Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
   throw 'E_INSTALLER_VERIFIED_INPUT_UNAVAILABLE'
@@ -163,9 +194,17 @@ New-Item -ItemType Directory -Path (Split-Path $profileSentinel) -Force | Out-Nu
 [IO.File]::WriteAllText($profileSentinel, 'JDC_PREEXISTING_PROFILE_UNTOUCHED')
 $profileHash = (Get-FileHash $profileSentinel -Algorithm SHA256).Hash
 Wait-ForHostFirewallObserver
+function Assert-InnoInstallerExitCode {
+  param([Parameter(Mandatory)][int]$ExitCode)
+  if ($ExitCode -ne 0) {
+    # Inno Setup documents the numeric setup exit status, unlike free-form logs.
+    [Console]::Error.WriteLine('E_INSTALLER_INNO_EXIT_CODE_' + $ExitCode)
+    throw 'E_INSTALLER_INNO_NONZERO_EXIT'
+  }
+}
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL'
 $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
-if ($result.ExitCode -ne 0) { throw "Windows install failed: $($result.ExitCode)" }
+Assert-InnoInstallerExitCode -ExitCode $result.ExitCode
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALLED_ASSERTIONS'
 if (!(Test-Path $uninstallKey)) { throw 'Installed JDC uninstall registration missing' }
 $registered = Get-ItemProperty $uninstallKey
@@ -213,7 +252,7 @@ $uninstall = Get-ChildItem -LiteralPath $target -Filter 'unins*.exe' -File | Sel
 if (!$uninstall) { throw 'Expected Inno uninstall executable missing' }
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_UNINSTALL'
 $result = Start-Process -FilePath $uninstall.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
-if ($result.ExitCode -ne 0) { throw "Windows uninstall failed: $($result.ExitCode)" }
+Assert-InnoInstallerExitCode -ExitCode $result.ExitCode
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_UNINSTALLED_ASSERTIONS'
 if (Test-Path $uninstallKey) { throw 'JDC uninstall registration remains after uninstall' }
 if (Test-Path $launcher) { throw 'Windows launcher shortcut remains after uninstall' }

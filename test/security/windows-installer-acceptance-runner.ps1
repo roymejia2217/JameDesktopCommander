@@ -36,6 +36,12 @@ function Write-SanitizedChildEvidence {
   } else {
     Write-Output 'E_INSTALLER_ACCEPTANCE_PHASE_UNOBSERVED'
   }
+  # The Inno CLI publishes documented numeric exit codes; never print its
+  # free-form installer log, which may contain private paths or filenames.
+  $innoCode = @($diagnostics | Where-Object {
+    $_ -cmatch '^E_INSTALLER_INNO_EXIT_CODE_-?[1-9][0-9]{0,9}$'
+  } | Select-Object -Last 1)
+  if ($innoCode.Count -eq 1) { Write-Output $innoCode[0] }
   $privateEvidence = $diagnostics -join [char]10
   if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
     Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'

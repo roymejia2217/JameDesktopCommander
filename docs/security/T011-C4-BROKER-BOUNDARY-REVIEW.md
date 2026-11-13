@@ -40,6 +40,15 @@ custody cannot be proved. Neither a local username nor a self-reported PID,
 `rootRef`, environment variable, pipe/socket pathname or CLI flag grants
 privilege. A failed bootstrap is not permission to run in the user's context.
 
+**Unresolved legitimate-client bootstrap:** today the portable MCP process
+runs with the interactive user's ambient identity, not automatically as a
+separately provisioned `jdc-mcp-client`. The installation/launch chain must
+prove how a genuine client obtains its protected origin and how another
+process under the **same** UID/SID is excluded from reusing it. Matching
+Unix UID/GID or a Windows user SID, inspecting a client PID/image name, or
+passing a nonce through user-readable configuration is insufficient alone.
+No automatic identity switch, privileged wrapper or grant is approved here.
+
 The research-only native N-API object remains excluded. Out-of-process IPC
 avoids invoking its unproven ownership mechanism but does **not** close #124.
 No production listener, file operation, or installed service is enabled by
@@ -69,11 +78,15 @@ A real adversarial test must establish that a transferred/reused connection
 cannot gain another principal's authority. Reject ancillary descriptor transfer
 or other delegation unless a separately reviewed design can prove it safe.
 
-A policy revocation is acknowledged only after all earlier in-flight reads
-have either completed under the old epoch or been cancelled and prevented
-from returning bytes. New reads require the new epoch. This linearization
-contract, including disconnect and crash semantics, needs implementation
-and hostile concurrency evidence before any production activation.
+A policy revocation may be acknowledged only after every old-epoch read
+has stopped issuing I/O and sending response bytes, with outstanding streams
+closed or finished. Already-transmitted bytes cannot be retracted, even if
+still buffered in the OS or retained by a client; a broker-side acknowledgement
+is **not** proof of their absence at the receiver. Any stronger no-delivery
+claim needs a separately verified client-drain/receipt protocol. Timeout,
+crash or uncertain transport state must deny a positive acknowledgement.
+New reads require the new epoch. Review and test these linearization points
+before activation; never infer revocation safety from a cancelled promise.
 
 ## 4. Platform and object-isolation dependencies
 
@@ -131,9 +144,11 @@ URL fetches and delegated search remain separate ambient-authority surfaces.
 
 **Open reviewer decisions:** Which operator owns immutable roots? Which
 filesystems and external aliases are permitted? What OS-protected monotonic
-state survives rollback/reinstall? How are same-account client processes and
-transferred descriptors excluded? How does a pending read interact with a
-concurrent revocation? What evidence proves Windows named-pipe parity?
+state survives rollback/reinstall? How is the actual interactive-user MCP
+launched as a verified client without granting access to another same-UID/SID
+process? How are transferred descriptors excluded? How are previously sent
+bytes distinguished from revocation-acknowledged future sends? What evidence
+proves Windows named-pipe parity?
 
 **Disposition:** REVIEW REQUIRED / NO IMPLEMENTATION PERMISSION.
 The current `main` continues deny-only for the native authority; #124, #139

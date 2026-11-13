@@ -214,6 +214,28 @@ test('installer firewall observer executes three real host snapshots behind rest
   }
 });
 
+test('an early installer child failure yields only a fixed phase code', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const runner = await readFile(resolve(root,'test/security/windows-installer-acceptance-runner.ps1'),'utf8');
+  const fn = runner.match(/^function Write-SanitizedChildEvidence \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(fn, 'a single sanitized diagnostic function must handle early exits');
+  assert.match(runner, /if \(\$child[.]HasExited\)/);
+  assert.match(runner, /Write-SanitizedChildEvidence -ErrorPath \$stderr/);
+  const dir = await mkdtemp(join(tmpdir(), 'jdc-installer-evidence-'));
+  try {
+    const evidence = join(dir, 'stderr.txt');
+    await writeFile(evidence, 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL\nSECRET_CANARY_PRIVATE_PATH\n');
+    const script = [fn, "Write-SanitizedChildEvidence -ErrorPath '" +
+      evidence.replaceAll("'", "''") + "'"].join('\n');
+    const result = spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-Command',script],
+      {encoding:'utf8',timeout:12000});
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /E_INSTALLER_ACCEPTANCE_PHASE_INSTALL/);
+    assert.doesNotMatch(result.stdout + result.stderr, /SECRET_CANARY/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {
   const config = await readFile(resolve(root,'packaging/linux/nfpm.yaml'),'utf8');
   const launch = await readFile(resolve(root,'packaging/linux/jdc'),'utf8');

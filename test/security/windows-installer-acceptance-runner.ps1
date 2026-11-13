@@ -25,6 +25,26 @@ if (![Security.Principal.WindowsPrincipal]::new($runnerIdentity).IsInRole(
   throw 'E_INSTALLER_HOST_FIREWALL_OBSERVER_NOT_ADMINISTRATOR'
 }
 . (Join-Path $PSScriptRoot 'windows-installer-firewall-snapshot.ps1')
+function Write-SanitizedChildEvidence {
+  param([Parameter(Mandatory)][string]$ErrorPath)
+  $diagnostics = @(Get-Content -LiteralPath $ErrorPath -ErrorAction SilentlyContinue)
+  $phase = @($diagnostics | Where-Object {
+    $_ -cmatch '^E_INSTALLER_ACCEPTANCE_PHASE_(PROFILE|BASELINE|BASELINE_REGISTRY_TESTS|BASELINE_REGISTRY_STARTUP|BASELINE_STARTUP_FILES|BASELINE_ENVIRONMENT|BASELINE_FIREWALL|BASELINE_TASKS|BASELINE_SERVICES|BASELINE_SENTINEL|INSTALL|INSTALLED_ASSERTIONS|UNINSTALL|UNINSTALLED_ASSERTIONS)$'
+  } | Select-Object -Last 1)
+  if ($phase.Count -eq 1) {
+    Write-Output $phase[0]
+  } else {
+    Write-Output 'E_INSTALLER_ACCEPTANCE_PHASE_UNOBSERVED'
+  }
+  $privateEvidence = $diagnostics -join [char]10
+  if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
+    Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'
+    foreach ($summary in [regex]::Matches($privateEvidence,
+      'presenceChanged=(?:true|false);added=[0-9]+;removed=[0-9]+;typeChanged=[0-9]+;dataChanged=[0-9]+')) {
+      Write-Output $summary.Value
+    }
+  }
+}
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -141,6 +161,10 @@ try {
   $firewallBefore = $null
   foreach ($checkpoint in @('BASELINE', 'INSTALLED', 'UNINSTALLED')) {
     if (!$signalEvent.WaitOne(180000)) {
+      if ($child.HasExited) {
+        Write-SanitizedChildEvidence -ErrorPath $stderr
+        throw ("E_INSTALLER_ISOLATED_CHILD_EXIT_BEFORE_" + $checkpoint)
+      }
       throw ("E_INSTALLER_FIREWALL_CHECKPOINT_TIMEOUT_" + $checkpoint)
     }
     $snapshot = Get-FirewallSnapshot
@@ -154,25 +178,7 @@ try {
   }
   if (!$child.WaitForExit(180000)) { throw 'E_INSTALLER_ISOLATED_CHILD_EXIT_TIMEOUT' }
   if ($null -eq $child.ExitCode -or $child.ExitCode -ne 0) {
-    # Never relay untrusted child stdout/stderr or expose registry value names.
-    # The child emits exactly one bounded stage code before failing closed.
-    $diagnostics = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue)
-    $phase = @($diagnostics | Where-Object {
-      $_ -cmatch '^E_INSTALLER_ACCEPTANCE_PHASE_(PROFILE|BASELINE|BASELINE_REGISTRY_TESTS|BASELINE_REGISTRY_STARTUP|BASELINE_STARTUP_FILES|BASELINE_ENVIRONMENT|BASELINE_FIREWALL|BASELINE_TASKS|BASELINE_SERVICES|BASELINE_SENTINEL|INSTALL|INSTALLED_ASSERTIONS|UNINSTALL|UNINSTALLED_ASSERTIONS)$'
-    } | Select-Object -Last 1)
-    if ($phase.Count -eq 1) {
-      Write-Output $phase[0]
-    } else {
-      Write-Output 'E_INSTALLER_ACCEPTANCE_PHASE_UNOBSERVED'
-    }
-    $privateEvidence = $diagnostics -join [char]10
-    if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
-      Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'
-      foreach ($summary in [regex]::Matches($privateEvidence,
-        'presenceChanged=(?:true|false);added=[0-9]+;removed=[0-9]+;typeChanged=[0-9]+;dataChanged=[0-9]+')) {
-        Write-Output $summary.Value
-      }
-    }
+    Write-SanitizedChildEvidence -ErrorPath $stderr
     throw "E_INSTALLER_ISOLATED_CHILD_FAILED_EXIT_$($child.ExitCode)"
   }
   $output = Get-Content -LiteralPath $stdout -Raw -ErrorAction Stop

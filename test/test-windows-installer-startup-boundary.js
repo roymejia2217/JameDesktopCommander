@@ -31,7 +31,6 @@ function invokeFixture(kind) {
     "  return 'presenceChanged=false;added=0;removed=0;typeChanged=0;dataChanged=1'",
     '}',
     'function Get-StartupFilesSnapshot { return $script:files }',
-    "function Get-FirewallSnapshot { return 'unchanged' }",
     "$startupKeys = @('HKCU:\\Run', 'HKLM:\\RunOnce')",
     "$environmentKeys = @('HKCU:\\Environment')",
   ];
@@ -43,7 +42,6 @@ function invokeFixture(kind) {
   const script = [
     ...setup, baseline,
     '$environmentBefore = Get-RegistrySnapshot $environmentKeys',
-    '$firewallBefore = Get-FirewallSnapshot',
     gate, mutation, 'Assert-HostPackageBoundary',
   ].join('\n');
   return spawnSync('powershell.exe', [
@@ -73,5 +71,37 @@ test('installer startup guard accepts unchanged snapshots', {
   skip: process.platform !== 'win32',
 }, () => {
   const result = invokeFixture('unchanged');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+const firewall = readFileSync(
+  new URL('./security/windows-installer-firewall-snapshot.ps1', import.meta.url), 'utf8');
+
+test('privileged firewall observer rejects a modified post-install snapshot', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const cmd = [firewall, "Assert-HostFirewallSnapshotUnchanged -Before 'safe' -Current 'modified' -Phase INSTALLED"].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+    { encoding: 'utf8', timeout: 12000 });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /E_INSTALLER_FIREWALL_DRIFT_INSTALLED/);
+});
+
+test('privileged firewall observer rejects a modified post-uninstall snapshot', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const cmd = [firewall, "Assert-HostFirewallSnapshotUnchanged -Before 'safe' -Current 'modified' -Phase UNINSTALLED"].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+    { encoding: 'utf8', timeout: 12000 });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /E_INSTALLER_FIREWALL_DRIFT_UNINSTALLED/);
+});
+
+test('privileged firewall observer accepts an unchanged snapshot', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const cmd = [firewall, "Assert-HostFirewallSnapshotUnchanged -Before 'safe' -Current 'safe' -Phase INSTALLED"].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+    { encoding: 'utf8', timeout: 12000 });
   assert.equal(result.status, 0, result.stderr);
 });

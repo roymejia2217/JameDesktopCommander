@@ -1,12 +1,15 @@
 # Executed only under a fresh non-administrator profile on an ephemeral GitHub Windows runner.
-# Preserve the original lifecycle and no-host-modification assertions verbatim below.
+# Per-user lifecycle assertions remain; the host runner independently checks the
+# machine-global firewall at three mandatory, acknowledged checkpoints.
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string]$InstallerPath,
   [Parameter(Mandatory)][string]$ExpectedSid,
   [Parameter(Mandatory)][string]$ExpectedCommit,
   [Parameter(Mandatory)][string]$ExpectedVersion,
-  [Parameter(Mandatory)][string]$NodeExecutable
+  [Parameter(Mandatory)][string]$NodeExecutable,
+  [Parameter(Mandatory)][string]$FirewallSignalEvent,
+  [Parameter(Mandatory)][string]$FirewallResumeEvent
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -101,19 +104,6 @@ function Get-StartupFilesSnapshot {
   }
   return ($entries -join [char]10)
 }
-function Get-FirewallSnapshot {
-  $rules = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop |
-    Sort-Object Name | ForEach-Object {
-      $_.Name + '|' + $_.DisplayName + '|' + $_.Enabled + '|' + $_.Direction + '|' + $_.Action
-    })
-  $ports = @(Get-NetFirewallPortFilter -PolicyStore PersistentStore -ErrorAction Stop |
-    Sort-Object InstanceID | ForEach-Object {
-      $_.InstanceID + '|' + $_.Protocol + '|' + ($_.LocalPort -join ',') + '|' + ($_.RemotePort -join ',')
-    })
-  $applications = @(Get-NetFirewallApplicationFilter -PolicyStore PersistentStore -ErrorAction Stop |
-    Sort-Object InstanceID | ForEach-Object { $_.InstanceID + '|' + $_.Program })
-  return ((@($rules) + @($ports) + @($applications)) -join [char]10)
-}
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_REGISTRY_STARTUP'
 $startupBefore = @{}
 foreach ($key in $startupKeys) {
@@ -124,7 +114,19 @@ $startupFilesBefore = Get-StartupFilesSnapshot
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_ENVIRONMENT'
 $environmentBefore = Get-RegistrySnapshot $environmentKeys
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_FIREWALL'
-$firewallBefore = Get-FirewallSnapshot
+if ($FirewallSignalEvent -cnotmatch '^Local\\JDC-Installer-[a-f0-9]{32}-Signal$' -or
+    $FirewallResumeEvent -cnotmatch '^Local\\JDC-Installer-[a-f0-9]{32}-Resume$') {
+  throw 'E_INSTALLER_FIREWALL_SYNC_NAME_INVALID'
+}
+$firewallSignal = [System.Threading.EventWaitHandleAcl]::OpenExisting(
+  $FirewallSignalEvent, [Security.AccessControl.EventWaitHandleRights]::Modify)
+$firewallResume = [System.Threading.EventWaitHandleAcl]::OpenExisting(
+  $FirewallResumeEvent, [Security.AccessControl.EventWaitHandleRights]::Synchronize)
+function Wait-ForHostFirewallObserver {
+  if (!$firewallSignal.Set() -or !$firewallResume.WaitOne(180000)) {
+    throw 'E_INSTALLER_HOST_FIREWALL_OBSERVER_UNAVAILABLE'
+  }
+}
 function Assert-HostPackageBoundary {
   $changedStartupKeys = @(
     foreach ($key in $startupKeys) {
@@ -146,9 +148,6 @@ function Assert-HostPackageBoundary {
   if ((Get-RegistrySnapshot $environmentKeys) -cne $environmentBefore) {
     throw 'Windows environment registration modified by installer'
   }
-  if ((Get-FirewallSnapshot) -cne $firewallBefore) {
-    throw 'Windows firewall rules modified by installer'
-  }
 }
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE_TASKS'
 $taskNamesBefore = @(Get-ScheduledTask | Where-Object { $_.TaskName -match 'JameDesktop|Desktop Commander' } |
@@ -163,6 +162,7 @@ if (Test-Path $profileSentinel) { throw 'Refusing to overwrite existing operator
 New-Item -ItemType Directory -Path (Split-Path $profileSentinel) -Force | Out-Null
 [IO.File]::WriteAllText($profileSentinel, 'JDC_PREEXISTING_PROFILE_UNTOUCHED')
 $profileHash = (Get-FileHash $profileSentinel -Algorithm SHA256).Hash
+Wait-ForHostFirewallObserver
 $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL'
 $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
 if ($result.ExitCode -ne 0) { throw "Windows install failed: $($result.ExitCode)" }
@@ -192,6 +192,7 @@ if ((Get-FileHash $profileSentinel -Algorithm SHA256).Hash -ne $profileHash) {
   throw 'Pre-existing tunnel profile modified by installer'
 }
 Assert-HostPackageBoundary
+Wait-ForHostFirewallObserver
 $runtime = Join-Path $target 'runtime/node.exe'
 if (!(Test-Path -LiteralPath $runtime)) { throw 'Installed runtime missing' }
 & $runtime --version
@@ -235,6 +236,7 @@ if ((Get-FileHash $profileSentinel -Algorithm SHA256).Hash -ne $profileHash) {
   throw 'Pre-existing tunnel profile modified by uninstaller'
 }
 Assert-HostPackageBoundary
+Wait-ForHostFirewallObserver
 $ownedProcesses = @(Get-CimInstance Win32_Process | Where-Object {
   $_.ExecutablePath -and $_.ExecutablePath.StartsWith(
     ($target + [IO.Path]::DirectorySeparatorChar),

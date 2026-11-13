@@ -19,6 +19,12 @@ if ($SourceCommit -notmatch '^[0-9a-f]{40}$' -or $Version -notmatch '^\d+\.\d+\.
   throw 'E_INSTALLER_UNVERIFIED_SOURCE'
 }
 Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+$runnerIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+if (![Security.Principal.WindowsPrincipal]::new($runnerIdentity).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw 'E_INSTALLER_HOST_FIREWALL_OBSERVER_NOT_ADMINISTRATOR'
+}
+. (Join-Path $PSScriptRoot 'windows-installer-firewall-snapshot.ps1')
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -28,6 +34,9 @@ $stage = Join-Path $env:ProgramData ('JDC-Isolated-Installer-' + $runId)
 $stdout = Join-Path $env:RUNNER_TEMP ('JDC-' + $runId + '.out')
 $stderr = Join-Path $env:RUNNER_TEMP ('JDC-' + $runId + '.err')
 $createdAccount = $null
+$child = $null
+$signalEvent = $null
+$resumeEvent = $null
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
 $installerHash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
 try {
@@ -47,6 +56,31 @@ try {
       (@(Get-LocalGroupMember -SID $adminSid -ErrorAction Stop).SID.Value) -contains $sid.Value) {
     throw 'E_INSTALLER_TEST_USER_IS_ADMINISTRATOR'
   }
+  # Separate ACLs are critical: the child can signal a checkpoint but
+  # cannot signal its own authorization to proceed. Only the host can resume.
+  $hostRights = [Security.AccessControl.EventWaitHandleRights]::Synchronize -bor
+    [Security.AccessControl.EventWaitHandleRights]::Modify
+  function New-BoundEvent([string]$name,
+                          [Security.AccessControl.EventWaitHandleRights]$childRights) {
+    $acl = [Security.AccessControl.EventWaitHandleSecurity]::new()
+    $acl.AddAccessRule([Security.AccessControl.EventWaitHandleAccessRule]::new(
+      $runnerIdentity.User, $hostRights, [Security.AccessControl.AccessControlType]::Allow))
+    $acl.AddAccessRule([Security.AccessControl.EventWaitHandleAccessRule]::new(
+      $sid, $childRights, [Security.AccessControl.AccessControlType]::Allow))
+    $wasCreated = $false
+    $handle = [System.Threading.EventWaitHandleAcl]::Create(
+      $false, [System.Threading.EventResetMode]::AutoReset, $name,
+      [ref]$wasCreated, $acl)
+    if (!$wasCreated) {
+      $handle.Dispose()
+      throw 'E_INSTALLER_FIREWALL_EVENT_NAME_COLLISION'
+    }
+    return $handle
+  }
+  $signalName = 'Local\JDC-Installer-' + $runId + '-Signal'
+  $resumeName = 'Local\JDC-Installer-' + $runId + '-Resume'
+  $signalEvent = New-BoundEvent $signalName ([Security.AccessControl.EventWaitHandleRights]::Modify)
+  $resumeEvent = New-BoundEvent $resumeName ([Security.AccessControl.EventWaitHandleRights]::Synchronize)
   New-Item -Path $stage -ItemType Directory -ErrorAction Stop | Out-Null
   $acl = Get-Acl -LiteralPath $stage
   $acl.SetAccessRuleProtection($true, $false)
@@ -97,11 +131,28 @@ try {
     '-ExpectedSid', $sid.Value,
     '-ExpectedCommit', $SourceCommit,
     '-ExpectedVersion', $Version,
-    '-NodeExecutable', ('"' + $node + '"')
+    '-NodeExecutable', ('"' + $node + '"'),
+    '-FirewallSignalEvent', $signalName,
+    '-FirewallResumeEvent', $resumeName
   )
   $child = Start-Process -FilePath $pwsh -Credential $credential -LoadUserProfile `
-    -ArgumentList $arguments -WorkingDirectory $stage -Wait -PassThru `
+    -ArgumentList $arguments -WorkingDirectory $stage -PassThru `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
+  $firewallBefore = $null
+  foreach ($checkpoint in @('BASELINE', 'INSTALLED', 'UNINSTALLED')) {
+    if (!$signalEvent.WaitOne(180000)) {
+      throw ("E_INSTALLER_FIREWALL_CHECKPOINT_TIMEOUT_" + $checkpoint)
+    }
+    $snapshot = Get-FirewallSnapshot
+    if ($checkpoint -eq 'BASELINE') {
+      $firewallBefore = $snapshot
+    } else {
+      Assert-HostFirewallSnapshotUnchanged -Before $firewallBefore `
+        -Current $snapshot -Phase $checkpoint
+    }
+    if (!$resumeEvent.Set()) { throw 'E_INSTALLER_FIREWALL_HOST_RESUME_FAILED' }
+  }
+  if (!$child.WaitForExit(180000)) { throw 'E_INSTALLER_ISOLATED_CHILD_EXIT_TIMEOUT' }
   if ($null -eq $child.ExitCode -or $child.ExitCode -ne 0) {
     # Never relay untrusted child stdout/stderr or expose registry value names.
     # The child emits exactly one bounded stage code before failing closed.
@@ -130,6 +181,19 @@ try {
   }
   Write-Output 'WINDOWS_ISOLATED_PRINCIPAL_ACCEPTANCE=PASS'
  } finally {
+  # Reap the child before unloading/deleting its profile even when the host
+  # observer fails, times out, or rejects an actual firewall modification.
+  if ($null -ne $child) {
+    try {
+      if (!$child.HasExited) {
+        $child.Kill()
+        if (!$child.WaitForExit(30000)) { $cleanupFailures.Add('CHILD_PROCESS') }
+      }
+    } catch { $cleanupFailures.Add('CHILD_PROCESS') }
+    $child.Dispose()
+  }
+  if ($null -ne $signalEvent) { $signalEvent.Dispose() }
+  if ($null -ne $resumeEvent) { $resumeEvent.Dispose() }
   # The runner is disposable, but CI still verifies complete owned cleanup.
   if ($null -ne $createdAccount) {
     try {

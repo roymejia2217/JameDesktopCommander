@@ -138,7 +138,6 @@ test('packaged lifecycle denies residual startup, environment, firewall and owne
   for (const contract of [
     'Windows startup registry drift during installer acceptance (cause unverified)',
     'Windows environment registration modified by installer',
-    'Windows firewall rules modified by installer',
     'JDC process remains after uninstall',
   ]) assert.ok(lifecycle.includes(contract), `Missing native Windows residual gate: ${contract}`);
   for (const contract of [
@@ -169,7 +168,9 @@ test('Windows installer acceptance uses a real isolated non-admin profile and pr
   assert.match(lifecycle, /Assert-HostPackageBoundary/);
   assert.match(lifecycle, /Get-RegistryChangeSummary/);
   assert.match(lifecycle, /Get-StartupFilesSnapshot/);
-  assert.match(lifecycle, /Get-FirewallSnapshot/);
+  const firewall = await readFile(resolve(root,'test/security/windows-installer-firewall-snapshot.ps1'),'utf8');
+  assert.match(firewall, /Get-FirewallSnapshot/);
+  assert.match(runner, /Get-FirewallSnapshot/);
 });
 
 test('isolated Windows installer failures disclose only fixed phase codes, not user paths or registry values', async () => {
@@ -188,6 +189,29 @@ test('isolated Windows installer failures disclose only fixed phase codes, not u
   }
   assert.match(lifecycle, /trap \{/);
   assert.match(lifecycle, /Console\]::Error\.WriteLine/);
+});
+
+test('installer firewall observer executes three real host snapshots behind restricted Windows event fences', async () => {
+  const runner = await readFile(resolve(root,'test/security/windows-installer-acceptance-runner.ps1'),'utf8');
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  const firewall = await readFile(resolve(root,'test/security/windows-installer-firewall-snapshot.ps1'),'utf8');
+  assert.match(runner, /EventWaitHandleAcl/);
+  assert.match(runner, /EventWaitHandleSecurity/);
+  assert.match(runner, /New-BoundEvent \$signalName.*Modify/);
+  assert.match(runner, /New-BoundEvent \$resumeName.*Synchronize/);
+  assert.match(runner, /Get-FirewallSnapshot/);
+  assert.match(runner, /WaitOne\(/);
+  assert.match(runner, /E_INSTALLER_FIREWALL_.*(TIMEOUT|DRIFT)/);
+  assert.match(runner, /'BASELINE', 'INSTALLED', 'UNINSTALLED'/);
+  assert.match(runner, /-FirewallSignalEvent/);
+  assert.match(runner, /-FirewallResumeEvent/);
+  assert.match(lifecycle, /Wait-ForHostFirewallObserver/);
+  assert.equal((lifecycle.match(/^Wait-ForHostFirewallObserver$/gm) || []).length, 3);
+  assert.doesNotMatch(lifecycle, /Get-NetFirewallRule|Get-FirewallSnapshot|\$firewallBefore/);
+  for (const query of ['Get-NetFirewallRule', 'Get-NetFirewallPortFilter',
+                       'Get-NetFirewallApplicationFilter', 'PersistentStore']) {
+    assert.match(firewall, new RegExp(query));
+  }
 });
 
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {

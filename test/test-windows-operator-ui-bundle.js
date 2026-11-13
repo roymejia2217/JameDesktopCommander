@@ -94,6 +94,8 @@ test('Windows installer uses only the reviewed UI overlay and an explicit GUI sh
 test('Windows candidate builds exact locked UI source, checks notices and cleans installed copy', async () => {
   const wf = await readFile(new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8');
   const native = await readFile(new URL('../.github/workflows/windows-operator-ui-bundle.yml', import.meta.url), 'utf8');
+  const lifecycle = await readFile(new URL('./security/windows-installer-acceptance.ps1', import.meta.url), 'utf8');
+  assert.match(wf, /windows-installer-acceptance-runner[.]ps1/);
   assert.match(native, /Build pinned Windows operator UI/);
   assert.match(native, /cargo \+1\.95\.0 build --release --locked/);
   assert.match(native, /epaint_default_fonts-0\.37\.0/);
@@ -101,11 +103,11 @@ test('Windows candidate builds exact locked UI source, checks notices and cleans
   assert.match(native, /operator-ui-bundle\.mjs create/);
   assert.match(native, /operator-ui-bundle\.mjs verify/);
   assert.match(native, /JDC_OPERATOR_UI_SOURCE:/);
-  assert.match(wf, /operator-ui-bundle\.mjs verify-installed/);
+  assert.match(lifecycle, /operator-ui-bundle\.mjs verify-installed/);
   assert.match(wf, /JDC_OPERATOR_UI_SOURCE:/);
-  assert.match(wf, /jdc-tunnel-operator-ui\.exe/);
-  assert.match(wf, /operator-ui-manifest\.json/);
-  assert.match(wf, /Test-Path/);
+  assert.match(lifecycle, /jdc-tunnel-operator-ui\.exe/);
+  assert.match(lifecycle, /operator-ui-manifest\.json/);
+  assert.match(lifecycle, /Test-Path/);
   assert.doesNotMatch(wf, /gh release upload|npm publish/);
 });
 

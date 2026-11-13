@@ -172,6 +172,21 @@ test('Windows installer acceptance uses a real isolated non-admin profile and pr
   assert.match(lifecycle, /Get-FirewallSnapshot/);
 });
 
+test('isolated Windows installer failures disclose only fixed phase codes, not user paths or registry values', async () => {
+  const runner = await readFile(resolve(root,'test/security/windows-installer-acceptance-runner.ps1'),'utf8');
+  const lifecycle = await readFile(resolve(root,'test/security/windows-installer-acceptance.ps1'),'utf8');
+  assert.match(runner, /E_INSTALLER_ACCEPTANCE_PHASE_/);
+  assert.match(runner, /Get-Content -LiteralPath \$stdout/);
+  assert.match(runner, /\^E_INSTALLER_ACCEPTANCE_PHASE_/);
+  assert.doesNotMatch(runner, /Write-Output \$stderr|Write-Output \$_[.]Exception/);
+  for (const phase of ['PROFILE', 'BASELINE', 'INSTALL', 'INSTALLED_ASSERTIONS',
+                       'UNINSTALL', 'UNINSTALLED_ASSERTIONS']) {
+    assert.match(lifecycle, new RegExp('E_INSTALLER_ACCEPTANCE_PHASE_' + phase));
+  }
+  assert.match(lifecycle, /trap \{/);
+  assert.match(lifecycle, /Console\]::Error\.WriteLine/);
+});
+
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {
   const config = await readFile(resolve(root,'packaging/linux/nfpm.yaml'),'utf8');
   const launch = await readFile(resolve(root,'packaging/linux/jdc'),'utf8');

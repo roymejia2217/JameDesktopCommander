@@ -10,6 +10,12 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_PROFILE'
+trap {
+  # Deliberately disclose only the fixed phase label, not private paths, values or tokens.
+  [Console]::Error.WriteLine($script:AcceptancePhase)
+  break
+}
 if ($ExpectedSid -notmatch '^S-1-5-21-(?:[0-9]+-){3}[0-9]+$' -or
     $ExpectedCommit -notmatch '^[0-9a-f]{40}$') {
   throw 'E_INSTALLER_EXPECTED_PROVENANCE_INVALID'
@@ -68,6 +74,7 @@ $launcher = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\JameDe
 $operatorShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\JameDesktopCommander - Tunnel Operator.lnk'
 # Installation must not add autoruns, environment entries or firewall exceptions.
 # Observe complete native registry/firewall state, but never print their values.
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_BASELINE'
 $startupKeys = @(
   'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
   'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce',
@@ -148,8 +155,10 @@ if (Test-Path $profileSentinel) { throw 'Refusing to overwrite existing operator
 New-Item -ItemType Directory -Path (Split-Path $profileSentinel) -Force | Out-Null
 [IO.File]::WriteAllText($profileSentinel, 'JDC_PREEXISTING_PROFILE_UNTOUCHED')
 $profileHash = (Get-FileHash $profileSentinel -Algorithm SHA256).Hash
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALL'
 $result = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target`"") -Wait -PassThru
 if ($result.ExitCode -ne 0) { throw "Windows install failed: $($result.ExitCode)" }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALLED_ASSERTIONS'
 if (!(Test-Path $uninstallKey)) { throw 'Installed JDC uninstall registration missing' }
 $registered = Get-ItemProperty $uninstallKey
 if ($registered.DisplayName -ne 'JameDesktopCommander' -or $registered.DisplayVersion -ne $version) {
@@ -193,8 +202,10 @@ $uiCheck = Start-Process -FilePath $gui -ArgumentList '--check-installation' -Wo
 if ($uiCheck.ExitCode -ne 0) { throw "Native operator read-only contract rejected: $($uiCheck.ExitCode)" }
 $uninstall = Get-ChildItem -LiteralPath $target -Filter 'unins*.exe' -File | Select-Object -First 1
 if (!$uninstall) { throw 'Expected Inno uninstall executable missing' }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_UNINSTALL'
 $result = Start-Process -FilePath $uninstall.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
 if ($result.ExitCode -ne 0) { throw "Windows uninstall failed: $($result.ExitCode)" }
+$script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_UNINSTALLED_ASSERTIONS'
 if (Test-Path $uninstallKey) { throw 'JDC uninstall registration remains after uninstall' }
 if (Test-Path $launcher) { throw 'Windows launcher shortcut remains after uninstall' }
 if (Test-Path $operatorShortcut) { throw 'Windows operator shortcut remains after uninstall' }

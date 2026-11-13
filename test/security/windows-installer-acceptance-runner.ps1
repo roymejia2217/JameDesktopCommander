@@ -103,10 +103,24 @@ try {
     -ArgumentList $arguments -WorkingDirectory $stage -Wait -PassThru `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
   if ($null -eq $child.ExitCode -or $child.ExitCode -ne 0) {
-    $failure = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue |
-      Select-String -Pattern 'E_INSTALLER_|Windows startup registry drift|presenceChanged=')
-    foreach ($line in $failure) {
-      if ($line.ToString().Length -le 280) { Write-Output $line.ToString() }
+    # Never relay untrusted child stdout/stderr or expose registry value names.
+    # The child emits exactly one bounded stage code before failing closed.
+    $diagnostics = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue)
+    $phase = @($diagnostics | Where-Object {
+      $_ -cmatch '^E_INSTALLER_ACCEPTANCE_PHASE_(PROFILE|BASELINE|INSTALL|INSTALLED_ASSERTIONS|UNINSTALL|UNINSTALLED_ASSERTIONS)$'
+    } | Select-Object -Last 1)
+    if ($phase.Count -eq 1) {
+      Write-Output $phase[0]
+    } else {
+      Write-Output 'E_INSTALLER_ACCEPTANCE_PHASE_UNOBSERVED'
+    }
+    $privateEvidence = $diagnostics -join [char]10
+    if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
+      Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'
+      foreach ($summary in [regex]::Matches($privateEvidence,
+        'presenceChanged=(?:true|false);added=[0-9]+;removed=[0-9]+;typeChanged=[0-9]+;dataChanged=[0-9]+')) {
+        Write-Output $summary.Value
+      }
     }
     throw "E_INSTALLER_ISOLATED_CHILD_FAILED_EXIT_$($child.ExitCode)"
   }

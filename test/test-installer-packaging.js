@@ -256,9 +256,16 @@ test('isolated installer binds writable TEMP and TMP to the verified profile, no
       "$env:TMP = 'C:\\Windows\\Temp\\inherited-host'",
       "Set-VerifiedProfileTemporaryDirectory -Profile '" + q(profile) +
         "' -LocalAppData '" + q(local) + "'",
-      "if ($env:TEMP -cne (Join-Path '" + q(local) + "' 'Temp') -or " +
-        "$env:TMP -cne $env:TEMP -or !(Test-Path -LiteralPath $env:TEMP -PathType Container)) " +
-        "{ throw 'TEMP_NOT_BOUND_TO_VERIFIED_PROFILE' }",
+      "$expectedTemp = [IO.Path]::GetFullPath((Join-Path '" + q(local) +
+        "' 'Temp')).TrimEnd('\\')",
+      "$actualTemp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')",
+      "if ($actualTemp -ine $expectedTemp) { throw 'TEMP_PATH_NOT_BOUND_TO_PROFILE' }",
+      "if ([IO.Path]::GetFullPath($env:TMP).TrimEnd('\\') -ine $actualTemp) " +
+        "{ throw 'TMP_PATH_NOT_BOUND_TO_PROFILE' }",
+      "if (!(Test-Path -LiteralPath $env:TEMP -PathType Container)) " +
+        "{ throw 'TEMP_DIRECTORY_NOT_CREATED' }",
+      "if ($actualTemp.ToUpperInvariant() -ine $expectedTemp) " +
+        "{ throw 'WINDOWS_TEMP_CASE_EQUIVALENCE_FAILED' }",
       "Write-Output 'ISOLATED_TEMP_BINDING_PASS'",
     ].join('\n');
     const result = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',ps],

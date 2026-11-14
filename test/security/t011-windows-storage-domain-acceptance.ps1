@@ -14,6 +14,8 @@ $attackerName = "jd148a$($guid.Substring(0,8))"
 $clientName = "jd148c$($guid.Substring(0,8))"
 $peerServer = $null
 $peerLog = $null
+$peerReadyWatcher = $null
+$peerReadySourceId = "JDC.T011.PeerReady.$guid"
 $createdUsers = [System.Collections.Generic.List[string]]::new()
 $attached = $false
 $letter = @('R','S','T','U','V','W') | Where-Object {
@@ -114,7 +116,14 @@ function Invoke-PeerClient([pscredential] $who, [string] $proof, [string] $mode,
     try {
         $process = Start-Process -FilePath $proof -Credential $who -ArgumentList @($mode, $pipeName) -WorkingDirectory $root -PassThru -RedirectStandardError $log
         if (-not $process.WaitForExit(12000)) { throw "E_PIPE_CLIENT_TIMEOUT_$mode" }
-        if ($process.ExitCode -ne 0) { throw "E_PIPE_CLIENT_FAILED_$mode" }
+        if ($process.ExitCode -ne 0) {
+            # Preserve only an explicitly classified machine error, not
+            # arbitrary process stderr, paths, SIDs or credentials.
+            $reasons = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                Where-Object { $_ -cmatch '^E_PIPE_[A-Z0-9_]+$' })
+            $reason = if ($reasons.Count -eq 1) { $reasons[0] } else { 'NO_SAFE_DIAGNOSTIC' }
+            throw "E_PIPE_CLIENT_FAILED_$($mode)_$reason"
+        }
         if (-not (Select-String -LiteralPath $log -SimpleMatch $expectedMarker -Quiet)) {
             throw "E_PIPE_CLIENT_MISSING_VERDICT_$mode"
         }
@@ -142,13 +151,16 @@ try {
     New-Item -Path $root -ItemType Directory | Out-Null
     $outside = Join-Path $root 'attacker'
     $bin = Join-Path $root 'bin'
+    $readyDir = Join-Path $root 'peer-ready'
     New-Item -Path $outside -ItemType Directory | Out-Null
     New-Item -Path $bin -ItemType Directory | Out-Null
+    New-Item -Path $readyDir -ItemType Directory | Out-Null
     Set-CustodyAcl $root @(
         @{ SID = $service.SID; Rights = 'ReadAndExecute' },
         @{ SID = $attacker.SID; Rights = 'ReadAndExecute' },
         @{ SID = $client.SID; Rights = 'ReadAndExecute' })
     Set-CustodyAcl $outside @(@{ SID = $attacker.SID; Rights = 'Modify' })
+    Set-CustodyAcl $readyDir @(@{ SID = $service.SID; Rights = 'Modify' })
     Set-CustodyAcl $bin @(
         @{ SID = $service.SID; Rights = 'ReadAndExecute' },
         @{ SID = $attacker.SID; Rights = 'ReadAndExecute' },
@@ -281,9 +293,30 @@ exit
     }
     $pipeName = "\\.\pipe\JDC-T011-$guid"
     $peerLog = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-server.stderr"
+    $peerReadyPath = Join-Path $readyDir 'pipe-ready'
+    if (Test-Path -LiteralPath $peerReadyPath) { throw 'E_PIPE_READY_STALE' }
+    # Register before launch; WaitNamedPipeW cannot wait for a missing instance.
+    # A .NET filesystem event replaces startup sleeps and retry loops.
+    $peerReadyWatcher = [System.IO.FileSystemWatcher]::new($readyDir, 'pipe-ready')
+    $peerReadyWatcher.NotifyFilter = [System.IO.NotifyFilters]::FileName
+    $peerReadyWatcher.EnableRaisingEvents = $true
+    Register-ObjectEvent -InputObject $peerReadyWatcher -EventName Created -SourceIdentifier $peerReadySourceId | Out-Null
     $peerServer = Start-Process -FilePath $peer -Credential $service.Credential -ArgumentList @(
-        'serve', $pipeName, $service.SID.Value, $client.SID.Value, $attacker.SID.Value
+        'serve', $pipeName, $service.SID.Value, $client.SID.Value,
+        $attacker.SID.Value, $peerReadyPath
     ) -WorkingDirectory $root -PassThru -RedirectStandardError $peerLog
+    if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
+        $readyEvent = Wait-Event -SourceIdentifier $peerReadySourceId -Timeout 12
+        if ($null -eq $readyEvent) {
+            $errors = @(Get-Content -LiteralPath $peerLog -ErrorAction SilentlyContinue |
+                Where-Object { $_ -cmatch '^E_PIPE_[A-Z0-9_]+$' })
+            $reason = if ($errors.Count -eq 1) { $errors[0] } else { 'NO_SAFE_DIAGNOSTIC' }
+            throw "E_PIPE_LISTENER_READY_TIMEOUT_$reason"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
+        throw 'E_PIPE_LISTENER_READY_NOT_CONFIRMED'
+    }
     Invoke-PeerClient $attacker.Credential $peer 'deny' $pipeName 'T011_WINDOWS_UNTRUSTED_CLIENT_NO_GRANT'
     Invoke-PeerClient $client.Credential $peer 'allow' $pipeName 'T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED'
     if (-not $peerServer.WaitForExit(12000)) { throw 'E_PIPE_PROOF_SERVER_TIMEOUT' }
@@ -300,6 +333,15 @@ exit
     Write-Output 'T011_STORAGE_WINDOWS_DOMAIN_PASS_NONRELEASE'
 } finally {
     $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $peerReadyWatcher) {
+        try {
+            Unregister-Event -SourceIdentifier $peerReadySourceId -ErrorAction Stop
+            Get-Event -SourceIdentifier $peerReadySourceId -ErrorAction SilentlyContinue |
+                Remove-Event -ErrorAction Stop
+        } catch { $cleanupErrors.Add('PIPE_READY_EVENT') }
+        try { $peerReadyWatcher.Dispose() }
+        catch { $cleanupErrors.Add('PIPE_READY_WATCHER') }
+    }
     if ($null -ne $peerServer) {
         try {
             if (-not $peerServer.HasExited) {

@@ -31,3 +31,24 @@ test('Windows native pipe has explicit DACL, local-only exclusive instance and d
   assert.match(example, /FlushFileBuffers\(pipe\.0\)/);
   assert.doesNotMatch(example, /FILE_GENERIC_WRITE/);
 });
+
+test('Windows hosted peer test awaits a service-owned readiness event without polling', () => {
+  const script = read('test/security/t011-windows-storage-domain-acceptance.ps1');
+  const example = read('native/authority-service/examples/windows_named_pipe_peer_proof.rs');
+  assert.match(script, /Set-CustodyAcl \$readyDir/);
+  assert.match(script, /Register-ObjectEvent -InputObject \$peerReadyWatcher -EventName Created/);
+  assert.match(script, /Wait-Event -SourceIdentifier \$peerReadySourceId -Timeout 12/);
+  assert.match(script, /Unregister-Event -SourceIdentifier \$peerReadySourceId/);
+  assert.doesNotMatch(script, /Start-Sleep/);
+  assert.match(example, /\.create_new\(true\)/);
+  assert.match(example, /E_PIPE_READY_SIGNAL/);
+  assert.match(example, /ready_path/);
+});
+
+test('Windows failed client retains only a classified error code', () => {
+  const script = read('test/security/t011-windows-storage-domain-acceptance.ps1');
+  assert.ok(script.includes("'-cmatch '^E_PIPE_[A-Z0-9_]+$'") ||
+    script.includes("-cmatch '^E_PIPE_[A-Z0-9_]+$'"));
+  assert.match(script, /NO_SAFE_DIAGNOSTIC/);
+  assert.match(script, /E_PIPE_CLIENT_FAILED_\$\(\$mode\)_\$reason/);
+});

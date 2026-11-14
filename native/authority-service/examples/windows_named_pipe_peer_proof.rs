@@ -124,7 +124,7 @@ mod proof {
         }
         Ok(LocalMemory(desc))
     }
-    fn serve(name: &str, service: &str, client: &str, attacker: &str) -> Result<()> {
+    fn serve(name: &str, service: &str, client: &str, attacker: &str, ready_path: &str) -> Result<()> {
         let pipe_name = pipe_name(name)?;
         let (service_sid, client_sid, attacker_sid) = (sid(service)?, sid(client)?, sid(attacker)?);
         if service_sid == client_sid || service_sid == attacker_sid || client_sid == attacker_sid {
@@ -155,6 +155,13 @@ mod proof {
             return Err("E_PIPE_CREATE_EXCLUSIVE");
         }
         let pipe = Handle(handle);
+        // Test-only event rendezvous: signal only after exclusive pipe creation.
+        // The signal file lives in a service-owned, client-inaccessible directory.
+        let _ready = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(ready_path)
+            .map_err(|_| "E_PIPE_READY_SIGNAL")?;
         for expected_allowed in [false, true] {
             let connected = unsafe { ConnectNamedPipe(pipe.0, ptr::null_mut()) };
             if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
@@ -227,8 +234,8 @@ mod proof {
     pub fn main() -> std::process::ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let result = match args.as_slice() {
-            [mode, pipe, service, client_sid, attacker] if mode == "serve" => {
-                serve(pipe, service, client_sid, attacker)
+            [mode, pipe, service, client_sid, attacker, ready_path] if mode == "serve" => {
+                serve(pipe, service, client_sid, attacker, ready_path)
             }
             [mode, pipe] if mode == "allow" => client(pipe, true),
             [mode, pipe] if mode == "deny" => client(pipe, false),

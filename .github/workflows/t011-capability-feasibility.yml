@@ -205,6 +205,10 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml
 
+      - name: Build test-only Windows named-pipe peer proof
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
+
       - name: Parse Windows NTFS custody acceptance script
         if: matrix.target == 'win32-x64'
         shell: pwsh

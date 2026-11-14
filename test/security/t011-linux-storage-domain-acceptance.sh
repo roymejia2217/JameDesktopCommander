@@ -185,7 +185,23 @@ probe_hash="$(sha256sum "$probe_source" | cut -d ' ' -f1)"
   echo 'E_STORAGE_OPENAT2_PROBE_HASH_MISMATCH' >&2; exit 1;
 }
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" service.bin allow
+# The same production-compiled native read primitive must reject hostile
+# objects and oversized payloads, not merely show syscall error codes.
+sudo -n -u jdc-authority -- ln -s service.bin "$isolated/blocked-link.bin"
+sudo -n -u jdc-authority -- ln -s "$outside_file" "$isolated/blocked-external-link.bin"
+sudo -n -u jdc-authority -- mkdir "$isolated/blocked-directory"
+sudo -n -u jdc-authority -- mkfifo "$isolated/blocked-fifo"
+sudo -n -u jdc-authority -- truncate --size=1048576 "$isolated/at-limit.bin"
+sudo -n -u jdc-authority -- truncate --size=1048577 "$isolated/too-large.bin"
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" at-limit.bin allow-limit
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" blocked-link.bin deny
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" blocked-external-link.bin deny
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" blocked-directory deny
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" blocked-fifo deny
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" too-large.bin deny
+sudo -n -u jdc-authority -- "$probe_path" "$isolated" missing-file.bin deny
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" admin-import.bin deny-exdev
+echo 'T011_STORAGE_BOUND_READ_REAL_KERNEL_PASS_NONRELEASE'
 echo 'T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE'
 sudo -n umount -- "$bind_alias"
 if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then

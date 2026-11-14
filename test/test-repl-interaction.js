@@ -1,248 +1,150 @@
-
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
-import { configManager } from '../dist/config-manager.js';
+import assert from 'node:assert/strict';
+import { after, test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { terminalManager } from '../dist/terminal-manager.js';
 
-// Get directory name
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh';
+const ownedPids = new Set();
+const EVENT_DEADLINE_MS = 10_000;
 
-// Test output directory
-const OUTPUT_DIR = path.join(__dirname, 'test_output');
-const OUTPUT_FILE = path.join(OUTPUT_DIR, 'repl_test_output.txt');
-
-// Colors for console output
-const colors = {
-  reset: '\x1b[0m',
-  green: '\x1b[32m',
-  red: '\x1b[31m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  cyan: '\x1b[36m'
-};
-
-/**
- * Setup function to prepare for tests
- */
-async function setup() {
-  console.log(`${colors.blue}Setting up REPL interaction test...${colors.reset}`);
-  
-  // Save original config to restore later
-  const originalConfig = await configManager.getConfig();
-  
-  // Create output directory if it doesn't exist
-  try {
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
-  } catch (error) {
-    console.warn(`${colors.yellow}Warning: Could not create output directory: ${error.message}${colors.reset}`);
-  }
-  
-  return originalConfig;
+function quoteShell(value) {
+  return process.platform === 'win32'
+    ? "'" + value.replaceAll("'", "''") + "'"
+    : "'" + value.replaceAll("'", "'\"'\"'") + "'";
 }
 
-/**
- * Teardown function to clean up after tests
- */
-async function teardown(originalConfig) {
-  console.log(`${colors.blue}Cleaning up after tests...${colors.reset}`);
-  
-  // Reset configuration to original
-  await configManager.updateConfig(originalConfig);
-  
-  console.log(`${colors.green}✓ Teardown: config restored${colors.reset}`);
+function interactiveCommand(executable) {
+  const invocation = (process.platform === 'win32' ? '& ' : '')
+    + quoteShell(executable) + ' -i';
+  return process.platform === 'win32'
+    ? invocation + '; exit $LASTEXITCODE'
+    : invocation;
 }
 
-/**
- * Wait for the specified number of milliseconds
- */
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function startInteractive(executable) {
+  const result = await terminalManager.executeCommand(
+    interactiveCommand(executable), 3_000, shell, true, {
+      onStarted(pid) { ownedPids.add(pid); },
+    },
+  );
+  assert.ok(result.pid > 0, 'a real interpreter shell process must start');
+  assert.ok(terminalManager.getSession(result.pid),
+    'the interpreter must still be interactive after startup');
+  assert.ok(ownedPids.has(result.pid), 'owned child must be registered for cleanup');
+  return result.pid;
 }
 
-/**
- * Test Python REPL interaction
- */
-async function testPythonREPL() {
-  console.log(`${colors.cyan}Running Python REPL interaction test...${colors.reset}`);
-  
-  try {
-    // Setup Python test
-    // Find Python executable
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-    
-    // Start a Python REPL process
-    const result = await terminalManager.executeCommand(pythonCmd + ' -i', 5000);
-    
-    if (result.pid <= 0) {
-      throw new Error(`Failed to start Python REPL: ${result.output}`);
-    }
-    
-    console.log(`${colors.green}✓ Started Python REPL with PID ${result.pid}${colors.reset}`);
-    
-    // Wait for REPL to initialize
-    await sleep(1000);
-    
-    // Send a command to the REPL with explicit Python print
-    const testValue = Math.floor(Math.random() * 100);
-    console.log(`${colors.blue}Test value: ${testValue}${colors.reset}`);
-    
-    // Send two different commands to increase chances of seeing output
-    let success = terminalManager.sendInputToProcess(result.pid, `print("STARTING PYTHON TEST")\n`)
-    if (!success) {
-      throw new Error('Failed to send initial input to Python REPL');
-    }
-    
-    // Wait a bit between commands
-    await sleep(1000);
-    
-    // Send the actual test command
-    success = terminalManager.sendInputToProcess(result.pid, `print(f"REPL_TEST_VALUE: {${testValue} * 2}")\n`)
-    if (!success) {
-      throw new Error('Failed to send test input to Python REPL');
-    }
-    
-    console.log(`${colors.green}✓ Sent test commands to Python REPL${colors.reset}`);
-    
-    // Wait longer for the command to execute
-    await sleep(3000);
-    
-    // Get output from the REPL
-    const output = terminalManager.getNewOutput(result.pid);
-    console.log(`Python REPL output: ${output || 'No output received'}`);
-    
-    // Write output to file for inspection
-    await fs.writeFile(OUTPUT_FILE, `Python REPL output:\n${output || 'No output received'}`);
-    
-    // Terminate the REPL process
-    const terminated = terminalManager.forceTerminate(result.pid);
-    if (!terminated) {
-      console.warn(`${colors.yellow}Warning: Could not terminate Python REPL process${colors.reset}`);
-    } else {
-      console.log(`${colors.green}✓ Terminated Python REPL process${colors.reset}`);
-    }
-    
-    // Check if we got the expected output
-    if (output && output.includes(`REPL_TEST_VALUE: ${testValue * 2}`)) {
-      console.log(`${colors.green}✓ Python REPL test passed!${colors.reset}`);
-      return true;
-    } else {
-      console.log(`${colors.red}✗ Python REPL test failed: Expected output containing "REPL_TEST_VALUE: ${testValue * 2}" but got: ${output}${colors.reset}`);
-      return false;
-    }
-  } catch (error) {
-    console.error(`${colors.red}✗ Python REPL test error: ${error.message}${colors.reset}`);
-    return false;
+async function observeEvaluation(pid, source, expected) {
+  const before = terminalManager.captureOutputSnapshot(pid);
+  assert.ok(before, 'REPL must expose an output snapshot');
+  assert.equal(terminalManager.sendInputToProcess(pid, source), true,
+    'the actual interpreter must accept stdin');
+  const deadline = Date.now() + EVENT_DEADLINE_MS;
+  while (true) {
+    const output = terminalManager.getOutputSinceSnapshot(pid, before) ?? '';
+    if (output.includes(expected)) return;
+    const remaining = deadline - Date.now();
+    assert.ok(remaining > 0,
+      'REPL did not evaluate input before deadline: '
+        + terminalManager.getOutputTail(pid, 2000));
+    const snapshot = terminalManager.captureOutputSnapshot(pid);
+    assert.ok(snapshot, 'the session must exist while awaiting evaluation');
+    const change = await terminalManager.waitForSessionChange(pid, snapshot, remaining);
+    assert.equal(change, 'output',
+      'REPL evaluation did not produce expected output; event=' + change
+        + '; tail=' + terminalManager.getOutputTail(pid, 2000));
   }
 }
 
-/**
- * Test Node.js REPL interaction
- */
-async function testNodeREPL() {
-  console.log(`${colors.cyan}Running Node.js REPL interaction test...${colors.reset}`);
-  
-  try {
-    // Start a Node.js REPL process
-    const result = await terminalManager.executeCommand('node -i', 5000);
-    
-    if (result.pid <= 0) {
-      throw new Error(`Failed to start Node.js REPL: ${result.output}`);
-    }
-    
-    console.log(`${colors.green}✓ Started Node.js REPL with PID ${result.pid}${colors.reset}`);
-    
-    // Wait for REPL to initialize
-    await sleep(1000);
-    
-    // Send commands to the Node.js REPL
-    const testValue = Math.floor(Math.random() * 100);
-    console.log(`${colors.blue}Test value: ${testValue}${colors.reset}`);
-    
-    // Send multiple commands to increase chances of seeing output
-    let success = terminalManager.sendInputToProcess(result.pid, `console.log("STARTING NODE TEST")\n`)
-    if (!success) {
-      throw new Error('Failed to send initial input to Node.js REPL');
-    }
-    
-    // Wait a bit between commands
-    await sleep(1000);
-    
-    // Send the actual test command
-    success = terminalManager.sendInputToProcess(result.pid, `console.log("NODE_REPL_TEST_VALUE:", ${testValue} * 3)\n`)
-    if (!success) {
-      throw new Error('Failed to send test input to Node.js REPL');
-    }
-    
-    console.log(`${colors.green}✓ Sent test commands to Node.js REPL${colors.reset}`);
-    
-    // Wait longer for the command to execute
-    await sleep(3000);
-    
-    // Get output from the REPL
-    const output = terminalManager.getNewOutput(result.pid);
-    console.log(`Node.js REPL output: ${output || 'No output received'}`);
-    
-    // Append output to file for inspection
-    await fs.appendFile(OUTPUT_FILE, `\n\nNode.js REPL output:\n${output || 'No output received'}`);
-    
-    // Terminate the REPL process
-    const terminated = terminalManager.forceTerminate(result.pid);
-    if (!terminated) {
-      console.warn(`${colors.yellow}Warning: Could not terminate Node.js REPL process${colors.reset}`);
-    } else {
-      console.log(`${colors.green}✓ Terminated Node.js REPL process${colors.reset}`);
-    }
-    
-    // Check if we got the expected output
-    if (output && output.includes(`NODE_REPL_TEST_VALUE: ${testValue * 3}`)) {
-      console.log(`${colors.green}✓ Node.js REPL test passed!${colors.reset}`);
-      return true;
-    } else {
-      console.log(`${colors.red}✗ Node.js REPL test failed: Expected output containing "NODE_REPL_TEST_VALUE: ${testValue * 3}" but got: ${output}${colors.reset}`);
-      return false;
-    }
-  } catch (error) {
-    console.error(`${colors.red}✗ Node.js REPL test error: ${error.message}${colors.reset}`);
-    return false;
+async function stopOwned(pid) {
+  if (!(pid > 0) || !ownedPids.has(pid)) return;
+  if (terminalManager.getSession(pid)) {
+    assert.equal(terminalManager.forceTerminate(pid), true,
+      'owned REPL process tree must terminate');
+    assert.equal(await terminalManager.waitForSessionExit(pid, 7_000), 'exit',
+      'owned REPL must exit without leaving child sessions');
   }
+  assert.equal(terminalManager.getSession(pid), undefined,
+    'no active REPL session may survive cleanup');
+  ownedPids.delete(pid);
 }
 
-/**
- * Run all REPL interaction tests
- */
-export default async function runTests() {
-  let originalConfig;
+after(async () => {
+  for (const pid of [...ownedPids]) await stopOwned(pid);
+  assert.equal(ownedPids.size, 0, 'all owned REPL processes must be closed');
+});
+
+test('Node REPL computes a deterministic value from stdin', { timeout: 20_000 }, async () => {
+  let pid;
   try {
-    originalConfig = await setup();
-    
-    const pythonTestResult = await testPythonREPL();
-    const nodeTestResult = await testNodeREPL();
-    
-    // Overall test result
-    const allPassed = pythonTestResult && nodeTestResult;
-    
-    console.log(`\n${colors.cyan}===== REPL Interaction Test Summary =====\n${colors.reset}`);
-    console.log(`Python REPL test: ${pythonTestResult ? colors.green + 'PASSED' : colors.red + 'FAILED'}${colors.reset}`);
-    console.log(`Node.js REPL test: ${nodeTestResult ? colors.green + 'PASSED' : colors.red + 'FAILED'}${colors.reset}`);
-    console.log(`\nOverall result: ${allPassed ? colors.green + 'ALL TESTS PASSED! 🎉' : colors.red + 'SOME TESTS FAILED!'}${colors.reset}`);
-    
-    return allPassed;
-  } catch (error) {
-    console.error(`${colors.red}✗ Test execution error: ${error.message}${colors.reset}`);
-    return false;
+    pid = await startInteractive(process.execPath);
+    await observeEvaluation(pid,
+      "console.log(['JDC','NODE','REPL','PROOF'].join('_'), 6 * 7)",
+      'JDC_NODE_REPL_PROOF 42');
   } finally {
-    if (originalConfig) {
-      await teardown(originalConfig);
-    }
+    if (pid) await stopOwned(pid);
   }
-}
+});
 
-// If this file is run directly (not imported), execute the test
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runTests().catch(error => {
-    console.error(`${colors.red}✗ Unhandled error: ${error}${colors.reset}`);
-    process.exit(1);
+test('Node REPL accepts sequential input without losing output', { timeout: 20_000 }, async () => {
+  let pid;
+  try {
+    pid = await startInteractive(process.execPath);
+    await observeEvaluation(pid,
+      "console.log(['JDC','NODE','FIRST'].join('_'), 8 * 5)",
+      'JDC_NODE_FIRST 40');
+    await observeEvaluation(pid,
+      "console.log(['JDC','NODE','SECOND'].join('_'), 8 * 6)",
+      'JDC_NODE_SECOND 48');
+  } finally {
+    if (pid) await stopOwned(pid);
+  }
+});
+
+test('Python REPL evaluates stdin when interpreter is installed',
+  { timeout: 20_000 }, async (t) => {
+    const candidates = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
+    let python = null;
+    for (const name of candidates) {
+      const probe = spawnSync(name, ['--version'], {
+        encoding: 'utf8', timeout: 5_000, windowsHide: true,
+      });
+      if (probe.status === 0 && /Python 3\./.test(
+        (probe.stdout ?? '') + (probe.stderr ?? '')
+      )) {
+        python = name;
+        break;
+      }
+    }
+    if (!python) {
+      t.skip('No usable Python 3 interpreter is installed on this host');
+      return;
+    }
+    let pid;
+    try {
+      pid = await startInteractive(python);
+      await observeEvaluation(pid,
+        "print('_'.join(('JDC','PYTHON','REPL','PROOF')), 6 * 7)",
+        'JDC_PYTHON_REPL_PROOF 42');
+    } finally {
+      if (pid) await stopOwned(pid);
+    }
   });
-}
+
+test('Node REPL propagates nonzero exit and rejects further stdin',
+  { timeout: 20_000 }, async () => {
+    let pid;
+    try {
+      pid = await startInteractive(process.execPath);
+      assert.equal(terminalManager.sendInputToProcess(pid, 'process.exit(7)'), true);
+      assert.equal(await terminalManager.waitForSessionExit(pid, 10_000), 'exit');
+      const result = terminalManager.readOutputPaginated(pid, -40, 40);
+      assert.ok(result, 'completed session must remain queryable');
+      assert.equal(result.isComplete, true);
+      assert.equal(result.exitCode, 7, 'actual nonzero child exit must be propagated');
+      assert.equal(terminalManager.sendInputToProcess(pid, 'console.log(0)'), false,
+        'a completed REPL must reject further stdin');
+    } finally {
+      if (pid) await stopOwned(pid);
+    }
+  });

@@ -13,7 +13,7 @@ use std::{mem, os::fd::AsRawFd, os::unix::net::UnixStream};
 /// A caller MUST NOT promote this result to authorization without separately
 /// established protected client identity, verified OS peer and policy epoch.
 #[allow(dead_code)]
-pub(crate) fn observe_kernel_peer(stream: &UnixStream) -> Result<KernelPeer, IdentityDenied> {
+pub fn observe_kernel_peer(stream: &UnixStream) -> Result<KernelPeer, IdentityDenied> {
     let mut raw = mem::MaybeUninit::<libc::ucred>::zeroed();
     let mut length = mem::size_of::<libc::ucred>() as libc::socklen_t;
     let status = unsafe {

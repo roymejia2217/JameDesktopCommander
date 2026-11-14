@@ -29,10 +29,10 @@ mod confined_read_contract_tests {
 }
 
 #[cfg(any(target_os = "linux", test))]
-mod peer_policy;
+pub mod peer_policy;
 
 #[cfg(target_os = "linux")]
-mod linux_peer;
+pub mod linux_peer;
 
 #[cfg(all(target_os = "linux", test))]
 mod linux_cross_principal;

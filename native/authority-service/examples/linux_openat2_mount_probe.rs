@@ -1,11 +1,11 @@
 //! Test-only Linux kernel path-resolution probe; not a service grant or shipped binary.
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
+    use jdc_authority_service::confined_read::read_regular_at;
     use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
     use std::{
         env,
         fs::File,
-        io::Read,
         path::{Component, Path},
         process::ExitCode,
     };
@@ -37,23 +37,35 @@ fn main() -> std::process::ExitCode {
     let observed = openat2(
         &root_dir,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
     );
     match (mode.to_str(), observed) {
-        (Some("allow"), Ok(fd)) => {
-            let file = File::from(fd);
-            let mut bytes = Vec::new();
-            match file.take(64).read_to_end(&mut bytes) {
-                Ok(_) if bytes == b"SERVICE_DOMAIN_BYTES" => ExitCode::SUCCESS,
-                _ => {
-                    eprintln!("E_OPENAT2_AUTHORIZED_READ_MISMATCH");
-                    ExitCode::FAILURE
-                }
+        (Some("allow"), Ok(_)) => match read_regular_at(&root_dir, name) {
+            Ok(bytes) if bytes == b"SERVICE_DOMAIN_BYTES" => ExitCode::SUCCESS,
+            _ => {
+                eprintln!("E_OPENAT2_AUTHORIZED_READ_MISMATCH");
+                ExitCode::FAILURE
             }
+        },
+        (Some("allow-limit"), Ok(_)) => match read_regular_at(&root_dir, name) {
+            Ok(bytes) if bytes.len() == 1048576 && bytes.iter().all(|&b| b == 0) => {
+                ExitCode::SUCCESS
+            }
+            _ => {
+                eprintln!("E_OPENAT2_READ_LIMIT_MISMATCH");
+                ExitCode::FAILURE
+            }
+        },
+        (Some("deny"), _) if read_regular_at(&root_dir, name).is_err() => ExitCode::SUCCESS,
+        (Some("deny"), _) => {
+            eprintln!("E_OPENAT2_UNEXPECTED_READ_PERMISSION");
+            ExitCode::FAILURE
         }
-        (Some("deny-exdev"), Err(error)) if error.raw_os_error() == libc::EXDEV => {
+        (Some("deny-exdev"), Err(error))
+            if error.raw_os_error() == libc::EXDEV && read_regular_at(&root_dir, name).is_err() =>
+        {
             ExitCode::SUCCESS
         }
         (Some("deny-exdev"), Err(error)) => {

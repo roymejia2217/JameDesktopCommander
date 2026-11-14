@@ -2,7 +2,31 @@
 //! This DOES NOT authenticate an IPC peer, validate a policy store,
 //! grant filesystem operations, or start a service.
 
+pub mod confined_read;
 pub mod token_policy;
+
+#[cfg(test)]
+mod confined_read_contract_tests {
+    use crate::confined_read::validate_relative_name;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_only_explicit_relative_file_components() {
+        assert!(validate_relative_name(Path::new("visible.txt")));
+        assert!(validate_relative_name(Path::new("nested/visible.txt")));
+        for rejected in [
+            "",
+            ".",
+            "..",
+            "../secret",
+            "nested/../secret",
+            "./visible.txt",
+            "/outside",
+        ] {
+            assert!(!validate_relative_name(Path::new(rejected)), "{rejected}");
+        }
+    }
+}
 
 #[cfg(any(target_os = "linux", test))]
 mod peer_policy;

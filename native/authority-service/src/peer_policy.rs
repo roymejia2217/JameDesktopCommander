@@ -4,7 +4,7 @@
 use crate::IdentityDenied;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KernelPeer {
+pub struct KernelPeer {
     pub pid: i32,
     pub uid: u32,
     pub gid: u32,
@@ -14,7 +14,7 @@ pub(crate) struct KernelPeer {
 // authorize runtime operations. Retained only for reviewed future admission.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DedicatedAccount {
+pub struct DedicatedAccount {
     pub uid: u32,
     pub gid: u32,
 }
@@ -22,7 +22,7 @@ pub(crate) struct DedicatedAccount {
 /// The expected account MUST come from protected OS account resolution.
 /// This comparison alone never makes a client authorized for filesystem I/O.
 #[allow(dead_code)]
-pub(crate) fn verify_distinct_peer(
+pub fn verify_distinct_peer(
     peer: KernelPeer,
     account: DedicatedAccount,
     service_uid: u32,

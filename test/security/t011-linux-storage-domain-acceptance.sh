@@ -11,16 +11,22 @@ command -v findmnt >/dev/null
 command -v setpriv >/dev/null
 getent passwd jdc-authority >/dev/null
 getent passwd nobody >/dev/null
+getent passwd jdc-mcp-client >/dev/null
 sudo -n true
 service_uid="$(id -u jdc-authority)"
 service_gid="$(id -g jdc-authority)"
 attacker_uid="$(id -u nobody)"
-[[ "$service_uid" -ne 0 && "$attacker_uid" -ne 0 &&
-   "$service_uid" -ne "$attacker_uid" ]] || exit 1
+client_uid="$(id -u jdc-mcp-client)"
+client_gid="$(id -g jdc-mcp-client)"
+[[ "$service_uid" -ne 0 && "$attacker_uid" -ne 0 && "$client_uid" -ne 0 &&
+   "$service_uid" -ne "$attacker_uid" && "$service_uid" -ne "$client_uid" &&
+   "$client_uid" -ne "$attacker_uid" && "$service_gid" -ne "$client_gid" ]] || exit 1
 base="$(mktemp -d /tmp/jdc-t011-storage.XXXXXXXX)"
 isolated="$base/service-volume"
 attacker="$base/attacker-owned"
 bind_alias=''
+peer_server_pid=''
+peer_server_log=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
 # The mountpoint's immediate parent belongs to the trusted administrator,
@@ -32,6 +38,13 @@ sudo -n chmod 0700 "$attacker"
 cleanup() {
   local code=$?
   trap - EXIT
+  if [[ -n "$peer_server_pid" ]]; then
+    kill "$peer_server_pid" 2>/dev/null || :
+    wait "$peer_server_pid" 2>/dev/null || :
+  fi
+  if [[ -n "$peer_server_log" ]]; then
+    rm -f -- "$peer_server_log" || code=1
+  fi
   if [[ -n "$bind_alias" ]] && findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
     sudo -n umount -- "$bind_alias" || code=1
   fi
@@ -203,6 +216,54 @@ sudo -n -u jdc-authority -- "$probe_path" "$isolated" missing-file.bin deny
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" admin-import.bin deny-exdev
 echo 'T011_STORAGE_BOUND_READ_REAL_KERNEL_PASS_NONRELEASE'
 echo 'T011_STORAGE_OPENAT2_NO_XDEV_DENIES_BIND_ALIAS_NONRELEASE'
+# Native test executable, not a production listener or user-host daemon.
+# The existing isolated volume and real OS users are mandatory positive controls.
+peer_source="$(realpath -e native/authority-service/target/debug/examples/linux_peered_read_proof)"
+[[ -x "$peer_source" ]] || { echo 'E_PEER_PROOF_BINARY_MISSING' >&2; exit 1; }
+peer_binary="$base/peered-read-proof"
+sudo -n install -o root -g root -m 0555 -- "$peer_source" "$peer_binary"
+[[ "$(sha256sum "$peer_source" | cut -d ' ' -f1)" == \
+   "$(sudo -n sha256sum "$peer_binary" | cut -d ' ' -f1)" ]] || {
+  echo 'E_PEER_PROOF_BINARY_DIGEST_CHANGED' >&2; exit 1;
+}
+peer_socket_dir="$base/peer-socket"
+sudo -n install -d -o jdc-authority -g jdc-authority -m 0711 -- "$peer_socket_dir"
+peer_socket="$peer_socket_dir/accepted.sock"
+peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-peered-read.XXXXXXXX)"
+timeout --kill-after=2s 14s sudo -n -u jdc-authority -- \
+  "$peer_binary" serve "$isolated" "$peer_socket" >"$peer_server_log" 2>&1 &
+peer_server_pid=$!
+peer_ready=0
+for ((attempt=0; attempt<80; attempt++)); do
+  if [[ -S "$peer_socket" ]]; then peer_ready=1; break; fi
+  if ! kill -0 "$peer_server_pid" 2>/dev/null; then break; fi
+  sleep 0.025
+done
+if [[ "$peer_ready" -ne 1 ]]; then
+  cat -- "$peer_server_log" >&2
+  echo 'E_PEER_PROOF_LISTENER_NOT_READY' >&2
+  exit 1
+fi
+# First the real foreign nobody UID/GID must connect and receive no data.
+sudo -n -u nobody -- "$peer_binary" deny "$peer_socket"
+# Then the dedicated jdc-mcp-client UID/GID reads exactly one synthetic file.
+sudo -n -u jdc-mcp-client -- "$peer_binary" allow "$peer_socket"
+if ! wait "$peer_server_pid"; then
+  cat -- "$peer_server_log" >&2
+  echo 'E_PEER_PROOF_SERVER_FAILED' >&2
+  exit 1
+fi
+peer_server_pid=''
+grep -Fq 'T011_LINUX_OS_PEER_BOUND_NATIVE_READ_PASS_NONRELEASE' "$peer_server_log" || {
+  cat -- "$peer_server_log" >&2
+  echo 'E_PEER_PROOF_NO_REAL_SERVER_VERDICT' >&2
+  exit 1
+}
+rm -f -- "$peer_server_log"
+peer_server_log=''
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == \
+   "$outside_hash" ]] || { echo 'E_PEER_PROOF_OUTSIDE_CHANGED' >&2; exit 1; }
+echo 'T011_LINUX_REAL_SERVICE_PEER_BOUND_READ_PASS_NONRELEASE'
 sudo -n umount -- "$bind_alias"
 if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
   echo 'E_STORAGE_BIND_ALIAS_REMAINS_MOUNTED' >&2; exit 1

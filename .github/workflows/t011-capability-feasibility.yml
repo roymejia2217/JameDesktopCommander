@@ -209,6 +209,10 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
 
+      - name: Prove native Windows named-pipe kernel denial classification
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 test --locked --example windows_named_pipe_peer_proof --manifest-path native/authority-service/Cargo.toml
+
       - name: Parse Windows NTFS custody acceptance script
         if: matrix.target == 'win32-x64'
         shell: pwsh

@@ -317,12 +317,15 @@ exit
     if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
         throw 'E_PIPE_LISTENER_READY_NOT_CONFIRMED'
     }
+    # Real Windows kernel DACL rejection, not merely application-level denial.
+    # The fixture client explicitly requires ERROR_ACCESS_DENIED, not timeout,
+    # FILE_NOT_FOUND or a synthetic denial byte from a reachable server.
     Invoke-PeerClient $attacker.Credential $peer 'deny' $pipeName 'T011_WINDOWS_UNTRUSTED_CLIENT_NO_GRANT'
+    Write-Output 'T011_WINDOWS_FOREIGN_SID_DENIED_BY_KERNEL'
     Invoke-PeerClient $client.Credential $peer 'allow' $pipeName 'T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED'
     if (-not $peerServer.WaitForExit(12000)) { throw 'E_PIPE_PROOF_SERVER_TIMEOUT' }
     if ($peerServer.ExitCode -ne 0) { throw 'E_PIPE_PROOF_SERVER_FAILED' }
-    if (-not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_FOREIGN_SID_DENIED' -Quiet) -or
-        -not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE' -Quiet)) {
+    if (-not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE' -Quiet)) {
         throw 'E_PIPE_PROOF_MISSING_KERNEL_VERDICT'
     }
     Write-Output 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE'

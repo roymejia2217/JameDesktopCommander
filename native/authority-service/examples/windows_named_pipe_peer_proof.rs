@@ -102,13 +102,13 @@ mod proof {
         }
         Ok(byte)
     }
-    fn security_descriptor(service: &str, client: &str, attacker: &str) -> Result<LocalMemory> {
-        // An explicit protected DACL. No Everyone/Anonymous ACE, and no
-        // FILE_CREATE_PIPE_INSTANCE for either test client.
+    fn security_descriptor(service: &str, client: &str) -> Result<LocalMemory> {
+        // Stronger kernel boundary: only the dedicated client SID may open
+        // a data channel. No Everyone/Anonymous or foreign-client ACE, and
+        // the client has no FILE_CREATE_PIPE_INSTANCE right (0x00000004).
         let sddl = format!(
             "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{service})\
-             (A;;{CLIENT_PIPE_RIGHTS};;;{client})\
-             (A;;{CLIENT_PIPE_RIGHTS};;;{attacker})"
+             (A;;{CLIENT_PIPE_RIGHTS};;;{client})"
         );
         let mut desc = ptr::null_mut();
         if unsafe {
@@ -140,7 +140,7 @@ mod proof {
         if observe_process_sid().map_err(|_| "E_PIPE_SERVICE_TOKEN")? != service_sid {
             return Err("E_PIPE_SERVICE_IDENTITY");
         }
-        let dacl = security_descriptor(service, client, attacker)?;
+        let dacl = security_descriptor(service, client)?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: dacl.0,
@@ -169,36 +169,30 @@ mod proof {
             .create_new(true)
             .open(ready_path)
             .map_err(|_| "E_PIPE_READY_SIGNAL")?;
-        for expected_allowed in [false, true] {
-            let connected = unsafe { ConnectNamedPipe(pipe.0, ptr::null_mut()) };
-            if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                return Err("E_PIPE_CONNECT");
-            }
-            if read_one(pipe.0)? != b'R' {
-                return Err("E_PIPE_REQUEST");
-            }
-            // The server owns this OS handle for the entire synchronous request.
-            let borrowed = unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(pipe.0) };
-            let observed =
-                observe_client_sid_after_read(borrowed).map_err(|_| "E_PIPE_IMPERSONATION")?;
-            let allowed = observed == client_sid;
-            if allowed != expected_allowed {
-                return Err("E_PIPE_PEER_IDENTITY_MISMATCH");
-            }
-            if !allowed && observed != attacker_sid {
-                return Err("E_PIPE_UNEXPECTED_FOREIGN_IDENTITY");
-            }
-            write_one(pipe.0, if allowed { b'A' } else { b'D' })?;
-            // Win32 disconnect discards unread bytes. Drain the reply before reuse.
-            if unsafe { FlushFileBuffers(pipe.0) } == 0 {
-                return Err("E_PIPE_REPLY_FLUSH");
-            }
-            if unsafe { DisconnectNamedPipe(pipe.0) } == 0 {
-                return Err("E_PIPE_DISCONNECT");
-            }
-            if !allowed {
-                eprintln!("T011_WINDOWS_FOREIGN_SID_DENIED");
-            }
+        // A foreign SID is denied by the kernel's DACL and cannot reach
+        // ConnectNamedPipe. The *one* eligible client must still pass an
+        // independent kernel-issued impersonation-token identity check.
+        let connected = unsafe { ConnectNamedPipe(pipe.0, ptr::null_mut()) };
+        if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+            return Err("E_PIPE_CONNECT");
+        }
+        if read_one(pipe.0)? != b'R' {
+            return Err("E_PIPE_REQUEST");
+        }
+        // The server owns this OS handle for the entire synchronous request.
+        let borrowed = unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(pipe.0) };
+        let observed =
+            observe_client_sid_after_read(borrowed).map_err(|_| "E_PIPE_IMPERSONATION")?;
+        if observed != client_sid || observed == attacker_sid {
+            return Err("E_PIPE_PEER_IDENTITY_MISMATCH");
+        }
+        write_one(pipe.0, b'A')?;
+        // Win32 disconnect discards unread bytes. Drain the reply before reuse.
+        if unsafe { FlushFileBuffers(pipe.0) } == 0 {
+            return Err("E_PIPE_REPLY_FLUSH");
+        }
+        if unsafe { DisconnectNamedPipe(pipe.0) } == 0 {
+            return Err("E_PIPE_DISCONNECT");
         }
         eprintln!("T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE");
         Ok(())
@@ -214,9 +208,14 @@ mod proof {
             _ => "E_PIPE_CLIENT_OPEN_UNKNOWN",
         }
     }
+    fn untrusted_open_is_kernel_denied(code: u32) -> bool {
+        code == ERROR_ACCESS_DENIED
+    }
     fn client(name: &str, expected_allowed: bool) -> Result<()> {
         let name = pipe_name(name)?;
-        if unsafe { WaitNamedPipeW(name.as_ptr(), 6000) } == 0 {
+        // The server fixture already signalled readiness using an OS event.
+        // Do not allow a negative test to be reclassified as busy/missing.
+        if expected_allowed && unsafe { WaitNamedPipeW(name.as_ptr(), 6000) } == 0 {
             return Err("E_PIPE_WAIT_EXPIRED");
         }
         let handle = unsafe {
@@ -231,23 +230,25 @@ mod proof {
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            // Must read GetLastError *immediately* after CreateFileW fails.
-            return Err(client_open_error(unsafe { GetLastError() }));
+            // Read the true kernel error immediately after failed CreateFileW.
+            let code = unsafe { GetLastError() };
+            if !expected_allowed && untrusted_open_is_kernel_denied(code) {
+                eprintln!("T011_WINDOWS_UNTRUSTED_CLIENT_NO_GRANT");
+                return Ok(());
+            }
+            return Err(client_open_error(code));
         }
         let pipe = Handle(handle);
+        // The foreign client is forbidden from opening a pipe at all.
+        // Even an unexpectedly successful open MUST fail the negative test.
+        if !expected_allowed {
+            return Err("E_PIPE_UNTRUSTED_CLIENT_CONNECTED");
+        }
         write_one(pipe.0, b'R')?;
-        let observed = read_one(pipe.0)?;
-        if observed != if expected_allowed { b'A' } else { b'D' } {
+        if read_one(pipe.0)? != b'A' {
             return Err("E_PIPE_CLIENT_WRONG_DECISION");
         }
-        eprintln!(
-            "{}",
-            if expected_allowed {
-                "T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED"
-            } else {
-                "T011_WINDOWS_UNTRUSTED_CLIENT_NO_GRANT"
-            }
-        );
+        eprintln!("T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED");
         Ok(())
     }
     #[cfg(test)]
@@ -256,6 +257,15 @@ mod proof {
         use windows_sys::Win32::Foundation::{
             ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY,
         };
+
+        #[test]
+        fn only_real_kernel_access_denial_counts_as_foreign_client_rejection() {
+            assert!(untrusted_open_is_kernel_denied(ERROR_ACCESS_DENIED));
+            assert!(!untrusted_open_is_kernel_denied(ERROR_FILE_NOT_FOUND));
+            assert!(!untrusted_open_is_kernel_denied(ERROR_PIPE_BUSY));
+            assert!(!untrusted_open_is_kernel_denied(ERROR_INVALID_PARAMETER));
+            assert!(!untrusted_open_is_kernel_denied(0));
+        }
 
         #[test]
         fn named_pipe_open_error_codes_are_distinct_and_fail_closed() {

@@ -9,6 +9,7 @@ test('native T011 compiles Windows named pipe proof only in nonrelease CI', () =
   const ci = read('.github/workflows/t011-capability-feasibility.yml');
   assert.match(ci, /build --locked --examples --manifest-path native\/authority-service\/Cargo\.toml/);
   assert.match(ci, /t011-windows-storage-domain-acceptance\.ps1/);
+  assert.match(ci, /test --locked --example windows_named_pipe_peer_proof --manifest-path native\/authority-service\/Cargo\.toml/);
   assert.match(ci, /if: matrix\.target == 'win32-x64'/);
 });
 test('Windows pipe CI uses three actual OS accounts and a real SID denial', () => {
@@ -18,6 +19,7 @@ test('Windows pipe CI uses three actual OS accounts and a real SID denial', () =
   assert.match(script, /Invoke-PeerClient \$attacker\.Credential/);
   assert.match(script, /Invoke-PeerClient \$client\.Credential/);
   assert.match(script, /T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE/);
+  assert.match(script, /T011_WINDOWS_FOREIGN_SID_DENIED_BY_KERNEL/);
   assert.match(script, /E_PIPE_CLIENT_(?:FAILED|TIMEOUT)/);
   assert.match(script, /E_STORAGE_EXTERIOR_BYTES_CHANGED/);
   assert.match(script, /RUNNER_ENVIRONMENT/);
@@ -30,6 +32,11 @@ test('Windows native pipe has explicit DACL, local-only exclusive instance and d
   assert.match(example, /PIPE_REJECT_REMOTE_CLIENTS/);
   assert.match(example, /FlushFileBuffers\(pipe\.0\)/);
   assert.doesNotMatch(example, /FILE_GENERIC_WRITE/);
+  // The foreign SID MUST NOT receive a connection ACE. It must be rejected
+  // at the native OS boundary before the Rust server observes a request.
+  assert.doesNotMatch(example, /\(A;;\{CLIENT_PIPE_RIGHTS\};;;\{attacker\}\)/);
+  assert.match(example, /if !expected_allowed && untrusted_open_is_kernel_denied\(code\)/);
+  assert.match(example, /E_PIPE_UNTRUSTED_CLIENT_CONNECTED/);
 });
 
 test('Windows hosted peer test awaits a service-owned readiness event without polling', () => {

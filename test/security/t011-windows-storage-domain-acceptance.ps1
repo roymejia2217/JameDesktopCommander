@@ -11,6 +11,11 @@ $root = Join-Path $env:ProgramData "JDC-148-STORAGE-$guid"
 $vhd = Join-Path $env:RUNNER_TEMP "JDC-148-$guid.vhdx"
 $serviceName = "jd148s$($guid.Substring(0,8))"
 $attackerName = "jd148a$($guid.Substring(0,8))"
+$clientName = "jd148c$($guid.Substring(0,8))"
+$peerServer = $null
+$peerLog = $null
+$peerReadyWatcher = $null
+$peerReadySourceId = "JDC.T011.PeerReady.$guid"
 $createdUsers = [System.Collections.Generic.List[string]]::new()
 $attached = $false
 $letter = @('R','S','T','U','V','W') | Where-Object {
@@ -104,12 +109,41 @@ function Invoke-DiskPart([string] $content) {
         Remove-Item -LiteralPath $instructions -Force -ErrorAction SilentlyContinue
     }
 }
+function Invoke-PeerClient([pscredential] $who, [string] $proof, [string] $mode,
+    [string] $pipeName, [string] $expectedMarker) {
+    $log = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-peer-$mode-$([guid]::NewGuid().ToString('N')).stderr"
+    $process = $null
+    try {
+        $process = Start-Process -FilePath $proof -Credential $who -ArgumentList @($mode, $pipeName) -WorkingDirectory $root -PassThru -RedirectStandardError $log
+        if (-not $process.WaitForExit(12000)) { throw "E_PIPE_CLIENT_TIMEOUT_$mode" }
+        if ($process.ExitCode -ne 0) {
+            # Preserve only an explicitly classified machine error, not
+            # arbitrary process stderr, paths, SIDs or credentials.
+            $reasons = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue |
+                Where-Object { $_ -cmatch '^E_PIPE_[A-Z0-9_]+$' })
+            $reason = if ($reasons.Count -eq 1) { $reasons[0] } else { 'NO_SAFE_DIAGNOSTIC' }
+            throw "E_PIPE_CLIENT_FAILED_$($mode)_$reason"
+        }
+        if (-not (Select-String -LiteralPath $log -SimpleMatch $expectedMarker -Quiet)) {
+            throw "E_PIPE_CLIENT_MISSING_VERDICT_$mode"
+        }
+    } finally {
+        if ($null -ne $process -and -not $process.HasExited) {
+            $process.Kill()
+            if (-not $process.WaitForExit(3000)) { throw 'E_PIPE_CLIENT_CLEANUP_FAILED' }
+        }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
 try {
     $service = New-CIIdentity $serviceName
     $attacker = New-CIIdentity $attackerName
-    if ($service.SID.Value -eq $attacker.SID.Value) { throw 'E_STORAGE_IDENTICAL_SIDS' }
+    $client = New-CIIdentity $clientName
+    if ($service.SID.Value -eq $attacker.SID.Value -or
+        $service.SID.Value -eq $client.SID.Value -or
+        $client.SID.Value -eq $attacker.SID.Value) { throw 'E_STORAGE_IDENTICAL_SIDS' }
     $adminSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    foreach ($u in @($service, $attacker)) {
+    foreach ($u in @($service, $attacker, $client)) {
         if (@(Get-LocalGroupMember -SID $adminSid).SID.Value -contains $u.SID.Value) {
             throw 'E_STORAGE_ATTACKER_ADMINISTRATOR'
         }
@@ -117,15 +151,20 @@ try {
     New-Item -Path $root -ItemType Directory | Out-Null
     $outside = Join-Path $root 'attacker'
     $bin = Join-Path $root 'bin'
+    $readyDir = Join-Path $root 'peer-ready'
     New-Item -Path $outside -ItemType Directory | Out-Null
     New-Item -Path $bin -ItemType Directory | Out-Null
+    New-Item -Path $readyDir -ItemType Directory | Out-Null
     Set-CustodyAcl $root @(
         @{ SID = $service.SID; Rights = 'ReadAndExecute' },
-        @{ SID = $attacker.SID; Rights = 'ReadAndExecute' })
+        @{ SID = $attacker.SID; Rights = 'ReadAndExecute' },
+        @{ SID = $client.SID; Rights = 'ReadAndExecute' })
     Set-CustodyAcl $outside @(@{ SID = $attacker.SID; Rights = 'Modify' })
+    Set-CustodyAcl $readyDir @(@{ SID = $service.SID; Rights = 'Modify' })
     Set-CustodyAcl $bin @(
         @{ SID = $service.SID; Rights = 'ReadAndExecute' },
-        @{ SID = $attacker.SID; Rights = 'ReadAndExecute' })
+        @{ SID = $attacker.SID; Rights = 'ReadAndExecute' },
+        @{ SID = $client.SID; Rights = 'ReadAndExecute' })
     $source = Join-Path (Get-Location).Path 'native/authority-store/target/debug/examples/custody_attacker.exe'
     $probe = Join-Path $bin 'custody_attacker.exe'
     Copy-Item -LiteralPath $source -Destination $probe -ErrorAction Stop
@@ -243,6 +282,53 @@ exit
         throw 'E_STORAGE_UNEXPECTED_CROSS_VOLUME_ALIAS'
     }
     Write-Output 'T011_STORAGE_CROSS_VOLUME_HARDLINK_DENIED'
+    # Non-shipping named-pipe proof: three different real Windows token SIDs.
+    $peerSource = Join-Path (Get-Location).Path 'native/authority-service/target/debug/examples/windows_named_pipe_peer_proof.exe'
+    if (-not (Test-Path -LiteralPath $peerSource -PathType Leaf)) { throw 'E_PIPE_PROOF_BINARY_MISSING' }
+    $peer = Join-Path $bin 'windows_named_pipe_peer_proof.exe'
+    Copy-Item -LiteralPath $peerSource -Destination $peer -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $peerSource -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $peer -Algorithm SHA256).Hash) {
+        throw 'E_PIPE_PROOF_BINARY_MISMATCH'
+    }
+    $pipeName = "\\.\pipe\JDC-T011-$guid"
+    $peerLog = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-server.stderr"
+    $peerReadyPath = Join-Path $readyDir 'pipe-ready'
+    if (Test-Path -LiteralPath $peerReadyPath) { throw 'E_PIPE_READY_STALE' }
+    # Register before launch; WaitNamedPipeW cannot wait for a missing instance.
+    # A .NET filesystem event replaces startup sleeps and retry loops.
+    $peerReadyWatcher = [System.IO.FileSystemWatcher]::new($readyDir, 'pipe-ready')
+    $peerReadyWatcher.NotifyFilter = [System.IO.NotifyFilters]::FileName
+    $peerReadyWatcher.EnableRaisingEvents = $true
+    Register-ObjectEvent -InputObject $peerReadyWatcher -EventName Created -SourceIdentifier $peerReadySourceId | Out-Null
+    $peerServer = Start-Process -FilePath $peer -Credential $service.Credential -ArgumentList @(
+        'serve', $pipeName, $service.SID.Value, $client.SID.Value,
+        $attacker.SID.Value, $peerReadyPath
+    ) -WorkingDirectory $root -PassThru -RedirectStandardError $peerLog
+    if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
+        $readyEvent = Wait-Event -SourceIdentifier $peerReadySourceId -Timeout 12
+        if ($null -eq $readyEvent) {
+            $errors = @(Get-Content -LiteralPath $peerLog -ErrorAction SilentlyContinue |
+                Where-Object { $_ -cmatch '^E_PIPE_[A-Z0-9_]+$' })
+            $reason = if ($errors.Count -eq 1) { $errors[0] } else { 'NO_SAFE_DIAGNOSTIC' }
+            throw "E_PIPE_LISTENER_READY_TIMEOUT_$reason"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
+        throw 'E_PIPE_LISTENER_READY_NOT_CONFIRMED'
+    }
+    # Real Windows kernel DACL rejection, not merely application-level denial.
+    # The fixture client explicitly requires ERROR_ACCESS_DENIED, not timeout,
+    # FILE_NOT_FOUND or a synthetic denial byte from a reachable server.
+    Invoke-PeerClient $attacker.Credential $peer 'deny' $pipeName 'T011_WINDOWS_UNTRUSTED_CLIENT_NO_GRANT'
+    Write-Output 'T011_WINDOWS_FOREIGN_SID_DENIED_BY_KERNEL'
+    Invoke-PeerClient $client.Credential $peer 'allow' $pipeName 'T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED'
+    if (-not $peerServer.WaitForExit(12000)) { throw 'E_PIPE_PROOF_SERVER_TIMEOUT' }
+    if ($peerServer.ExitCode -ne 0) { throw 'E_PIPE_PROOF_SERVER_FAILED' }
+    if (-not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE' -Quiet)) {
+        throw 'E_PIPE_PROOF_MISSING_KERNEL_VERDICT'
+    }
+    Write-Output 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE'
     if ((Get-FileHash -LiteralPath $outsideFile -Algorithm SHA256).Hash -ne $before) {
         throw 'E_STORAGE_EXTERIOR_BYTES_CHANGED'
     }
@@ -250,6 +336,27 @@ exit
     Write-Output 'T011_STORAGE_WINDOWS_DOMAIN_PASS_NONRELEASE'
 } finally {
     $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $peerReadyWatcher) {
+        try {
+            Unregister-Event -SourceIdentifier $peerReadySourceId -ErrorAction Stop
+            Get-Event -SourceIdentifier $peerReadySourceId -ErrorAction SilentlyContinue |
+                Remove-Event -ErrorAction Stop
+        } catch { $cleanupErrors.Add('PIPE_READY_EVENT') }
+        try { $peerReadyWatcher.Dispose() }
+        catch { $cleanupErrors.Add('PIPE_READY_WATCHER') }
+    }
+    if ($null -ne $peerServer) {
+        try {
+            if (-not $peerServer.HasExited) {
+                $peerServer.Kill()
+                if (-not $peerServer.WaitForExit(3000)) { throw 'E_PIPE_SERVER_NOT_STOPPED' }
+            }
+        } catch { $cleanupErrors.Add('PIPE_SERVER_STOP') }
+    }
+    if ($peerLog -and (Test-Path -LiteralPath $peerLog)) {
+        try { Remove-Item -LiteralPath $peerLog -Force -ErrorAction Stop }
+        catch { $cleanupErrors.Add('PIPE_LOG_REMOVE') }
+    }
     if (Test-Path -LiteralPath $vhd) {
         try { Invoke-DiskPart "select vdisk file=`"$vhd`"`ndetach vdisk`nexit" }
         catch { $cleanupErrors.Add('VHD_DETACH') }

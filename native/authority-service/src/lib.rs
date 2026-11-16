@@ -40,6 +40,9 @@ mod linux_cross_principal;
 #[cfg(windows)]
 pub mod windows_token;
 
+#[cfg(windows)]
+pub mod windows_pipe_peer;
+
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityDenied;

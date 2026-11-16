@@ -32,6 +32,8 @@ test('Windows native pipe has explicit DACL, local-only exclusive instance and d
   assert.match(example, /PIPE_REJECT_REMOTE_CLIENTS/);
   assert.match(example, /FlushFileBuffers\(pipe\.0\)/);
   assert.doesNotMatch(example, /FILE_GENERIC_WRITE/);
+  // The client gets standard read/write metadata rights, never create-instance.
+  assert.match(example, /const CLIENT_PIPE_RIGHTS: &str = "0x0012019B";/);
   // The foreign SID MUST NOT receive a connection ACE. It must be rejected
   // at the native OS boundary before the Rust server observes a request.
   assert.doesNotMatch(example, /\(A;;\{CLIENT_PIPE_RIGHTS\};;;\{attacker\}\)/);

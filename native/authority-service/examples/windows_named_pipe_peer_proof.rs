@@ -30,7 +30,11 @@ mod proof {
 
     type Result<T> = std::result::Result<T, &'static str>;
     const READ_WRITE_DATA: u32 = 0x0003;
-    const CLIENT_PIPE_RIGHTS: &str = "0x00100003"; // synchronize + read/write, no create-instance
+    // Standard file read/write rights minus FILE_APPEND_DATA (0x4).
+    // This retains standard READ_CONTROL and attribute rights while refusing
+    // FILE_CREATE_PIPE_INSTANCE, which aliases FILE_APPEND_DATA for pipes.
+    // Never grant generic file-write rights directly to a client.
+    const CLIENT_PIPE_RIGHTS: &str = "0x0012019B";
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -257,6 +261,19 @@ mod proof {
         use windows_sys::Win32::Foundation::{
             ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY,
         };
+
+        #[test]
+        fn client_ace_allows_standard_read_write_metadata_but_never_create_instance() {
+            // These are the documented standard file read/write access
+            // bits EXCEPT the dangerous FILE_APPEND_DATA/CREATE_PIPE_INSTANCE.
+            let rights = u32::from_str_radix(CLIENT_PIPE_RIGHTS.trim_start_matches("0x"), 16)
+                .expect("literal SDDL access mask");
+            assert_eq!(rights, 0x0012_019B);
+            assert_eq!(
+                rights & windows_sys::Win32::Storage::FileSystem::FILE_CREATE_PIPE_INSTANCE,
+                0
+            );
+        }
 
         #[test]
         fn only_real_kernel_access_denial_counts_as_foreign_client_rejection() {

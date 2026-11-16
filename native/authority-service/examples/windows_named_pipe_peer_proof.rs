@@ -5,7 +5,14 @@ mod proof {
     use jdc_authority_service::windows_pipe_peer::{
         observe_client_sid_after_read, observe_process_sid,
     };
-    use std::{ffi::c_void, mem::size_of, ptr};
+    use std::{
+        ffi::c_void,
+        io::Read,
+        mem::size_of,
+        os::windows::fs::{MetadataExt, OpenOptionsExt},
+        path::Path,
+        ptr,
+    };
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
@@ -19,8 +26,9 @@ mod proof {
             GetLengthSid, SECURITY_ATTRIBUTES,
         },
         Storage::FileSystem::{
-            CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
-            OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+            CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+            PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
         },
         System::Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW,
@@ -30,6 +38,35 @@ mod proof {
 
     type Result<T> = std::result::Result<T, &'static str>;
     const READ_WRITE_DATA: u32 = 0x0003;
+    const FIXED_PROOF_BYTES: &[u8] = b"JDC_T011_BOUND_READ_BYTES";
+    const FIXED_MAX_BYTES: usize = 1024 * 1024;
+    // Synthetic fixture-only read. This is not arbitrary path authorization,
+    // a production confinement policy, or protection from a malicious admin.
+    fn read_fixed_service_file(root: &Path) -> Result<Vec<u8>> {
+        // Open a single constant filename after client authentication. The
+        // host CI fixture separately proves a dedicated NTFS volume, service
+        // custody, and access denial to both unprivileged client principals.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(root.join("service-read.bin"))
+            .map_err(|_| "E_PIPE_FIXED_FILE_OPEN")?;
+        let metadata = file.metadata().map_err(|_| "E_PIPE_FIXED_FILE_STAT")?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || metadata.len() > FIXED_MAX_BYTES as u64
+        {
+            return Err("E_PIPE_FIXED_FILE_UNSAFE_OBJECT");
+        }
+        let mut bytes = Vec::new();
+        file.take((FIXED_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "E_PIPE_FIXED_FILE_READ")?;
+        if bytes.len() > FIXED_MAX_BYTES || bytes != FIXED_PROOF_BYTES {
+            return Err("E_PIPE_FIXED_FILE_UNEXPECTED_BYTES");
+        }
+        Ok(bytes)
+    }
     // Standard file read/write rights minus FILE_APPEND_DATA (0x4).
     // This retains standard READ_CONTROL and attribute rights while refusing
     // FILE_CREATE_PIPE_INSTANCE, which aliases FILE_APPEND_DATA for pipes.
@@ -135,6 +172,7 @@ mod proof {
         client: &str,
         attacker: &str,
         ready_path: &str,
+        trusted_fixture_root: &str,
     ) -> Result<()> {
         let pipe_name = pipe_name(name)?;
         let (service_sid, client_sid, attacker_sid) = (sid(service)?, sid(client)?, sid(attacker)?);
@@ -190,7 +228,13 @@ mod proof {
         if observed != client_sid || observed == attacker_sid {
             return Err("E_PIPE_PEER_IDENTITY_MISMATCH");
         }
+        // Only an authenticated real Windows token can cause this fixture
+        // read. The caller supplies no filename, root or filesystem grant.
+        let bounded = read_fixed_service_file(Path::new(trusted_fixture_root))?;
         write_one(pipe.0, b'A')?;
+        for byte in bounded {
+            write_one(pipe.0, byte)?;
+        }
         // Win32 disconnect discards unread bytes. Drain the reply before reuse.
         if unsafe { FlushFileBuffers(pipe.0) } == 0 {
             return Err("E_PIPE_REPLY_FLUSH");
@@ -199,6 +243,7 @@ mod proof {
             return Err("E_PIPE_DISCONNECT");
         }
         eprintln!("T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE");
+        eprintln!("T011_WINDOWS_PEER_BOUND_SYNTHETIC_READ_PASS_NONRELEASE");
         Ok(())
     }
     // Preserve the kernel verdict without exposing a pipe name, SID, token, or
@@ -252,7 +297,13 @@ mod proof {
         if read_one(pipe.0)? != b'A' {
             return Err("E_PIPE_CLIENT_WRONG_DECISION");
         }
+        for expected in FIXED_PROOF_BYTES {
+            if read_one(pipe.0)? != *expected {
+                return Err("E_PIPE_CLIENT_WRONG_SYNTHETIC_BYTES");
+            }
+        }
         eprintln!("T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED");
+        eprintln!("T011_WINDOWS_PEER_BOUND_SYNTHETIC_READ_PASS_NONRELEASE");
         Ok(())
     }
     #[cfg(test)]
@@ -261,6 +312,29 @@ mod proof {
         use windows_sys::Win32::Foundation::{
             ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY,
         };
+
+        #[test]
+        fn fixture_file_read_must_be_bounded_regular_and_exact() {
+            let root = std::env::temp_dir()
+                .join(format!("jdc-t011-win-fixed-read-{}", std::process::id()));
+            std::fs::create_dir(&root).expect("new private fixture directory");
+            let file = root.join("service-read.bin");
+            std::fs::write(&file, b"JDC_T011_BOUND_READ_BYTES").unwrap();
+            assert_eq!(
+                read_fixed_service_file(&root).unwrap(),
+                b"JDC_T011_BOUND_READ_BYTES"
+            );
+            std::fs::write(&file, b"WRONG_BYTES").unwrap();
+            assert!(read_fixed_service_file(&root).is_err());
+            std::fs::write(&file, vec![b'X'; 1024 * 1024 + 1]).unwrap();
+            assert!(read_fixed_service_file(&root).is_err());
+            std::fs::remove_file(&file).unwrap();
+            assert!(read_fixed_service_file(&root).is_err());
+            std::fs::create_dir(&file).unwrap();
+            assert!(read_fixed_service_file(&root).is_err());
+            std::fs::remove_dir(&file).unwrap();
+            std::fs::remove_dir(&root).unwrap();
+        }
 
         #[test]
         fn client_ace_allows_standard_read_write_metadata_but_never_create_instance() {
@@ -308,8 +382,17 @@ mod proof {
     pub fn main() -> std::process::ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let result = match args.as_slice() {
-            [mode, pipe, service, client_sid, attacker, ready_path] if mode == "serve" => {
-                serve(pipe, service, client_sid, attacker, ready_path)
+            [mode, pipe, service, client_sid, attacker, ready_path, fixture_root]
+                if mode == "serve" =>
+            {
+                serve(
+                    pipe,
+                    service,
+                    client_sid,
+                    attacker,
+                    ready_path,
+                    fixture_root,
+                )
             }
             [mode, pipe] if mode == "allow" => client(pipe, true),
             [mode, pipe] if mode == "deny" => client(pipe, false),

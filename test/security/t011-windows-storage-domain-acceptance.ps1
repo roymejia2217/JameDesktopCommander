@@ -282,6 +282,15 @@ exit
         throw 'E_STORAGE_UNEXPECTED_CROSS_VOLUME_ALIAS'
     }
     Write-Output 'T011_STORAGE_CROSS_VOLUME_HARDLINK_DENIED'
+    # A fixed, service-owned NTFS object on the separate VHD: not a client
+    # pathname, not a user-owned root and not a production broker policy.
+    $nativeReadFile = Join-Path $volume 'service-read.bin'
+    $nativeReadBytes = [Text.Encoding]::ASCII.GetBytes('JDC_T011_BOUND_READ_BYTES')
+    [System.IO.File]::WriteAllBytes($nativeReadFile, $nativeReadBytes)
+    $nativeReadBefore = (Get-FileHash -LiteralPath $nativeReadFile -Algorithm SHA256).Hash
+    Require-UserSuccess 'SERVICE_CAN_READ_NATIVE_READ_FILE' $service.Credential $probe @('read', $nativeReadFile, $nativeReadFile)
+    Require-UserDenial 'CLIENT_CANNOT_READ_NATIVE_READ_FILE' $client.Credential $probe @('read', $nativeReadFile, $nativeReadFile)
+    Require-UserDenial 'ATTACKER_CANNOT_READ_NATIVE_READ_FILE' $attacker.Credential $probe @('read', $nativeReadFile, $nativeReadFile)
     # Non-shipping named-pipe proof: three different real Windows token SIDs.
     $peerSource = Join-Path (Get-Location).Path 'native/authority-service/target/debug/examples/windows_named_pipe_peer_proof.exe'
     if (-not (Test-Path -LiteralPath $peerSource -PathType Leaf)) { throw 'E_PIPE_PROOF_BINARY_MISSING' }
@@ -303,7 +312,7 @@ exit
     Register-ObjectEvent -InputObject $peerReadyWatcher -EventName Created -SourceIdentifier $peerReadySourceId | Out-Null
     $peerServer = Start-Process -FilePath $peer -Credential $service.Credential -ArgumentList @(
         'serve', $pipeName, $service.SID.Value, $client.SID.Value,
-        $attacker.SID.Value, $peerReadyPath
+        $attacker.SID.Value, $peerReadyPath, $volume
     ) -WorkingDirectory $root -PassThru -RedirectStandardError $peerLog
     if (-not (Test-Path -LiteralPath $peerReadyPath -PathType Leaf)) {
         $readyEvent = Wait-Event -SourceIdentifier $peerReadySourceId -Timeout 12
@@ -325,10 +334,15 @@ exit
     Invoke-PeerClient $client.Credential $peer 'allow' $pipeName 'T011_WINDOWS_LEGITIMATE_CLIENT_SID_OBSERVED'
     if (-not $peerServer.WaitForExit(12000)) { throw 'E_PIPE_PROOF_SERVER_TIMEOUT' }
     if ($peerServer.ExitCode -ne 0) { throw 'E_PIPE_PROOF_SERVER_FAILED' }
-    if (-not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE' -Quiet)) {
+    if (-not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE' -Quiet) -or
+        -not (Select-String -LiteralPath $peerLog -SimpleMatch 'T011_WINDOWS_PEER_BOUND_SYNTHETIC_READ_PASS_NONRELEASE' -Quiet)) {
         throw 'E_PIPE_PROOF_MISSING_KERNEL_VERDICT'
     }
     Write-Output 'T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE'
+    Write-Output 'T011_WINDOWS_PEER_BOUND_SYNTHETIC_READ_PASS_NONRELEASE'
+    if ((Get-FileHash -LiteralPath $nativeReadFile -Algorithm SHA256).Hash -ne $nativeReadBefore) {
+        throw 'E_PIPE_FIXED_PROOF_OBJECT_CHANGED'
+    }
     if ((Get-FileHash -LiteralPath $outsideFile -Algorithm SHA256).Hash -ne $before) {
         throw 'E_STORAGE_EXTERIOR_BYTES_CHANGED'
     }

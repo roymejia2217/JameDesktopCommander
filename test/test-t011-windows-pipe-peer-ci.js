@@ -61,3 +61,16 @@ test('Windows failed client retains only a classified error code', () => {
   assert.match(script, /NO_SAFE_DIAGNOSTIC/);
   assert.match(script, /E_PIPE_CLIENT_FAILED_\$\(\$mode\)_\$reason/);
 });
+
+test('Windows T011 native read is fixed synthetic, ACL-protected, and not a client pathname grant', () => {
+  const script = read('test/security/t011-windows-storage-domain-acceptance.ps1');
+  const example = read('native/authority-service/examples/windows_named_pipe_peer_proof.rs');
+  assert.match(script, /Require-UserDenial 'CLIENT_CANNOT_READ_NATIVE_READ_FILE'/);
+  assert.match(script, /Require-UserDenial 'ATTACKER_CANNOT_READ_NATIVE_READ_FILE'/);
+  assert.match(script, /Require-UserSuccess 'SERVICE_CAN_READ_NATIVE_READ_FILE'/);
+  assert.match(script, /T011_WINDOWS_PEER_BOUND_SYNTHETIC_READ_PASS_NONRELEASE/);
+  assert.match(example, /FILE_FLAG_OPEN_REPARSE_POINT/);
+  assert.match(example, /read_fixed_service_file/);
+  assert.match(example, /JDC_T011_BOUND_READ_BYTES/);
+  assert.doesNotMatch(example, /std::fs::read/);
+});

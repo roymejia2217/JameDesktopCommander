@@ -25,7 +25,7 @@ use windows_sys::Win32::{
             PIPE_TYPE_BYTE, PIPE_WAIT,
         },
         Threading::{CreateEventW, WaitForSingleObject},
-        IO::{GetOverlappedResult, OVERLAPPED},
+        IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
     },
 };
 
@@ -65,6 +65,58 @@ fn request(pipe: HANDLE, sent: u8, receive: bool) -> u8 {
     );
     assert_eq!(count, 1);
     byte
+}
+
+// A pending Windows IO operation owns its OVERLAPPED and byte buffer until
+// completion, including error/cancellation paths. Never drop them on timeout.
+fn complete_pending(pipe: HANDLE, event: HANDLE, ov: &OVERLAPPED) -> u32 {
+    let status = unsafe { WaitForSingleObject(event, 7000) };
+    if status != WAIT_OBJECT_0 {
+        unsafe { CancelIoEx(pipe, ov) };
+        let mut drained = 0u32;
+        unsafe { GetOverlappedResult(pipe, ov, &mut drained, 1) };
+        panic!("E_PIPE_ASYNC_IO_TIMEOUT");
+    }
+    let mut count = 0u32;
+    assert_ne!(
+        unsafe { GetOverlappedResult(pipe, ov, &mut count, 0) },
+        0,
+        "kernel overlapped I/O completion failed"
+    );
+    count
+}
+
+// The server created an overlapped pipe. Supplying NULL OVERLAPPED here
+// could falsely report successful I/O, according to Win32 documentation.
+fn server_byte_io(pipe: HANDLE, byte: &mut u8, reading: bool) {
+    let event = Handle(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) });
+    assert!(!event.0.is_null());
+    let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+    ov.hEvent = event.0;
+    let completed = unsafe {
+        if reading {
+            ReadFile(pipe, byte, 1, ptr::null_mut(), &mut ov)
+        } else {
+            WriteFile(pipe, byte, 1, ptr::null_mut(), &mut ov)
+        }
+    };
+    let transferred = if completed != 0 {
+        let mut count = 0u32;
+        assert_ne!(
+            unsafe { GetOverlappedResult(pipe, &ov, &mut count, 0) },
+            0,
+            "completed I/O result must be observed"
+        );
+        count
+    } else {
+        assert_eq!(
+            unsafe { GetLastError() },
+            ERROR_IO_PENDING,
+            "unexpected kernel I/O error"
+        );
+        complete_pending(pipe, event.0, &ov)
+    };
+    assert_eq!(transferred, 1, "exactly one real pipe byte is required");
 }
 
 #[test]
@@ -142,30 +194,17 @@ fn observe_independent_client(label: &str, unique: u128) -> (u32, Vec<u8>) {
             .expect("actual child OS process must be created"),
     );
     if error == ERROR_IO_PENDING {
-        assert_eq!(
-            unsafe { WaitForSingleObject(event.0, 7000) },
-            WAIT_OBJECT_0,
-            "real IPC connection did not complete before deadline"
-        );
-        let mut bytes = 0u32;
-        assert_ne!(
-            unsafe { GetOverlappedResult(pipe.0, &overlapped, &mut bytes, 0) },
-            0,
-            "kernel connection completion failed"
-        );
+        let _ = complete_pending(pipe.0, event.0, &overlapped);
     }
     // Impersonation consumes the exact connection that delivered this request.
     // The SID alone is identical for both independent child origins.
     let mut inbound = 0u8;
-    let mut received = 0u32;
-    assert_ne!(
-        unsafe { ReadFile(pipe.0, &mut inbound, 1, &mut received, ptr::null_mut()) },
-        0
-    );
-    assert_eq!((inbound, received), (b'R', 1));
+    server_byte_io(pipe.0, &mut inbound, true);
+    assert_eq!(inbound, b'R');
     let observed = observe_client_sid_after_read(unsafe { BorrowedHandle::borrow_raw(pipe.0) })
         .expect("kernel-issued impersonation token after real request");
-    assert_eq!(request(pipe.0, b'A', false), 0);
+    let mut reply = b'A';
+    server_byte_io(pipe.0, &mut reply, false);
     let child_pid = child.0.id();
     assert!(
         child

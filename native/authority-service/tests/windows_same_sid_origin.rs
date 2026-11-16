@@ -193,13 +193,19 @@ fn two_independent_processes_under_same_sid_are_not_provenance_distinguishable()
     );
     assert_ne!(legitimate_pid, std::process::id());
     assert_ne!(impostor_pid, std::process::id());
-    assert_eq!(legitimate_sid, parent_sid, "first true kernel SID");
-    assert_eq!(impostor_sid, parent_sid, "second true kernel SID");
+    assert!(
+        legitimate_sid == parent_sid,
+        "first true kernel SID mismatch"
+    );
+    assert!(
+        impostor_sid == parent_sid,
+        "second true kernel SID mismatch"
+    );
     // RED disproved: two real origins yield the same kernel-issued SID.
     // A SID-only broker would treat both as equally eligible. This test
     // grants neither process any file authority; production remains deny-only.
-    assert_eq!(
-        legitimate_sid, impostor_sid,
+    assert!(
+        legitimate_sid == impostor_sid,
         "SID alone cannot prove client origin"
     );
 }

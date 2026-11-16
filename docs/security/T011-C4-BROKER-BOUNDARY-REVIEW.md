@@ -133,6 +133,30 @@ restart, update and uninstall preserve that boundary. Until a positive
 authorized-client proof and a true same-principal denial both exist
 under a stated OS threat model, retain deny-only native authority.
 
+**Windows same-SID private-handle duplication (2026-11-16, non-shipping):**
+The real-process test `native/authority-service/tests/windows_same_sid_handle_dup.rs`
+starts one child under the interactive user's actual kernel SID holding an
+**unnamed, non-inheritable Windows event handle**. A second, independent child
+with the same SID uses `OpenProcess(PROCESS_DUP_HANDLE)` against the first
+child, then `DuplicateHandle(DUPLICATE_SAME_ACCESS)` into its own process
+and `SetEvent`. The first child receives `WAIT_OBJECT_0` on its original
+event. The deliberately incorrect RED assertion that a non-inheritable
+handle is protected from another same-SID process failed on real Windows;
+the final assertion preserves the observed failure of isolation. No
+installed service, broker, root, privileged token or user data is accessed.
+
+**Limits:** The test deliberately communicates the numeric handle value to
+the attacker via a test-only environment variable. It proves that a default
+same-user process security descriptor can permit a real duplicate-and-use
+operation **given that value**, not that an attacker can enumerate any
+unknown value or that a separately provisioned, protected process would be
+openable. Do not replace a trustworthy client-origin design with a private
+handle/inheritance flag under the same interactive token. A candidate design
+must independently prove the *process object DACL*, required token privileges,
+launch custody and negative `PROCESS_DUP_HANDLE` behavior, including a
+legitimate MCP client's positive use path. No production remediation or
+credential boundary has yet been approved.
+
 **Both:** #148's invariant O forbids reading outside-object bytes through
 an in-root hard-link alias as well as changing them. A link-count test, a
 path-prefix check and a confined open alone are insufficient. An approved
@@ -190,5 +214,7 @@ and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
 - [Windows named-pipe client impersonation](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient)
 - [Windows named-pipe access control](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
 - [Windows process token and access control](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)
+- [Windows DuplicateHandle API](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
+- [Windows OpenProcess API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess)
 - [Windows process creation and explicit handle inheritance](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)
 - [Windows hard links and junctions](https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions)

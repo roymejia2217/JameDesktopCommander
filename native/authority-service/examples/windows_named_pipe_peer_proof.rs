@@ -8,7 +8,8 @@ mod proof {
     use std::{ffi::c_void, mem::size_of, ptr};
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE,
+            CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
+            ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE,
             INVALID_HANDLE_VALUE,
         },
         Security::{
@@ -124,7 +125,13 @@ mod proof {
         }
         Ok(LocalMemory(desc))
     }
-    fn serve(name: &str, service: &str, client: &str, attacker: &str, ready_path: &str) -> Result<()> {
+    fn serve(
+        name: &str,
+        service: &str,
+        client: &str,
+        attacker: &str,
+        ready_path: &str,
+    ) -> Result<()> {
         let pipe_name = pipe_name(name)?;
         let (service_sid, client_sid, attacker_sid) = (sid(service)?, sid(client)?, sid(attacker)?);
         if service_sid == client_sid || service_sid == attacker_sid || client_sid == attacker_sid {
@@ -196,6 +203,17 @@ mod proof {
         eprintln!("T011_WINDOWS_SEPARATE_SID_PIPE_ACCEPTED_NONRELEASE");
         Ok(())
     }
+    // Preserve the kernel verdict without exposing a pipe name, SID, token, or
+    // unbounded operating-system text in public CI diagnostics.
+    fn client_open_error(code: u32) -> &'static str {
+        match code {
+            ERROR_ACCESS_DENIED => "E_PIPE_CLIENT_OPEN_ACCESS_DENIED",
+            ERROR_FILE_NOT_FOUND => "E_PIPE_CLIENT_OPEN_NOT_FOUND",
+            ERROR_PIPE_BUSY => "E_PIPE_CLIENT_OPEN_BUSY",
+            ERROR_INVALID_PARAMETER => "E_PIPE_CLIENT_OPEN_INVALID_PARAMETER",
+            _ => "E_PIPE_CLIENT_OPEN_UNKNOWN",
+        }
+    }
     fn client(name: &str, expected_allowed: bool) -> Result<()> {
         let name = pipe_name(name)?;
         if unsafe { WaitNamedPipeW(name.as_ptr(), 6000) } == 0 {
@@ -213,7 +231,8 @@ mod proof {
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err("E_PIPE_CLIENT_OPEN");
+            // Must read GetLastError *immediately* after CreateFileW fails.
+            return Err(client_open_error(unsafe { GetLastError() }));
         }
         let pipe = Handle(handle);
         write_one(pipe.0, b'R')?;
@@ -230,6 +249,34 @@ mod proof {
             }
         );
         Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY,
+        };
+
+        #[test]
+        fn named_pipe_open_error_codes_are_distinct_and_fail_closed() {
+            assert_eq!(
+                client_open_error(ERROR_ACCESS_DENIED),
+                "E_PIPE_CLIENT_OPEN_ACCESS_DENIED"
+            );
+            assert_eq!(
+                client_open_error(ERROR_FILE_NOT_FOUND),
+                "E_PIPE_CLIENT_OPEN_NOT_FOUND"
+            );
+            assert_eq!(
+                client_open_error(ERROR_PIPE_BUSY),
+                "E_PIPE_CLIENT_OPEN_BUSY"
+            );
+            assert_eq!(
+                client_open_error(ERROR_INVALID_PARAMETER),
+                "E_PIPE_CLIENT_OPEN_INVALID_PARAMETER"
+            );
+            assert_eq!(client_open_error(0xFFFF_FFFF), "E_PIPE_CLIENT_OPEN_UNKNOWN");
+        }
     }
     pub fn main() -> std::process::ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();

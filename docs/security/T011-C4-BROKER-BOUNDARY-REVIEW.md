@@ -104,6 +104,35 @@ lifetime checks, and checked `ImpersonateNamedPipeClient` / `RevertToSelf`
 semantics. A failed impersonation must abort before touching the filesystem.
 No Windows production counterpart is currently approved.
 
+**Windows same-SID DACL falsification (2026-11-16, non-shipping):**
+`native/authority-service/tests/windows_same_sid_origin.rs` now exercises
+an explicit protected `D:P` security descriptor on a real local,
+first-instance named pipe. The ACL grants a data-channel right to the
+actual interactive user's SID, plus SYSTEM/Administrators; it does not
+grant Everyone/Anonymous. Two separately spawned Windows processes have
+different kernel PIDs, each completes a real pipe request, and the server
+observes each client's token SID by `ImpersonateNamedPipeClient` after the
+read. The RED assumption that this per-user ACL distinguishes genuine
+client origin was **falsified**: both processes connect with the same SID.
+The final negative-security regression records this fact without logging
+the raw SID. This extends #330's default-ACL proof; it does **not**
+authenticate a trusted installer/launcher, prove unique client custody, or
+grant access to a service-held file.
+
+**Disposition of the tempting SID-only design: REJECTED.** Explicit
+Windows DACLs remain necessary to exclude other principals, but are not
+a same-principal origin mechanism. Linux user/group socket permissions
+have the analogous limitation when the interactive process and a foreign
+process share the same UID/GID. Do not accept executable name, command-line
+markers, self-reported PID, environment-only secrets or a same-user
+restricted token as substitutes for independently protected custody.
+Review must identify exactly who creates and owns the authorized client
+process/token, the allowed MCP host activation path, how its IPC handles
+remain protected from another same-user process, and how installer,
+restart, update and uninstall preserve that boundary. Until a positive
+authorized-client proof and a true same-principal denial both exist
+under a stated OS threat model, retain deny-only native authority.
+
 **Both:** #148's invariant O forbids reading outside-object bytes through
 an in-root hard-link alias as well as changing them. A link-count test, a
 path-prefix check and a confined open alone are insufficient. An approved
@@ -159,4 +188,7 @@ and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
 - [Linux Unix-domain peer credentials](https://man7.org/linux/man-pages/man7/unix.7.html)
 - [Linux anchored path resolution](https://man7.org/linux/man-pages/man2/openat2.2.html)
 - [Windows named-pipe client impersonation](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient)
+- [Windows named-pipe access control](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+- [Windows process token and access control](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)
+- [Windows process creation and explicit handle inheritance](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)
 - [Windows hard links and junctions](https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions)

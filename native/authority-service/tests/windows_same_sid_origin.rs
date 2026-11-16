@@ -5,6 +5,8 @@ use jdc_authority_service::windows_pipe_peer::{
     observe_client_sid_after_read, observe_process_sid,
 };
 use std::{
+    ffi::c_void,
+    mem::size_of,
     os::windows::io::BorrowedHandle,
     process::{Child, Command, Stdio},
     ptr,
@@ -12,8 +14,14 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
+        CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
         INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    },
+    Security::{
+        Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        },
+        SECURITY_ATTRIBUTES,
     },
     Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -37,6 +45,50 @@ impl Drop for Handle {
         }
     }
 }
+// Test-only LocalAlloc-owned Windows security descriptor/SID buffers.
+struct LocalMemory(*mut c_void);
+impl Drop for LocalMemory {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+// Explicitly allow the real user's SID (plus kernel/system administrators),
+// excluding Everyone/Anonymous. This deliberately tests whether even a
+// restrictive, kernel-enforced user-SID DACL establishes client provenance.
+fn same_sid_security_descriptor() -> LocalMemory {
+    let sid = observe_process_sid().expect("real Windows process SID");
+    let mut sid_ptr = ptr::null_mut();
+    assert_ne!(
+        unsafe { ConvertSidToStringSidW(sid.as_ptr().cast_mut().cast(), &mut sid_ptr) },
+        0
+    );
+    assert!(!sid_ptr.is_null());
+    let sid_owner = LocalMemory(sid_ptr.cast());
+    let sid_length = (0..192)
+        .find(|&i| unsafe { *sid_ptr.add(i) } == 0)
+        .expect("bounded kernel-formatted SID");
+    let sid_string = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_ptr, sid_length) })
+        .expect("valid kernel SID text");
+    let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019B;;;{sid_string})");
+    let mut descriptor = ptr::null_mut();
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(&sddl).as_ptr(),
+                1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        },
+        0,
+        "test-only explicit SID security descriptor must parse"
+    );
+    assert!(!descriptor.is_null());
+    drop(sid_owner);
+    LocalMemory(descriptor)
+}
+
 struct ChildCleanup(Child);
 impl Drop for ChildCleanup {
     fn drop(&mut self) {
@@ -145,14 +197,25 @@ fn same_sid_child_connects_and_reads_reply() {
     assert_eq!(request(pipe.0, b'R', true), b'A');
 }
 
-fn observe_independent_client(label: &str, unique: u128) -> (u32, Vec<u8>) {
+fn observe_independent_client(label: &str, unique: u128, explicit_acl: bool) -> (u32, Vec<u8>) {
     let name = format!(
         r"\\.\pipe\JDC-T011-SAMESID-{}-{unique}-{label}",
         std::process::id()
     );
     let wide_name = wide(&name);
-    // The default process-token DACL intentionally gives the same real user
-    // access. This models a client launched by an ordinary interactive user.
+    // The default or an explicitly restrictive user-SID DACL admits the
+    // interactive user's independently launched processes. Never a grant.
+    let security_descriptor = explicit_acl.then(same_sid_security_descriptor);
+    let security_attributes = security_descriptor
+        .as_ref()
+        .map(|descriptor| SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        });
+    let security_ptr = security_attributes
+        .as_ref()
+        .map_or(ptr::null(), |value| value);
     let raw = unsafe {
         CreateNamedPipeW(
             wide_name.as_ptr(),
@@ -162,7 +225,7 @@ fn observe_independent_client(label: &str, unique: u128) -> (u32, Vec<u8>) {
             128,
             128,
             0,
-            ptr::null(),
+            security_ptr,
         )
     };
     assert_ne!(raw, INVALID_HANDLE_VALUE, "real pipe creation failed");
@@ -224,8 +287,8 @@ fn two_independent_processes_under_same_sid_are_not_provenance_distinguishable()
         .expect("valid epoch")
         .as_nanos();
     let parent_sid = observe_process_sid().expect("real process-token SID");
-    let (legitimate_pid, legitimate_sid) = observe_independent_client("legit", unique);
-    let (impostor_pid, impostor_sid) = observe_independent_client("impostor", unique);
+    let (legitimate_pid, legitimate_sid) = observe_independent_client("legit", unique, false);
+    let (impostor_pid, impostor_sid) = observe_independent_client("impostor", unique, false);
     assert_ne!(
         legitimate_pid, impostor_pid,
         "fixture must use two processes"
@@ -246,5 +309,36 @@ fn two_independent_processes_under_same_sid_are_not_provenance_distinguishable()
     assert!(
         legitimate_sid == impostor_sid,
         "SID alone cannot prove client origin"
+    );
+}
+
+#[test]
+fn explicit_sid_dacl_is_not_unique_trusted_client_origin() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("valid epoch")
+        .as_nanos();
+    let expected_sid = observe_process_sid().expect("real kernel process SID");
+    // Both independent OS processes are admitted by an actual restrictive
+    // Windows named-pipe DACL that grants access to this one user SID.
+    let (legitimate_pid, legitimate_sid) = observe_independent_client("acl-legit", unique, true);
+    let (impostor_pid, impostor_sid) = observe_independent_client("acl-impostor", unique, true);
+    assert_ne!(legitimate_pid, impostor_pid, "must be independent PIDs");
+    assert_ne!(legitimate_pid, std::process::id());
+    assert_ne!(impostor_pid, std::process::id());
+    assert!(
+        legitimate_sid == expected_sid,
+        "first pipe connection must use the actual process-token SID"
+    );
+    assert!(
+        impostor_sid == expected_sid,
+        "second pipe connection must use the actual process-token SID"
+    );
+    // RED disproved on real Windows: even this restrictive SID DACL
+    // admitted two independent client processes. No privilege is granted.
+    // Identity of the trusted launcher remains unproved.
+    assert!(
+        legitimate_sid == impostor_sid,
+        "explicit SID DACL cannot prove which process is trusted"
     );
 }

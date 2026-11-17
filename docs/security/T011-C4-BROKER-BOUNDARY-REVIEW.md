@@ -157,6 +157,36 @@ launch custody and negative `PROCESS_DUP_HANDLE` behavior, including a
 legitimate MCP client's positive use path. No production remediation or
 credential boundary has yet been approved.
 
+**Windows process-owner WRITE_DAC falsification (2026-11-17, non-shipping):**
+The extended `windows_same_sid_handle_dup.rs` now tests a second, stricter
+condition. A disposable child assigns its **actual process object** a protected
+SDDL DACL allowing SYSTEM full access but only limited-query access to its
+interactive user SID. The other separately spawned real same-SID child
+disables **all its own token privileges**, checks by independent kernel
+queries that the process owner SID equals its token's default owner SID,
+and first proves `OpenProcess(PROCESS_DUP_HANDLE)` returns exactly
+`ERROR_ACCESS_DENIED`. Despite that denial, `OpenProcess(WRITE_DAC)`
+**succeeds**. It then calls `SetKernelObjectSecurity` to grant its own
+SID process access, reopens the target with `PROCESS_DUP_HANDLE`, and
+`DuplicateHandle`/`SetEvent` signal the original non-inheritable event.
+A deliberately false RED assertion that `WRITE_DAC` was also denied
+failed only *after* the privilege-isolation and initial-denial controls;
+the final real-Windows test passes. No unrelated process is accessed.
+
+**Disposition:** REJECT a same-principal process-object DACL as sufficient
+client provenance if the hostile process retains the protected process's
+effective owner authority. The initial RED execution under the elevated
+host had `SeDebugPrivilege` enabled and did **not** prove the necessary
+initial `PROCESS_DUP_HANDLE` denial; it was not scored as security evidence.
+The corrected fixture changes **only the disposable attacker child's token**,
+not the user's installed runtime or other accounts. This demonstration is
+conditional on tested process owner rights and the actual DACL; it does
+**not** refute independent protection with a different OS principal,
+OWNER RIGHTS rules or a privileged trusted launcher. The test deliberately
+supplies the numeric event handle through its own fixture. A positive,
+independently protected MCP client path and same-user adversarial denial
+remain necessary before granting authority.
+
 **Both:** #148's invariant O forbids reading outside-object bytes through
 an in-root hard-link alias as well as changing them. A link-count test, a
 path-prefix check and a confined open alone are insufficient. An approved
@@ -216,5 +246,7 @@ and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
 - [Windows process token and access control](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)
 - [Windows DuplicateHandle API](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
 - [Windows OpenProcess API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess)
+- [Windows owner of a new object](https://learn.microsoft.com/en-us/windows/win32/secauthz/owner-of-a-new-object)
+- [Windows standard access rights](https://learn.microsoft.com/en-us/windows/win32/secauthz/standard-access-rights)
 - [Windows process creation and explicit handle inheritance](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)
 - [Windows hard links and junctions](https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions)

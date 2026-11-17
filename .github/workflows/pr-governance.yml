@@ -9,10 +9,12 @@ on:
       - edited
       - reopened
       - synchronize
+      - ready_for_review
 
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   governance:
@@ -62,6 +64,62 @@ jobs:
             release
             main
           requireScope: true
+
+      - name: Prevent premature P0 issue auto-closure
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo: name } = context.repo;
+            const number = context.payload.pull_request?.number;
+            if (!Number.isSafeInteger(number)) {
+              core.setFailed('Missing GitHub pull request identity');
+              return;
+            }
+            const result = await github.graphql(`
+              query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 100) {
+                      nodes {
+                        number
+                        state
+                        url
+                        labels(first: 100) {
+                          nodes { name }
+                          pageInfo { hasNextPage }
+                        }
+                      }
+                      pageInfo { hasNextPage }
+                    }
+                  }
+                }
+              }
+            `, { owner, name, number });
+            const linked = result?.repository?.pullRequest?.closingIssuesReferences;
+            if (!linked || !Array.isArray(linked.nodes) ||
+                linked.pageInfo?.hasNextPage !== false) {
+              core.setFailed('GitHub closing-issue pagination or metadata incomplete');
+              return;
+            }
+            for (const issue of linked.nodes) {
+              const labels = issue?.labels;
+              if (!Number.isSafeInteger(issue?.number) ||
+                  !['OPEN', 'CLOSED'].includes(issue?.state) ||
+                  !Array.isArray(labels?.nodes) ||
+                  labels.pageInfo?.hasNextPage !== false) {
+                core.setFailed('GitHub linked-issue labels pagination or metadata incomplete');
+                return;
+              }
+              if (issue.state === 'OPEN' &&
+                  labels.nodes.some((label) => label?.name === 'priority:P0')) {
+                core.setFailed(
+                  `PR #${number} would auto-close open P0 issue #${issue.number}. ` +
+                  'Unlink the issue as a closing reference; record partial work ' +
+                  'using an ordinary issue reference and close P0 only after independent acceptance.',
+                );
+                return;
+              }
+            }
 
       - name: Validate ordinary pull request body
         if: >-

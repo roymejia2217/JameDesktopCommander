@@ -203,6 +203,35 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     {
         return Err("Unsupported or contradictory operator evidence");
     }
+    // The backend's cause must be supported by the observed control-plane
+    // category. Otherwise an unverified probe could be displayed as HTTP 401.
+    let observed_failure = match snapshot.control_plane.as_str() {
+        "credential_rejected" => Some("CONTROL_PLANE_CREDENTIAL_REJECTED"),
+        "permission_denied" => Some("CONTROL_PLANE_FORBIDDEN"),
+        "rate_limited" => Some("CONTROL_PLANE_RATE_LIMITED"),
+        "server_error" => Some("CONTROL_PLANE_SERVER_ERROR"),
+        "other_http_error" => Some("CONTROL_PLANE_HTTP_ERROR"),
+        _ => None,
+    };
+    if let Some(expected) = observed_failure {
+        if snapshot.verdict.reason_code != expected || snapshot.verdict.state != "degraded" {
+            return Err("Control-plane fault contradicts diagnostic reason");
+        }
+    } else if matches!(
+        snapshot.verdict.reason_code.as_str(),
+        "CONTROL_PLANE_CREDENTIAL_REJECTED"
+            | "CONTROL_PLANE_FORBIDDEN"
+            | "CONTROL_PLANE_RATE_LIMITED"
+            | "CONTROL_PLANE_SERVER_ERROR"
+            | "CONTROL_PLANE_HTTP_ERROR"
+    ) {
+        return Err("Control-plane fault has no matching observation");
+    }
+    if snapshot.verdict.reason_code == "CONTROL_PLANE_UNVERIFIED"
+        && (snapshot.control_plane != "unverified" || snapshot.verdict.state != "unverified")
+    {
+        return Err("Unverified control-plane diagnosis contradicts observation");
+    }
     if (linux && snapshot.verdict.reason_code == "TASK_STATUS_UNAVAILABLE")
         || (!linux
             && one_of(
@@ -522,6 +551,78 @@ mod tests {
         assert_eq!(value.remote_delivery, "not_observed");
         assert_eq!(value.reason(), "CONTROL_PLANE_CREDENTIAL_REJECTED");
         assert_eq!(value.control_plane, "credential_rejected");
+    }
+
+    #[test]
+    fn rejects_control_plane_errors_without_corresponding_evidence() {
+        for baseline in [GOOD.to_string(), linux_sample()] {
+            for wrong in [
+                "unverified",
+                "none",
+                "permission_denied",
+                "rate_limited",
+                "server_error",
+                "other_http_error",
+            ] {
+                let inconsistent = baseline.replace(
+                    "\"controlPlane\":\"credential_rejected\"",
+                    &format!("\"controlPlane\":\"{wrong}\""),
+                );
+                assert!(
+                    parse_overview(inconsistent.as_bytes()).is_err(),
+                    "a reported credential rejection cannot be based on {wrong}"
+                );
+            }
+            let wrong_state =
+                baseline.replace("\"state\":\"degraded\"", "\"state\":\"unverified\"");
+            assert!(parse_overview(wrong_state.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn accepts_matching_control_plane_failure_codes_on_both_platforms() {
+        for baseline in [GOOD.to_string(), linux_sample()] {
+            for (evidence, reason) in [
+                ("credential_rejected", "CONTROL_PLANE_CREDENTIAL_REJECTED"),
+                ("permission_denied", "CONTROL_PLANE_FORBIDDEN"),
+                ("rate_limited", "CONTROL_PLANE_RATE_LIMITED"),
+                ("server_error", "CONTROL_PLANE_SERVER_ERROR"),
+                ("other_http_error", "CONTROL_PLANE_HTTP_ERROR"),
+            ] {
+                let valid = baseline
+                    .replace(
+                        "\"controlPlane\":\"credential_rejected\"",
+                        &format!("\"controlPlane\":\"{evidence}\""),
+                    )
+                    .replace("CONTROL_PLANE_CREDENTIAL_REJECTED", reason);
+                assert!(
+                    parse_overview(valid.as_bytes()).is_ok(),
+                    "{evidence}: {reason}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unverified_control_plane_reason_requires_unknown_evidence() {
+        for baseline in [GOOD.to_string(), linux_sample()] {
+            let unknown = baseline
+                .replace(
+                    "\"controlPlane\":\"credential_rejected\"",
+                    "\"controlPlane\":\"unverified\"",
+                )
+                .replace("\"state\":\"degraded\"", "\"state\":\"unverified\"")
+                .replace(
+                    "CONTROL_PLANE_CREDENTIAL_REJECTED",
+                    "CONTROL_PLANE_UNVERIFIED",
+                );
+            assert!(parse_overview(unknown.as_bytes()).is_ok());
+            let falsely_unverified = unknown.replace(
+                "\"controlPlane\":\"unverified\"",
+                "\"controlPlane\":\"none\"",
+            );
+            assert!(parse_overview(falsely_unverified.as_bytes()).is_err());
+        }
     }
 
     #[test]

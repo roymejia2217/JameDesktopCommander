@@ -12,7 +12,7 @@ import { configManager } from '../dist/config-manager.js';
 import { startProcess, readProcessOutput, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -63,7 +63,9 @@ async function isShellAvailable(shellPath) {
     ? ['-NoProfile', '-NonInteractive', '-Command', 'Write-Output JDC_SHELL_PROBE_OK']
     : ['-c', "printf 'JDC_SHELL_PROBE_OK\n'"];
   const result = spawnSync(shellPath, args, {
-    encoding: 'utf8', timeout: 2000, windowsHide: true,
+    // Match runCommandToExit's existing 15-second bound. Cold native shells
+    // can start more slowly on hosted runners without being unavailable.
+    encoding: 'utf8', timeout: 15000, windowsHide: true,
   });
   if (result.error?.code === 'ENOENT') return false;
   assert.ifError(result.error);
@@ -400,6 +402,23 @@ test('shell availability checks the requested executable, not the configured def
     else process.env[pathKey] = originalPath;
     rmSync(fixtureDir, { recursive: true, force: true });
     await configManager.setValue('defaultShell', previousShell);
+  }
+});
+test('available shell survives a slow but bounded native process startup', async (t) => {
+  if (os.platform() !== 'linux') {
+    t.skip('Linux-only startup latency acceptance');
+    return;
+  }
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'jdc-shell-latency-'));
+  const executable = path.join(dir, 'slow-shell');
+  try {
+    // Delay an actual shell handoff, rather than faking the expected marker.
+    writeFileSync(executable, '#!/bin/sh\nsleep 3\nexec /bin/sh "$@"\n');
+    chmodSync(executable, 0o700);
+    assert.equal(await isShellAvailable(executable), true,
+      'a functioning shell must not be rejected solely for a 3-second startup');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 test('default shell selects PowerShell Core', testDefaultShellPwsh);

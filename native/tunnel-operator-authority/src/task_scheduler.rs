@@ -348,8 +348,43 @@ pub(super) fn observe_registered_task_acl(
     })
 }
 
-// This lexical check rejects task-provided UNC, device namespace, environment,
-// traversal and ADS spellings. It is deliberately NOT file-object validation.
+// Windows normalizes some names before opening them. Reject ambiguous task
+// input before it can be mistaken for a trusted installed executable path.
+// This is still only an observation; it is never file-object authorization.
+fn unambiguous_win32_component(part: &str) -> bool {
+    if part.is_empty()
+        || matches!(part, "." | "..")
+        || part.ends_with('.')
+        || part.ends_with(' ')
+        || part.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | ':' | '"' | '<' | '>' | '|' | '?' | '*' | '%')
+        })
+    {
+        return false;
+    }
+    // A DOS device name is reserved even with an extension. Preserve
+    // non-ASCII file names, but reject the documented superscript COM/LPT
+    // device digits as well as the ordinary digits 1 through 9.
+    let base = part.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let upper = base.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return false;
+    }
+    !["COM", "LPT"].iter().any(|prefix| {
+        upper.strip_prefix(prefix).is_some_and(|number| {
+            matches!(
+                number,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
+}
+
+// The registered Task Scheduler action is untrusted. No lexical check is a
+// substitute for opened-handle custody, binary identity or operator consent.
 fn untrusted_local_drive_path(raw: &str) -> Result<std::path::PathBuf, SidObservationError> {
     let bytes = raw.as_bytes();
     if bytes.len() < 4
@@ -359,9 +394,7 @@ fn untrusted_local_drive_path(raw: &str) -> Result<std::path::PathBuf, SidObserv
         || bytes[2] != b'\\'
         || raw[3..]
             .split('\\')
-            .any(|part| part.is_empty() || matches!(part, "." | ".."))
-        || raw[3..].contains(':')
-        || raw.chars().any(|c| c.is_control() || c == '%' || c == '"')
+            .any(|part| !unambiguous_win32_component(part))
     {
         return Err(SidObservationError::Unverifiable);
     }
@@ -593,6 +626,60 @@ mod tests {
                     "untrusted path shape must be rejected"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn untrusted_exec_path_rejects_ambiguous_win32_separators_and_characters() {
+        for bad in [
+            r"C:\Tools/run.exe",
+            r"C:\Tools\bad?.exe",
+            r"C:\Tools\bad*.exe",
+            r"C:\Tools\bad<name>.exe",
+            r"C:\Tools\bad>name.exe",
+            r"C:\Tools\bad|name.exe",
+            r"C:\Tools\bad\\run.exe",
+        ] {
+            assert_eq!(
+                untrusted_local_drive_path(bad),
+                Err(SidObservationError::Unverifiable),
+                "ambiguous Windows path must fail closed: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_exec_path_rejects_win32_device_aliases_and_trimmed_components() {
+        for bad in [
+            r"C:\Tools\CON",
+            r"C:\Tools\con.txt",
+            r"C:\Tools\nul.exe",
+            r"C:\Tools\PRN",
+            r"C:\Tools\AUX.txt",
+            r"C:\Tools\COM1.exe",
+            r"C:\Tools\lpt9.log",
+            r"C:\Tools\COM¹.exe",
+            r"C:\Tools\LPT³.txt",
+            r"C:\Tools\run.exe.",
+            r"C:\Tools\run.exe ",
+            r"C:\Tools.\run.exe",
+            r"C:\Tools \run.exe",
+        ] {
+            assert_eq!(
+                untrusted_local_drive_path(bad),
+                Err(SidObservationError::Unverifiable),
+                "ambiguous Win32 component must fail closed: {bad:?}"
+            );
+        }
+        for good in [
+            r"C:\Program Files\OpenAI\tunnel-client.exe",
+            r"C:\Tools\COM10.exe",
+            r"C:\Usuarios\José\client.exe",
+        ] {
+            assert!(
+                untrusted_local_drive_path(good).is_ok(),
+                "ordinary local Unicode path must remain observable: {good:?}"
+            );
         }
     }
 

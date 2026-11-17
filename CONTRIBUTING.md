@@ -37,6 +37,29 @@ Ordinary pull-request bodies contain exactly these level-two sections, in this o
 Every section must contain substantive content. Use GitHub closing keywords when applicable,
 or write `None.` when no tracked issue exists.
 
+### P0 issue closure
+
+GitHub's pull-request **Development** linkage can mark an issue for closure
+even if the PR body says `Refs #139` instead of `Fixes #139`.
+Research and partial security PRs must **not** link an open
+`priority:P0` issue as a closing issue. PR Governance reads
+`closingIssuesReferences` from GitHub and rejects such links before merge.
+Plain references for traceability remain permitted. A P0 issue must be
+closed **manually after independent end-to-end acceptance**, not implicitly
+by merging an isolated test, document or component. The workflow requires
+read-only access to issue metadata; API failures must fail the gate.
+
+This check covers the PR state at evaluation time. GitHub may not re-run
+an existing status check when a closing-issue linkage is changed without
+editing the PR body or its commit; maintainers must verify the live
+Development linkage immediately before squash merge. The gate is
+defense-in-depth, not a substitute for that final confirmation.
+GitHub additionally offers a repository-wide **Settings → General → Issues →
+Auto-close issues with merged linked pull requests** switch. Disabling it
+would prevent this class of automatic closure at the platform level, but
+also changes closure behavior for non-P0 work; assess that repository-wide
+policy separately rather than toggling it as a side effect of this guard.
+
 Release Please pull requests are the only body-format exception. The exception applies only when
 the pull request is created by the configured release bot, comes from this repository, and uses
 the canonical Release Please branch. Their generated title must be

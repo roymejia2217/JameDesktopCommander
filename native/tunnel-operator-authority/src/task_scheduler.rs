@@ -674,7 +674,7 @@ mod tests {
         for good in [
             r"C:\Program Files\OpenAI\tunnel-client.exe",
             r"C:\Tools\COM10.exe",
-            r"C:\Usuarios\José\cliente.exe",
+            r"C:\Usuarios\José\client.exe",
         ] {
             assert!(
                 untrusted_local_drive_path(good).is_ok(),

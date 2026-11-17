@@ -11,6 +11,8 @@
 import { configManager } from '../dist/config-manager.js';
 import { startProcess, readProcessOutput, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -55,13 +57,18 @@ async function runCommandToExit(command, initialTimeoutMs = 2000, shell = null) 
 async function isShellAvailable(shellPath) {
   if (shellPath === 'cmd' || shellPath === 'cmd.exe') return os.platform() === 'win32';
   const powershell = shellPath === 'pwsh' || shellPath === 'powershell';
-  const command = powershell
-    ? `${shellPath} -NoProfile -Command "Get-Host"`
-    : `test -x "${shellPath}" && echo "available"`;
-  const result = await runCommandToExit(command);
-  const text = result.content?.[0]?.text ?? '';
-  return /Process completed with exit code 0/.test(text)
-    && (powershell || text.includes('available'));
+  // Probe the executable that startProcess will actually launch, not a
+  // "test -x" command interpreted by whichever default shell is configured.
+  const args = powershell
+    ? ['-NoProfile', '-NonInteractive', '-Command', 'Write-Output JDC_SHELL_PROBE_OK']
+    : ['-c', "printf 'JDC_SHELL_PROBE_OK\n'"];
+  const result = spawnSync(shellPath, args, {
+    encoding: 'utf8', timeout: 2000, windowsHide: true,
+  });
+  if (result.error?.code === 'ENOENT') return false;
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, 'Shell executable ' + shellPath + ' exited unsuccessfully');
+  return /^JDC_SHELL_PROBE_OK\r?$/m.test(result.stdout ?? '');
 }
 
 /**
@@ -368,6 +375,33 @@ after(async () => { if (originalConfig) await teardown(originalConfig); });
 test('default shell selects /bin/sh', testDefaultShellSh);
 test('default shell selects /bin/bash', testDefaultShellBash);
 test('default shell selects cmd', testDefaultShellCmd);
+test('shell availability checks the requested executable, not the configured default', async (t) => {
+  if (os.platform() !== 'win32') {
+    t.skip('Windows-only unavailable-POSIX-shell regression');
+    return;
+  }
+  const previousShell = (await configManager.getConfig()).defaultShell;
+  const fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'jdc-shell-probe-'));
+  // Deliberately make an unrelated PATH command claim a POSIX shell exists.
+  // That must not substitute for spawning the exact requested shell executable.
+  writeFileSync(path.join(fixtureDir, 'test.cmd'), '@echo off\r\nexit /b 0\r\n');
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH';
+  const originalPath = process.env[pathKey];
+  try {
+    process.env[pathKey] = fixtureDir + path.delimiter + (originalPath ?? '');
+    await configManager.setValue('defaultShell', 'cmd');
+    assert.equal(await isShellAvailable('/bin/sh'), false,
+      '/bin/sh cannot be spawned on this Windows host');
+    assert.equal(await isShellAvailable('/bin/bash'), false,
+      '/bin/bash cannot be spawned on this Windows host');
+    assert.equal(await isShellAvailable('cmd'), true);
+  } finally {
+    if (originalPath === undefined) delete process.env[pathKey];
+    else process.env[pathKey] = originalPath;
+    rmSync(fixtureDir, { recursive: true, force: true });
+    await configManager.setValue('defaultShell', previousShell);
+  }
+});
 test('default shell selects PowerShell Core', testDefaultShellPwsh);
 test('default shell switching changes the executing shell', testShellSwitching);
 test('default shell configuration persists', testConfigurationPersistence);

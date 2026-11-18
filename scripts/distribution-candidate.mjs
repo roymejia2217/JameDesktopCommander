@@ -335,12 +335,22 @@ export async function createCandidateArchive(destination, archivePath) {
   assert.ok(archiveInfo.isFile() && archiveInfo.size > 0, 'Candidate TAR is empty');
 }
 
-export async function restoreCandidateArchive(originalArchive, downloadedArchive, destination) {
+export async function restoreCandidateArchive(
+  originalArchive, downloadedArchive, destination, producerSha256,
+) {
   assert.ok(isAbsolute(originalArchive) && isAbsolute(downloadedArchive) &&
     isAbsolute(destination));
   assert.notEqual(resolve(originalArchive), resolve(downloadedArchive),
     'Round-trip must validate a separately downloaded artifact');
-  assert.equal(await sha256File(downloadedArchive), await sha256File(originalArchive),
+  // On a different CI runner the original TAR is unavailable. The source job
+  // must supply its independent, fixed-size SHA-256 through a needs output.
+  // The original same-run comparison remains supported for local regressions.
+  const expected = producerSha256 === undefined
+    ? await sha256File(originalArchive)
+    : producerSha256;
+  assert.ok(typeof expected === 'string' && digestPattern.test(expected),
+    'Original TAR SHA-256 digest is missing or malformed');
+  assert.equal(await sha256File(downloadedArchive), expected,
     'Downloaded candidate archive differs from uploaded bytes');
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });
@@ -365,7 +375,7 @@ async function main() {
     source: projectRoot,
     destination,
     nodeExecutable: process.execPath,
-    nodeLicense: await nodeLicenseFor(process.execPath),
+    nodeLicense: action === 'build' ? await nodeLicenseFor(process.execPath) : undefined,
     target,
     sourceCommit: process.env.JDC_CANDIDATE_SOURCE_SHA,
     runId: process.env.GITHUB_RUN_ID,
@@ -375,13 +385,18 @@ async function main() {
   const archivePath = join(await realpath(temp), archiveName);
   let manifest;
   if (action === 'build') manifest = await buildCandidate(args);
-  else manifest = await verifyCandidate(args);
+  else if (action !== 'roundtrip') manifest = await verifyCandidate(args);
+  // The acceptance job is a fresh runner: it has no original staged candidate.
+  // Verify only the downloaded, SHA-256-matched archive after extraction.
   if (action === 'smoke') await smokeCandidate(destination, manifest);
   if (action === 'archive') await createCandidateArchive(destination, archivePath);
   if (action === 'roundtrip') {
     const downloadedArchive = join(await realpath(temp), 'jdc-roundtrip-download', archiveName);
     const extracted = join(await realpath(temp), 'jdc-candidate-roundtrip-' + target);
-    await restoreCandidateArchive(archivePath, downloadedArchive, extracted);
+    const producerSha256 = process.env.JDC_CANDIDATE_ORIGINAL_TAR_SHA256;
+    assert.ok(typeof producerSha256 === 'string' && digestPattern.test(producerSha256),
+      'Independent producer TAR SHA-256 is required for cross-job acceptance');
+    await restoreCandidateArchive(archivePath, downloadedArchive, extracted, producerSha256);
     manifest = await verifyCandidate({ ...args, destination: extracted });
     await smokeCandidate(extracted, manifest);
   }

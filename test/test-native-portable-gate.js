@@ -21,26 +21,37 @@ function assertNoResearchBuild(steps) {
   }
 }
 test('portable candidates exclude N-API while native denial remains an independent security gate', () => {
-  const job = workflow('distribution-candidate.yml').jobs['portable-candidate'];
-  assert.equal(workflow('distribution-candidate.yml').env?.JDC_CANDIDATE_INCLUDE_NATIVE, '0');
-  assert.deepEqual(job.strategy.matrix.include.map(p => p.target).sort(),
+  const config = workflow('distribution-candidate.yml');
+  const producer = config.jobs['portable-candidate'];
+  const consumer = config.jobs['portable-acceptance'];
+  assert.equal(config.env?.JDC_CANDIDATE_INCLUDE_NATIVE, '0');
+  assert.deepEqual(producer.strategy.matrix.include.map(p => p.target).sort(),
     ['linux-x64', 'win32-x64']);
-  const steps = job.steps;
+  assert.deepEqual(consumer.strategy.matrix, producer.strategy.matrix);
+  assert.deepEqual(consumer.needs,
+    ['portable-candidate', 'windows-operator-ui', 'linux-operator-ui']);
+  const producerSteps = producer.steps;
   const labels = [
     'Stage Node runtime without native capability with hashed manifest',
     'Independently verify staged bytes and provenance',
     'Smoke test packaged Node and bundled ripgrep',
-    'Verify downloaded TAR and smoke extracted native runtime',
   ];
-  const indices = labels.map(label => position(steps, label));
+  const indices = labels.map(label => position(producerSteps, label));
   assert.deepEqual(indices, [...indices].sort((a, b) => a - b),
     'Authorization, packaging and exact-archive checks must retain order');
-  assertNoResearchBuild(steps);
-  assert.ok(steps.every(step => !/\b(?:cargo|rustup)\b/.test(step.run ?? '')),
-    'Portable distribution must not build experimental Rust authority');
-  assert.ok(steps.every(step => !/native addon from locked source|native dependency lock|native addon surface before staging/i.test(step.name ?? '')),
+  const consumerSteps = consumer.steps;
+  const downloaded = position(consumerSteps, 'Download original uploaded candidate for round-trip acceptance');
+  const verify = position(consumerSteps, 'Verify downloaded TAR and smoke extracted native runtime');
+  assert.ok(downloaded < verify, 'the original uploaded archive must be validated before extraction');
+  assert.match(consumerSteps[verify].run, /distribution-candidate\.mjs roundtrip/);
+  for (const steps of [producerSteps, consumerSteps]) {
+    assertNoResearchBuild(steps);
+    assert.ok(steps.every(step => !/\b(?:cargo|rustup)\b/.test(step.run ?? '')),
+      'Portable distribution must not build experimental Rust authority');
+    assert.ok(steps.every(step =>
+      !/native addon from locked source|native dependency lock|native addon surface before staging/i.test(step.name ?? '')),
     'Native ownership proofs belong only to dedicated T011 feasibility CI');
-  assert.match(steps[indices.at(-1)].run, /distribution-candidate\.mjs roundtrip/);
+  }
 });
 test('native Windows/Linux and Node22/24 matrices reject an unsafe class export', () => {
   const job = workflow('t011-capability-feasibility.yml').jobs['native-probe'];

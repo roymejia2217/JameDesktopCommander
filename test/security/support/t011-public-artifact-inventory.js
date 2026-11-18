@@ -68,7 +68,7 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
     reject('native UI upload is not the narrowly reviewed short-lived overlay');
   }
   const caller = portable.jobs?.['windows-operator-ui'];
-  const candidateJob = portable.jobs?.['portable-candidate'];
+  const candidateJob = portable.jobs?.['portable-acceptance'];
   const download = candidateJob?.steps?.find(step =>
     step.name === 'Download exact Windows operator UI overlay');
   const inno = candidateJob?.steps?.find(step =>
@@ -76,7 +76,7 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
   if (caller?.uses !== './.github/workflows/windows-operator-ui-bundle.yml' ||
       caller.with?.source_commit !== SOURCE_SHA ||
       JSON.stringify(candidateJob?.needs) !==
-        JSON.stringify(['windows-operator-ui', 'linux-operator-ui']) ||
+        JSON.stringify(['portable-candidate', 'windows-operator-ui', 'linux-operator-ui']) ||
       download?.uses !== PINNED_DOWNLOAD ||
       download.if !== "matrix.target == 'win32-x64'" ||
       download.with?.name !== conf.name ||
@@ -143,7 +143,7 @@ function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
       conf?.['compression-level'] !== 0) {
     reject('Linux UI upload must be a narrowly reviewed one-day artifact');
   }
-  const candidate = portable.jobs?.['portable-candidate'];
+  const candidate = portable.jobs?.['portable-acceptance'];
   const caller = portable.jobs?.['linux-operator-ui'];
   const download = candidate?.steps?.find(step =>
     step.name === 'Download exact Linux operator UI overlay');
@@ -213,9 +213,12 @@ export function validatePublicArtifactInventory(workflows) {
   const nativeUploads = uploads.filter(entry =>
     entry.workflowName === 't011-capability-feasibility.yml' &&
     entry.jobName === 'native-probe');
-  const portableUploads = uploads.filter(entry =>
+  const portableProducerUploads = uploads.filter(entry =>
     entry.workflowName === 'distribution-candidate.yml' &&
     entry.jobName === 'portable-candidate');
+  const portableAcceptanceUploads = uploads.filter(entry =>
+    entry.workflowName === 'distribution-candidate.yml' &&
+    entry.jobName === 'portable-acceptance');
   const operatorUploads = uploads.filter(entry =>
     entry.workflowName === 'windows-operator-ui-bundle.yml' &&
     entry.jobName === 'native-gui');
@@ -223,24 +226,78 @@ export function validatePublicArtifactInventory(workflows) {
     entry.workflowName === 'linux-operator-ui-bundle.yml' &&
     entry.jobName === 'native-gui');
   if (uploads.length !== 5 || nativeUploads.length !== 1 ||
-      portableUploads.length !== 2 || operatorUploads.length !== 1 ||
-      linuxUiUploads.length !== 1) {
+      portableProducerUploads.length !== 1 ||
+      portableAcceptanceUploads.length !== 1 ||
+      operatorUploads.length !== 1 || linuxUiUploads.length !== 1) {
     reject('unreviewed upload action or wrong workflow/job');
   }
-  const candidate = portableUploads.find(entry =>
-    entry.step.with?.name === 'UNPUBLISHED-jdc-portable-' + matrixTarget);
-  const installer = portableUploads.find(entry =>
-    entry.step.with?.name === 'UNPUBLISHED-jdc-installer-' + matrixTarget);
-  if (!candidate || !installer || installer.step.uses !== PINNED_UPLOAD) {
-    reject('installer upload identity or pinned action mismatch');
+  const candidate = portableProducerUploads[0];
+  const installer = portableAcceptanceUploads[0];
+  if (candidate.step.with?.name !== 'UNPUBLISHED-jdc-portable-' + matrixTarget ||
+      installer.step.with?.name !== 'UNPUBLISHED-jdc-installer-' + matrixTarget ||
+      candidate.step.uses !== PINNED_UPLOAD || installer.step.uses !== PINNED_UPLOAD ||
+      candidate.step.id !== 'portable_tar_upload') {
+    reject('candidate/installer upload source identity and pinned actions must match');
   }
-  if (candidate.step.uses !== PINNED_UPLOAD) {
-    reject('portable upload action SHA not pinned');
-  }
+  const producer = portable.jobs?.['portable-candidate'];
+  const consumer = portable.jobs?.['portable-acceptance'];
   if (Object.keys(portable.permissions ?? {}).length !== 1 ||
       portable.permissions?.contents !== 'read' ||
-      portable.jobs['portable-candidate']?.permissions !== undefined) {
+      producer?.permissions !== undefined || consumer?.permissions !== undefined) {
     reject('portable workflow must retain least permissions');
+  }
+  if (JSON.stringify(producer?.needs) !==
+        JSON.stringify(['windows-operator-ui', 'linux-operator-ui']) ||
+      JSON.stringify(consumer?.needs) !==
+        JSON.stringify(['portable-candidate', 'windows-operator-ui', 'linux-operator-ui']) ||
+      JSON.stringify(producer?.strategy?.matrix) !==
+        JSON.stringify(consumer?.strategy?.matrix) ||
+      producer?.env?.JDC_CANDIDATE_SOURCE_SHA !== SOURCE_SHA ||
+      consumer?.env?.JDC_CANDIDATE_SOURCE_SHA !== SOURCE_SHA ||
+      producer?.env?.JDC_CANDIDATE_TARGET !== matrixTarget ||
+      consumer?.env?.JDC_CANDIDATE_TARGET !== matrixTarget) {
+    reject('producer and acceptance must bind the same immutable platform/source');
+  }
+  const tarHash = producer.steps?.find(step => step.id === 'original_tar_sha256');
+  const downloaded = consumer.steps?.find(step =>
+    step.name === 'Download original uploaded candidate for round-trip acceptance');
+  const beforeDownload = consumer.steps?.find(step =>
+    step.name === 'Verify uploaded artifact identity and original TAR checksum');
+  const roundTrip = consumer.steps?.find(step =>
+    step.name === 'Verify downloaded TAR and smoke extracted native runtime');
+  if (!tarHash?.run?.includes('Get-FileHash') ||
+      producer.steps.some(step =>
+        String(step?.uses ?? '').startsWith('actions/download-artifact@')) ||
+      producer.steps.indexOf(tarHash) >= producer.steps.indexOf(candidate.step) ||
+      downloaded?.uses !== PINNED_DOWNLOAD ||
+      downloaded?.with?.['artifact-ids'] !== '${{ env.JDC_CANDIDATE_ARTIFACT_ID }}' ||
+      downloaded?.with?.['merge-multiple'] !== true ||
+      downloaded?.with?.path !== '${{ runner.temp }}/jdc-roundtrip-download/' ||
+      downloaded.with.name !== undefined || downloaded.with['github-token'] !== undefined ||
+      !beforeDownload?.run?.includes('JDC_CANDIDATE_ORIGINAL_TAR_SHA256') ||
+      !beforeDownload?.run?.includes('JDC_CANDIDATE_ARTIFACT_ID') ||
+      !roundTrip?.run?.includes('distribution-candidate.mjs roundtrip') ||
+      consumer.steps.indexOf(beforeDownload) >= consumer.steps.indexOf(downloaded) ||
+      consumer.steps.indexOf(downloaded) >= consumer.steps.indexOf(roundTrip)) {
+    reject('cross-job immutable artifact ID, TAR SHA-256 and ordered verification required');
+  }
+  for (const platform of ['win', 'linux']) {
+    const target = platform === 'win' ? 'win32-x64' : 'linux-x64';
+    const expectedId = '$' + `{{ matrix.target == '${target}' && steps.portable_tar_upload.outputs.artifact-id || '' }}`;
+    const expectedHash = '$' + `{{ matrix.target == '${target}' && steps.original_tar_sha256.outputs.sha256 || '' }}`;
+    if (producer.outputs?.[platform + '_artifact_id'] !== expectedId ||
+        producer.outputs?.[platform + '_tar_sha256'] !== expectedHash) {
+      reject('platform-specific immutable artifact identity and checksum outputs missing');
+    }
+  }
+  const exactPlatformLookup = (suffix) => '$' +
+    "{{ fromJSON(format('{{\"win32-x64\":\"{0}\",\"linux-x64\":\"{1}\"}}', needs.portable-candidate.outputs.win_" +
+    suffix + ', needs.portable-candidate.outputs.linux_' + suffix + '))[matrix.target] }}';
+  const expectedConsumerId = exactPlatformLookup('artifact_id');
+  const expectedConsumerHash = exactPlatformLookup('tar_sha256');
+  if (consumer.env?.JDC_CANDIDATE_ARTIFACT_ID !== expectedConsumerId ||
+      consumer.env?.JDC_CANDIDATE_ORIGINAL_TAR_SHA256 !== expectedConsumerHash) {
+    reject('consumer must bind both platform artifact outputs exactly');
   }
   const conf = candidate.step.with;
   if (!conf || conf.name !== 'UNPUBLISHED-jdc-portable-' + matrixTarget ||
@@ -249,6 +306,20 @@ export function validatePublicArtifactInventory(workflows) {
       conf['if-no-files-found'] !== 'error' ||
       conf['compression-level'] !== 0) {
     reject('portable upload path or retention differs from reviewed configuration');
+  }
+  const acceptanceMustPrecedeInstallerUpload = [
+    'Verify downloaded TAR and smoke extracted native runtime',
+    'Real MCP client acceptance outside checkout',
+    'Verify installer provenance',
+    'Verify Windows installer install and uninstall',
+    'Verify Debian install and remove',
+  ];
+  const installerUploadAt = consumer.steps.indexOf(installer.step);
+  if (installerUploadAt < 0 || acceptanceMustPrecedeInstallerUpload.some(name => {
+    const index = consumer.steps.findIndex(step => step.name === name);
+    return index < 0 || index >= installerUploadAt;
+  })) {
+    reject('unpublished installers require intact actual MCP and OS acceptance before export');
   }
   const installerConf = installer.step.with;
   if (!installerConf ||

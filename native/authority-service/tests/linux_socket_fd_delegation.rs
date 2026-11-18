@@ -7,7 +7,7 @@ use jdc_authority_service::linux_peer::observe_kernel_peer;
 use std::{
     env, fs,
     io::{Read, Write},
-    mem::{size_of, zeroed},
+    mem::{align_of, size_of, zeroed},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
         unix::net::{UnixListener, UnixStream},
@@ -53,12 +53,15 @@ fn send_fd(transport: &UnixStream, delegated: RawFd) {
         iov_len: marker.len(),
     };
     let bytes = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-    let mut ancillary = vec![0u8; bytes];
+    // CMSG_FIRSTHDR treats msg_control as an aligned cmsghdr pointer.
+    // Vec<u8> promises only byte alignment; use native machine words instead.
+    assert!(align_of::<usize>() >= align_of::<libc::cmsghdr>());
+    let mut ancillary = vec![0usize; bytes.div_ceil(size_of::<usize>())];
     let mut message: libc::msghdr = unsafe { zeroed() };
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
     message.msg_control = ancillary.as_mut_ptr().cast();
-    message.msg_controllen = ancillary.len();
+    message.msg_controllen = bytes;
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
         assert!(!header.is_null());
@@ -81,12 +84,15 @@ fn receive_fd(transport: &UnixStream) -> UnixStream {
         iov_len: marker.len(),
     };
     let bytes = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-    let mut ancillary = vec![0u8; bytes];
+    // CMSG_FIRSTHDR treats msg_control as an aligned cmsghdr pointer.
+    // Vec<u8> promises only byte alignment; use native machine words instead.
+    assert!(align_of::<usize>() >= align_of::<libc::cmsghdr>());
+    let mut ancillary = vec![0usize; bytes.div_ceil(size_of::<usize>())];
     let mut message: libc::msghdr = unsafe { zeroed() };
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
     message.msg_control = ancillary.as_mut_ptr().cast();
-    message.msg_controllen = ancillary.len();
+    message.msg_controllen = bytes;
     unsafe {
         assert_eq!(
             libc::recvmsg(transport.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC),
@@ -120,6 +126,9 @@ fn original_connecting_client_fixture() {
     let data = UnixStream::connect(data_path).expect("original child opens data connection");
     let control =
         UnixStream::connect(control_path).expect("original child opens descriptor channel");
+    control
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("bounded original descriptor send");
     send_fd(&control, data.as_raw_fd());
 }
 
@@ -176,6 +185,9 @@ fn kernel_peer_snapshot_does_not_authenticate_writer_after_fd_transfer() {
     assert_eq!(initial.uid, unsafe { libc::geteuid() });
     assert_eq!(initial.gid, unsafe { libc::getegid() });
     let original_control = accept_ready(&original_control_listener);
+    original_control
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("bounded original descriptor receipt");
     let original_socket = receive_fd(&original_control);
     assert!(original.0.wait().expect("original client exit").success());
 
@@ -192,6 +204,9 @@ fn kernel_peer_snapshot_does_not_authenticate_writer_after_fd_transfer() {
     assert_ne!(delegated.0.id(), original.0.id());
     assert_ne!(delegated.0.id(), std::process::id());
     let delegated_control = accept_ready(&delegated_control_listener);
+    delegated_control
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("bounded delegated descriptor send");
     send_fd(&delegated_control, original_socket.as_raw_fd());
     drop(original_socket);
 

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
+import { parse } from 'yaml';
 import { validateInstallerInput } from '../scripts/validate-installer-input.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,20 +86,60 @@ test('Windows installer stays per-user with separate launcher and no service tak
   assert.match(cmd, /runtime\\node\.exe/);
   assert.match(cmd, /dist\\index\.js/);
 });
-test('portable round-trip retrieves the exact immutable artifact uploaded in the same job', async () => {
-  const workflow = await readFile(resolve(root, '.github/workflows/distribution-candidate.yml'), 'utf8');
-  const upload = workflow.split('name: Retain unpublished candidate as a short-lived CI artifact')[1]
-    ?.split('name: Download original uploaded candidate for round-trip acceptance')[0];
-  const download = workflow.split('name: Download original uploaded candidate for round-trip acceptance')[1]
-    ?.split('name: Verify downloaded TAR and smoke extracted native runtime')[0];
-  assert.ok(upload && download, 'both original upload and identity-bound round-trip must be present');
-  assert.match(upload, /^\s+id: portable_tar_upload\s*$/m);
-  assert.match(download, /artifact-ids:\s*\$\{\{\s*steps\.portable_tar_upload\.outputs\.artifact-id\s*\}\}/);
-  assert.match(download, /^\s+merge-multiple:\s*true\s*$/m,
-    'the single exact-ID artifact must extract directly into the existing round-trip path');
-  assert.doesNotMatch(download, /^\s+name:\s*UNPUBLISHED-jdc-portable-/m,
-    'do not resolve an immutable just-uploaded artifact by eventual-consistency name search');
-  assert.ok(download.includes('path: ${{ runner.temp }}/jdc-roundtrip-download/'));
+test('portable acceptance depends on completed matrix producers and exact immutable artifact identities', async () => {
+  const workflow = parse(await readFile(resolve(root, '.github/workflows/distribution-candidate.yml'), 'utf8'),
+    { uniqueKeys: true });
+  const producer = workflow.jobs['portable-candidate'];
+  const consumer = workflow.jobs['portable-acceptance'];
+  assert.ok(producer && consumer, 'separate build/upload and download/acceptance jobs are mandatory');
+  assert.deepEqual(consumer.needs, ['portable-candidate', 'windows-operator-ui', 'linux-operator-ui']);
+  assert.equal(producer.permissions, undefined, 'producer must inherit least-privilege token');
+  assert.equal(consumer.permissions, undefined, 'consumer must not widen the token');
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(consumer.strategy.matrix, producer.strategy.matrix,
+    'both acceptance runners must exactly match the source producer platform matrix');
+  assert.deepEqual(consumer.env.JDC_CANDIDATE_SOURCE_SHA, producer.env.JDC_CANDIDATE_SOURCE_SHA);
+  assert.equal(consumer.env.JDC_CANDIDATE_TARGET, '${{ matrix.target }}');
+  assert.equal(consumer.env.JDC_CANDIDATE_INCLUDE_NATIVE, undefined);
+  const uploads = producer.steps.filter(s => String(s.uses ?? '').startsWith('actions/upload-artifact@'));
+  assert.equal(uploads.length, 1, 'producer must export exactly one original portable artifact');
+  assert.equal(uploads[0].id, 'portable_tar_upload');
+  assert.equal(uploads[0].with.overwrite, undefined, 'upload is immutable, never overwritten');
+  assert.equal(uploads[0].with.name, 'UNPUBLISHED-jdc-portable-${{ matrix.target }}');
+  assert.ok(!producer.steps.some(s => String(s.uses ?? '').startsWith('actions/download-artifact@')),
+    'producer cannot immediately download a just-finalized upload');
+  assert.equal(consumer.steps.filter(s => String(s.uses ?? '').startsWith('actions/upload-artifact@')).length, 1,
+    'only the checked installer candidate may be uploaded by the acceptance job');
+  const download = consumer.steps.find(s => s.name ===
+    'Download original uploaded candidate for round-trip acceptance');
+  assert.ok(download && download.uses ===
+    'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
+  assert.ok(!('name' in download.with) && !('github-token' in download.with) &&
+    !('run-id' in download.with), 'acceptance must use same-run immutable ID, not a name or external token');
+  assert.equal(download.with['artifact-ids'], '${{ env.JDC_CANDIDATE_ARTIFACT_ID }}');
+  assert.equal(download.with['merge-multiple'], true);
+  assert.equal(download.with.path, '${{ runner.temp }}/jdc-roundtrip-download/');
+  const hash = producer.steps.find(s => s.id === 'original_tar_sha256');
+  assert.ok(hash && /Get-FileHash/.test(hash.run), 'producer must SHA-256 the original TAR bytes');
+  for (const platform of ['win', 'linux']) {
+    assert.match(String(producer.outputs[platform + '_artifact_id']), /steps\.portable_tar_upload\.outputs\.artifact-id/);
+    assert.match(String(producer.outputs[platform + '_tar_sha256']), /steps\.original_tar_sha256\.outputs\.sha256/);
+    assert.match(String(consumer.env.JDC_CANDIDATE_ORIGINAL_TAR_SHA256),
+      new RegExp('needs\\.portable-candidate\\.outputs\\.' + platform + '_tar_sha256'));
+    assert.match(String(consumer.env.JDC_CANDIDATE_ARTIFACT_ID),
+      new RegExp('needs\\.portable-candidate\\.outputs\\.' + platform + '_artifact_id'));
+  }
+  const verify = consumer.steps.find(s => s.name ===
+    'Verify downloaded TAR and smoke extracted native runtime');
+  const idGuard = consumer.steps.find(s => s.name ===
+    'Verify uploaded artifact identity and original TAR checksum');
+  assert.ok(idGuard && verify, 'identity and hash must be checked before extracting or running payload');
+  assert.ok(consumer.steps.indexOf(idGuard) < consumer.steps.indexOf(download));
+  assert.ok(consumer.steps.indexOf(download) < consumer.steps.indexOf(verify));
+  assert.match(verify.run, /distribution-candidate\.mjs roundtrip/);
+  assert.ok(consumer.steps.some(s => s.name === 'Real MCP client acceptance outside checkout'));
+  assert.ok(consumer.steps.some(s => s.name === 'Verify Debian install and remove'));
+  assert.ok(consumer.steps.some(s => s.name === 'Verify Windows installer install and uninstall'));
 });
 
 test('Windows hosted installer checks full registered package lifecycle, not only GUI files', async () => {

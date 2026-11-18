@@ -6,7 +6,7 @@ import YAML from 'yaml';
 
 const workflow = YAML.parse(readFileSync(
   new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8'));
-const run = workflow.jobs['portable-candidate'].steps.find(
+const run = workflow.jobs['portable-acceptance'].steps.find(
   (step) => step.name === 'Verify Windows installer install and uninstall').run;
 assert.match(run, /windows-installer-acceptance-runner[.]ps1/);
 const acceptance = readFileSync(

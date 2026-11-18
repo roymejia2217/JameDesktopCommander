@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { appendFile, chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildCandidate, verifyCandidate, createCandidateArchive, restoreCandidateArchive,
 } from '../scripts/distribution-candidate.mjs';
@@ -272,6 +274,65 @@ test('altered downloaded TAR is rejected before extraction', async () => {
       /Downloaded candidate archive differs/);
     await assert.rejects(lstat(extracted), { code: 'ENOENT' });
   });
+});
+
+test('cross-job restoration requires the independent producer TAR SHA-256 before extraction', async () => {
+  await withFixture(async options => {
+    await buildCandidate(options);
+    const root = dirname(options.destination);
+    const original = join(root, 'producer.tar');
+    const downloaded = join(root, 'downloaded-in-acceptance.tar');
+    const extracted = join(root, 'extracted-cross-job');
+    await createCandidateArchive(options.destination, original);
+    const digest = createHash('sha256').update(await readFile(original)).digest('hex');
+    await copyFile(original, downloaded);
+    await rm(original);
+    await assert.rejects(restoreCandidateArchive(original, downloaded, extracted),
+      /ENOENT|not found/i, 'a consumer cannot pretend to have the original TAR');
+    await restoreCandidateArchive(original, downloaded, extracted, digest);
+    assert.deepEqual(await verifyCandidate({ ...options, destination: extracted }),
+      await verifyCandidate(options));
+    await appendFile(downloaded, 'unauthorized appended bytes\n');
+    await assert.rejects(restoreCandidateArchive(original, downloaded, extracted, digest),
+      /Downloaded candidate archive differs/);
+    await assert.rejects(restoreCandidateArchive(original, downloaded, extracted, '0'.repeat(63)),
+      /SHA-256|digest/i, 'malformed producer checksum must fail closed');
+  });
+});
+
+test('cross-job CLI verifies the downloaded TAR without an existing producer stage', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'jdc-cross-job-cli-'));
+  try {
+    const platform = process.platform + '-' + process.arch;
+    const archiveName = 'UNPUBLISHED-jdc-portable-' + platform + '.tar';
+    const download = join(temp, 'jdc-roundtrip-download');
+    await mkdir(download);
+    await writeFile(join(download, archiveName), 'corrupted artifact bytes');
+    // This runner has no original producer candidate directory. The first
+    // failure MUST come from the downloaded artifact SHA, before extraction.
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL('../scripts/distribution-candidate.mjs', import.meta.url)),
+      'roundtrip',
+    ], {
+      cwd: dirname(fileURLToPath(new URL('../package.json', import.meta.url))),
+      encoding: 'utf8', timeout: 20000,
+      env: { ...process.env,
+        RUNNER_TEMP: temp,
+        JDC_CANDIDATE_TARGET: platform,
+        JDC_CANDIDATE_SOURCE_SHA: sourceCommit,
+        JDC_CANDIDATE_ORIGINAL_TAR_SHA256: 'a'.repeat(64),
+        GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt,
+        JDC_CANDIDATE_INCLUDE_NATIVE: '0',
+      },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Downloaded candidate archive differs from uploaded bytes/,
+      'no producer stage or source checkout may be read as the original TAR');
+    await assert.rejects(lstat(join(temp, 'jdc-candidate-roundtrip-' + platform)),
+      { code: 'ENOENT' }, 'a rejected checksum cannot extract anything');
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 });
 
 test('native candidate requires a platform-valid addon and records its exact bytes', async () => {

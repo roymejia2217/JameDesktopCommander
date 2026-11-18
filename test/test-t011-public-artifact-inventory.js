@@ -19,6 +19,7 @@ const clone = () => structuredClone(originals);
 const findUpload = (job) => job.steps.find((step) =>
   String(step?.uses ?? '').startsWith('actions/upload-artifact@'));
 const candidate = (workflows) => workflows['distribution-candidate.yml'].jobs['portable-candidate'];
+const acceptance = (workflows) => workflows['distribution-candidate.yml'].jobs['portable-acceptance'];
 
 function mustReject(title, mutate) {
   test(title, () => {
@@ -36,7 +37,7 @@ test('only the five explicitly reviewed public artifact upload surfaces are allo
         String(step?.uses ?? '').startsWith('actions/upload-artifact@'))
         .map(() => file + '/' + job)));
   assert.deepEqual(all.sort(), [
-    'distribution-candidate.yml/portable-candidate',
+    'distribution-candidate.yml/portable-acceptance',
     'distribution-candidate.yml/portable-candidate',
     'linux-operator-ui-bundle.yml/native-gui',
     't011-capability-feasibility.yml/native-probe',
@@ -92,6 +93,55 @@ mustReject('rejects candidate job-level permission escalation', (docs) => {
 mustReject('rejects candidate workflow permission escalation', (docs) => {
   docs['distribution-candidate.yml'].permissions = { contents: 'write' };
 });
+mustReject('rejects acceptance job actions-token escalation', docs => {
+  acceptance(docs).permissions = { contents: 'read', actions: 'read' };
+});
+mustReject('rejects acceptance that does not depend on completed upload jobs', docs => {
+  acceptance(docs).needs = ['windows-operator-ui', 'linux-operator-ui'];
+});
+mustReject('rejects producer that downloads an unfinalized artifact', docs => {
+  candidate(docs).steps.push(structuredClone(acceptance(docs).steps.find(
+    step => step.name === 'Download original uploaded candidate for round-trip acceptance')));
+});
+mustReject('rejects cross-platform artifact ID output confusion', docs => {
+  candidate(docs).outputs.win_artifact_id =
+    candidate(docs).outputs.linux_artifact_id;
+});
+mustReject('rejects missing original TAR SHA-256 output', docs => {
+  delete candidate(docs).outputs.linux_tar_sha256;
+});
+mustReject('rejects missing original TAR fingerprint step', docs => {
+  candidate(docs).steps = candidate(docs).steps.filter(s =>
+    s.id !== 'original_tar_sha256');
+});
+mustReject('rejects download by mutable name instead of immutable ID', docs => {
+  const step = acceptance(docs).steps.find(s =>
+    s.name === 'Download original uploaded candidate for round-trip acceptance');
+  delete step.with['artifact-ids'];
+  step.with.name = 'UNPUBLISHED-jdc-portable-${{ matrix.target }}';
+});
+mustReject('rejects cross-run token-based artifact download', docs => {
+  acceptance(docs).steps.find(s =>
+    s.name === 'Download original uploaded candidate for round-trip acceptance')
+    .with['github-token'] = '${{ github.token }}';
+});
+mustReject('rejects bypass of pre-download SHA and identity gate', docs => {
+  acceptance(docs).steps = acceptance(docs).steps.filter(s =>
+    s.name !== 'Verify uploaded artifact identity and original TAR checksum');
+});
+mustReject('rejects publisher that uploads installer before real host acceptance', docs => {
+  const steps = acceptance(docs).steps;
+  const at = steps.findIndex(s => s.name === 'Retain unpublished installer candidates');
+  const [upload] = steps.splice(at, 1);
+  steps.splice(steps.findIndex(s =>
+    s.name === 'Real MCP client acceptance outside checkout'), 0, upload);
+});
+mustReject('rejects producer uploading before recording original SHA-256', docs => {
+  const steps = candidate(docs).steps;
+  const at = steps.findIndex(s => s.id === 'original_tar_sha256');
+  const [hash] = steps.splice(at, 1);
+  steps.splice(steps.findIndex(s => s.id === 'portable_tar_upload') + 1, 0, hash);
+});
 mustReject('rejects removed candidate upload', (docs) => {
   candidate(docs).steps = candidate(docs).steps.filter((s) =>
     !String(s.uses ?? '').startsWith('actions/upload-artifact@'));
@@ -111,20 +161,20 @@ mustReject('rejects upload step named without a pinned action ref', (docs) => {
 const findInstallerUpload = (job) => job.steps.find(step =>
   String(step?.with?.name ?? '').startsWith('UNPUBLISHED-jdc-installer-'));
 mustReject('reject installer artifact path broadening to runner temp', docs => {
-  findInstallerUpload(candidate(docs)).with.path = '${{ runner.temp }}';
+  findInstallerUpload(acceptance(docs)).with.path = '${{ runner.temp }}';
 });
 mustReject('reject installer upload with generic wildcard export', docs => {
-  findInstallerUpload(candidate(docs)).with.path =
+  findInstallerUpload(acceptance(docs)).with.path =
     '${{ runner.temp }}/jdc-installer-output/*';
 });
 mustReject('reject changed installer upload target identity', docs => {
-  findInstallerUpload(candidate(docs)).with.name = 'UNPUBLISHED-other';
+  findInstallerUpload(acceptance(docs)).with.name = 'UNPUBLISHED-other';
 });
 mustReject('reject extended installer retention', docs => {
-  findInstallerUpload(candidate(docs)).with['retention-days'] = 90;
+  findInstallerUpload(acceptance(docs)).with['retention-days'] = 90;
 });
 mustReject('reject unpinned installer artifact upload action', docs => {
-  findInstallerUpload(candidate(docs)).uses = 'actions/upload-artifact@v4';
+  findInstallerUpload(acceptance(docs)).uses = 'actions/upload-artifact@v4';
 });
 
 const operatorUi = docs => docs['windows-operator-ui-bundle.yml'].jobs['native-gui'];
@@ -160,7 +210,7 @@ mustReject('reject portable candidate that drops the same-run GUI dependency', d
   delete docs['distribution-candidate.yml'].jobs['portable-candidate'].needs;
 });
 mustReject('reject downloaded GUI overlay from an unrelated artifact name', docs => {
-  const steps = candidate(docs).steps;
+  const steps = acceptance(docs).steps;
   const download = steps.find(s => s.name === 'Download exact Windows operator UI overlay');
   download.with.name = 'UNPUBLISHED-untrusted-payload';
 });
@@ -214,13 +264,13 @@ mustReject('reject unrelated external action in Linux GUI build', docs => {
   });
 });
 mustReject('reject Linux GUI candidate without same-run build dependency', docs => {
-  candidate(docs).needs = ['windows-operator-ui'];
+  acceptance(docs).needs = ['windows-operator-ui'];
 });
 mustReject('reject Linux GUI downloaded under unapproved artifact name', docs => {
-  candidate(docs).steps.find(s => s.name === 'Download exact Linux operator UI overlay')
+  acceptance(docs).steps.find(s => s.name === 'Download exact Linux operator UI overlay')
     .with.name = 'UNPUBLISHED-wrong-source';
 });
 mustReject('reject Linux candidate that skips installed hash verification', docs => {
-  candidate(docs).steps.find(s => s.name === 'Verify Debian install and remove')
+  acceptance(docs).steps.find(s => s.name === 'Verify Debian install and remove')
     .run = 'sudo dpkg -i candidate.deb && sudo dpkg -r jame-desktop-commander';
 });

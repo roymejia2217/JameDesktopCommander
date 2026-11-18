@@ -32,7 +32,9 @@
         "do_not_enforce_on_create": false,
         "required_status_checks": [
           { "context": "PR Governance" },
-          { "context": "Required CI" }
+          { "context": "Required CI" },
+          { "context": "CodeQL Security (rust)" },
+          { "context": "CodeQL Security (actions)" }
         ]
       }
     },

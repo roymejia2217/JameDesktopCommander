@@ -145,8 +145,8 @@ jobs:
       JDC_CANDIDATE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       # The producer's distinct matrix outputs bind both archive identity and
       # original TAR bytes. Missing/colliding outputs fail before any download.
-      JDC_CANDIDATE_ARTIFACT_ID: ${{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_artifact_id || needs.portable-candidate.outputs.linux_artifact_id }}
-      JDC_CANDIDATE_ORIGINAL_TAR_SHA256: ${{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_tar_sha256 || needs.portable-candidate.outputs.linux_tar_sha256 }}
+      JDC_CANDIDATE_ARTIFACT_ID: ${{ fromJSON(format('{{"win32-x64":"{0}","linux-x64":"{1}"}}', needs.portable-candidate.outputs.win_artifact_id, needs.portable-candidate.outputs.linux_artifact_id))[matrix.target] }}
+      JDC_CANDIDATE_ORIGINAL_TAR_SHA256: ${{ fromJSON(format('{{"win32-x64":"{0}","linux-x64":"{1}"}}', needs.portable-candidate.outputs.win_tar_sha256, needs.portable-candidate.outputs.linux_tar_sha256))[matrix.target] }}
 
     steps:
       - name: Checkout exact candidate acceptance source

@@ -142,6 +142,23 @@ test('portable acceptance depends on completed matrix producers and exact immuta
   assert.ok(consumer.steps.some(s => s.name === 'Verify Windows installer install and uninstall'));
 });
 
+test('missing platform artifact output never falls back to the other operating system', async () => {
+  const workflow = parse(await readFile(resolve(root, '.github/workflows/distribution-candidate.yml'), 'utf8'),
+    { uniqueKeys: true });
+  const env = workflow.jobs['portable-acceptance'].env;
+  const exactLookup = (suffix) =>
+    "${{ fromJSON(format('{{\"win32-x64\":\"{0}\",\"linux-x64\":\"{1}\"}}', needs.portable-candidate.outputs.win_" +
+    suffix + ', needs.portable-candidate.outputs.linux_' + suffix + '))[matrix.target] }}';
+  assert.equal(env.JDC_CANDIDATE_ARTIFACT_ID, exactLookup('artifact_id'),
+    'selecting an absent win32 artifact ID must not use a valid Linux artifact ID');
+  assert.equal(env.JDC_CANDIDATE_ORIGINAL_TAR_SHA256, exactLookup('tar_sha256'),
+    'selecting an absent original platform digest must not use the other platform digest');
+  for (const field of ['JDC_CANDIDATE_ARTIFACT_ID', 'JDC_CANDIDATE_ORIGINAL_TAR_SHA256']) {
+    assert.doesNotMatch(env[field], /\|\|\s*needs\.portable-candidate\.outputs/,
+      'a cross-platform logical fallback violates pre-download artifact identity');
+  }
+});
+
 test('Windows hosted installer checks full registered package lifecycle, not only GUI files', async () => {
   const workflow = await readFile(resolve(root,'.github/workflows/distribution-candidate.yml'),'utf8');
   const windows = workflow.split('name: Verify Windows installer install and uninstall')[1]

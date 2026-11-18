@@ -107,6 +107,14 @@ mustReject('rejects cross-platform artifact ID output confusion', docs => {
   candidate(docs).outputs.win_artifact_id =
     candidate(docs).outputs.linux_artifact_id;
 });
+mustReject('rejects implicit Linux ID fallback when Windows producer output is absent', docs => {
+  acceptance(docs).env.JDC_CANDIDATE_ARTIFACT_ID =
+    "${{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_artifact_id || needs.portable-candidate.outputs.linux_artifact_id }}";
+});
+mustReject('rejects implicit Linux TAR digest fallback when Windows producer output is absent', docs => {
+  acceptance(docs).env.JDC_CANDIDATE_ORIGINAL_TAR_SHA256 =
+    "${{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_tar_sha256 || needs.portable-candidate.outputs.linux_tar_sha256 }}";
+});
 mustReject('rejects missing original TAR SHA-256 output', docs => {
   delete candidate(docs).outputs.linux_tar_sha256;
 });

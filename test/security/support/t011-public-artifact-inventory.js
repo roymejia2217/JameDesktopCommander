@@ -290,10 +290,11 @@ export function validatePublicArtifactInventory(workflows) {
       reject('platform-specific immutable artifact identity and checksum outputs missing');
     }
   }
-  const expectedConsumerId = '$' +
-    "{{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_artifact_id || needs.portable-candidate.outputs.linux_artifact_id }}";
-  const expectedConsumerHash = '$' +
-    "{{ matrix.target == 'win32-x64' && needs.portable-candidate.outputs.win_tar_sha256 || needs.portable-candidate.outputs.linux_tar_sha256 }}";
+  const exactPlatformLookup = (suffix) => '$' +
+    "{{ fromJSON(format('{{\"win32-x64\":\"{0}\",\"linux-x64\":\"{1}\"}}', needs.portable-candidate.outputs.win_" +
+    suffix + ', needs.portable-candidate.outputs.linux_' + suffix + '))[matrix.target] }}';
+  const expectedConsumerId = exactPlatformLookup('artifact_id');
+  const expectedConsumerHash = exactPlatformLookup('tar_sha256');
   if (consumer.env?.JDC_CANDIDATE_ARTIFACT_ID !== expectedConsumerId ||
       consumer.env?.JDC_CANDIDATE_ORIGINAL_TAR_SHA256 !== expectedConsumerHash) {
     reject('consumer must bind both platform artifact outputs exactly');

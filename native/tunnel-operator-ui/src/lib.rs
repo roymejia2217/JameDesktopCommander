@@ -232,6 +232,18 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     {
         return Err("Unverified control-plane diagnosis contradicts observation");
     }
+    // Remote delivery can be the only remaining unknown only after every
+    // local readiness, handshake, tool-discovery and control-plane gate passed.
+    if snapshot.verdict.reason_code == "REMOTE_ROUND_TRIP_UNVERIFIED"
+        && (snapshot.verdict.state != "unverified"
+            || snapshot.task_registration != "observed"
+            || snapshot.local_health != "ready"
+            || snapshot.mcp_initialize != "observed"
+            || snapshot.tool_discovery != "observed_complete"
+            || snapshot.control_plane != "none")
+    {
+        return Err("Remote-only uncertainty contradicts incomplete local evidence");
+    }
     if (linux && snapshot.verdict.reason_code == "TASK_STATUS_UNAVAILABLE")
         || (!linux
             && one_of(
@@ -622,6 +634,60 @@ mod tests {
                 "\"controlPlane\":\"none\"",
             );
             assert!(parse_overview(falsely_unverified.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_unverified_reason_requires_actual_local_readiness_on_both_platforms() {
+        for baseline in [GOOD.to_string(), linux_sample()] {
+            let locally_ready = baseline
+                .replace(
+                    "\"toolDiscovery\":\"observed_incomplete\"",
+                    "\"toolDiscovery\":\"observed_complete\"",
+                )
+                .replace(
+                    "\"controlPlane\":\"credential_rejected\"",
+                    "\"controlPlane\":\"none\"",
+                )
+                .replace("\"state\":\"degraded\"", "\"state\":\"unverified\"")
+                .replace(
+                    "CONTROL_PLANE_CREDENTIAL_REJECTED",
+                    "REMOTE_ROUND_TRIP_UNVERIFIED",
+                );
+            assert!(
+                parse_overview(locally_ready.as_bytes()).is_ok(),
+                "verified local state with unknown remote delivery is allowed"
+            );
+            let registration_field = if baseline.contains("\"platform\":\"linux\"") {
+                "serviceRegistration"
+            } else {
+                "taskRegistration"
+            };
+            for (field, contradictory) in [
+                (registration_field, "unverified"),
+                ("localHealth", "not_ready"),
+                ("localHealth", "unverified"),
+                ("mcpInitialize", "not_observed"),
+                ("mcpInitialize", "unverified"),
+                ("toolDiscovery", "observed_incomplete"),
+                ("toolDiscovery", "unverified"),
+                ("controlPlane", "unverified"),
+            ] {
+                let mut payload: serde_json::Value = serde_json::from_str(&locally_ready).unwrap();
+                payload[field] = serde_json::Value::String(contradictory.into());
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                assert!(
+                    parse_overview(&bytes).is_err(),
+                    "{field}={contradictory}: remote-only uncertainty cannot conceal a local fault"
+                );
+            }
+            let mut false_severity: serde_json::Value =
+                serde_json::from_str(&locally_ready).unwrap();
+            false_severity["verdict"]["state"] = serde_json::Value::String("degraded".into());
+            assert!(
+                parse_overview(&serde_json::to_vec(&false_severity).unwrap()).is_err(),
+                "a remote-only unverified reason cannot claim a degraded verdict"
+            );
         }
     }
 

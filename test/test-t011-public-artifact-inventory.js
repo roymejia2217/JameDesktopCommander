@@ -103,6 +103,18 @@ mustReject('rejects producer that downloads an unfinalized artifact', docs => {
   candidate(docs).steps.push(structuredClone(acceptance(docs).steps.find(
     step => step.name === 'Download original uploaded candidate for round-trip acceptance')));
 });
+mustReject('reject producer checkout of attacker-nominated PR head SHA', docs => {
+  candidate(docs).steps.find(step => step.name === 'Checkout exact candidate source')
+    .with.ref = '${{ github.event.pull_request.head.sha }}';
+});
+mustReject('reject acceptance checkout from a different source identity', docs => {
+  acceptance(docs).steps.find(step => step.name === 'Checkout exact candidate acceptance source')
+    .with.ref = 'main';
+});
+mustReject('reject replacing pull_request with privileged pull_request_target', docs => {
+  delete docs['distribution-candidate.yml'].on.pull_request;
+  docs['distribution-candidate.yml'].on.pull_request_target = { branches: ['main'] };
+});
 mustReject('rejects cross-platform artifact ID output confusion', docs => {
   candidate(docs).outputs.win_artifact_id =
     candidate(docs).outputs.linux_artifact_id;
@@ -206,6 +218,14 @@ mustReject('reject GUI artifact retention beyond its reviewed one day', docs => 
 mustReject('reject GUI job permissions escalated to contents write', docs => {
   docs['windows-operator-ui-bundle.yml'].permissions = { contents: 'write' };
 });
+mustReject('reject Windows GUI input-controlled source commitment', docs => {
+  operatorUi(docs).env.JDC_CANDIDATE_SOURCE_SHA = '${{ inputs.source_commit }}';
+});
+mustReject('reject Windows GUI caller supplying a mutable source input', docs => {
+  docs['distribution-candidate.yml'].jobs['windows-operator-ui'].with = {
+    source_commit: '${{ github.event.pull_request.head.sha }}',
+  };
+});
 mustReject('reject GUI build sourcing an unreviewed commit', docs => {
   operatorUi(docs).steps.find(s => s.name === 'Checkout exact native operator source')
     .with.ref = 'main';
@@ -243,15 +263,19 @@ mustReject('reject Linux GUI artifact retention beyond one day', docs => {
 mustReject('reject Linux GUI artifact with unpinned upload-action', docs => {
   linuxOperatorUpload(docs).uses = 'actions/upload-artifact@v4';
 });
-mustReject('reject Linux UI reusable workflow without a caller event allowlist', docs => {
-  delete linuxOperatorUi(docs).if;
+mustReject('reject Linux UI job that silently skips a fork PR', docs => {
+  linuxOperatorUi(docs).if = "${{ github.event.pull_request.head.repo.full_name == github.repository }}";
 });
-mustReject('reject Linux UI reusable workflow that skips exact source-ref binding', docs => {
-  linuxOperatorUi(docs).if = "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
+mustReject('reject Linux UI input-controlled source commitment', docs => {
+  linuxOperatorUi(docs).env.JDC_CANDIDATE_SOURCE_SHA = '${{ inputs.source_commit }}';
 });
-mustReject('reject Linux UI reusable workflow that admits fork source repositories', docs => {
-  linuxOperatorUi(docs).if = String(linuxOperatorUi(docs).if)
-    .replace('github.event.pull_request.head.repo.full_name == github.repository &&', '');
+mustReject('reject unreviewed privileged PR target invocation', docs => {
+  docs['distribution-candidate.yml'].on.pull_request_target = { branches: ['main'] };
+});
+mustReject('reject Linux GUI caller supplying a mutable source input', docs => {
+  docs['distribution-candidate.yml'].jobs['linux-operator-ui'].with = {
+    source_commit: '${{ github.event.pull_request.head.sha }}',
+  };
 });
 mustReject('reject Linux GUI build from unreviewed source commit', docs => {
   linuxOperatorUi(docs).steps.find(s => s.name === 'Checkout exact native operator source')

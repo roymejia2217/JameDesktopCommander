@@ -85,8 +85,13 @@ mod proof {
         ))?;
         io(listener.set_nonblocking(true))?;
         let deadline = Instant::now() + Duration::from_secs(12);
-        let (mut denied, mut allowed) = (false, false);
-        while !denied || !allowed {
+        let mut denied = false;
+        // The second eligible request is intentionally launched from another
+        // process under the SAME client UID/GID: pure peer identity cannot
+        // prove which process originated a legitimate MCP host request.
+        let mut accepted_peer_pid: Option<i32> = None;
+        let mut admitted_count = 0usize;
+        while !denied || admitted_count < 2 {
             let (mut conn, _) = match listener.accept() {
                 Ok(pair) => pair,
                 Err(e)
@@ -111,8 +116,21 @@ mod proof {
                 denied = true;
                 continue;
             }
-            if allowed {
-                return Err("E_PEER_PROOF_REPLAYED_CLIENT");
+            if admitted_count >= 2 {
+                return Err("E_PEER_PROOF_EXCESS_CLIENTS");
+            }
+            if let Some(first_pid) = accepted_peer_pid {
+                if peer.pid == first_pid {
+                    return Err("E_PEER_PROOF_SAME_PROCESS_REUSED");
+                }
+                // Both independent PIDs have passed the same UID/GID-only
+                // peer policy. This is the precise *origin* counterexample,
+                // not proof of a protected client process or a safe broker.
+                if peer.uid != approved_client.uid || peer.gid != approved_client.gid {
+                    return Err("E_PEER_PROOF_UNEXPECTED_SECOND_CREDENTIALS");
+                }
+            } else {
+                accepted_peer_pid = Some(peer.pid);
             }
             let mut request = [0_u8; 1];
             io(conn.read_exact(&mut request))?;
@@ -131,13 +149,23 @@ mod proof {
             io(conn.write_all(b"A"))?;
             io(conn.write_all(&length.to_be_bytes()))?;
             io(conn.write_all(&bytes))?;
-            allowed = true;
+            admitted_count += 1;
+            if admitted_count == 2 {
+                eprintln!("T011_LINUX_SAME_UID_UNATTESTED_SECOND_PROCESS_READ_NONRELEASE");
+            }
         }
         eprintln!("T011_LINUX_OS_PEER_BOUND_NATIVE_READ_PASS_NONRELEASE");
         Ok(())
     }
 
-    fn request(socket: &Path, should_allow: bool) -> Result<(), &'static str> {
+    fn request(
+        socket: &Path,
+        should_allow: bool,
+        untrusted_same_uid_origin: bool,
+    ) -> Result<(), &'static str> {
+        if untrusted_same_uid_origin && !should_allow {
+            return Err("E_PEER_PROOF_INVALID_UNTRUSTED_CASE");
+        }
         let mut conn = io(UnixStream::connect(socket))?;
         io(conn.set_read_timeout(Some(Duration::from_secs(3))))?;
         io(conn.set_write_timeout(Some(Duration::from_secs(3))))?;
@@ -175,7 +203,13 @@ mod proof {
         if io(conn.read(&mut extra))? != 0 {
             return Err("E_PEER_PROOF_TRAILING_RESPONSE_BYTES");
         }
-        eprintln!("T011_LINUX_LEGITIMATE_CLIENT_RECEIVED_BOUND_BYTES");
+        if untrusted_same_uid_origin {
+            // A second independent process deliberately invoked the same
+            // admitted request without an independently attested host origin.
+            eprintln!("T011_LINUX_SAME_UID_UNTRUSTED_CLIENT_READ_NONRELEASE");
+        } else {
+            eprintln!("T011_LINUX_LEGITIMATE_CLIENT_RECEIVED_BOUND_BYTES");
+        }
         Ok(())
     }
 
@@ -186,10 +220,13 @@ mod proof {
                 serve(Path::new(&root), Path::new(&socket))
             }
             (Some(role), Some(socket), None, None) if role == "allow" => {
-                request(Path::new(&socket), true)
+                request(Path::new(&socket), true, false)
+            }
+            (Some(role), Some(socket), None, None) if role == "impersonate" => {
+                request(Path::new(&socket), true, true)
             }
             (Some(role), Some(socket), None, None) if role == "deny" => {
-                request(Path::new(&socket), false)
+                request(Path::new(&socket), false, false)
             }
             _ => Err("E_PEER_PROOF_ARGUMENTS"),
         };

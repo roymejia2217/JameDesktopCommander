@@ -246,8 +246,13 @@ if [[ "$peer_ready" -ne 1 ]]; then
 fi
 # First the real foreign nobody UID/GID must connect and receive no data.
 sudo -n -u nobody -- "$peer_binary" deny "$peer_socket"
-# Then the dedicated jdc-mcp-client UID/GID reads exactly one synthetic file.
+# The dedicated jdc-mcp-client UID/GID must complete a genuine native read.
 sudo -n -u jdc-mcp-client -- "$peer_binary" allow "$peer_socket"
+# A *second* real process using the same CI-only UID/GID is not the original
+# client. It must demonstrate the missing distinct *origin* boundary: a pure
+# SO_PEERCRED UID/GID admission check cannot tell these processes apart.
+# This is a research FALSIFICATION, not production access acceptance.
+sudo -n -u jdc-mcp-client -- "$peer_binary" impersonate "$peer_socket"
 if ! wait "$peer_server_pid"; then
   cat -- "$peer_server_log" >&2
   echo 'E_PEER_PROOF_SERVER_FAILED' >&2
@@ -257,6 +262,13 @@ peer_server_pid=''
 grep -Fq 'T011_LINUX_OS_PEER_BOUND_NATIVE_READ_PASS_NONRELEASE' "$peer_server_log" || {
   cat -- "$peer_server_log" >&2
   echo 'E_PEER_PROOF_NO_REAL_SERVER_VERDICT' >&2
+  exit 1
+}
+# Prove the second process had a different OS PID but the SAME authorized
+# UID/GID and obtained exact protected-root bytes (a fail-open of origin).
+grep -Fq 'T011_LINUX_SAME_UID_UNATTESTED_SECOND_PROCESS_READ_NONRELEASE' "$peer_server_log" || {
+  cat -- "$peer_server_log" >&2
+  echo 'E_PEER_PROOF_SAME_UID_ORIGIN_NOT_FALSIFIED' >&2
   exit 1
 }
 rm -f -- "$peer_server_log"

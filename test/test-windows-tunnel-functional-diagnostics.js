@@ -119,6 +119,20 @@ test('running and locally ready tunnel exposes control-plane HTTP 401 as rejecte
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TOKEN_MUST_NOT_LEAK/);
 });
 
+test('contradictory OK control-plane reason never masquerades as a clean status', () => {
+  const contradictory = structuredClone(example);
+  contradictory.components['control-plane'] = {
+    status: 'ok',
+    reason_code: 'http_error',
+    details: { consecutive_failures: 0, http_status: 401 },
+  };
+  const found = parseTunnelFunctionalHealth(contradictory);
+  assert.equal(found.controlPlaneProblem, 'unverified');
+  assert.equal(found.controlPlaneHttpStatus, null);
+  assert.equal(found.operatorGuidance, null);
+  assert.equal(found.operability.reasonCode, 'CONTROL_PLANE_UNVERIFIED');
+});
+
 test('control-plane causes classify safely without asserting expiry or trusting stale errors', () => {
   const cases = [
     [401, 'credential_rejected'],

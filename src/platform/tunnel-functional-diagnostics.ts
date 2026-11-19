@@ -55,7 +55,11 @@ function controlPlaneFailure(controlPlane: Record<string, unknown>): {
     problem: TunnelFunctionalDiagnostics['controlPlaneProblem'];
 } {
     const details = child(controlPlane, 'details');
-    if (controlPlane.status === 'ok' && count(details, 'consecutive_failures') === 0) {
+    if (controlPlane.status === 'ok' &&
+        count(details, 'consecutive_failures') === 0 &&
+        (controlPlane.reason_code === null || controlPlane.reason_code === undefined)) {
+        // An explicit error reason conflicts with "ok"; it must not become
+        // an observed healthy control plane merely because its counter reset.
         return { httpStatus: null, problem: 'none' };
     }
     const failures = count(details, 'consecutive_failures');

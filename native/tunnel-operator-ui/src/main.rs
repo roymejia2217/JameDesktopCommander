@@ -28,6 +28,21 @@ enum Presentation {
     NoInstallation,
 }
 
+// Show the age of the producer's observation, never the age of GUI receipt.
+// A timestamp ahead of the local clock is not an observation with age zero.
+fn observation_age_label(value: &Overview, now: OffsetDateTime) -> String {
+    let Ok(observed) = OffsetDateTime::parse(
+        &value.observed_at,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return "Observation age: unavailable".to_owned();
+    };
+    if observed > now {
+        return "Observation age: unavailable (future timestamp)".to_owned();
+    }
+    format!("Observation age: {}s", (now - observed).whole_seconds())
+}
+
 // Status always reflects the current freshness of a read-only observation.
 // A stale last-known result cannot be presented as a live tunnel verdict.
 fn snapshot_stale(value: &Overview, received_age: Duration, now: OffsetDateTime) -> bool {
@@ -155,7 +170,8 @@ impl OperatorApp {
         // backend. A network/diagnostic refresh still requires user action.
         ui.ctx().request_repaint_after(Duration::from_secs(1));
         let age = received.elapsed();
-        let status_label = snapshot_status_label(value, age, OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
+        let status_label = snapshot_status_label(value, age, now);
         let stale = status_label == "STALE DATA";
         let verdict_color = if stale || value.verdict.state == "degraded" {
             egui::Color32::from_rgb(250, 180, 90)
@@ -172,8 +188,8 @@ impl OperatorApp {
             ui.label(guidance(value.reason()));
         }
         ui.add_space(8.0);
-        ui.small(format!("Checked: {}", value.observed_at));
-        ui.small(format!("Age: {}s", age.as_secs()));
+        ui.small(format!("Observed at: {}", value.observed_at));
+        ui.small(observation_age_label(value, now));
         if stale {
             ui.label(
                 egui::RichText::new("Last observation is outdated. Refresh to verify.")
@@ -347,6 +363,27 @@ mod tests {
         assert_eq!(
             snapshot_status_label(&value, Duration::from_secs(31), recent),
             "STALE DATA"
+        );
+    }
+
+    #[test]
+    fn age_label_uses_source_observation_instead_of_ui_receive_time() {
+        let value = sample();
+        let old = OffsetDateTime::parse(
+            "2026-11-06T15:02:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        // A delayed backend may deliver evidence that is already two minutes old.
+        assert_eq!(observation_age_label(&value, old), "Observation age: 120s");
+        let future = OffsetDateTime::parse(
+            "2026-11-06T14:59:55Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(
+            observation_age_label(&value, future),
+            "Observation age: unavailable (future timestamp)"
         );
     }
 

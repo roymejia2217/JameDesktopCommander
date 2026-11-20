@@ -245,8 +245,10 @@ export const StartSearchArgsSchema = z.object({
 
 export const GetMoreSearchResultsArgsSchema = z.object({
   sessionId: z.string(),
-  offset: z.number().optional().default(0),    // Same as file reading
-  length: z.number().optional().default(100),  // Same as file reading (but smaller default)
+  // A negative offset requests that many tail results, so it must also be bounded.
+  offset: z.number().int().min(-1000).max(Number.MAX_SAFE_INTEGER).optional().default(0),
+  // Preserve zero-length status reads; limit allocations before response-byte checks.
+  length: z.number().int().min(0).max(1000).optional().default(100),
 });
 
 export const StopSearchArgsSchema = z.object({

@@ -13,8 +13,9 @@ function page(results, hasMoreResults = false) {
 }
 
 test('excessive requested result page is rejected without transmitting it', async t => {
-  const entries = Array.from({ length: 9000 }, (_, i) => ({
-    type: 'content', file: 'synthetic/'.padEnd(120, 'p'),
+  // A valid 1000-row page can still exceed the independent 1 MiB byte budget.
+  const entries = Array.from({ length: 1000 }, (_, i) => ({
+    type: 'content', file: 'synthetic/'.padEnd(1200, 'p'),
     line: i + 1, match: 'x'.repeat(95),
   }));
   t.mock.method(searchManager, 'readSearchResults', (_session, offset, length) =>
@@ -67,6 +68,48 @@ test('a page just under the byte budget remains available', async t => {
   assert.notEqual(response.isError, true);
   assert.ok(Buffer.byteLength(response.content[0].text, 'utf8') <= MAX_RESPONSE_BYTES);
   assert.match(response.content[0].text, /Search completed/);
+});
+
+test('unbounded or fractional page requests fail before any result read', async t => {
+  let reads = 0;
+  t.mock.method(searchManager, 'readSearchResults', () => {
+    reads++;
+    return page([]);
+  });
+  for (const args of [
+    { length: -1 }, { length: 1001 }, { length: 1.5 },
+    { length: Number.MAX_SAFE_INTEGER },
+    { offset: -1001 }, { offset: -1.5 },
+    { offset: 1.5 }, { offset: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    const response = await handleGetMoreSearchResults({ sessionId: 'test-only', ...args });
+    assert.equal(response.isError, true, JSON.stringify(args));
+    assert.match(response.content[0].text, /Invalid arguments/);
+  }
+  assert.equal(reads, 0, 'rejected pagination must never allocate the result page');
+});
+
+test('valid default, maximum and tail pages preserve documented offsets', async t => {
+  const requests = [];
+  t.mock.method(searchManager, 'readSearchResults', (...args) => {
+    requests.push(args);
+    return page([]);
+  });
+  for (const args of [
+    {},
+    { offset: 0, length: 0 },
+    { offset: 1000000, length: 1000 },
+    { offset: -1000, length: 1000 },
+  ]) {
+    const response = await handleGetMoreSearchResults({ sessionId: 'test-only', ...args });
+    assert.notEqual(response.isError, true, JSON.stringify(args));
+  }
+  assert.deepEqual(requests, [
+    ['test-only', 0, 100],
+    ['test-only', 0, 0],
+    ['test-only', 1000000, 1000],
+    ['test-only', -1000, 1000],
+  ]);
 });
 
 test('bounded normal result pages retain the next-offset contract', async t => {

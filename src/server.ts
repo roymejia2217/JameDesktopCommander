@@ -818,10 +818,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         Supports partial result reading with:
                         - 'offset' (start result index, default: 0)
                           * Positive: Start from result N (0-based indexing)
-                          * Negative: Read last N results from end (tail behavior)
-                        - 'length' (max results to read, default: 100)
+                          * Negative: Read last N results from end (tail behavior, at most 1000)
+                          * Must be a safe integer
+                        - 'length' (max results to read, default: 100, range 0–1000)
                           * Used with positive offsets for range reading
-                          * Ignored when offset is negative (reads all requested tail results)
+                          * Ignored when offset is negative (reads the bounded tail)
+                        - Responses exceeding the 1 MiB UTF-8 budget are rejected;
+                          retry the same offset with a smaller length.
                         
                         Examples:
                         - offset: 0, length: 100     → First 100 results

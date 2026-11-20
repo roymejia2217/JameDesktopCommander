@@ -158,6 +158,39 @@ fn local_verdict_consistent(snapshot: &Overview) -> bool {
     }
 }
 
+/// Unavailable/conflict reasons must preserve the producer's loss-of-evidence
+/// contract. Neither a missing diagnostic nor contradictory local observations
+/// can be displayed beside a successful handshake or a verified control plane.
+fn unavailable_verdict_consistent(snapshot: &Overview, linux: bool) -> bool {
+    let unknown_evidence = snapshot.verdict.state == "unverified"
+        && snapshot.mcp_initialize == "unverified"
+        && snapshot.tool_discovery == "unverified"
+        && snapshot.control_plane == "unverified";
+    match snapshot.verdict.reason_code.as_str() {
+        "TASK_STATUS_UNAVAILABLE" => {
+            !linux
+                && unknown_evidence
+                && snapshot.task_registration == "unverified"
+                && snapshot.local_health == "unverified"
+        }
+        "LOCAL_DIAGNOSTICS_UNAVAILABLE" => {
+            unknown_evidence
+                && snapshot.task_registration == "observed"
+                && (if linux {
+                    snapshot.local_health == "unverified"
+                } else {
+                    one_of(&snapshot.local_health, &["ready", "not_ready"])
+                })
+        }
+        "LOCAL_EVIDENCE_CONFLICT" => {
+            unknown_evidence
+                && snapshot.local_health == "unverified"
+                && (linux || snapshot.task_registration == "observed")
+        }
+        _ => true,
+    }
+}
+
 pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     if raw.is_empty() || raw.len() > MAX_SNAPSHOT_BYTES {
         return Err("Operator response size out of bounds");
@@ -272,6 +305,9 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     }
     if !local_verdict_consistent(&snapshot) {
         return Err("Local diagnostic reason contradicts observed evidence");
+    }
+    if !unavailable_verdict_consistent(&snapshot, linux) {
+        return Err("Unavailable diagnostic contradicts observed evidence");
     }
     // Remote delivery can be the only remaining unknown only after every
     // local readiness, handshake, tool-discovery and control-plane gate passed.
@@ -749,6 +785,110 @@ mod tests {
                     parse_overview(&serde_json::to_vec(&payload).unwrap()).is_err(),
                     "{platform} {reason}: {mismatched_field}={mismatched} cannot retain the old reason"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_reasons_require_consistent_local_observations() {
+        for (platform, baseline) in [("win32", GOOD.to_string()), ("linux", linux_sample())] {
+            let linux = platform == "linux";
+            let registration = if linux {
+                "serviceRegistration"
+            } else {
+                "taskRegistration"
+            };
+            let cases = [
+                (
+                    if linux {
+                        "SERVICE_STATUS_UNAVAILABLE"
+                    } else {
+                        "TASK_STATUS_UNAVAILABLE"
+                    },
+                    "unverified",
+                    "unverified",
+                ),
+                (
+                    "LOCAL_DIAGNOSTICS_UNAVAILABLE",
+                    "observed",
+                    if linux { "unverified" } else { "ready" },
+                ),
+                ("LOCAL_EVIDENCE_CONFLICT", "observed", "unverified"),
+            ];
+            for (reason, reg, health) in cases {
+                let mut observed: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+                for (field, value) in [
+                    (registration, reg),
+                    ("localHealth", health),
+                    ("mcpInitialize", "unverified"),
+                    ("toolDiscovery", "unverified"),
+                    ("controlPlane", "unverified"),
+                ] {
+                    observed[field] = serde_json::Value::String(value.into());
+                }
+                observed["verdict"]["state"] = serde_json::Value::String("unverified".into());
+                observed["verdict"]["reasonCode"] = serde_json::Value::String(reason.into());
+                assert!(
+                    parse_overview(&serde_json::to_vec(&observed).unwrap()).is_ok(),
+                    "{platform} {reason}: matching producer evidence must remain valid"
+                );
+                if !linux && reason == "LOCAL_DIAGNOSTICS_UNAVAILABLE" {
+                    let mut failed_health = observed.clone();
+                    failed_health["localHealth"] = serde_json::Value::String("not_ready".into());
+                    assert!(
+                        parse_overview(&serde_json::to_vec(&failed_health).unwrap()).is_ok(),
+                        "Windows diagnostics can be unavailable even when local health fails"
+                    );
+                }
+                if linux && reason == "LOCAL_EVIDENCE_CONFLICT" {
+                    let mut bad_service_status = observed.clone();
+                    bad_service_status[registration] =
+                        serde_json::Value::String("unverified".into());
+                    assert!(
+                        parse_overview(&serde_json::to_vec(&bad_service_status).unwrap()).is_ok(),
+                        "Linux service-status evidence can conflict before registration is verified"
+                    );
+                }
+                for (field, wrong) in [
+                    ("mcpInitialize", "observed"),
+                    ("toolDiscovery", "observed_incomplete"),
+                    ("controlPlane", "none"),
+                    ("verdict.state", "degraded"),
+                ] {
+                    let mut contradictory = observed.clone();
+                    if field == "verdict.state" {
+                        contradictory["verdict"]["state"] = serde_json::Value::String(wrong.into());
+                    } else {
+                        contradictory[field] = serde_json::Value::String(wrong.into());
+                    }
+                    assert!(
+                        parse_overview(&serde_json::to_vec(&contradictory).unwrap()).is_err(),
+                        "{platform} {reason}: {field}={wrong} must not be displayed"
+                    );
+                }
+                if reason != "LOCAL_DIAGNOSTICS_UNAVAILABLE" || linux {
+                    let mut contradictory = observed.clone();
+                    contradictory["localHealth"] = serde_json::Value::String("not_ready".into());
+                    assert!(
+                        parse_overview(&serde_json::to_vec(&contradictory).unwrap()).is_err(),
+                        "{platform} {reason}: failed local health contradicts unavailable evidence"
+                    );
+                }
+                if !linux || reason != "LOCAL_EVIDENCE_CONFLICT" {
+                    let mut contradictory = observed.clone();
+                    contradictory[registration] = serde_json::Value::String(
+                        if reg == "observed" {
+                            "unverified"
+                        } else {
+                            "observed"
+                        }
+                        .into(),
+                    );
+                    assert!(
+                        parse_overview(&serde_json::to_vec(&contradictory).unwrap()).is_err(),
+                        "{platform} {reason}: unsupported registration state must be rejected"
+                    );
+                }
             }
         }
     }

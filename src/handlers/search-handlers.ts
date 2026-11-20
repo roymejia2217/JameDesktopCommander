@@ -7,6 +7,18 @@ import {
 import { ServerResult } from '../types.js';
 import { capture } from '../utils/capture.js';
 
+const MAX_SEARCH_RESULT_PAGE_BYTES = 1024 * 1024;
+
+function oversizedSearchPage(): ServerResult {
+  return {
+    content: [{
+      type: 'text',
+      text: 'Search result page exceeds the 1 MiB response budget; retry with smaller length.',
+    }],
+    isError: true,
+  };
+}
+
 /**
  * Handle start_search command
  */
@@ -128,6 +140,11 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
       output += `Showing results ${startPos}-${endPos}\n\n`;
     }
 
+    let responseBytes = Buffer.byteLength(output, 'utf8');
+    if (responseBytes > MAX_SEARCH_RESULT_PAGE_BYTES) {
+      return oversizedSearchPage();
+    }
+
     if (results.results.length === 0) {
       if (results.isComplete) {
         output += results.totalResults === 0 ? "No matches found." : "No results in this range.";
@@ -138,11 +155,16 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
       output += "Results:\n";
       
       for (const result of results.results) {
-        if (result.type === 'content') {
-          output += `📄 ${result.file}:${result.line} - ${result.match?.substring(0, 100)}${result.match && result.match.length > 100 ? '...' : ''}\n`;
-        } else {
-          output += `📁 ${result.file}\n`;
+        const line = result.type === 'content'
+          ? `📄 ${result.file}:${result.line} - ${result.match?.substring(0, 100)}${result.match && result.match.length > 100 ? '...' : ''}\n`
+          : `📁 ${result.file}\n`;
+        const lineBytes = Buffer.byteLength(line, 'utf8');
+        // Reject the whole oversized page; never silently advance its offset.
+        if (responseBytes + lineBytes > MAX_SEARCH_RESULT_PAGE_BYTES) {
+          return oversizedSearchPage();
         }
+        output += line;
+        responseBytes += lineBytes;
       }
     }
 
@@ -159,6 +181,10 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
       if (results.wasIncomplete) {
         output += `\n⚠️  Warning: Some files were inaccessible due to permissions. Results may be incomplete.`;
       }
+    }
+
+    if (Buffer.byteLength(output, 'utf8') > MAX_SEARCH_RESULT_PAGE_BYTES) {
+      return oversizedSearchPage();
     }
 
     return {

@@ -44,9 +44,16 @@ export default async function* verificationSummary(source) {
       summary = event.data;
     }
   }
-  const valid = summary?.counts && Number.isFinite(summary.duration_ms);
+  const counts = summary?.counts;
+  const fields = ['tests', 'passed', 'failed', 'cancelled', 'skipped', 'todo'];
+  const valid = Boolean(counts &&
+    Number.isFinite(summary.duration_ms) && summary.duration_ms >= 0 &&
+    fields.every(field => Number.isSafeInteger(counts[field]) && counts[field] >= 0) &&
+    counts.tests > 0 &&
+    counts.tests === counts.passed + counts.failed + counts.cancelled +
+      counts.skipped + counts.todo);
   const ok = valid && summary.success === true &&
-    summary.counts.failed === 0 && summary.counts.cancelled === 0;
+    counts.failed === 0 && counts.cancelled === 0;
   const report = {
     status: ok ? 'PASS' : 'FAIL',
     exitCode: ok ? 0 : 1,

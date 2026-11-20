@@ -115,6 +115,49 @@ fn linux_service_verdict_consistent(snapshot: &Overview) -> bool {
     }
 }
 
+/// Require local reason codes to agree with the same evidence precedence
+/// used by the shared TypeScript operator assessor on Windows and Linux.
+/// This is only input validation, never an authority or remote success grant.
+fn local_verdict_consistent(snapshot: &Overview) -> bool {
+    let state = snapshot.verdict.state.as_str();
+    let health = snapshot.local_health.as_str();
+    let initialize = snapshot.mcp_initialize.as_str();
+    let discovery = snapshot.tool_discovery.as_str();
+    let plane = snapshot.control_plane.as_str();
+    let registered = snapshot.task_registration == "observed";
+    match snapshot.verdict.reason_code.as_str() {
+        "LOCAL_NOT_READY" => {
+            registered
+                && state == "degraded"
+                && health == "not_ready"
+                && matches!(plane, "none" | "unverified")
+        }
+        "LOCAL_READINESS_UNVERIFIED" => {
+            registered && state == "unverified" && health == "unverified" && plane == "none"
+        }
+        "MCP_HANDSHAKE_UNOBSERVED" => {
+            registered
+                && state == "unverified"
+                && health == "ready"
+                && plane == "none"
+                && initialize != "observed"
+                && discovery != "observed_complete"
+        }
+        "MCP_TOOLS_LIST_UNVERIFIED" => {
+            registered
+                && state == "unverified"
+                && health == "ready"
+                && plane == "none"
+                && initialize == "observed"
+                && discovery != "observed_complete"
+        }
+        "CONTROL_PLANE_UNVERIFIED" => {
+            registered && state == "unverified" && plane == "unverified" && health != "not_ready"
+        }
+        _ => true,
+    }
+}
+
 pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     if raw.is_empty() || raw.len() > MAX_SNAPSHOT_BYTES {
         return Err("Operator response size out of bounds");
@@ -227,10 +270,8 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     ) {
         return Err("Control-plane fault has no matching observation");
     }
-    if snapshot.verdict.reason_code == "CONTROL_PLANE_UNVERIFIED"
-        && (snapshot.control_plane != "unverified" || snapshot.verdict.state != "unverified")
-    {
-        return Err("Unverified control-plane diagnosis contradicts observation");
+    if !local_verdict_consistent(&snapshot) {
+        return Err("Local diagnostic reason contradicts observed evidence");
     }
     // Remote delivery can be the only remaining unknown only after every
     // local readiness, handshake, tool-discovery and control-plane gate passed.
@@ -634,6 +675,81 @@ mod tests {
                 "\"controlPlane\":\"none\"",
             );
             assert!(parse_overview(falsely_unverified.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn local_operator_reasons_require_their_observed_evidence_on_both_platforms() {
+        for (platform, baseline) in [("win32", GOOD.to_string()), ("linux", linux_sample())] {
+            for (reason, state, health, initialize, tools, plane, mismatched_field, mismatched) in [
+                (
+                    "LOCAL_NOT_READY",
+                    "degraded",
+                    "not_ready",
+                    "observed",
+                    "observed_incomplete",
+                    "none",
+                    "localHealth",
+                    "ready",
+                ),
+                (
+                    "LOCAL_READINESS_UNVERIFIED",
+                    "unverified",
+                    "unverified",
+                    "observed",
+                    "observed_incomplete",
+                    "none",
+                    "localHealth",
+                    "ready",
+                ),
+                (
+                    "MCP_HANDSHAKE_UNOBSERVED",
+                    "unverified",
+                    "ready",
+                    "not_observed",
+                    "observed_incomplete",
+                    "none",
+                    "mcpInitialize",
+                    "observed",
+                ),
+                (
+                    "MCP_TOOLS_LIST_UNVERIFIED",
+                    "unverified",
+                    "ready",
+                    "observed",
+                    "observed_incomplete",
+                    "none",
+                    "toolDiscovery",
+                    "observed_complete",
+                ),
+                (
+                    "CONTROL_PLANE_UNVERIFIED",
+                    "unverified",
+                    "ready",
+                    "observed",
+                    "observed_incomplete",
+                    "unverified",
+                    "localHealth",
+                    "not_ready",
+                ),
+            ] {
+                let mut payload: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+                payload["localHealth"] = serde_json::Value::String(health.into());
+                payload["mcpInitialize"] = serde_json::Value::String(initialize.into());
+                payload["toolDiscovery"] = serde_json::Value::String(tools.into());
+                payload["controlPlane"] = serde_json::Value::String(plane.into());
+                payload["verdict"]["state"] = serde_json::Value::String(state.into());
+                payload["verdict"]["reasonCode"] = serde_json::Value::String(reason.into());
+                assert!(
+                    parse_overview(&serde_json::to_vec(&payload).unwrap()).is_ok(),
+                    "{platform} {reason}: consistent evidence must remain valid"
+                );
+                payload[mismatched_field] = serde_json::Value::String(mismatched.into());
+                assert!(
+                    parse_overview(&serde_json::to_vec(&payload).unwrap()).is_err(),
+                    "{platform} {reason}: {mismatched_field}={mismatched} cannot retain the old reason"
+                );
+            }
         }
     }
 

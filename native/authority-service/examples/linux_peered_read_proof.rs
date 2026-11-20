@@ -352,19 +352,16 @@ mod proof {
         let mut conn = io(UnixStream::connect(socket))?;
         io(conn.set_read_timeout(Some(Duration::from_secs(3))))?;
         io(conn.set_write_timeout(Some(Duration::from_secs(3))))?;
-        // An independent same-UID caller attempts the same read opcode.
-        // The server may deny and close the connection before its write:
-        // EPIPE is then expected, but the explicit D response and absence
-        // of any protected bytes must still be verified below.
-        if untrusted_same_uid_origin {
-            match conn.write_all(b"R") {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
-                Err(_) => return Err("E_PEER_PROOF_ATTACKER_WRITE"),
-            }
-        }
-        let mut decision = [0_u8; 1];
-        io(conn.read_exact(&mut decision))?;
+        // Both unauthorized principals request admission to the one-read
+        // protocol by connecting. Only a protected issuer's original process
+        // may receive the 'C' challenge and send 'R'. Sending 'R' before this
+        // decision leaves unread data in a denied socket and can cause Linux
+        // to reset it, masking an actual denial. Verify the exact 'D' reply
+        // and absence of protected bytes rather than accepting a transport
+        // reset as a security verdict.
+        let mut decision = [0u8; 1];
+        conn.read_exact(&mut decision)
+            .map_err(|_| "E_PEER_PROOF_ADMISSION_DECISION_UNREADABLE")?;
         if should_allow {
             if decision != *b"C" {
                 return Err("E_PEER_PROOF_LEGITIMATE_HANDSHAKE_DENIED");

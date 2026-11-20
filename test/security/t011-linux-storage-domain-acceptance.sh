@@ -43,6 +43,13 @@ cleanup() {
     wait "$peer_server_pid" 2>/dev/null || :
   fi
   if [[ -n "$peer_server_log" ]]; then
+    # Preserve failing native-service diagnostics in the CI job log before
+    # removing ephemeral files. A failed client test must never erase the
+    # server-side denial/error evidence needed to distinguish transport and
+    # authorization failures.
+    if [[ "$code" -ne 0 && -f "$peer_server_log" ]]; then
+      cat -- "$peer_server_log" >&2
+    fi
     rm -f -- "$peer_server_log" || code=1
   fi
   if [[ -n "$bind_alias" ]] && findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then

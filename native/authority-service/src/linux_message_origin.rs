@@ -94,9 +94,7 @@ pub fn receive_attested_byte(
                 });
             }
         } else if current.cmsg_level == libc::SOL_SOCKET && current.cmsg_type == libc::SCM_RIGHTS {
-            if bytes % size_of::<libc::c_int>() != 0 {
-                invalid = true;
-            } else {
+            if bytes.is_multiple_of(size_of::<libc::c_int>()) {
                 for index in 0..(bytes / size_of::<libc::c_int>()) {
                     let fd = unsafe {
                         std::ptr::read_unaligned(
@@ -106,7 +104,7 @@ pub fn receive_attested_byte(
                     received.0.push(fd);
                 }
             }
-            // Receiving a descriptor as part of a request is never accepted.
+            // Even a well-formed descriptor must be closed and the request denied.
             invalid = true;
         } else {
             invalid = true;

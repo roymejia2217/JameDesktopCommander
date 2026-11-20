@@ -1,35 +1,22 @@
 name: Unpublished Linux Operator UI Bundle
 
-on:
-  workflow_call:
-    inputs:
-      source_commit:
-        required: true
-        type: string
+on: workflow_call
 
 permissions:
   contents: read
 
 jobs:
   native-gui:
-    # Reusable workflow: never execute a caller-supplied SHA under privileged events.
-    # This is intentionally restricted to the unprivileged PR build and main push.
-    if: >-
-      ${{ (github.event_name == 'pull_request' &&
-           github.event.pull_request.head.repo.full_name == github.repository &&
-           inputs.source_commit == github.event.pull_request.head.sha) ||
-          (github.event_name == 'push' &&
-           github.ref == 'refs/heads/main' &&
-           inputs.source_commit == github.sha) }}
+    # GitHub's caller event binds the source identity; no PR-provided ref.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      JDC_CANDIDATE_SOURCE_SHA: ${{ inputs.source_commit }}
+      JDC_CANDIDATE_SOURCE_SHA: ${{ github.sha }}
     steps:
       - name: Checkout exact native operator source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.source_commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up official Node.js 24 runtime

@@ -20,15 +20,13 @@ env:
   JDC_CANDIDATE_INCLUDE_NATIVE: '0'
 
 jobs:
+  # The same caller event commit is used by both GUI bundles and every
+  # portable producer/acceptor. PR events build GitHub's test merge commit.
   windows-operator-ui:
     uses: ./.github/workflows/windows-operator-ui-bundle.yml
-    with:
-      source_commit: ${{ github.event.pull_request.head.sha || github.sha }}
 
   linux-operator-ui:
     uses: ./.github/workflows/linux-operator-ui-bundle.yml
-    with:
-      source_commit: ${{ github.event.pull_request.head.sha || github.sha }}
 
   portable-candidate:
     needs: [windows-operator-ui, linux-operator-ui]
@@ -52,13 +50,13 @@ jobs:
     timeout-minutes: 35
     env:
       JDC_CANDIDATE_TARGET: ${{ matrix.target }}
-      JDC_CANDIDATE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      JDC_CANDIDATE_SOURCE_SHA: ${{ github.sha }}
 
     steps:
       - name: Checkout exact candidate source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up official Node.js 24 runtime
@@ -142,7 +140,7 @@ jobs:
     timeout-minutes: 35
     env:
       JDC_CANDIDATE_TARGET: ${{ matrix.target }}
-      JDC_CANDIDATE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      JDC_CANDIDATE_SOURCE_SHA: ${{ github.sha }}
       # The producer's distinct matrix outputs bind both archive identity and
       # original TAR bytes. Missing/colliding outputs fail before any download.
       JDC_CANDIDATE_ARTIFACT_ID: ${{ fromJSON(format('{{"win32-x64":"{0}","linux-x64":"{1}"}}', needs.portable-candidate.outputs.win_artifact_id, needs.portable-candidate.outputs.linux_artifact_id))[matrix.target] }}
@@ -152,7 +150,7 @@ jobs:
       - name: Checkout exact candidate acceptance source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up official Node.js 24 for verification

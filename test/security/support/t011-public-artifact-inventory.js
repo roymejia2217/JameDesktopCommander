@@ -14,8 +14,9 @@ function reject(reason) {
   throw new Error('E_T011_PUBLIC_ARTIFACT: ' + reason);
 }
 
-const SOURCE_SHA = '$' + '{{ github.event.pull_request.head.sha || github.sha }}';
-const CALLED_SHA = '$' + '{{ inputs.source_commit }}';
+// The GitHub-owned event commit is the PR test merge commit or main push SHA.
+// All same-run producer/GUI/acceptor artifacts must bind to this one identity.
+const SOURCE_SHA = '$' + '{{ github.sha }}';
 const UI_STAGE = '$' + '{{ runner.temp }}' + '/jdc-operator-ui';
 const LINUX_UI_STAGE = '$' + '{{ runner.temp }}' + '/jdc-operator-ui-linux';
 const PINNED_DOWNLOAD = 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093';
@@ -23,8 +24,7 @@ const PINNED_CHECKOUT = 'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af8
 const PINNED_NODE = 'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38';
 
 function validateOperatorUiArtifactPolicy(nativeUi, portable) {
-  if (!nativeUi || nativeUi.on?.workflow_call?.inputs?.source_commit?.required !== true ||
-      nativeUi.on?.workflow_call?.inputs?.source_commit?.type !== 'string' ||
+  if (!nativeUi || nativeUi.on !== 'workflow_call' ||
       Object.keys(nativeUi.permissions ?? {}).length !== 1 ||
       nativeUi.permissions?.contents !== 'read') {
     reject('native UI workflow must be an unprivileged reusable source-locked build');
@@ -32,13 +32,14 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
   const job = nativeUi.jobs?.['native-gui'];
   const steps = job?.steps;
   if (!Array.isArray(steps) || job.permissions !== undefined ||
+      job.if !== undefined || job.env?.JDC_CANDIDATE_SOURCE_SHA !== SOURCE_SHA ||
       job['runs-on'] !== 'windows-2025' ||
       job['continue-on-error'] !== undefined ||
       steps.some(step => step['continue-on-error'] !== undefined)) {
     reject('reviewed native UI build job identity or permissions changed');
   }
   const checkout = steps.find(step => step.name === 'Checkout exact native operator source');
-  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== CALLED_SHA ||
+  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== SOURCE_SHA ||
       checkout.with?.['persist-credentials'] !== false) {
     reject('native UI source checkout must be immutable and credential-free');
   }
@@ -74,7 +75,7 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
   const inno = candidateJob?.steps?.find(step =>
     step.name === 'Compile Inno Setup installer candidate');
   if (caller?.uses !== './.github/workflows/windows-operator-ui-bundle.yml' ||
-      caller.with?.source_commit !== SOURCE_SHA ||
+      caller.with !== undefined ||
       JSON.stringify(candidateJob?.needs) !==
         JSON.stringify(['portable-candidate', 'windows-operator-ui', 'linux-operator-ui']) ||
       download?.uses !== PINNED_DOWNLOAD ||
@@ -87,32 +88,22 @@ function validateOperatorUiArtifactPolicy(nativeUi, portable) {
 }
 
 function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
-  const input = nativeUi?.on?.workflow_call?.inputs?.source_commit;
-  if (input?.required !== true || input.type !== 'string' ||
+  if (!nativeUi || nativeUi.on !== 'workflow_call' ||
       Object.keys(nativeUi.permissions ?? {}).length !== 1 ||
       nativeUi.permissions?.contents !== 'read') {
     reject('Linux native GUI must remain a source-bound unprivileged build');
   }
   const job = nativeUi.jobs?.['native-gui'];
-  const eventGate = String(job?.if ?? '')
-    .replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '').replace(/\s+/g, '');
-  const expectedEventGate = [
-    "(github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository&&inputs.source_commit==github.event.pull_request.head.sha)",
-    '||',
-    "(github.event_name=='push'&&github.ref=='refs/heads/main'&&inputs.source_commit==github.sha)",
-  ].join('');
-  if (eventGate !== expectedEventGate) {
-    reject('Linux reusable GUI must reject privileged events and mismatched source SHAs');
-  }
   const steps = job?.steps;
   if (job?.['runs-on'] !== 'ubuntu-24.04' ||
       !Array.isArray(steps) || job.permissions !== undefined ||
+      job.if !== undefined || job.env?.JDC_CANDIDATE_SOURCE_SHA !== SOURCE_SHA ||
       job['continue-on-error'] !== undefined ||
       steps.some(step => step['continue-on-error'] !== undefined)) {
     reject('Linux native UI runner or failure handling changed');
   }
   const checkout = steps.find(step => step.name === 'Checkout exact native operator source');
-  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== CALLED_SHA ||
+  if (checkout?.uses !== PINNED_CHECKOUT || checkout.with?.ref !== SOURCE_SHA ||
       checkout.with?.['persist-credentials'] !== false ||
       steps.some(step => step.uses && ![PINNED_CHECKOUT, PINNED_NODE, PINNED_UPLOAD].includes(step.uses))) {
     reject('Linux operator source checkout or actions are untrusted');
@@ -152,7 +143,7 @@ function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
   const install = candidate?.steps?.find(step =>
     step.name === 'Verify Debian install and remove');
   if (caller?.uses !== './.github/workflows/linux-operator-ui-bundle.yml' ||
-      caller.with?.source_commit !== SOURCE_SHA ||
+      caller.with !== undefined ||
       download?.uses !== PINNED_DOWNLOAD ||
       download.if !== "matrix.target == 'linux-x64'" ||
       download.with?.name !== conf.name ||
@@ -241,6 +232,17 @@ export function validatePublicArtifactInventory(workflows) {
   }
   const producer = portable.jobs?.['portable-candidate'];
   const consumer = portable.jobs?.['portable-acceptance'];
+  // Never allow a privileged event to feed this read-only, non-release path.
+  // On PRs, GitHub supplies a test merge commit; on main pushes, the push SHA.
+  const events = portable.on;
+  if (!events ||
+      JSON.stringify(Object.keys(events).sort()) !== JSON.stringify(['pull_request', 'push']) ||
+      JSON.stringify(events.pull_request?.branches) !== JSON.stringify(['main']) ||
+      JSON.stringify(events.pull_request?.types) !==
+        JSON.stringify(['opened', 'reopened', 'synchronize']) ||
+      JSON.stringify(events.push?.branches) !== JSON.stringify(['main'])) {
+    reject('portable candidate must run only on unprivileged PRs and main pushes');
+  }
   if (Object.keys(portable.permissions ?? {}).length !== 1 ||
       portable.permissions?.contents !== 'read' ||
       producer?.permissions !== undefined || consumer?.permissions !== undefined) {
@@ -257,6 +259,17 @@ export function validatePublicArtifactInventory(workflows) {
       producer?.env?.JDC_CANDIDATE_TARGET !== matrixTarget ||
       consumer?.env?.JDC_CANDIDATE_TARGET !== matrixTarget) {
     reject('producer and acceptance must bind the same immutable platform/source');
+  }
+  const producerCheckout = producer.steps?.find(step => step.name ===
+    'Checkout exact candidate source');
+  const consumerCheckout = consumer.steps?.find(step => step.name ===
+    'Checkout exact candidate acceptance source');
+  for (const checkout of [producerCheckout, consumerCheckout]) {
+    if (checkout?.uses !== PINNED_CHECKOUT ||
+        checkout.with?.ref !== SOURCE_SHA ||
+        checkout.with?.['persist-credentials'] !== false) {
+      reject('producer and acceptance must checkout the same GitHub event SHA');
+    }
   }
   const tarHash = producer.steps?.find(step => step.id === 'original_tar_sha256');
   const downloaded = consumer.steps?.find(step =>

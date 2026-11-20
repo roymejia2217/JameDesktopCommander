@@ -3,11 +3,58 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, rm, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import YAML from 'yaml';
 import {
   createOperatorUiManifest, verifyOperatorUiBundle, OPERATOR_UI_FILES,
 } from '../scripts/operator-ui-bundle.mjs';
 
 const sha = 'a'.repeat(40);
+
+test('unpublished operator workflows bind every checkout and artifact to the event commit', async () => {
+  const candidateText = await readFile(
+    new URL('../.github/workflows/distribution-candidate.yml', import.meta.url), 'utf8');
+  const candidate = YAML.parse(candidateText);
+  const eventCommit = '${{ github.sha }}';
+  assert.deepEqual(Object.keys(candidate.on).sort(), ['pull_request', 'push']);
+  assert.deepEqual(candidate.on.pull_request.branches, ['main']);
+  assert.deepEqual(candidate.on.push.branches, ['main']);
+  assert.equal(candidate.permissions.contents, 'read');
+  for (const [jobName, workflowFile] of [
+    ['windows-operator-ui', 'windows-operator-ui-bundle.yml'],
+    ['linux-operator-ui', 'linux-operator-ui-bundle.yml'],
+  ]) {
+    const call = candidate.jobs[jobName];
+    assert.equal(call.uses, './.github/workflows/' + workflowFile);
+    assert.equal(Object.hasOwn(call, 'with'), false,
+      'an untrusted caller must not supply a native UI checkout commit');
+    const workflowText = await readFile(
+      new URL('../.github/workflows/' + workflowFile, import.meta.url), 'utf8');
+    const workflow = YAML.parse(workflowText);
+    assert.equal(workflow.on, 'workflow_call');
+    assert.equal(workflow.permissions.contents, 'read');
+    const job = workflow.jobs['native-gui'];
+    assert.equal(Object.hasOwn(job, 'if'), false,
+      'fork PRs must not silently skip required artifact production');
+    assert.equal(job.env.JDC_CANDIDATE_SOURCE_SHA, eventCommit);
+    const checkout = job.steps.find(step => step.name === 'Checkout exact native operator source');
+    assert.ok(checkout, 'native GUI checkout must be present');
+    assert.equal(checkout.with.ref, eventCommit);
+    assert.equal(checkout.with['persist-credentials'], false);
+    assert.doesNotMatch(workflowText, /inputs[.]source_commit|pull_request[.]head[.]sha/,
+      'reusable workflow must not checkout a caller-supplied PR head');
+  }
+  for (const jobName of ['portable-candidate', 'portable-acceptance']) {
+    const job = candidate.jobs[jobName];
+    assert.equal(job.env.JDC_CANDIDATE_SOURCE_SHA, eventCommit);
+    const checkout = job.steps.find(step => /Checkout exact candidate/.test(step.name));
+    assert.ok(checkout);
+    assert.equal(checkout.with.ref, eventCommit);
+    assert.equal(checkout.with['persist-credentials'], false);
+  }
+  assert.doesNotMatch(candidateText, /pull_request[.]head[.]sha/,
+    'producer and consumers must fingerprint the same event commit');
+});
+
 async function fixture(callback) {
   const root = await mkdtemp(join(tmpdir(), 'jdc-operator-bundle-'));
   try {
@@ -131,7 +178,7 @@ test('native GUI build is isolated from the restricted portable Node packaging j
   assert.match(candidate, /uses: \.\/\.github\/workflows\/windows-operator-ui-bundle\.yml/);
   assert.match(candidate, /needs: \[windows-operator-ui, linux-operator-ui\]/);
   assert.match(candidate, /name: UNPUBLISHED-jdc-operator-ui-win32-x64/);
-  assert.match(nativeWorkflow, /workflow_call:/);
+  assert.equal(YAML.parse(nativeWorkflow).on, 'workflow_call');
   assert.match(nativeWorkflow, /Build pinned Windows operator UI/);
   assert.match(nativeWorkflow, /cargo \+1\.95\.0 build --release --locked/);
   assert.doesNotMatch(nativeWorkflow, /capability-probe|napi|research_impl|receiver-test-fixture/);

@@ -93,7 +93,7 @@ test('Debian UI packaging uses pinned overlay provenance, desktop launcher and u
   assert.match(desktop, /Type=Application/);
   assert.match(desktop, /Exec=\/opt\/jame-desktop-commander\/jdc-tunnel-operator-ui/);
   assert.match(desktop, /Terminal=false/);
-  assert.match(native, /workflow_call:/);
+  assert.equal(parse(native, { uniqueKeys: true }).on, 'workflow_call');
   assert.match(native, /cargo \+1\.95\.0 build --release --locked/);
   assert.match(native, /epaint_default_fonts-0\.37\.0/);
   assert.match(native, /foldhash-0\.2\.0/);

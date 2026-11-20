@@ -43,6 +43,13 @@ cleanup() {
     wait "$peer_server_pid" 2>/dev/null || :
   fi
   if [[ -n "$peer_server_log" ]]; then
+    # Preserve failing native-service diagnostics in the CI job log before
+    # removing ephemeral files. A failed client test must never erase the
+    # server-side denial/error evidence needed to distinguish transport and
+    # authorization failures.
+    if [[ "$code" -ne 0 && -f "$peer_server_log" ]]; then
+      cat -- "$peer_server_log" >&2
+    fi
     rm -f -- "$peer_server_log" || code=1
   fi
   if [[ -n "$bind_alias" ]] && findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
@@ -229,13 +236,14 @@ sudo -n install -o root -g root -m 0555 -- "$peer_source" "$peer_binary"
 peer_socket_dir="$base/peer-socket"
 sudo -n install -d -o jdc-authority -g jdc-authority -m 0711 -- "$peer_socket_dir"
 peer_socket="$peer_socket_dir/accepted.sock"
+peer_issuer_socket="$peer_socket_dir/issuer.sock"
 peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-peered-read.XXXXXXXX)"
 timeout --kill-after=2s 14s sudo -n -u jdc-authority -- \
-  "$peer_binary" serve "$isolated" "$peer_socket" >"$peer_server_log" 2>&1 &
+  "$peer_binary" serve "$isolated" "$peer_socket" "$peer_issuer_socket" >"$peer_server_log" 2>&1 &
 peer_server_pid=$!
 peer_ready=0
 for ((attempt=0; attempt<80; attempt++)); do
-  if [[ -S "$peer_socket" ]]; then peer_ready=1; break; fi
+  if [[ -S "$peer_socket" && -S "$peer_issuer_socket" ]]; then peer_ready=1; break; fi
   if ! kill -0 "$peer_server_pid" 2>/dev/null; then break; fi
   sleep 0.025
 done
@@ -244,14 +252,19 @@ if [[ "$peer_ready" -ne 1 ]]; then
   echo 'E_PEER_PROOF_LISTENER_NOT_READY' >&2
   exit 1
 fi
-# First the real foreign nobody UID/GID must connect and receive no data.
+# The exact root-owned launcher must reject invocation by an ordinary
+# process, even if that process can execute the same binary and copy args.
+if sudo -n -u jdc-mcp-client -- "$peer_binary" issue "$peer_issuer_socket" "$peer_socket"; then
+  echo 'E_PEER_PROOF_UNTRUSTED_ISSUER_ACCEPTED' >&2
+  exit 1
+fi
+# The trusted CI administrator issues ONE specific OS client process, retaining
+# a real pidfd on the service side. The child performs a genuine confined read
+# with exact bytes, not a synthetic self-reported SID/UID/PID.
+sudo -n -- "$peer_binary" issue "$peer_issuer_socket" "$peer_socket"
+# A different OS principal never receives the protected-root sentinel.
 sudo -n -u nobody -- "$peer_binary" deny "$peer_socket"
-# The dedicated jdc-mcp-client UID/GID must complete a genuine native read.
-sudo -n -u jdc-mcp-client -- "$peer_binary" allow "$peer_socket"
-# A *second* real process using the same CI-only UID/GID is not the original
-# client. It must demonstrate the missing distinct *origin* boundary: a pure
-# SO_PEERCRED UID/GID admission check cannot tell these processes apart.
-# This is a research FALSIFICATION, not production access acceptance.
+# The same client UID/GID on a NEW process is no longer sufficient to read.
 sudo -n -u jdc-mcp-client -- "$peer_binary" impersonate "$peer_socket"
 if ! wait "$peer_server_pid"; then
   cat -- "$peer_server_log" >&2
@@ -259,16 +272,19 @@ if ! wait "$peer_server_pid"; then
   exit 1
 fi
 peer_server_pid=''
-grep -Fq 'T011_LINUX_OS_PEER_BOUND_NATIVE_READ_PASS_NONRELEASE' "$peer_server_log" || {
+grep -Fq 'T011_LINUX_ROOT_ISSUED_PEER_BOUND_READ_PASS_NONRELEASE' "$peer_server_log" || {
   cat -- "$peer_server_log" >&2
-  echo 'E_PEER_PROOF_NO_REAL_SERVER_VERDICT' >&2
+  echo 'E_PEER_PROOF_NO_REAL_ISSUER_READ_VERDICT' >&2
   exit 1
 }
-# Prove the second process had a different OS PID but the SAME authorized
-# UID/GID and obtained exact protected-root bytes (a fail-open of origin).
-grep -Fq 'T011_LINUX_SAME_UID_UNATTESTED_SECOND_PROCESS_READ_NONRELEASE' "$peer_server_log" || {
+grep -Fq 'T011_LINUX_SAME_UID_FOREIGN_CLIENT_DENIED' "$peer_server_log" || {
   cat -- "$peer_server_log" >&2
-  echo 'E_PEER_PROOF_SAME_UID_ORIGIN_NOT_FALSIFIED' >&2
+  echo 'E_PEER_PROOF_SAME_UID_DENIAL_NOT_PROVEN' >&2
+  exit 1
+}
+grep -Fq 'T011_LINUX_FOREIGN_UID_DENIED' "$peer_server_log" || {
+  cat -- "$peer_server_log" >&2
+  echo 'E_PEER_PROOF_FOREIGN_UID_DENIAL_NOT_PROVEN' >&2
   exit 1
 }
 rm -f -- "$peer_server_log"

@@ -48,9 +48,73 @@ pub fn verify_distinct_peer(
     Ok(())
 }
 
+/// A message writer must be the exact kernel-observed connection owner.
+/// This check is NOT a proof that the original process was issued by a
+/// protected launcher. That independent admission gate remains mandatory.
+pub fn verify_message_writer(
+    connection: KernelPeer,
+    writer: Option<KernelPeer>,
+) -> Result<(), IdentityDenied> {
+    let Some(writer) = writer else {
+        return Err(IdentityDenied);
+    };
+    if connection.pid <= 0 || writer.pid <= 0 || writer != connection {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transferred_connection_cannot_reuse_original_process_credentials() {
+        let original = peer();
+        assert_eq!(verify_message_writer(original, Some(original)), Ok(()));
+        assert_eq!(verify_message_writer(original, None), Err(IdentityDenied));
+        assert_eq!(
+            verify_message_writer(
+                KernelPeer {
+                    pid: -1,
+                    ..original
+                },
+                Some(original)
+            ),
+            Err(IdentityDenied),
+        );
+        assert_eq!(
+            verify_message_writer(
+                original,
+                Some(KernelPeer {
+                    pid: original.pid + 1,
+                    ..original
+                })
+            ),
+            Err(IdentityDenied),
+            "a second process with the same UID/GID must never inherit original-origin authority",
+        );
+        assert_eq!(
+            verify_message_writer(
+                original,
+                Some(KernelPeer {
+                    uid: original.uid + 1,
+                    ..original
+                })
+            ),
+            Err(IdentityDenied),
+        );
+        assert_eq!(
+            verify_message_writer(
+                original,
+                Some(KernelPeer {
+                    gid: original.gid + 1,
+                    ..original
+                })
+            ),
+            Err(IdentityDenied),
+        );
+    }
 
     fn expected() -> DedicatedAccount {
         DedicatedAccount {

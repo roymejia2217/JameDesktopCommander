@@ -3,7 +3,11 @@
 //! No trusted root, policy epoch, filesystem authorization or service is used.
 #![cfg(target_os = "linux")]
 
-use jdc_authority_service::linux_peer::observe_kernel_peer;
+use jdc_authority_service::{
+    linux_message_origin::{enable_writer_credentials, receive_attested_byte},
+    linux_peer::observe_kernel_peer,
+    IdentityDenied,
+};
 use std::{
     env, fs,
     io::{Read, Write},
@@ -151,6 +155,41 @@ fn delegated_writer_fixture() {
 }
 
 #[test]
+fn kernel_writer_credentials_accept_only_the_original_request_process() {
+    let (mut client, server) = UnixStream::pair().expect("local kernel socket pair");
+    let original = observe_kernel_peer(&server).expect("kernel connection identity");
+    enable_writer_credentials(&server).expect("kernel per-message credential option");
+    client.write_all(b"R").expect("one legitimate byte");
+    assert_eq!(receive_attested_byte(&server, original), Ok(b'R'));
+}
+
+#[test]
+fn missing_kernel_writer_credentials_cannot_authorize_a_request() {
+    let (mut client, server) = UnixStream::pair().expect("local kernel socket pair");
+    let original = observe_kernel_peer(&server).expect("kernel connection identity");
+    // In an unprovisioned transport no credentials may be inferred from
+    // SO_PEERCRED as a fallback.
+    client.write_all(b"R").expect("one unauthenticated byte");
+    assert_eq!(
+        receive_attested_byte(&server, original),
+        Err(IdentityDenied)
+    );
+}
+
+#[test]
+fn ancillary_descriptor_delegation_is_not_an_authorized_request() {
+    let (client, server) = UnixStream::pair().expect("local kernel socket pair");
+    let original = observe_kernel_peer(&server).expect("kernel connection identity");
+    enable_writer_credentials(&server).expect("kernel per-message credential option");
+    let file = fs::File::open("/dev/null").expect("real descriptor fixture");
+    send_fd(&client, file.as_raw_fd());
+    assert_eq!(
+        receive_attested_byte(&server, original),
+        Err(IdentityDenied)
+    );
+}
+
+#[test]
 fn kernel_peer_snapshot_does_not_authenticate_writer_after_fd_transfer() {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let dir = env::temp_dir().join(format!(
@@ -184,6 +223,7 @@ fn kernel_peer_snapshot_does_not_authenticate_writer_after_fd_transfer() {
     assert_eq!(initial.pid as u32, original.0.id());
     assert_eq!(initial.uid, unsafe { libc::geteuid() });
     assert_eq!(initial.gid, unsafe { libc::getegid() });
+    enable_writer_credentials(&server).expect("receive kernel-issued writer credentials");
     let original_control = accept_ready(&original_control_listener);
     original_control
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -213,11 +253,18 @@ fn kernel_peer_snapshot_does_not_authenticate_writer_after_fd_transfer() {
     server
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("bounded data read");
-    let mut actual_writer = [0u8; size_of::<u32>()];
+    // A transferred fd retains the old SO_PEERCRED snapshot, but the
+    // kernel attaches the *actual writer's* credentials to this request.
+    assert_eq!(
+        receive_attested_byte(&server, initial),
+        Err(IdentityDenied),
+        "a distinct same-UID writer cannot inherit the original connection",
+    );
+    let mut remainder = [0u8; size_of::<u32>() - 1];
     server
-        .read_exact(&mut actual_writer)
-        .expect("real delegated bytes");
-    assert_eq!(u32::from_ne_bytes(actual_writer), delegated.0.id());
+        .read_exact(&mut remainder)
+        .expect("remaining delegated PID bytes");
+    assert_eq!(remainder.as_slice(), &delegated.0.id().to_ne_bytes()[1..]);
 
     // SO_PEERCRED is the first client's connection-time snapshot; it cannot
     // identify who holds or writes through a later-transferred socket.

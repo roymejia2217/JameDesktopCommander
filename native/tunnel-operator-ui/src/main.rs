@@ -235,6 +235,19 @@ fn guidance(reason: &str) -> &'static str {
         "CONTROL_PLANE_CREDENTIAL_REJECTED" => "HTTP 401: credentials rejected. Expiry is unknown.",
         "CONTROL_PLANE_FORBIDDEN" => "HTTP 403: access denied. Check permissions.",
         "CONTROL_PLANE_RATE_LIMITED" => "HTTP 429: rate limited. Try again later.",
+        "CONTROL_PLANE_SERVER_ERROR" => {
+            "Control-plane server error observed. Check provider service status."
+        }
+        "CONTROL_PLANE_HTTP_ERROR" => {
+            "Other control-plane HTTP error observed. Review HTTP diagnostics."
+        }
+        "CONTROL_PLANE_UNVERIFIED" => {
+            "Control-plane status not verified. Review connectivity and diagnostics."
+        }
+        "LOCAL_NOT_READY" => "Local tunnel is not ready. Check local health diagnostics.",
+        "LOCAL_READINESS_UNVERIFIED" => {
+            "Local readiness not verified. Check local health diagnostics."
+        }
         "MCP_TOOLS_LIST_UNVERIFIED" => "MCP tools are incomplete. Remote access is unverified.",
         "MCP_HANDSHAKE_UNOBSERVED" => "MCP handshake not observed.",
         "TASK_STATUS_UNAVAILABLE" => "Tunnel task unavailable. Check installation.",
@@ -394,6 +407,27 @@ mod tests {
         assert!(guidance("CONTROL_PLANE_CREDENTIAL_REJECTED").contains("401"));
         assert!(guidance("CONTROL_PLANE_FORBIDDEN").contains("403"));
         assert!(guidance("CONTROL_PLANE_RATE_LIMITED").contains("429"));
+    }
+
+    #[test]
+    fn observed_control_plane_faults_get_specific_secret_free_guidance() {
+        let cases = [
+            ("CONTROL_PLANE_SERVER_ERROR", "server error"),
+            ("CONTROL_PLANE_HTTP_ERROR", "HTTP error"),
+            ("CONTROL_PLANE_UNVERIFIED", "not verified"),
+            ("LOCAL_NOT_READY", "not ready"),
+            ("LOCAL_READINESS_UNVERIFIED", "not verified"),
+        ];
+        for (reason, expected) in cases {
+            let message = guidance(reason);
+            assert!(message.contains(expected), "{reason}: {message}");
+            assert!(!message.contains("401"), "{reason}: no false 401");
+            assert!(!message.contains("expired"), "{reason}: no inferred expiry");
+            assert!(
+                !message.contains("rotate"),
+                "{reason}: no unauthorized action"
+            );
+        }
     }
 
     #[test]

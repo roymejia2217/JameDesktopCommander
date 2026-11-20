@@ -82,6 +82,16 @@ test('native runner identifies deliberately skipped tests without changing PASS'
   assert.doesNotMatch(run.stdout, /skipped fixture must never execute/);
 });
 
+test('real Node TODO remains valid while its count is preserved', () => {
+  const { run, summary, completeLog } = verifyFixture('todo.cjs');
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(summary.status, 'PASS');
+  assert.equal(summary.counts.tests, 1);
+  assert.equal(summary.counts.todo, 1);
+  assert.equal(summary.counts.failed, 0);
+  assert.match(completeLog, /planned fixture remains visible/);
+});
+
 test('missing native summary is FAIL, never a fabricated success', async () => {
   const reporter = (await import('../scripts/verification-summary-reporter.mjs')).default;
   async function* events() {
@@ -93,6 +103,29 @@ test('missing native summary is FAIL, never a fabricated success', async () => {
   assert.equal(summary.status, 'FAIL');
   assert.equal(summary.exitCode, 1);
   assert.equal(summary.counts, null);
+});
+
+test('native reporter denies zero-test and inconsistent successful summaries', async () => {
+  const reporter = (await import('../scripts/verification-summary-reporter.mjs')).default;
+  const cases = [
+    { tests: 0, passed: 0, failed: 0, skipped: 0, cancelled: 0, todo: 0 },
+    { tests: 2, passed: 1, failed: 0, skipped: 0, cancelled: 0, todo: 0 },
+    { tests: 1, passed: 2, failed: 0, skipped: 0, cancelled: 0, todo: 0 },
+    { tests: 1, passed: 0, failed: 0, skipped: 0, cancelled: 0, todo: 0 },
+  ];
+  for (const counts of cases) {
+    async function* events() {
+      yield { type: 'test:summary', data: {
+        success: true, duration_ms: 1, counts,
+      } };
+    }
+    const chunks = [];
+    for await (const chunk of reporter(events())) chunks.push(chunk);
+    const report = JSON.parse(chunks.join('').slice('VERIFICATION_SUMMARY '.length));
+    assert.equal(report.status, 'FAIL', JSON.stringify(counts));
+    assert.equal(report.exitCode, 1);
+    assert.equal(report.counts, null, 'invalid counts cannot be presented as trusted');
+  }
 });
 
 test('failed assertions retain bounded single-line diagnostics without raw stacks', async () => {

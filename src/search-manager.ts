@@ -6,6 +6,17 @@ import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
 import PizZip from 'pizzip';
+import { configManager } from './config-manager.js';
+
+/** Restricted search cannot be confined by a pathname-only ripgrep/Node scan. */
+export class SearchAuthorityUnavailableError extends Error {
+  readonly code = 'E_POLICY_UNAVAILABLE';
+
+  constructor() {
+    super('E_POLICY_UNAVAILABLE: restricted search requires a protected native authority');
+    this.name = 'SearchAuthorityUnavailableError';
+  }
+}
 
 export interface SearchResult {
   file: string;
@@ -64,6 +75,18 @@ export interface SearchSessionOptions {
     totalResults: number;
     runtime: number;
   }> {
+    // The pathname-based ripgrep/Node traversal is not the native broker.
+    // No restricted or unverified policy may create an ambient child process.
+    let allowedDirectories: string[] | undefined;
+    try {
+      allowedDirectories = await configManager.getAllowedDirectoriesForFilesystem();
+    } catch {
+      throw new SearchAuthorityUnavailableError();
+    }
+    if (!Array.isArray(allowedDirectories) || allowedDirectories.length !== 0) {
+      throw new SearchAuthorityUnavailableError();
+    }
+
     const sessionId = `search_${++this.sessionCounter}_${Date.now()}`;
     
     // Validate path first
@@ -1004,6 +1027,15 @@ export const searchManager = new SearchManager();
 
 // Cleanup management - run on fixed schedule
 let cleanupInterval: NodeJS.Timeout | null = null;
+let initialCleanup: NodeJS.Timeout | null = null;
+
+/** Release both cleanup timers on shutdown or isolated test teardown. */
+export function stopSearchManagerCleanup(): void {
+  if (cleanupInterval) clearInterval(cleanupInterval);
+  if (initialCleanup) clearTimeout(initialCleanup);
+  cleanupInterval = null;
+  initialCleanup = null;
+}
 
 /**
  * Start cleanup interval - now runs on fixed schedule
@@ -1015,7 +1047,8 @@ function startCleanupIfNeeded(): void {
     }, 5 * 60 * 1000);
     
     // Also check immediately after a short delay (let search process finish)
-    setTimeout(() => {
+    initialCleanup = setTimeout(() => {
+      initialCleanup = null;
       searchManager.cleanupSessions();
     }, 1000);
   }

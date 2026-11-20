@@ -819,7 +819,7 @@ export async function moveFile(sourcePath: string, destinationPath: string): Pro
 export async function searchFiles(rootPath: string, pattern: string): Promise<string[]> {
     // Use the new search manager for better performance
     // This provides a temporary compatibility layer until we fully migrate to search sessions
-    const { searchManager } = await import('../search-manager.js');
+    const { searchManager, SearchAuthorityUnavailableError } = await import('../search-manager.js');
 
     try {
         const result = await searchManager.startSearch({
@@ -874,6 +874,9 @@ export async function searchFiles(rootPath: string, pattern: string): Promise<st
 
         return allResults;
     } catch (error) {
+        // An unavailable native authority is a denial, not a reason to switch
+        // to an unconfined Node traversal. Only ordinary ripgrep failures fall back.
+        if (error instanceof SearchAuthorityUnavailableError) throw error;
         // Fallback to original Node.js implementation if ripgrep fails
         capture('server_search_files_ripgrep_fallback', {
             error: error instanceof Error ? error.message : 'Unknown error'

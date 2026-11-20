@@ -352,10 +352,16 @@ mod proof {
         let mut conn = io(UnixStream::connect(socket))?;
         io(conn.set_read_timeout(Some(Duration::from_secs(3))))?;
         io(conn.set_write_timeout(Some(Duration::from_secs(3))))?;
-        // The adversary attempts the same one-read opcode despite not being
-        // the specific root-issued original MCP client.
+        // An independent same-UID caller attempts the same read opcode.
+        // The server may deny and close the connection before its write:
+        // EPIPE is then expected, but the explicit D response and absence
+        // of any protected bytes must still be verified below.
         if untrusted_same_uid_origin {
-            io(conn.write_all(b"R"))?;
+            match conn.write_all(b"R") {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(_) => return Err("E_PEER_PROOF_ATTACKER_WRITE"),
+            }
         }
         let mut decision = [0_u8; 1];
         io(conn.read_exact(&mut decision))?;

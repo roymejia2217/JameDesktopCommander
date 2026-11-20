@@ -32,6 +32,8 @@ mod confined_read_contract_tests {
 pub mod peer_policy;
 
 #[cfg(target_os = "linux")]
+pub mod linux_message_origin;
+#[cfg(target_os = "linux")]
 pub mod linux_peer;
 
 #[cfg(all(target_os = "linux", test))]

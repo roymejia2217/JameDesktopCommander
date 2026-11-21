@@ -207,8 +207,8 @@ fn create_guarded_child(name: &str, protected: bool) -> Child {
     } else {
         None
     };
-    let proc_attrs = descriptors.as_ref().map(|x| x.process_attributes());
-    let thread_attrs = descriptors.as_ref().map(|x| x.primary_thread_attributes());
+    // Borrowed creation attributes must not outlive their owned descriptors.
+    let borrowed = descriptors.as_ref().map(|x| x.borrow_attributes());
     // Isolated test-only Unicode environment. Does not mutate the host's env.
     let root = std::env::var("SystemRoot").expect("Windows environment");
     let env = format!("JDC_T011_GUARDED_PIPE_NAME={name}\0SystemRoot={root}\0\0");
@@ -221,8 +221,10 @@ fn create_guarded_child(name: &str, protected: bool) -> Child {
             CreateProcessW(
                 app.as_ptr(),
                 command.as_mut_ptr(),
-                proc_attrs.as_ref().map_or(ptr::null(), |a| a),
-                thread_attrs.as_ref().map_or(ptr::null(), |a| a),
+                borrowed.as_ref().map_or(ptr::null(), |a| a.process()),
+                borrowed
+                    .as_ref()
+                    .map_or(ptr::null(), |a| a.primary_thread()),
                 0,
                 CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                 env.as_mut_ptr().cast(),

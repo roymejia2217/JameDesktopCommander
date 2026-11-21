@@ -201,7 +201,190 @@ missing native backend must fail closed, but an all-deny prototype is not a
 substitute for proven legitimate in-root reads. Process execution, OpenCode,
 URL fetches and delegated search remain separate ambient-authority surfaces.
 
-## 5. Acceptance sequence and review decision record
+## 5. Original-host activation decision gate (2026-11-21)
+
+**Disposition: REVIEW REQUESTED; no protected-host implementation or shipping
+policy change is approved by this addendum.** This distinguishes a real
+original-client origin from the unrelated fact that a process can speak MCP.
+
+### Actual compatibility boundary, not a credential
+
+The existing `setup-claude-server.js` writes `node` or `npx` stdio launch
+commands to a user-controlled host configuration. The remote-device adapter
+uses the official SDK `StdioClientTransport`, and `src/index.ts` starts the
+ordinary stdio MCP server. An independent same-user process can invoke the
+same command and advertise the same `clientInfo`: the merged #359 SDK
+process test verifies that both complete `tools/list` successfully.
+Neither a bundled executable, process name, numeric PID, host config entry,
+environment flag, nor SDK handshake authenticates a protected issuer.
+
+An administrative service cannot safely turn an ordinary user-invocable
+stdio command into a privileged client merely by wrapping it. A same-principal
+intruder can invoke that wrapper too. A launch **under an independently
+protected principal and issuer** is a materially different product mode,
+not a transparent modification of the current setup contract.
+
+| Candidate host mode | Original-origin guarantee | Proposed restricted authority |
+| --- | --- | --- |
+| Legacy host, current `node`/`npx` stdio setup | Unproven; same-user SDK impostor admitted to public MCP | **Never grant a native restricted capability on this evidence.** Preserve separate review of legacy ambient tool semantics. |
+| Managed/provisioned MCP host and separately protected issuer | Conditionally possible with OS custody proven *before execution* and authenticated throughout the operation | Eligible for a non-shipping one-read prototype **only after reviewer-approved principal, launch and storage models**. |
+| User-invocable elevated wrapper, shared secret/config, PID/SID/client-name allowlist | Not an issuer; does not exclude same-user caller | **Rejected** as a privileged admission mechanism. |
+| No independently supported original-host activation | No origin attestation | Typed refusal for any *future* restricted native capability; never fallback to ambient pathname I/O. |
+
+**Compatibility consequence requiring product review:** Existing MCP hosts
+should still be able to initialize and discover public tools. That capability
+must not be presented as protected-file access. Turning on managed mode cannot
+silently claim support for arbitrary unmodified hosts. If an operator expects
+restricted protected reads from such a host, surface a stable
+`E_AUTH_REQUIRED`/`E_POLICY_UNAVAILABLE` classification (mapped to the
+reviewed `DENIED`/`UNAVAILABLE` user error taxonomy) rather than asking
+users to edit undocumented credentials.
+The current code has **not** implemented that end-to-end UX behavior.
+
+### Rust crate / JDC-owned policy alternative — evaluated, not a trust substitute
+
+**Decision for this increment: retain existing crates; DO NOT add an
+"OS-independent security" dependency or activate a new privilege path.**
+A capability engine inside JDC can limit requests reaching a *trusted* broker,
+but cannot stop an unrelated same-UID/SID process from accessing the OS
+resources available to that principal or from invoking an unprotected issuer.
+This is the distinction between **application authorization** and **external
+security boundary**. No cryptographic signing of caller-provided metadata,
+unprotected bearer token, shared in-process secret, dynamic library or
+memory-safe Rust type establishes original host custody.
+
+Current `main@c8c8e07b5b64f2f37c0265990a35041a06a85df8` already pins:
+- `cap-std =4.0.3` inside the **non-shipping deny-only**
+  `native/capability-probe` research crate. Directory-relative capability
+  operations help avoid ambient path reopening, but cannot prove #148's
+  absence of outside-object hard-link aliases. The excluded N-API receiver
+  issue #124 must not be reintroduced to make this crate available to Node.
+- `rustix =1.1.6` (Linux) inside `native/authority-service` and
+  `native/capability-probe`. It provides typed wrappers over kernel
+  descriptor/lookup primitives; `openat2` resolution can support namespace
+  confinement but cannot authenticate the original host or guarantee that
+  every hard link targets an in-root object.
+- `windows-sys =0.61.2` in the native authority service provides bindings
+  to Windows security/process/file operations. It is **not** a Windows
+  equivalent of Linux `openat2`; platform-native tests remain mandatory.
+
+Examined additional candidate families, **not selected as release gates**:
+- `wasmtime`/WASI: capability-restricted execution of *guest WebAssembly*
+  components can help contain future untrusted plugins **only if all host
+  imports are explicitly scoped**. Existing Node MCP handlers and the Rust
+  broker are *hosts*, not automatically sandboxed WASM guests; a host-side
+  ambient file API or external same-user process bypasses this containment.
+  Introducing Wasmtime now would widen the architecture without resolving
+  the protected-issuer question.
+- `landlock`: meaningful Linux defense-in-depth for restricting a process,
+  but is implemented by the **Linux kernel** and does not support Windows.
+  It cannot authenticate the original MCP client or prove hard-link
+  object provenance. It is not an OS-independent cross-platform answer.
+- Application-held MAC/signature/opaque capability: can guard protocol
+  integrity **only after** a separately protected key/issuer, authoritative
+  policy epoch and recipient are established. If same-user adversaries can
+  invoke the signer, copy its keys or use the same OS process authority,
+  it cannot supply the missing identity boundary.
+
+**What JDC can implement portably in pure Rust once an issuer is trusted:**
+strict request parser and length bounds, immutable operation policy,
+opaque non-serializable capability IDs confined to broker memory, typed
+denials, resource quotas, explicit operation lifetimes and revocation state.
+These are valuable defense-in-depth, not authority to open a new root,
+read an out-of-scope object or accept an unauthenticated same-user caller.
+Even an in-memory database of grants needs kernel-protected process custody
+and a replay-safe durable policy source across restarts.
+
+**Reviewer outcome required before any implementation:** identify the exact
+adversary that a proposed crate would stop, demonstrate the enforced OS
+principal/storage boundary it still relies upon, and reproduce both a valid
+SDK->protected-broker read and a denied second same-principal process on
+real Windows and Linux. If this cannot be demonstrated, keep restricted
+operations unavailable; do not weaken #148's outside-byte invariant or the
+legacy-host compatibility contract.
+
+Official references:
+- [cap-std capability directory APIs](https://docs.rs/cap-std/latest/cap_std/fs/struct.Dir.html)
+- [rustix openat2 API](https://docs.rs/rustix/latest/rustix/fs/fn.openat2.html)
+- [Wasmtime security model](https://docs.wasmtime.dev/security.html)
+- [Landlock userspace API](https://www.kernel.org/doc/html/latest/userspace-api/landlock.html)
+
+### Protected bootstrap candidate — testable, not accepted
+
+1. **Provision.** An administrator or independently authorized installer
+   establishes a least-privilege service principal, a distinct managed-client
+   principal and a protected immutable policy root. Ordinary same-user
+   processes must be unable to update the issuer, activation rules or root
+   mapping. Review update, rollback and uninstall authority before testing.
+2. **Launch.** A protected issuer authenticates the operator/host through a
+   separately reviewed OS mechanism, chooses a fixed approved executable
+   identity, and creates the managed client. The issuer—not `clientInfo` or
+   a JS environment variable—retains trustworthy process or PID-handle
+   custody before untrusted code runs.
+3. **Windows.** Evaluate an explicitly controlled primary token with
+   `CreateProcessAsUserW` and process/thread security descriptors supplied
+   at creation. Prove actual privilege prerequisites, OWNER RIGHTS handling,
+   deny of `PROCESS_DUP_HANDLE` and `WRITE_DAC` to an independent same-SID
+   adversary, restricted handle inheritance, named-pipe impersonation and
+   service/client token separation. Existing #358 test custody is a component
+   proof, **not a trusted host issuer**. No SCM privilege change is approved.
+4. **Linux.** Evaluate a root- or independently protected supervisor issuing
+   a client under a distinct OS UID/GID. Retain the kernel `pidfd`; use
+   OS-verified issuer credentials, socket custody and per-message writer
+   credentials. Explicitly reject transferred descriptors and a second
+   process with the same managed-client UID/GID. Preserve the existing
+   `linux_peered_read_proof.rs` as a **non-MCP** component proof.
+5. **Admit each operation.** The broker accepts only the already-provisioned
+   client proven against issuer-held process custody and current policy
+   epoch. Connection access is insufficient. Root identifiers are references,
+   not grants. Untrusted Node receives no handle, global namespace access,
+   credential or reusable admission token.
+6. **Revoke and recover.** Define the exact linearization points for read,
+   policy change, cancellation, restart and disconnect; hold old-epoch reads
+   until securely completed or cancelled before acknowledging revocation.
+   Neither a client-side timeout nor a broker crash can imply an operation
+   committed or that already-sent bytes were recalled.
+7. **Isolate objects.** Prior to a protected byte response, satisfy #148's
+   outside-object invariant under approved filesystem/principal boundaries,
+   including preexisting/concurrent hard links; #124 must retain exclusion
+   of the unsafe N-API receiver. A valid issuer alone never grants content
+   access.
+
+### Mandatory decision experiment
+
+The **next non-shipping functional increment**, once its issuer/principal
+model receives independent review, is an official SDK MCP session under a
+*real* issued managed-client process, with one broker-held regular-file read
+and exact output bytes. Its negative controls must independently demonstrate:
+
+- A different same-interactive-user launcher cannot request protected
+  activation, reuse an issued client, or duplicate its held channel.
+- A separate process under the *managed-client* OS principal cannot reuse
+  the issuer-attested origin or delegate a socket/pipe.
+- Stale, replayed or revoked requests yield typed denial without leaking
+  response bytes; service unavailable yields typed unavailability.
+- Symlink/junction, final-component rename, preexisting hard-link alias and
+  concurrent namespace changes never read or alter outside-object bytes.
+- An unmodified legacy host retains documented public MCP compatibility but
+  **cannot** receive a privileged native read by merely copying metadata
+  or launch configuration.
+
+Test both Windows and Linux real kernel principals, not mocks. Verify actual
+attack setup, before/after outside bytes and signed package provenance.
+Do **not** create another speculative SDK identity test or promote a
+user-invocable privileged launcher. A positive response is release-blocked
+until the complete #139/#148/#124 criteria, review and production packaging
+are independently satisfied.
+
+**Review questions requiring explicit sign-off:** Which supported hosts may
+enter managed mode and by what authorized installation action? What precisely
+authenticates the original host *before* issuing it a protected process? Who
+owns each OS principal and protected policy source? What is the product
+contract for legacy hosts with configured `allowedDirectories`? Which
+privileges, IPC rights and filesystem boundaries are reviewed on both OSs?
+What exact revocation and rollback evidence is required?
+
+## 6. Acceptance sequence and review decision record
 
 1. Independent security reviewers must decide supported storage/volume/mount
    models, service/client principals, IPC custody, anti-rollback mechanism and
@@ -250,3 +433,5 @@ and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
 - [Windows standard access rights](https://learn.microsoft.com/en-us/windows/win32/secauthz/standard-access-rights)
 - [Windows process creation and explicit handle inheritance](https://learn.microsoft.com/en-us/windows/win32/procthread/creating-processes)
 - [Windows hard links and junctions](https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions)
+- [Windows CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
+- [MCP TypeScript SDK v1 client transport](https://ts.sdk.modelcontextprotocol.io/client.html)

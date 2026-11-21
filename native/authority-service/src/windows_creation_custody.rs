@@ -31,12 +31,30 @@ impl Drop for LocalAllocation {
     }
 }
 
-/// Owns both security descriptors. The SECURITY_ATTRIBUTES returned by the
-/// accessors are borrowed views: keep this object alive until process creation
-/// returns, and never publish their descriptor pointers to an MCP caller.
+/// Owns both kernel object security descriptors. Clients receive only a
+/// Rust-lifetime-bound borrowed view for the CreateProcessW call; descriptor
+/// pointers must never be published to the MCP client or detached from
+/// their owning allocation.
 pub struct OwnerRightsCreationDescriptors {
     process: LocalAllocation,
     primary_thread: LocalAllocation,
+}
+
+/// Win32 creation attributes tied to their owning security descriptors.
+/// Safe Rust cannot retain this view after its owner is dropped. Never
+/// clone the underlying raw SECURITY_ATTRIBUTES into a longer-lived object.
+pub struct BorrowedCreationAttributes<'a> {
+    process: SECURITY_ATTRIBUTES,
+    primary_thread: SECURITY_ATTRIBUTES,
+    _owner: &'a OwnerRightsCreationDescriptors,
+}
+impl BorrowedCreationAttributes<'_> {
+    pub fn process(&self) -> &SECURITY_ATTRIBUTES {
+        &self.process
+    }
+    pub fn primary_thread(&self) -> &SECURITY_ATTRIBUTES {
+        &self.primary_thread
+    }
 }
 impl OwnerRightsCreationDescriptors {
     /// Caller must hold the *real* primary token intended for its new child.
@@ -66,18 +84,21 @@ impl OwnerRightsCreationDescriptors {
             primary_thread: descriptor(&owner, "RC")?,
         })
     }
-    pub fn process_attributes(&self) -> SECURITY_ATTRIBUTES {
-        SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: self.process.0,
-            bInheritHandle: 0,
-        }
-    }
-    pub fn primary_thread_attributes(&self) -> SECURITY_ATTRIBUTES {
-        SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: self.primary_thread.0,
-            bInheritHandle: 0,
+    /// Returns attributes whose lifetime is bounded by the owner of
+    /// both descriptors. Keep this borrowed view alive through CreateProcess.
+    pub fn borrow_attributes(&self) -> BorrowedCreationAttributes<'_> {
+        BorrowedCreationAttributes {
+            process: SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.process.0,
+                bInheritHandle: 0,
+            },
+            primary_thread: SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.primary_thread.0,
+                bInheritHandle: 0,
+            },
+            _owner: self,
         }
     }
 }

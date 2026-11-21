@@ -82,10 +82,7 @@ fn create_test_child_suspended(protected_at_creation: bool) -> TestChild {
     } else {
         None
     };
-    let process_attrs = descriptors.as_ref().map(|value| value.process_attributes());
-    let thread_attrs = descriptors
-        .as_ref()
-        .map(|value| value.primary_thread_attributes());
+    let borrowed = descriptors.as_ref().map(|value| value.borrow_attributes());
     let cmd = format!(
         "\"{}\" --exact fixture_suspended_child --nocapture",
         exe.display()
@@ -98,8 +95,12 @@ fn create_test_child_suspended(protected_at_creation: bool) -> TestChild {
         CreateProcessW(
             app.as_ptr(),
             arguments.as_mut_ptr(),
-            process_attrs.as_ref().map_or(ptr::null(), |value| value),
-            thread_attrs.as_ref().map_or(ptr::null(), |value| value),
+            borrowed
+                .as_ref()
+                .map_or(ptr::null(), |value| value.process()),
+            borrowed
+                .as_ref()
+                .map_or(ptr::null(), |value| value.primary_thread()),
             0,
             CREATE_SUSPENDED | CREATE_NO_WINDOW,
             ptr::null(),

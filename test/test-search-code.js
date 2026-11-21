@@ -91,8 +91,9 @@ async function setup() {
   // Save original config
   const originalConfig = await configManager.getConfig();
   
-  // Set allowed directories to include test directory
-  await configManager.setValue('allowedDirectories', [TEST_DIR]);
+  // Exercise streaming search under an explicitly unrestricted test policy.
+  // Restricted requests are denied by the dedicated T011 authority gate.
+  await configManager.setValue('allowedDirectories', []);
   
   // Create test directory structure
   await fs.mkdir(TEST_DIR, { recursive: true });
@@ -563,7 +564,7 @@ export async function testSearchCode() {
 export default testSearchCode;
 
 // Run tests if this file is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])) {
   testSearchCode().then(() => {
     console.log('Search tests completed successfully.');
     process.exit(0);

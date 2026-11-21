@@ -43,6 +43,9 @@ mod linux_cross_principal;
 pub mod windows_token;
 
 #[cfg(windows)]
+pub mod windows_process_custody;
+
+#[cfg(windows)]
 pub mod windows_pipe_peer;
 
 /// This error never carries user-controlled credentials into diagnostics.

@@ -2,10 +2,12 @@
 //! handle privacy even when the original event handle is non-inheritable.
 //! Own child fixtures only. No privileged service, secret, or file access.
 #![cfg(windows)]
-use jdc_authority_service::windows_pipe_peer::observe_process_sid;
+use jdc_authority_service::{
+    windows_pipe_peer::observe_process_sid, windows_process_custody::seal_process_owner_rights,
+};
 use std::{
     ffi::c_void,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Child, Command, Stdio},
     ptr,
 };
@@ -227,8 +229,8 @@ fn own_sid_text() -> String {
 }
 
 fn set_test_process_dacl(process: HANDLE, user_access: &str) {
-    // Explicitly grant SYSTEM access; deny PROCESS_DUP_HANDLE to this
-    // same-SID user until the foreign process changes the process DACL.
+    // Historical RED-proof baseline: owner retains implicit WRITE_DAC when
+    // OWNER RIGHTS is absent. Do not change this adversarial control.
     let sddl = format!("D:P(A;;GA;;;SY)(A;;{user_access};;;{})", own_sid_text());
     let mut descriptor = ptr::null_mut();
     assert_ne!(
@@ -394,6 +396,156 @@ fn same_sid_owner_write_dac_can_undo_restricted_process_dacl() {
     assert!(
         holder.0.wait().expect("holder finishes").success(),
         "original owner event signaled via duplicated handle"
+    );
+}
+
+// Independent disposable-process acceptance for Windows OWNER RIGHTS
+// (S-1-3-4). This is NOT a broker, issuer or trusted MCP launcher.
+#[test]
+fn fixture_owner_rights_holder_keeps_event_private() {
+    if std::env::var("JDC_T011_OWNER_RIGHTS_HOLDER").as_deref() != Ok("1") {
+        return;
+    }
+    verify_real_process_sid();
+    let raw = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+    assert!(!raw.is_null(), "test-only event creation");
+    let event = Handle(raw);
+    // Exercise a real kernel process HANDLE carrying READ_CONTROL|WRITE_DAC,
+    // as a trusted launcher would retain after creating its suspended child.
+    let process =
+        Handle(unsafe { OpenProcess(READ_CONTROL_RIGHT | WRITE_DAC_RIGHT, 0, std::process::id()) });
+    assert!(
+        !process.0.is_null(),
+        "test must own a real writable process handle"
+    );
+    seal_process_owner_rights(unsafe {
+        std::os::windows::io::BorrowedHandle::borrow_raw(process.0)
+    })
+    .expect("kernel-derived OWNER RIGHTS process DACL");
+    // Do not retain an open WRITE_DAC handle in the client-side fixture.
+    drop(process);
+    println!("JDC_T011_OWNER_RIGHTS_EVENT={}", event.0 as usize);
+    std::io::stdout().flush().expect("test holder rendezvous");
+
+    let mut release = [0_u8; 1];
+    std::io::stdin()
+        .read_exact(&mut release)
+        .expect("bounded parent release");
+    assert_eq!(release, [0x51]);
+    assert_eq!(
+        unsafe { WaitForSingleObject(event.0, 0) },
+        windows_sys::Win32::Foundation::WAIT_TIMEOUT,
+        "the private event must not have been signaled by an impostor"
+    );
+}
+
+#[test]
+fn fixture_owner_rights_intruder_is_denied() {
+    if std::env::var("JDC_T011_OWNER_RIGHTS_ATTACKER").as_deref() != Ok("1") {
+        return;
+    }
+    verify_real_process_sid();
+    // Scope token changes to the disposable adversary child only.
+    disable_attacker_token_privileges();
+    let pid = std::env::var("JDC_T011_OWNER_RIGHTS_PID")
+        .expect("test-only child PID")
+        .parse::<u32>()
+        .expect("numeric test-owned PID");
+    assert_ne!(pid, std::process::id());
+    assert_attacker_is_target_process_owner(pid);
+
+    for (right, label) in [
+        (PROCESS_DUP_HANDLE, "PROCESS_DUP_HANDLE"),
+        (WRITE_DAC_RIGHT, "WRITE_DAC"),
+        (0x0008_0000, "WRITE_OWNER"),
+    ] {
+        let opened = unsafe { OpenProcess(right, 0, pid) };
+        if !opened.is_null() {
+            unsafe { CloseHandle(opened) };
+        }
+        assert!(
+            opened.is_null(),
+            "same-owner impostor unexpectedly obtained {label}"
+        );
+        assert_eq!(
+            unsafe { GetLastError() },
+            ERROR_ACCESS_DENIED,
+            "real kernel denial required for {label}"
+        );
+    }
+    println!("T011_WINDOWS_SAME_OWNER_PROCESS_RIGHTS_DENIED");
+}
+
+#[test]
+fn owner_rights_acl_prevents_same_sid_process_permission_takeover() {
+    let exe = std::env::current_exe().expect("test binary");
+    let sid = process_sid_hex();
+    let mut holder = ChildCleanup(
+        Command::new(&exe)
+            .args([
+                "--exact",
+                "fixture_owner_rights_holder_keeps_event_private",
+                "--nocapture",
+            ])
+            .env("JDC_T011_OWNER_RIGHTS_HOLDER", "1")
+            .env("JDC_T011_EXPECTED_TEST_SID", &sid)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("independent event holder"),
+    );
+    let pid = holder.0.id();
+    let stdout = holder.0.stdout.take().expect("holder event rendezvous");
+    let mut stream = BufReader::new(stdout);
+    let mut observed_handle = false;
+    for _ in 0..12 {
+        let mut line = String::new();
+        if stream.read_line(&mut line).expect("test fixture output") == 0 {
+            break;
+        }
+        if let Some(value) = line.trim().strip_prefix("JDC_T011_OWNER_RIGHTS_EVENT=") {
+            let _event = value.parse::<usize>().expect("test-only event identity");
+            observed_handle = true;
+            break;
+        }
+    }
+    assert!(observed_handle, "actual target must hold its own event");
+    let intruder = Command::new(&exe)
+        .args([
+            "--exact",
+            "fixture_owner_rights_intruder_is_denied",
+            "--nocapture",
+        ])
+        .env("JDC_T011_OWNER_RIGHTS_ATTACKER", "1")
+        .env("JDC_T011_EXPECTED_TEST_SID", &sid)
+        .env("JDC_T011_OWNER_RIGHTS_PID", pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("separate same-owner process");
+    holder
+        .0
+        .stdin
+        .take()
+        .expect("event-controlled release channel")
+        .write_all(&[0x51])
+        .expect("release original event holder");
+    let held = holder.0.wait().expect("holder exit after release");
+    assert!(
+        intruder.status.success(),
+        "same-owner denial proof failed: {}",
+        String::from_utf8_lossy(&intruder.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&intruder.stdout)
+            .contains("T011_WINDOWS_SAME_OWNER_PROCESS_RIGHTS_DENIED"),
+        "adversary must execute and report real kernel denials"
+    );
+    assert!(
+        held.success(),
+        "original private event must remain unsignaled"
     );
 }
 

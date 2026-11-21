@@ -2,12 +2,12 @@
 //! Two unrelated child processes run under the same real Windows SID.
 #![cfg(windows)]
 use jdc_authority_service::windows_pipe_peer::{
-    observe_client_sid_after_read, observe_process_sid,
+    observe_client_sid_after_read, observe_process_sid, verify_live_issued_peer_after_read,
 };
 use std::{
     ffi::c_void,
     mem::size_of,
-    os::windows::io::BorrowedHandle,
+    os::windows::io::{AsRawHandle, BorrowedHandle},
     process::{Child, Command, Stdio},
     ptr,
     time::{SystemTime, UNIX_EPOCH},
@@ -32,7 +32,7 @@ use windows_sys::Win32::{
             ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_TYPE_BYTE, PIPE_WAIT,
         },
-        Threading::{CreateEventW, WaitForSingleObject},
+        Threading::{CreateEventW, OpenProcess, WaitForSingleObject},
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
     },
 };
@@ -266,6 +266,28 @@ fn observe_independent_client(label: &str, unique: u128, explicit_acl: bool) -> 
     assert_eq!(inbound, b'R');
     let observed = observe_client_sid_after_read(unsafe { BorrowedHandle::borrow_raw(pipe.0) })
         .expect("kernel-issued impersonation token after real request");
+    // Independently provisioned issuers must retain the actual child HANDLE:
+    // same Windows SID or a caller-reported PID cannot select which process
+    // owns the live named-pipe connection. Verify while the child is alive.
+    let original_handle = unsafe { BorrowedHandle::borrow_raw(child.0.as_raw_handle()) };
+    assert_eq!(
+        verify_live_issued_peer_after_read(
+            unsafe { BorrowedHandle::borrow_raw(pipe.0) },
+            original_handle,
+        ),
+        Ok(()),
+        "original live child kernel handle must match the actual pipe origin",
+    );
+    // The test runner shares the same interactive SID, but did not connect.
+    let outsider = Handle(unsafe { OpenProcess(0x0010_1000, 0, std::process::id()) });
+    assert!(!outsider.0.is_null(), "genuine parent process query handle");
+    assert_eq!(
+        verify_live_issued_peer_after_read(unsafe { BorrowedHandle::borrow_raw(pipe.0) }, unsafe {
+            BorrowedHandle::borrow_raw(outsider.0)
+        },),
+        Err(jdc_authority_service::IdentityDenied),
+        "same-SID but different pinned process must be denied",
+    );
     let mut reply = b'A';
     server_byte_io(pipe.0, &mut reply, false);
     let child_pid = child.0.id();
@@ -276,6 +298,13 @@ fn observe_independent_client(label: &str, unique: u128, explicit_acl: bool) -> 
             .expect("child must terminate after reply")
             .success(),
         "independent client must complete IPC exchange"
+    );
+    assert_eq!(
+        verify_live_issued_peer_after_read(unsafe { BorrowedHandle::borrow_raw(pipe.0) }, unsafe {
+            BorrowedHandle::borrow_raw(child.0.as_raw_handle())
+        },),
+        Err(jdc_authority_service::IdentityDenied),
+        "an exited but still handle-pinned process must never pass liveness",
     );
     (child_pid, observed)
 }

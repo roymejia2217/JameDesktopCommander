@@ -46,6 +46,9 @@ pub mod windows_token;
 pub mod windows_process_custody;
 
 #[cfg(windows)]
+pub mod windows_creation_custody;
+
+#[cfg(windows)]
 pub mod windows_pipe_peer;
 
 /// This error never carries user-controlled credentials into diagnostics.

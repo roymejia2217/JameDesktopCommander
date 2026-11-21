@@ -11,14 +11,17 @@ use std::{
     ptr,
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE},
+    Foundation::{CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, WAIT_TIMEOUT},
     Security::{
         GetTokenInformation, RevertToSelf, SecurityIdentification, TokenImpersonation,
         TokenImpersonationLevel, TokenType, TokenUser, TOKEN_QUERY, TOKEN_USER,
     },
     System::{
-        Pipes::ImpersonateNamedPipeClient,
-        Threading::{GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken},
+        Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient},
+        Threading::{
+            GetCurrentProcess, GetCurrentThread, GetProcessId, OpenProcessToken, OpenThreadToken,
+            WaitForSingleObject,
+        },
     },
 };
 
@@ -126,6 +129,41 @@ pub fn observe_client_sid_after_read(pipe: BorrowedHandle<'_>) -> Result<Vec<u8>
         return Err(IdentityDenied);
     }
     token_user_sid(token.0)
+}
+
+/// Match the actual connected named-pipe origin against a *real, retained*
+/// issued-process HANDLE. The trusted issuer must have created and retained
+/// this handle independently, then protected process + primary-thread
+/// custody at object creation. Caller-supplied PIDs never authorize.
+/// Must be invoked AFTER a complete request has been read and paired with
+/// kernel client-token checks. PID of the original pipe connector alone
+/// does NOT attest who later writes through a delegated/duplicated pipe.
+/// This is non-shipping evidence only; it never grants filesystem authority.
+pub fn verify_live_issued_peer_after_read(
+    pipe: BorrowedHandle<'_>,
+    issued_process: BorrowedHandle<'_>,
+) -> Result<(), IdentityDenied> {
+    let pipe = pipe.as_raw_handle() as HANDLE;
+    let process = issued_process.as_raw_handle() as HANDLE;
+    if pipe.is_null()
+        || process.is_null()
+        || pipe == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+        || process == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+    {
+        return Err(IdentityDenied);
+    }
+    let mut connector_pid = 0u32;
+    if unsafe { GetNamedPipeClientProcessId(pipe, &mut connector_pid) } == 0 || connector_pid == 0 {
+        return Err(IdentityDenied);
+    }
+    let issued_pid = unsafe { GetProcessId(process) };
+    if issued_pid == 0 || issued_pid != connector_pid {
+        return Err(IdentityDenied);
+    }
+    if unsafe { WaitForSingleObject(process, 0) } != WAIT_TIMEOUT {
+        return Err(IdentityDenied);
+    }
+    Ok(())
 }
 
 /// Test fixture observation of the process token, NOT permission to act

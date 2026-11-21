@@ -87,8 +87,9 @@ async function setup() {
   // Save original config
   const originalConfig = await configManager.getConfig();
   
-  // Set allowed directories to include test directory
-  await configManager.setValue('allowedDirectories', [LITERAL_SEARCH_TEST_DIR]);
+  // These assertions cover search syntax, not native restricted-mode custody.
+  // Explicitly opt into the documented unrestricted policy in this isolated fixture.
+  await configManager.setValue('allowedDirectories', []);
   
   // Create test directory
   await fs.mkdir(LITERAL_SEARCH_TEST_DIR, { recursive: true });
@@ -432,7 +433,7 @@ export async function testLiteralSearch() {
 export default testLiteralSearch;
 
 // Run tests if this file is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])) {
   testLiteralSearch().then(() => {
     console.log('Literal search tests completed successfully.');
     process.exit(0);

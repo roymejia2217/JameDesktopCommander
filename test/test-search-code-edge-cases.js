@@ -85,7 +85,9 @@ async function setupEdgeCases() {
   console.log(`${colors.blue}Setting up edge case tests...${colors.reset}`);
   
   const originalConfig = await configManager.getConfig();
-  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
+  // Search feature tests require an explicit unrestricted test policy;
+  // restricted-mode denial is covered separately below and in T011 tests.
+  await configManager.setValue('allowedDirectories', []);
   
   await fs.mkdir(EDGE_CASE_TEST_DIR, { recursive: true });
   
@@ -376,29 +378,32 @@ async function testLargeContextLines() {
  * Test path traversal security
  */
 async function testPathTraversalSecurity() {
-  console.log(`${colors.yellow}Testing path traversal security...${colors.reset}`);
-  
-  // Test with path traversal attempts
+  console.log(`${colors.yellow}Testing restricted path traversal rejection...${colors.reset}`);
+
+  // Preserve the security assertion independently of unrestricted syntax tests.
+  // No pathname-based search may spawn under this restricted policy.
+  const previous = await configManager.getAllowedDirectoriesForFilesystem();
+  assert(Array.isArray(previous) && previous.length === 0,
+    'The functional fixture must be explicitly unrestricted before this gate');
+  await configManager.setValue('allowedDirectories', [EDGE_CASE_TEST_DIR]);
   try {
+    const { searchManager } = await import('../dist/search-manager.js');
+    const sessionsBefore = searchManager.listSearchSessions().length;
     const result = await handleStartSearch({
       path: EDGE_CASE_TEST_DIR + '/../../../etc',
       pattern: 'pattern',
       searchType: 'content'
     });
-    
-    // If it doesn't throw, it should handle gracefully
-    assert(result.content, 'Should handle path traversal attempts gracefully');
-    const text = result.content[0].text;
-    const isSecure = text.includes('not allowed') || text.includes('Error') || text.includes('permission');
-    assert(isSecure, 'Should handle path traversal securely');
-    
-  } catch (error) {
-    // It's acceptable to throw an error for security violations
-    const isSecurityError = error.message.includes('not allowed') || error.message.includes('permission');
-    assert(isSecurityError, 'Should reject unauthorized path access');
+    assert(result.isError === true, 'Restricted traversal must be denied');
+    assert(result.content[0].text.includes('E_POLICY_UNAVAILABLE'),
+      'Unavailable protected authority must be a typed denial');
+    assert(searchManager.listSearchSessions().length === sessionsBefore,
+      'A denied traversal must not start a search session');
+  } finally {
+    await configManager.setValue('allowedDirectories', previous);
   }
-  
-  console.log(`${colors.green}✓ Path traversal security test passed${colors.reset}`);
+
+  console.log(`${colors.green}✓ Restricted path traversal rejection passed${colors.reset}`);
 }
 
 /**
@@ -550,7 +555,7 @@ export async function testSearchCodeEdgeCases() {
 export default testSearchCodeEdgeCases;
 
 // Run tests if this file is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])) {
   testSearchCodeEdgeCases().then(() => {
     console.log('Edge case tests completed successfully.');
     process.exit(0);

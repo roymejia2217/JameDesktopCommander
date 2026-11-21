@@ -86,6 +86,71 @@ test('HTTP errors, missing body and oversized responses fail closed', async () =
       async () => response));
   }
 });
+test('oversized streamed diagnostic cancels the unread response body', async () => {
+  let cancelled = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      // This source deliberately stays open beyond the accepted byte limit.
+      controller.enqueue(new Uint8Array(262145));
+    },
+    cancel() { cancelled++; },
+  }, { highWaterMark: 0 });
+  const mock = async () => new Response(body, { status: 200 });
+  await assert.rejects(
+    readTunnelFunctionalDiagnostics('http://127.0.0.1:1234/', mock),
+    /exceeds allowed size/i,
+  );
+  assert.equal(cancelled, 1, 'rejected stream must be cancelled, not just unlocked');
+});
+
+test('rejected HTTP status and oversized declared length cancel the body', async () => {
+  for (const [status, headers] of [
+    [401, {}],
+    [200, { 'content-length': '262145' }],
+  ]) {
+    let cancelled = 0;
+    const body = new ReadableStream({
+      cancel() { cancelled++; },
+    }, { highWaterMark: 0 });
+    const mock = async () => new Response(body, { status, headers });
+    await assert.rejects(
+      readTunnelFunctionalDiagnostics('http://127.0.0.1:1234/', mock),
+    );
+    assert.equal(cancelled, 1, `status=${status} rejected body not cancelled`);
+  }
+});
+
+test('untrusted cancellation failure never hides the sanitized rejection', async () => {
+  const body = new ReadableStream({
+    cancel() { throw new Error('PRIVATE_CANCEL_FAILURE'); },
+  }, { highWaterMark: 0 });
+  const mock = async () => new Response(body, { status: 401 });
+  await assert.rejects(
+    readTunnelFunctionalDiagnostics('http://127.0.0.1:1234/', mock),
+    error => {
+      assert.match(error.message, /did not return a valid response/);
+      assert.doesNotMatch(error.message, /PRIVATE_CANCEL_FAILURE/);
+      return true;
+    },
+  );
+});
+
+test('valid complete diagnostic stream is read without cancellation', async () => {
+  let cancelled = 0;
+  const bytes = new TextEncoder().encode(JSON.stringify(example));
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+    cancel() { cancelled++; },
+  });
+  const result = await readTunnelFunctionalDiagnostics('http://127.0.0.1:1234/',
+    async () => new Response(body, { status: 200 }));
+  assert.equal(result.localHealth, 'ready');
+  assert.equal(cancelled, 0, 'completed responses must not be treated as abandoned');
+});
+
 test('counters are strictly nonnegative safe integers', () => {
   const bad = structuredClone(example);
   bad.components.dispatcher.details.timeouts = -1;

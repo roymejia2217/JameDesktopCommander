@@ -172,24 +172,37 @@ export async function readTunnelFunctionalDiagnostics(
         signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!response.ok || response.status !== 200 || !response.body) {
+        // Do not leave a rejected streaming response attached to a socket.
+        // Cancellation is best effort: an untrusted source must not delay denial.
+        void response.body?.cancel().catch(() => {});
         throw new Error('Tunnel diagnostic endpoint did not return a valid response.');
     }
     const length = response.headers.get('content-length');
     if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BYTES)) {
+        void response.body.cancel().catch(() => {});
         throw new Error('Tunnel diagnostic response exceeds allowed size.');
     }
     const chunks: Uint8Array[] = [];
     let total = 0;
     const reader = response.body.getReader();
+    let exhausted = false;
     try {
         while (true) {
             const result = await reader.read();
-            if (result.done) break;
+            if (result.done) {
+                exhausted = true;
+                break;
+            }
             total += result.value.byteLength;
             if (total > MAX_BYTES) throw new Error('Tunnel diagnostic response exceeds allowed size.');
             chunks.push(result.value);
         }
     } finally {
+        if (!exhausted) {
+            // Releasing a reader does not cancel its source. Do not await
+            // untrusted cancel hooks or replace the original read error.
+            void reader.cancel().catch(() => {});
+        }
         reader.releaseLock();
     }
     const bytes = new Uint8Array(total);

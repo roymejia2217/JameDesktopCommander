@@ -351,12 +351,15 @@ pub fn parse_overview(raw: &[u8]) -> Result<Overview, &'static str> {
     if linux && !linux_service_verdict_consistent(&snapshot) {
         return Err("Linux service status contradicts local evidence");
     }
+    // If task/service registration is unavailable, no trusted installed
+    // instance can be linked to a current local or control-plane observation.
     if snapshot.task_registration == "unverified"
         && (snapshot.local_health != "unverified"
             || snapshot.mcp_initialize != "unverified"
-            || snapshot.tool_discovery != "unverified")
+            || snapshot.tool_discovery != "unverified"
+            || snapshot.control_plane != "unverified")
     {
-        return Err("Unregistered task cannot assert local readiness");
+        return Err("Unverified registration cannot assert operational evidence");
     }
     if snapshot.mcp_initialize != "observed" && snapshot.tool_discovery == "observed_complete" {
         return Err("MCP tools cannot be complete without initialization evidence");
@@ -456,6 +459,58 @@ mod tests {
       "remoteDelivery":"not_observed",
       "verdict":{"state":"unverified","reasonCode":"CLIENT_PROVENANCE_UNVERIFIED"}
     }"#;
+
+    #[test]
+    fn unverified_registration_cannot_claim_a_control_plane_http_observation() {
+        // A missing task/service identity cannot authenticate a 401/403/429
+        // or server-side HTTP diagnosis, even if the remote JSON says it did.
+        for baseline in [GOOD.to_string(), linux_sample()] {
+            let mut snapshot: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+            let linux = snapshot["platform"] == "linux";
+            let field = if linux {
+                "serviceRegistration"
+            } else {
+                "taskRegistration"
+            };
+            snapshot[field] = "unverified".into();
+            snapshot["localHealth"] = "unverified".into();
+            snapshot["mcpInitialize"] = "unverified".into();
+            snapshot["toolDiscovery"] = "unverified".into();
+            for (category, reason) in [
+                ("credential_rejected", "CONTROL_PLANE_CREDENTIAL_REJECTED"),
+                ("permission_denied", "CONTROL_PLANE_FORBIDDEN"),
+                ("rate_limited", "CONTROL_PLANE_RATE_LIMITED"),
+                ("server_error", "CONTROL_PLANE_SERVER_ERROR"),
+                ("other_http_error", "CONTROL_PLANE_HTTP_ERROR"),
+                ("none", "CONTROL_PLANE_UNVERIFIED"),
+            ] {
+                snapshot["controlPlane"] = category.into();
+                snapshot["verdict"]["reasonCode"] = reason.into();
+                snapshot["verdict"]["state"] = if category == "none" {
+                    "unverified"
+                } else {
+                    "degraded"
+                }
+                .into();
+                assert!(
+                    parse_overview(&serde_json::to_vec(&snapshot).unwrap()).is_err(),
+                    "{field} unverified must not claim {category} as observed"
+                );
+            }
+            // Normal missing-registration reports remain representable.
+            snapshot["controlPlane"] = "unverified".into();
+            snapshot["verdict"]["state"] = "unverified".into();
+            snapshot["verdict"]["reasonCode"] = if linux {
+                "SERVICE_STATUS_UNAVAILABLE"
+            } else {
+                "TASK_STATUS_UNAVAILABLE"
+            }
+            .into();
+            assert!(parse_overview(&serde_json::to_vec(&snapshot).unwrap()).is_ok());
+            // Real registration with original evidence remains usable.
+            assert!(parse_overview(baseline.as_bytes()).is_ok());
+        }
+    }
 
     #[test]
     fn windows_client_provenance_reason_requires_observed_task_and_unknown_health() {

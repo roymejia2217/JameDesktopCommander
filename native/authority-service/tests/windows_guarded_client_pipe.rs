@@ -500,7 +500,7 @@ impl Drop for OwnedDiagnostic {
 #[test]
 #[ignore = "Requires official SDK node_modules and JDC_T011_NODE_BINARY; CI exercises explicitly"]
 fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
-    use std::io::Read;
+    use jdc_authority_service::windows_opened_read::read_opened_regular;
     use std::path::PathBuf;
     let node = PathBuf::from(
         std::env::var_os("JDC_T011_NODE_BINARY")
@@ -524,7 +524,7 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     ));
     std::fs::write(&sentinel, BYTES).expect("test-owned sentinel creation");
     let _owned_sentinel = OwnedSentinel(sentinel.clone());
-    let mut retained_file = std::fs::File::open(&sentinel)
+    let retained_file = std::fs::File::open(&sentinel)
         .expect("issuer retains original file object before SDK admission");
 
     let name = format!(r"\\.\pipe\JDC-T011-SDK-{}-{unique}", std::process::id());
@@ -705,10 +705,8 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
         "same-SID intruder obtained custody or any protected response bytes"
     );
 
-    let mut content = Vec::new();
-    retained_file
-        .read_to_end(&mut content)
-        .expect("read original retained file HANDLE");
+    let content = read_opened_regular(retained_file)
+        .expect("native module must read only the preopened file object");
     assert_eq!(
         content, BYTES,
         "preopened test file must supply the exact bytes"

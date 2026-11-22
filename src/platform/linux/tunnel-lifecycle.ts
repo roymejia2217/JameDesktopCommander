@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
 import {
@@ -203,6 +204,29 @@ async function resolveTrustedProfileDirectory(profileDir: string): Promise<strin
   }
 }
 
+// Profile parsing is observational: never allocate or parse unbounded input.
+// Read only through the already-opened descriptor, not a re-resolved pathname.
+export async function readBoundedStatusProfileFile(file: FileHandle): Promise<string> {
+  const maxBytes = 1024 * 1024;
+  const info = await file.stat();
+  if (!info.isFile() || !Number.isSafeInteger(info.size) ||
+      info.size < 0 || info.size > maxBytes) {
+    throw new Error('Linux tunnel status profile exceeds allowed size.');
+  }
+  // The file can grow after stat(): cap the actual read as well.
+  const bytes = Buffer.alloc(maxBytes + 1);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await file.read(bytes, offset, bytes.length - offset, offset);
+    if (result.bytesRead === 0) break;
+    offset += result.bytesRead;
+  }
+  if (offset > maxBytes) {
+    throw new Error('Linux tunnel status profile exceeds allowed size.');
+  }
+  return bytes.toString('utf8', 0, offset);
+}
+
 // A trusted parent does not protect an existing file with unsafe permissions.
 // Read and check the same opened regular file. This is a point-in-time check,
 // not protection against same-user writes or concurrent ancestor replacement.
@@ -217,7 +241,7 @@ async function readTrustedStatusProfile(profileFile: string): Promise<string> {
           (info.mode & 0o022) !== 0) {
         throw new Error('Untrusted profile file');
       }
-      return await file.readFile('utf8');
+      return await readBoundedStatusProfileFile(file);
     } finally {
       await file.close();
     }

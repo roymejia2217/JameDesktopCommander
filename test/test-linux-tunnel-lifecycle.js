@@ -352,6 +352,20 @@ test('Linux systemd user lifecycle and actual health are fail-closed and preserv
     assert.ok(!calls.slice(beforeDropInRestart).some(c => c[2] === 'try-restart'),
       'Drop-in must block restart before any executable transition');
     injectedDropIn = '';
+    // A registered profile exceeding the observational budget must not reach
+    // YAML parsing or leak its pathname in a status failure.
+    const originalProfile = await readFile(profilePath, 'utf8');
+    await writeFile(profilePath, Buffer.alloc(1024 * 1024 + 1, 0x61));
+    try {
+      await assert.rejects(runLinuxTunnelCommand(['status'], deps), (error) => {
+        assert.equal(error.message, 'Linux tunnel status profile custody cannot be verified.');
+        assert.ok(!error.message.includes('profile.yaml'));
+        assert.ok(!error.message.includes('private/runtime.key'));
+        return true;
+      });
+    } finally {
+      await writeFile(profilePath, originalProfile);
+    }
     const healthyStatus = (await runLinuxTunnelCommand(['status'], deps)).status;
     assert.equal(healthyStatus.healthy, true);
     assert.equal(healthyStatus.credentialSource, 'file_reference');

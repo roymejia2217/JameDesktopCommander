@@ -363,6 +363,21 @@ try {
   assert.match(errors[0], /effective systemd unit/i);
   assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
 
+  for (const [code, reason] of [
+    ['E_TUNNEL_RESTART_NOT_ACTIVE', /enabled, active/i],
+    ['E_TUNNEL_UNIT_TEMPLATE_MISMATCH', /differs from the managed template/i],
+  ]) {
+    errors.length = 0;
+    const deniedLifecycle = Object.assign(new Error(sensitive), { code });
+    await runTunnel(['status'], {
+      ...dependencies,
+      statusTunnel: async () => { throw deniedLifecycle; },
+    });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], reason);
+    assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+  }
+
   errors.length = 0;
   // An untrusted error may expose a throwing code accessor. Even classifying
   // the exception must not create an uncaught secret-bearing exception.

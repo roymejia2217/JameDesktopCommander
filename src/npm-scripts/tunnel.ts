@@ -573,6 +573,10 @@ function tunnelCliFailureCode(error: unknown): string {
             return 'E_TUNNEL_TIMEOUT';
         case 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED':
             return 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED: effective systemd unit is not trusted';
+        case 'E_TUNNEL_RESTART_NOT_ACTIVE':
+            return 'E_TUNNEL_RESTART_NOT_ACTIVE: restart requires an enabled, active user service';
+        case 'E_TUNNEL_UNIT_TEMPLATE_MISMATCH':
+            return 'E_TUNNEL_UNIT_TEMPLATE_MISMATCH: unit differs from the managed template';
         default:
             return 'E_TUNNEL_COMMAND_UNAVAILABLE';
     }

@@ -278,7 +278,7 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   // directives could execute additional programs under this user account.
   // Only the exact versioned template written by this lifecycle is trusted.
   if (content !== buildLinuxTunnelUnit(match[1], match[2], match[3])) {
-    throw new Error('Linux tunnel unit differs from the managed template.');
+    throw new RejectedLinuxTunnelLifecycleError('E_TUNNEL_UNIT_TEMPLATE_MISMATCH');
   }
   const recordedExecutable = safePath(match[1]);
   const executable = await resolveTrustedExecutable(recordedExecutable);
@@ -290,6 +290,20 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
     throw new Error('Linux tunnel registered profile directory changed.');
   }
   return { executable, profileDir, profile: match[3] };
+}
+
+// Strictly typed, static lifecycle denials preserve operator actionability
+// without forwarding systemctl output, service contents or private paths.
+class RejectedLinuxTunnelLifecycleError extends Error {
+  readonly code: 'E_TUNNEL_UNIT_TEMPLATE_MISMATCH' | 'E_TUNNEL_RESTART_NOT_ACTIVE';
+
+  constructor(code: 'E_TUNNEL_UNIT_TEMPLATE_MISMATCH' | 'E_TUNNEL_RESTART_NOT_ACTIVE') {
+    super(code === 'E_TUNNEL_UNIT_TEMPLATE_MISMATCH'
+      ? 'Linux tunnel unit differs from the managed template.'
+      : 'Linux tunnel restart requires an enabled, active user service.');
+    this.code = code;
+    this.name = 'RejectedLinuxTunnelLifecycleError';
+  }
 }
 
 // Only a fixed, trusted reason can cross from effective systemd metadata
@@ -671,7 +685,7 @@ export async function runLinuxTunnelCommand(
       const state = parseActivationState(await systemctl(['show', unit,
         '--property=ActiveState', '--property=UnitFileState', '--no-pager']));
       if (!state.active || !state.enabled) {
-        throw new Error('Linux tunnel restart requires an enabled, active user service.');
+        throw new RejectedLinuxTunnelLifecycleError('E_TUNNEL_RESTART_NOT_ACTIVE');
       }
       // A successful restart does not establish remote control-plane readiness.
       await systemctl(['try-restart', unit]);

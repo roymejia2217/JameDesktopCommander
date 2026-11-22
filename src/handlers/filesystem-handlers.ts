@@ -15,6 +15,7 @@ import type { ReadOptions } from '../utils/files/base.js';
 
 import { ServerResult } from '../types.js';
 import { withTimeout } from '../utils/withTimeout.js';
+import { withScriptSyntaxFeedback } from '../utils/script-syntax-diagnostics.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { configManager } from '../config-manager.js';
 
@@ -391,12 +392,12 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
 
         // No structuredContent: nothing in the UI calls write_file (the widget
         // previews the write via its own read_file pull at tool-result time).
-        return {
+        return withScriptSyntaxFeedback({
             content: [{
                 type: "text",
                 text: `Successfully ${modeMessage} ${parsed.path} (${lineCount} lines) ${errorMessage}`
             }],
-        };
+        }, resolveAbsolutePath(parsed.path));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         return createErrorResponse(errorMessage);

@@ -50,7 +50,8 @@ jobs:
             const outstanding = [];
             for (const issue_number of blockers) {
               const { data } = await github.rest.issues.get({ ...context.repo, issue_number });
-              if (!data || data.pull_request || data.state !== 'closed') {
+              if (!data || data.pull_request || data.state !== 'closed' ||
+                  data.state_reason !== 'completed') {
                 outstanding.push(issue_number);
               }
             }

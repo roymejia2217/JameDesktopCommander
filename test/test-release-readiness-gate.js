@@ -61,15 +61,16 @@ test('missing manual approval fails closed without API access', async () => {
 });
 
 test('every mandatory release blocker is checked and any open issue defers release', async () => {
-  const states = { 124: { state: 'closed' }, 139: { state: 'open' },
-    148: { state: 'closed' }, 150: { state: 'closed' }, 248: { state: 'closed' } };
+  const completed = { state: 'closed', state_reason: 'completed' };
+  const states = { 124: completed, 139: { state: 'open', state_reason: null },
+    148: completed, 150: completed, 248: completed };
   const result = await runGate({ states });
   assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
   assert.equal(result.outputs.get('eligible'), 'false');
   assert.ok(result.notices.some(message => message.includes('139')));
 });
 test('release is eligible only when all blockers are closed and approval is explicit', async () => {
-  const closed = { state: 'closed' };
+  const closed = { state: 'closed', state_reason: 'completed' };
   const result = await runGate({ states: { 124: closed, 139: closed, 148: closed, 150: closed, 248: closed } });
   assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
   assert.equal(result.outputs.get('eligible'), 'true');
@@ -78,7 +79,10 @@ test('release is eligible only when all blockers are closed and approval is expl
 test('open Linux installer or local recovery UX issue blocks publication even if all P0 are closed', async () => {
   for (const blockingIssue of [150, 248]) {
     const states = Object.fromEntries([124, 139, 148, 150, 248]
-      .map(number => [number, { state: number === blockingIssue ? 'open' : 'closed' }]));
+      .map(number => [number, {
+        state: number === blockingIssue ? 'open' : 'closed',
+        state_reason: number === blockingIssue ? null : 'completed',
+      }]));
     const result = await runGate({ states });
     assert.deepEqual(result.calls, [124, 139, 148, 150, 248]);
     assert.equal(result.outputs.get('eligible'), 'false', `Issue #${blockingIssue} must block publication`);
@@ -86,9 +90,34 @@ test('open Linux installer or local recovery UX issue blocks publication even if
   }
 });
 
+test('closed as not planned never counts as resolution of a release blocker', async () => {
+  const blockers = [124, 139, 148, 150, 248];
+  for (const blockingIssue of blockers) {
+    const states = Object.fromEntries(blockers.map(number => [
+      number,
+      { state: 'closed', state_reason: number === blockingIssue ? 'not_planned' : 'completed' },
+    ]));
+    const result = await runGate({ states });
+    assert.deepEqual(result.calls, blockers);
+    assert.equal(result.outputs.get('eligible'), 'false',
+      `Release must not accept a discarded requirement #${blockingIssue}`);
+  }
+});
+
+test('closed without an explicit completed disposition is not release acceptance', async () => {
+  const blockers = [124, 139, 148, 150, 248];
+  const states = Object.fromEntries(blockers.map(number => [
+    number, { state: 'closed', state_reason: number === 148 ? null : 'completed' },
+  ]));
+  const result = await runGate({ states });
+  assert.deepEqual(result.calls, blockers);
+  assert.equal(result.outputs.get('eligible'), 'false');
+});
+
 test('unavailable GitHub issue or API failure cannot grant release eligibility', async () => {
   const result = await runGate({ states: {
-    124: { state: 'closed' }, 139: { state: 'closed' }, 148: null,
+    124: { state: 'closed', state_reason: 'completed' },
+    139: { state: 'closed', state_reason: 'completed' }, 148: null,
   } });
   assert.equal(result.outputs.get('eligible'), 'false');
   await assert.rejects(runGate({ failOn: 139 }), /API unreachable/);

@@ -320,4 +320,81 @@ try {
   process.exitCode = originalExitCode;
 }
 
+// Provider/OS failures can contain a key, profile directory or command line.
+// A local CLI command must not echo an untrusted exception's message.
+const previousError = console.error;
+const previousCliExit = process.exitCode;
+try {
+  const errors = [];
+  console.error = (...parts) => errors.push(parts.join(' '));
+  const sensitive = 'provider-api-key-CANARY C:\\Private\\credentials\\runtime.key';
+  process.exitCode = undefined;
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw new Error(sensitive); },
+  });
+  assert.equal(process.exitCode, 1);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_COMMAND_UNAVAILABLE/);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+
+  errors.length = 0;
+  const denied = Object.assign(new Error(sensitive), { code: 'EACCES' });
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw denied; },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_PERMISSION_DENIED/);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+
+  // A protected Linux systemd preflight has a stable, actionable reason.
+  // The test still rejects any third-party message and private path.
+  errors.length = 0;
+  const rejectedUnit = Object.assign(new Error(sensitive), {
+    code: 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED',
+  });
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw rejectedUnit; },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED/);
+  assert.match(errors[0], /effective systemd unit/i);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+
+  for (const [code, reason] of [
+    ['E_TUNNEL_RESTART_NOT_ACTIVE', /enabled, active/i],
+    ['E_TUNNEL_UNIT_TEMPLATE_MISMATCH', /differs from the managed template/i],
+  ]) {
+    errors.length = 0;
+    const deniedLifecycle = Object.assign(new Error(sensitive), { code });
+    await runTunnel(['status'], {
+      ...dependencies,
+      statusTunnel: async () => { throw deniedLifecycle; },
+    });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], reason);
+    assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+  }
+
+  errors.length = 0;
+  // An untrusted error may expose a throwing code accessor. Even classifying
+  // the exception must not create an uncaught secret-bearing exception.
+  const maliciousCode = new Error(sensitive);
+  Object.defineProperty(maliciousCode, 'code', {
+    get: () => { throw new Error(sensitive); },
+  });
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw maliciousCode; },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_COMMAND_UNAVAILABLE/);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+} finally {
+  console.error = previousError;
+  process.exitCode = previousCliExit;
+}
+
 console.log('Windows tunnel CLI contract: PASS');

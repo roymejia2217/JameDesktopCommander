@@ -548,6 +548,27 @@ Notes:
   Secrets remain owned by tunnel-client profiles via env: or file: references.`);
 }
 
+/**
+ * CLI errors may originate in provider output, profile parsing or OS commands.
+ * Classify only known Node error codes; never echo arbitrary exception strings.
+ * The read-only overview/diagnose commands supply actionable, redacted detail.
+ */
+function tunnelCliFailureCode(error: unknown): string {
+    const code = error !== null && typeof error === 'object' && 'code' in error
+        ? error.code : undefined;
+    switch (code) {
+        case 'EACCES':
+        case 'EPERM':
+            return 'E_TUNNEL_PERMISSION_DENIED';
+        case 'ENOENT':
+            return 'E_TUNNEL_DEPENDENCY_NOT_FOUND';
+        case 'ETIMEDOUT':
+            return 'E_TUNNEL_TIMEOUT';
+        default:
+            return 'E_TUNNEL_COMMAND_UNAVAILABLE';
+    }
+}
+
 export async function runTunnel(
     args: readonly string[] = process.argv.slice(3),
     dependencies: WindowsTunnelCommandDependencies = {},
@@ -570,7 +591,7 @@ export async function runTunnel(
             }
         } catch (error) {
             console.error('Linux tunnel command failed: ' +
-                (error instanceof Error ? error.message : 'Unknown error'));
+                tunnelCliFailureCode(error) + '. Use tunnel overview or diagnose for sanitized diagnostics.');
             process.exitCode = 1;
         }
         return;
@@ -590,8 +611,7 @@ export async function runTunnel(
             process.exitCode = 1;
         }
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(`Tunnel command failed: ${message}`);
+        console.error(`Tunnel command failed: ${tunnelCliFailureCode(error)}. Use tunnel overview or diagnose for sanitized diagnostics.`);
         process.exitCode = 1;
     }
 }

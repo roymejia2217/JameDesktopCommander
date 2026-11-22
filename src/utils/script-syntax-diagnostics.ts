@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import type { ServerResult } from '../types.js';
+import { resolveWindowsSystemTool } from '../platform/windows/scheduled-task.js';
 
 export type ScriptValidationStatus = 'passed' | 'failed' | 'unavailable' | 'skipped';
 export interface ScriptValidation {
@@ -40,18 +41,6 @@ const POWERSHELL_PARSE = [
     '}',
 ].join('; ');
 
-const POWERSHELL_LINT = [
-    '$source = [Console]::In.ReadToEnd()',
-    '$module = Get-Module -ListAvailable -Name PSScriptAnalyzer | Select-Object -First 1',
-    'if ($null -eq $module) { [Console]::Out.WriteLine("JDC_OPTIONAL_LINTER_MISSING"); exit 4 }',
-    'Import-Module PSScriptAnalyzer -ErrorAction Stop',
-    '$issues = @(Invoke-ScriptAnalyzer -ScriptDefinition $source -Severity Error,Warning -ErrorAction Stop)',
-    'foreach ($issue in $issues | Select-Object -First 6) {',
-    '  [Console]::Error.WriteLine(("{0}:{1}: {2} {3}" -f $issue.Line, $issue.Column, $issue.RuleName, $issue.Message))',
-    '}',
-    'if ($issues.Count -gt 0) { exit 2 }',
-].join('; ');
-
 const PYTHON_PARSE = [
     'import ast, sys',
     'ast.parse(sys.stdin.read(), filename="agent.py")',
@@ -67,15 +56,20 @@ function selectParser(filePath: string): Parser | null {
             engine: 'Node.js syntax checker' };
     }
     if (ext === '.py') {
-        return { command: process.platform === 'win32' ? 'python' : 'python3',
+        if (process.platform !== 'linux') return null;
+        return { command: '/usr/bin/python3',
             args: ['-I', '-c', PYTHON_PARSE], engine: 'Python ast.parse' };
     }
     if (ext === '.sh' || ext === '.bash') {
-        return { command: 'bash', args: ['-n', '-'], engine: 'Bash syntax checker' };
+        if (process.platform !== 'linux') return null;
+        return { command: '/usr/bin/bash', args: ['-n', '-'], engine: 'Bash syntax checker' };
     }
     if (['.ps1', '.psm1', '.psd1'].includes(ext)) {
-        return { command: process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
-            args: ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_PARSE],
+        const command = process.platform === 'win32'
+            ? resolveWindowsSystemTool('powershell')
+            : process.platform === 'linux' ? '/usr/bin/pwsh' : null;
+        if (!command) return null;
+        return { command, args: ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_PARSE],
             engine: 'PowerShell Parser.ParseInput' };
     }
     return null;
@@ -84,16 +78,16 @@ function selectParser(filePath: string): Parser | null {
 function selectOptionalLinter(filePath: string): Parser | null {
     const ext = path.extname(filePath).toLowerCase();
     if (ext === '.sh' || ext === '.bash') {
-        return { command: 'shellcheck', args: ['--format=gcc', '--severity=warning', '-'],
+        if (process.platform !== 'linux') return null;
+        return { command: '/usr/bin/shellcheck', args: ['--format=gcc', '--severity=warning', '-'],
             engine: 'ShellCheck' };
     }
-    if (['.ps1', '.psm1', '.psd1'].includes(ext)) {
-        return { command: process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
-            args: ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_LINT],
-            engine: 'PSScriptAnalyzer' };
-    }
+    // PSScriptAnalyzer loads PowerShell modules from user-writable locations.
+    // Without an administrator-pinned module identity, auto-import is unsafe.
+    if (['.ps1', '.psm1', '.psd1'].includes(ext)) return null;
     if (ext === '.py') {
-        return { command: 'ruff', args: ['check', '--isolated', '--no-cache',
+        if (process.platform !== 'linux') return null;
+        return { command: '/usr/bin/ruff', args: ['check', '--isolated', '--no-cache',
                 '--output-format=concise', '--stdin-filename', 'agent.py', '-'],
             engine: 'Ruff' };
     }
@@ -102,8 +96,14 @@ function selectOptionalLinter(filePath: string): Parser | null {
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
     const env = { ...process.env };
-    for (const key of ['NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV',
-        'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP']) delete env[key];
+    const forbidden = new Set([
+        'PATH', 'PATHEXT', 'NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV',
+        'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONINSPECT',
+        'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'PSMODULEPATH',
+    ]);
+    for (const key of Object.keys(env)) {
+        if (forbidden.has(key.toUpperCase()) || key.toUpperCase().startsWith('DYLD_')) delete env[key];
+    }
     return env;
 }
 
@@ -196,15 +196,29 @@ export async function checkScriptSyntax(
     if (Buffer.byteLength(submittedText, 'utf8') > MAX_SOURCE_BYTES) {
         return unavailable('source snapshot', 'Script exceeds the 1 MiB inspection limit.');
     }
-    const parser = selectParser(filePath);
+    let parser: Parser | null;
+    try {
+        parser = selectParser(filePath);
+    } catch {
+        return unavailable('system parser', 'OS-owned parser executable could not be resolved.');
+    }
     if (!parser) {
-        return unavailable('TypeScript project compiler',
-            'No trusted TypeScript parser is bundled with the installed runtime; run the project type checker.');
+        const extension = path.extname(filePath).toLowerCase();
+        const language = ['.ts', '.tsx', '.mts', '.cts'].includes(extension) ? 'TypeScript' : extension;
+        return unavailable('system parser',
+            `${language}: no trusted parser executable is available on this platform; use a reviewed project toolchain.`);
     }
     const syntax = await invokeParser(parser, submittedText);
     if (syntax.status !== 'passed') return syntax;
     const linter = selectOptionalLinter(filePath);
-    if (!linter) return syntax;
+    if (!linter) {
+        if (['.ps1', '.psm1', '.psd1'].includes(path.extname(filePath).toLowerCase())) {
+            return { ...syntax, diagnostics: [
+                'PSScriptAnalyzer not loaded: its module custody has not been verified.',
+            ], lint: { engine: 'PSScriptAnalyzer', status: 'unavailable' } };
+        }
+        return syntax;
+    }
     const lint = await invokeParser(linter, submittedText);
     return {
         status: lint.status === 'failed' ? 'failed' : 'passed',

@@ -202,3 +202,26 @@ test('incomplete append snapshot reports unavailable rather than checking an unr
   assert.equal(response.structuredContent?.scriptValidation?.status, 'unavailable');
   assert.match(response.content[1].text, /complete.*source|snapshot/i);
 });
+
+test('PowerShell parser custody ignores an attacker controlled executable first in PATH', async (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows process lookup boundary'); return; }
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'jdc-untrusted-parser-path-'));
+  const previousPath = process.env.Path;
+  const previousPATH = process.env.PATH;
+  try {
+    const faux = path.join(dir, 'powershell.exe');
+    await fs.copyFile(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), faux);
+    const source = path.join(dir, 'agent.ps1');
+    await fs.writeFile(source, 'Write-Output "good syntax"');
+    process.env.Path = dir;
+    process.env.PATH = dir;
+    const report = await checkScriptSyntax(source, 'Write-Output "good syntax"');
+    assert.equal(report.syntaxStatus, 'passed', 'PATH cannot substitute a different executable for the real Windows PowerShell parser');
+  } finally {
+    if (previousPath === undefined) delete process.env.Path;
+    else process.env.Path = previousPath;
+    if (previousPATH === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPATH;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

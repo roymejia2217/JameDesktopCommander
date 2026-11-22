@@ -320,6 +320,62 @@ peer_server_log=''
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == \
    "$outside_hash" ]] || { echo 'E_PEER_PROOF_OUTSIDE_CHANGED' >&2; exit 1; }
 echo 'T011_LINUX_REAL_SERVICE_PEER_BOUND_READ_PASS_NONRELEASE'
+# Independent official MCP SDK tool call, this time from the exact
+# root-issued Node process whose live PID is attested by the native server.
+# It is a disposable SDK-to-kernel proof, NOT the shipping desktop MCP host.
+sdk_bundle="$(realpath -e -- .tmp/t011-issued-sdk-native-read.mjs)"
+node_binary="$(realpath -e -- "$(command -v node)")"
+[[ "$("$node_binary" --version)" == v24.* ]] || exit 1
+sudo -n -u jdc-mcp-client -- "$node_binary" --version >/dev/null
+sdk_installed="$base/t011-issued-sdk-native-read.mjs"
+sudo -n install -o root -g root -m 0555 -- "$sdk_bundle" "$sdk_installed"
+[[ "$(sha256sum "$sdk_bundle" | cut -d ' ' -f1)" == \
+   "$(sudo -n sha256sum "$sdk_installed" | cut -d ' ' -f1)" ]] || exit 1
+[[ "$(sudo -n stat -c '%U:%G:%a' "$sdk_installed")" == 'root:root:555' ]] || exit 1
+sudo -n -u jdc-mcp-client -- test -r "$sdk_installed"
+sdk_socket="$peer_socket_dir/sdk-accepted.sock"
+sdk_issuer_socket="$peer_socket_dir/sdk-issuer.sock"
+peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-peered.XXXXXXXX)"
+timeout --kill-after=2s 14s sudo -n -u jdc-authority -- \
+  "$peer_binary" serve "$isolated" "$sdk_socket" "$sdk_issuer_socket" >"$peer_server_log" 2>&1 &
+peer_server_pid=$!
+peer_ready=0
+for ((attempt=0; attempt<80; attempt++)); do
+  if [[ -S "$sdk_socket" && -S "$sdk_issuer_socket" ]]; then peer_ready=1; break; fi
+  if ! kill -0 "$peer_server_pid" 2>/dev/null; then break; fi
+  sleep 0.025
+done
+if [[ "$peer_ready" -ne 1 ]]; then
+  echo 'E_PEER_SDK_LISTENER_NOT_READY' >&2; exit 1
+fi
+# The issuer has to be root. An untrusted user cannot create the accepted PID.
+if sudo -n -u jdc-mcp-client -- "$peer_binary" issue-sdk \
+    "$sdk_issuer_socket" "$sdk_socket" "$node_binary" "$sdk_installed"; then
+  echo 'E_PEER_SDK_UNTRUSTED_ISSUER_ACCEPTED' >&2; exit 1
+fi
+if ! sdk_issuer_output="$(sudo -n -- env GITHUB_ACTIONS=true \
+  RUNNER_ENVIRONMENT=github-hosted "$peer_binary" issue-sdk \
+  "$sdk_issuer_socket" "$sdk_socket" "$node_binary" "$sdk_installed" 2>&1)"; then
+  printf '%s\n' "$sdk_issuer_output" >&2; exit 1
+fi
+grep -Fq 'T011_LINUX_ROOT_ISSUED_OFFICIAL_SDK_NATIVE_BYTES_PASS_NONRELEASE' \
+  <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_TOOL_NOT_PROVEN' >&2; exit 1; }
+sudo -n -u nobody -- "$peer_binary" deny "$sdk_socket"
+sudo -n -u jdc-mcp-client -- "$peer_binary" impersonate "$sdk_socket"
+if ! wait "$peer_server_pid"; then
+  echo 'E_PEER_SDK_SERVER_FAILED' >&2; exit 1
+fi
+peer_server_pid=''
+for marker in T011_LINUX_ROOT_ISSUED_PEER_BOUND_READ_PASS_NONRELEASE \
+              T011_LINUX_SAME_UID_FOREIGN_CLIENT_DENIED \
+              T011_LINUX_FOREIGN_UID_DENIED; do
+  grep -Fq "$marker" "$peer_server_log" || {
+    echo "E_PEER_SDK_MISSING_MARKER:$marker" >&2; exit 1;
+  }
+done
+rm -f -- "$peer_server_log"
+peer_server_log=''
+echo 'T011_LINUX_OFFICIAL_SDK_TO_KERNEL_BOUND_READ_PASS_NONRELEASE'
 sudo -n umount -- "$bind_alias"
 if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/null; then
   echo 'E_STORAGE_BIND_ALIAS_REMAINS_MOUNTED' >&2; exit 1

@@ -132,6 +132,60 @@ jobs:
       - name: Lint GitHub Actions
         run: ./actionlint -color
 
+      - name: Check syntax and high-severity ShellCheck findings in tracked Bash scripts
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.sh' | xargs -0 -r -n 1 bash -n
+          git ls-files -z -- '*.sh' | xargs -0 -r shellcheck --severity=error
+
+      - name: Parse all tracked JavaScript with Node.js
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.js' '*.mjs' '*.cjs' |
+            xargs -0 -r -n 1 -P 4 node --check
+
+      - name: Enforce rustfmt on every native crate
+        run: |
+          set -euo pipefail
+          while IFS= read -r manifest; do
+            cargo fmt --manifest-path "$manifest" --all -- --check
+          done < <(git ls-files 'native/**/Cargo.toml')
+
+      - name: Parse every tracked PowerShell script with the native parser
+        shell: pwsh
+        run: |
+          $files = @(git ls-files '*.ps1' '*.psm1' '*.psd1')
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate PowerShell scripts' }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD.Path $file), [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              foreach ($diagnostic in $errors) {
+                Write-Error ("{0}:{1}: {2}" -f $file, $diagnostic.Extent.StartLineNumber, $diagnostic.Message)
+              }
+              throw "PowerShell syntax invalid: $file"
+            }
+          }
+
+      - name: Check production PowerShell scripts with pinned PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Repository PSGallery -Force -ErrorAction Stop
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -ErrorAction Stop
+          # All test fixtures are syntax-checked above. Four existing PSSA
+          # plaintext-to-SecureString errors create random disposable CI users;
+          # do not silently suppress them or block production code diagnostics.
+          foreach ($file in @('install-docker.ps1', 'scripts/windows-registry-snapshot.ps1')) {
+            $findings = @(Invoke-ScriptAnalyzer -Path $file -Severity Error -ErrorAction Stop)
+            if ($findings.Count -gt 0) {
+              $findings | Format-Table ScriptName, Line, RuleName, Message | Out-String | Write-Host
+              throw "PSScriptAnalyzer errors found in $file"
+            }
+          }
+
       - name: Enforce Standard Readme and remark-lint
         run: npm run lint:readme
 

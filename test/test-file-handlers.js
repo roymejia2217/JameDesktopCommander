@@ -445,6 +445,21 @@ async function testWriteModeGuard() {
     'Rejected write must leave the file untouched');
   console.log('✓ No-mode write to non-empty file rejected, content preserved');
 
+  // A prototype is not an explicit caller-supplied mode. A polluted prototype
+  // must not silently authorize destructive rewrite or an unsolicited append.
+  for (const inheritedMode of ['rewrite', 'append']) {
+    const request = Object.assign(Object.create({ mode: inheritedMode }), {
+      path: GUARD_FILE,
+      content: 'inherited mode must not write\n',
+    });
+    const inherited = await handleWriteFile(request);
+    assert.strictEqual(inherited.isError, true,
+      `Inherited ${inheritedMode} must not count as an explicit write mode`);
+    assert.strictEqual(await fs.readFile(GUARD_FILE, 'utf8'), originalContent,
+      `Inherited ${inheritedMode} must preserve exact existing bytes`);
+  }
+  console.log('✓ Inherited rewrite/append modes rejected without changing bytes');
+
   // The recovery path the error steers the model to: retry with explicit append.
   const appended = await handleWriteFile({ path: GUARD_FILE, content: 'appended line\n', mode: 'append' });
   assert.notStrictEqual(appended.isError, true, 'Explicit append should succeed');

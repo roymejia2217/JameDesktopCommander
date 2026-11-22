@@ -343,7 +343,8 @@ export async function handleReadMultipleFiles(args: unknown): Promise<ServerResu
  */
 export async function handleWriteFile(args: unknown): Promise<ServerResult> {
     try {
-        const modeProvided = !!(args && typeof args === 'object' && 'mode' in args);
+        const modeProvided = !!(args && typeof args === 'object' &&
+            Object.prototype.hasOwnProperty.call(args, 'mode'));
         const parsed = WriteFileArgsSchema.parse(args);
 
         // An omitted `mode` falls back to 'rewrite', which silently destroys

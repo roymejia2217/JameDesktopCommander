@@ -2,31 +2,38 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import YAML from 'yaml';
 
 const repo = path.resolve(import.meta.dirname, '..');
 const workflow = fs.readFileSync(
   path.join(repo, '.github/workflows/t011-capability-feasibility.yml'), 'utf8',
 ).replace(/\r\n/g, '\n');
 
-test('cross-principal proof is inside the existing governed Linux native job', () => {
+test('Linux custody acceptance runs within the native security matrix', () => {
   assert.match(workflow, /^  native-probe:\n/m);
   assert.match(workflow, /^          - runner: ubuntu-24\.04\n            target: linux-x64$/m);
   assert.doesNotMatch(workflow, /^  linux-custody-acceptance:/m,
     'a detached optional job must not be mistaken for an already-governed native gate');
 
-  for (const [name, command] of [
-    ['Build test-only dedicated identity probe on Linux',
+  const steps = YAML.parse(workflow).jobs['native-probe'].steps;
+  for (const [id, command] of [
+    ['linux_identity_fixture',
       'cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml'],
-    ['Build test-only transactional store fixture on Linux',
+    ['linux_store_fixture',
       'cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml'],
-    ['Lint Linux cross-principal acceptance fixture',
+    ['linux_custody_lint',
       'shellcheck --severity=warning test/security/t011-linux-custody-acceptance.sh && bash -n test/security/t011-linux-custody-acceptance.sh'],
-    ['Prove Linux distinct-principal custody and reject database rollback',
-      'bash test/security/t011-linux-custody-acceptance.sh'],
+    ['linux_custody_acceptance', 'bash test/security/t011-linux-custody-acceptance.sh'],
   ]) {
-    assert.ok(workflow.includes(`      - name: ${name}\n        if: matrix.target == 'linux-x64'\n        run: ${command}`),
-      `Linux-only native control missing or conditional check removed: ${name}`);
+    const step = steps.find(item => item.id === id);
+    assert.ok(step, `Missing mandatory Linux custody gate: ${id}`);
+    assert.equal(step.if, "matrix.target == 'linux-x64'");
+    assert.equal(step.run, command);
   }
+  const ordered = ['linux_identity_fixture', 'linux_store_fixture',
+    'linux_custody_lint', 'linux_custody_acceptance'];
+  assert.deepEqual(ordered.map(id => steps.findIndex(step => step.id === id)),
+    [...ordered.map(id => steps.findIndex(step => step.id === id))].sort((a, b) => a - b));
   const script = fs.readFileSync(
     path.join(repo, 'test/security/t011-linux-custody-acceptance.sh'), 'utf8',
   );

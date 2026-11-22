@@ -7,7 +7,7 @@ environment or processing sensitive institutional data.
 
 ## Existing portable capability
 
-The `Unpublished Portable Candidate` workflow builds a Linux x64 archive on
+The `Distribution Acceptance` workflow builds a Linux x64 archive on
 Ubuntu 24.04 containing its own Node.js executable, production dependencies,
 compiled JDC, a byte-inventory manifest and provenance data. After upload,
 download and independent integrity verification it extracts the candidate

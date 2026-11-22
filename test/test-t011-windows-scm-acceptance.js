@@ -2,13 +2,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import YAML from 'yaml';
 
 const repo=path.resolve(import.meta.dirname,'..');
 const workflow=fs.readFileSync(path.join(repo,'.github/workflows/t011-capability-feasibility.yml'),'utf8').replace(/\r\n/g,'\n');
-test('SCM real-host acceptance is mandatory within existing native Windows job',()=>{
+test('Windows SCM acceptance runs within the native security matrix',()=>{
   assert.match(workflow,/^  native-probe:\n/m);
   assert.doesNotMatch(workflow,/^  windows-scm-acceptance:/m);
-  assert.ok(workflow.includes("      - name: Prove Windows SCM virtual account denies startup under its real token\n        if: matrix.target == 'win32-x64'\n        run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1"));
+  const step = YAML.parse(workflow).jobs['native-probe'].steps
+    .find(item => item.id === 'windows_scm_acceptance');
+  assert.ok(step, 'Native Windows SCM acceptance step is required');
+  assert.equal(step.if, "matrix.target == 'win32-x64'");
+  assert.equal(step.run, 'pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1');
   assert.ok(workflow.includes('cargo +1.91.1 build --locked --bin jdc-authority-scm'));
 });
 test('SCM acceptance guards ephemeral host and verifies service-specific denial and cleanup',()=>{

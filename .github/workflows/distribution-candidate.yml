@@ -1,4 +1,4 @@
-name: Unpublished Portable Candidate
+name: Distribution Acceptance
 
 on:
   pull_request:
@@ -30,7 +30,7 @@ jobs:
 
   portable-candidate:
     needs: [windows-operator-ui, linux-operator-ui]
-    name: Candidate Producer (${{ matrix.target }})
+    name: Package Build (${{ matrix.target }})
     # Matrix outputs have distinct names per platform. An empty output must
     # never be treated as an authorized artifact by the downstream job.
     outputs:
@@ -68,7 +68,7 @@ jobs:
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Exercise deterministic filesystem test barriers and temp fixtures
+      - name: Test filesystem concurrency and temporary-file behavior
         run: node --test test/security/controlled-interleaving.test.js
 
       - name: Build JDC production files
@@ -79,10 +79,10 @@ jobs:
         env:
           MCP_INSPECTOR_SECRET_STORE: memory
 
-      - name: Deny filesystem access when authorization config cannot be loaded
+      - name: Test filesystem authorization fail-closed behavior
         run: node --test test/test-filesystem-policy-fail-closed.js
 
-      - name: Run packaging security regression tests
+      - name: Run distribution security tests
         run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js
 
       - name: Keep only locked runtime dependencies
@@ -93,13 +93,16 @@ jobs:
       # This distribution job must prove only the exact packaged Node payload.
       # Do not remove the native deny-only security checks from T011 CI.
 
-      - name: Stage Node runtime without native capability with hashed manifest
+      - name: Stage portable runtime and manifest
+        id: portable_stage
         run: node scripts/distribution-candidate.mjs build
 
-      - name: Independently verify staged bytes and provenance
+      - name: Verify staged runtime integrity
+        id: portable_stage_integrity
         run: node scripts/distribution-candidate.mjs verify
 
-      - name: Smoke test packaged Node and bundled ripgrep
+      - name: Smoke-test packaged Node.js and ripgrep
+        id: portable_smoke
         run: node scripts/distribution-candidate.mjs smoke
 
       - name: Create lossless TAR containing hidden files and native permissions
@@ -127,7 +130,7 @@ jobs:
 
   portable-acceptance:
     needs: [portable-candidate, windows-operator-ui, linux-operator-ui]
-    name: Candidate Acceptance (${{ matrix.target }})
+    name: Package Acceptance (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +184,8 @@ jobs:
             throw 'Acceptance checkout does not match producer source'
           }
 
-      - name: Download original uploaded candidate for round-trip acceptance
+      - name: Download original portable archive
+        id: portable_download
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           # This is the original immutable artifact ID from the completed
@@ -190,10 +194,11 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/jdc-roundtrip-download/
 
-      - name: Verify downloaded TAR and smoke extracted native runtime
+      - name: Verify downloaded archive and extracted runtime
+        id: portable_roundtrip
         run: node scripts/distribution-candidate.mjs roundtrip
 
-      - name: Real MCP client acceptance outside checkout
+      - name: Test packaged MCP client using official SDK
         run: node scripts/portable-mcp-e2e.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}"
       - name: Provision real hosted Linux user manager
         if: matrix.target == 'linux-x64'

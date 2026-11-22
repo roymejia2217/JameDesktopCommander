@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import YAML from 'yaml';
 
 const root = path.resolve(import.meta.dirname, '..');
 const file = path.join(root,'packaging/experimental/windows/jdc-authority-service.sddl');
@@ -29,6 +30,10 @@ test('SCM tests prove real non-admin child process and service-object rights rat
   assert.doesNotMatch(acceptance,/start= auto/);
 });
 test('existing governed Windows native acceptance remains mandatory',()=>{
-  assert.ok(workflow.includes("      - name: Prove Windows SCM virtual account denies startup under its real token\n        if: matrix.target == 'win32-x64'"));
+  const step = YAML.parse(workflow).jobs['native-probe'].steps
+    .find(item => item.id === 'windows_scm_acceptance');
+  assert.ok(step, 'SCM acceptance step must remain in the native security job');
+  assert.equal(step.if, "matrix.target == 'win32-x64'");
+  assert.equal(step.run, 'pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1');
   assert.doesNotMatch(workflow,/^  scm-dacl-only-acceptance:/m);
 });

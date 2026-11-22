@@ -1,4 +1,4 @@
-name: Native Operator UI (non-release)
+name: Native UI Tests
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   operator-ui:
-    name: Operator UI (${{ matrix.target }})
+    name: Native UI (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:

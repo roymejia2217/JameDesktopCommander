@@ -528,6 +528,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 name: "write_file",
                 description: `
                         Write or append to file contents.
+                        For script files, the result includes a machine-readable scriptValidation report
+                        and a separate syntax/linter diagnostic text block. Inspect and correct FAILED
+                        or UNAVAILABLE diagnostics before executing the script. This check never runs
+                        the script and does not guarantee its runtime behavior.
 
                         IMPORTANT: DO NOT use this tool to create PDF files. Use 'write_pdf' for all PDF creation tasks.
                         DO NOT use this tool to edit DOCX files. Use 'edit_block' with old_string/new_string instead.
@@ -910,6 +914,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 name: "edit_block",
                 description: `
                         Apply surgical edits to files.
+                        After a successful edit of a script, inspect the appended scriptValidation
+                        diagnostic before executing it. A fuzzy suggestion does not count as an edit,
+                        and validation never executes user code or proves runtime correctness.
 
                         BEST PRACTICE: Make multiple small, focused edits rather than one large edit.
                         Each edit_block call should change only what needs to be changed - include just enough

@@ -21,6 +21,7 @@ import { ServerResult } from '../types.js';
 import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
 import { capture } from '../utils/capture.js';
 import { createErrorResponse } from '../error-handlers.js';
+import { withScriptSyntaxFeedback } from '../utils/script-syntax-diagnostics.js';
 import { EditBlockArgsSchema } from "./schemas.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
@@ -218,7 +219,7 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
         const remaining = totalLines - previewEnd;
         const statusLine = `[Reading ${previewLineCount} lines from ${previewStart === 0 ? 'start' : `line ${previewStart}`} (total: ${totalLines} lines, ${remaining} remaining)]\n\n`;
 
-        return {
+        return withScriptSyntaxFeedback({
             content: [{
                 type: "text",
                 text: `${statusLine}${previewContent}`
@@ -235,7 +236,7 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
                     ...await getDefaultEditorMetadata(resolvedEditPath),
                 },
             } : {}),
-        };
+        }, validPath, newContent);
     }
     
     // If exact match found but count doesn't match expected, inform the user

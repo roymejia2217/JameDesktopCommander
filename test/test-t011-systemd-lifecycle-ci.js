@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import YAML from 'yaml';
 
 const repo = path.resolve(import.meta.dirname, '..');
 const ci = fs.readFileSync(path.join(repo,'.github/workflows/t011-capability-feasibility.yml'),'utf8').replace(/\r\n/g,'\n');
@@ -9,13 +10,19 @@ test('systemd sysusers provisions CI service account before Linux identity and c
   assert.match(ci,/^  native-probe:\n/m);
   assert.doesNotMatch(ci,/^  linux-service-acceptance:/m);
   assert.match(ci,/sudo systemd-sysusers "\$sysusers_file"/);
-  assert.ok(ci.indexOf('sudo systemd-sysusers "$sysusers_file"') < ci.indexOf('Prove Linux distinct-principal custody'));
+  const steps = YAML.parse(ci).jobs['native-probe'].steps;
+  const provisioning = steps.findIndex(step => step.id === 'linux_systemd_provision');
+  const acceptance = steps.findIndex(step => step.id === 'linux_custody_acceptance');
+  assert.ok(provisioning >= 0 && acceptance > provisioning,
+    'Linux account provisioning must precede custody acceptance in the same job');
+  assert.match(steps[provisioning].run, /sudo systemd-sysusers "\$sysusers_file"/);
+  assert.equal(steps[acceptance].run, 'bash test/security/t011-linux-custody-acceptance.sh');
   const custody = fs.readFileSync(path.join(repo,'test/security/t011-linux-custody-acceptance.sh'),'utf8');
   assert.doesNotMatch(custody,/\buseradd\b/);
   assert.match(custody,/getent passwd jdc-authority/);
   assert.match(custody,/E_CUSTODY_SERVICE_PRINCIPAL_NOT_PROVISIONED/);
 });
-test('service real-lifecycle check uses official systemctl and journalctl in existing Linux native gate',()=>{
+test('Linux systemd acceptance checks service lifecycle and cleanup',()=>{
   for (const v of ['systemctl daemon-reload','systemctl --wait start "$unit_name"','systemctl show','journalctl','E_POLICY_UNAVAILABLE']) {
     const script=fs.readFileSync(path.join(repo,'test/security/t011-systemd-lifecycle-acceptance.sh'),'utf8');
     assert.ok(script.includes(v),v);

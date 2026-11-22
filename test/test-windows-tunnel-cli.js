@@ -347,6 +347,36 @@ try {
   assert.equal(errors.length, 1);
   assert.match(errors[0], /E_TUNNEL_PERMISSION_DENIED/);
   assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+
+  // A protected Linux systemd preflight has a stable, actionable reason.
+  // The test still rejects any third-party message and private path.
+  errors.length = 0;
+  const rejectedUnit = Object.assign(new Error(sensitive), {
+    code: 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED',
+  });
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw rejectedUnit; },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED/);
+  assert.match(errors[0], /effective systemd unit/i);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+
+  errors.length = 0;
+  // An untrusted error may expose a throwing code accessor. Even classifying
+  // the exception must not create an uncaught secret-bearing exception.
+  const maliciousCode = new Error(sensitive);
+  Object.defineProperty(maliciousCode, 'code', {
+    get: () => { throw new Error(sensitive); },
+  });
+  await runTunnel(['status'], {
+    ...dependencies,
+    statusTunnel: async () => { throw maliciousCode; },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /E_TUNNEL_COMMAND_UNAVAILABLE/);
+  assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
 } finally {
   console.error = previousError;
   process.exitCode = previousCliExit;

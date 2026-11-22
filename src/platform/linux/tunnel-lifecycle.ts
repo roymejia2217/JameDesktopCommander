@@ -292,6 +292,19 @@ async function unitRegistration(home: string): Promise<{ executable: string; pro
   return { executable, profileDir, profile: match[3] };
 }
 
+// Only a fixed, trusted reason can cross from effective systemd metadata
+// validation into the user-facing CLI. Never expose manager-provided paths.
+class UntrustedEffectiveSystemdUnitError extends Error {
+  readonly code = 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED';
+
+  constructor(reason: 'metadata' | 'definition') {
+    super(reason === 'metadata'
+      ? 'Linux tunnel effective systemd unit metadata is invalid.'
+      : 'Linux tunnel effective systemd unit differs from the managed definition.');
+    this.name = 'UntrustedEffectiveSystemdUnitError';
+  }
+}
+
 // systemd merges manager-selected fragments and drop-ins across its entire
 // unit search path. Trust the *loaded* manager metadata, not a file scan.
 async function assertTrustedLoadedUnit(
@@ -312,7 +325,7 @@ async function assertTrustedLoadedUnit(
     const idx = line.indexOf('=');
     const key = line.slice(0, idx);
     if (idx < 1 || !expectedKeys.has(key) || props.has(key)) {
-      throw new Error('Linux tunnel effective systemd unit metadata is invalid.');
+      throw new UntrustedEffectiveSystemdUnitError('metadata');
     }
     props.set(key, line.slice(idx + 1));
   }
@@ -324,7 +337,7 @@ async function assertTrustedLoadedUnit(
       props.get('DropInPaths') !== '' ||
       props.get('LoadState') !== 'loaded' ||
       props.get('NeedDaemonReload') !== 'no') {
-    throw new Error('Linux tunnel effective systemd unit differs from the managed definition.');
+    throw new UntrustedEffectiveSystemdUnitError('definition');
   }
 }
 

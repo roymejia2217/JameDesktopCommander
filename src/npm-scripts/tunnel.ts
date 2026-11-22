@@ -554,8 +554,15 @@ Notes:
  * The read-only overview/diagnose commands supply actionable, redacted detail.
  */
 function tunnelCliFailureCode(error: unknown): string {
-    const code = error !== null && typeof error === 'object' && 'code' in error
-        ? error.code : undefined;
+    let code: unknown;
+    try {
+        code = error !== null && typeof error === 'object' && 'code' in error
+            ? error.code : undefined;
+    } catch {
+        // Exception objects and proxies can have throwing property traps.
+        // Never let diagnostic classification raise another exception.
+        return 'E_TUNNEL_COMMAND_UNAVAILABLE';
+    }
     switch (code) {
         case 'EACCES':
         case 'EPERM':
@@ -564,6 +571,8 @@ function tunnelCliFailureCode(error: unknown): string {
             return 'E_TUNNEL_DEPENDENCY_NOT_FOUND';
         case 'ETIMEDOUT':
             return 'E_TUNNEL_TIMEOUT';
+        case 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED':
+            return 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED: effective systemd unit is not trusted';
         default:
             return 'E_TUNNEL_COMMAND_UNAVAILABLE';
     }

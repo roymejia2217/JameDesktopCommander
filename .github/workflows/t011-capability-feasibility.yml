@@ -173,6 +173,22 @@ jobs:
           grep -Fq 'LINUX_DISTINCT_USER_SOCKET_KERNEL_TEST=PASS' "$log"
           grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
 
+      - name: Use pinned Node 24 for disposable issuer-to-MCP-SDK proof
+        if: matrix.target == 'linux-x64'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Bundle official MCP SDK test client from the locked dependency tree
+        if: matrix.target == 'linux-x64'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          mkdir -p .tmp
+          node node_modules/esbuild/bin/esbuild \
+            test/security/support/t011-issued-sdk-native-read.mjs \
+            --bundle --platform=node --format=esm --target=node24 \
+            --outfile=.tmp/t011-issued-sdk-native-read.mjs
+
       - name: Prove Linux isolated volume, bind alias rejection and outside-byte integrity
         if: matrix.target == 'linux-x64'
         run: |

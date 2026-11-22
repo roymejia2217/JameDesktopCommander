@@ -99,17 +99,32 @@ mod proof {
         Ok(())
     }
 
-    fn issue(issuer_socket: &Path, client_socket: &Path) -> Result<(), &'static str> {
+    fn issue(
+        issuer_socket: &Path,
+        client_socket: &Path,
+        sdk: Option<(&Path, &Path)>,
+    ) -> Result<(), &'static str> {
         if unsafe { libc::getuid() } != 0 || unsafe { libc::geteuid() } != 0 {
             return Err("E_PEER_PROOF_ISSUER_NOT_ROOT");
         }
         let approved = fixture_client()?;
-        let mut command = Command::new(io(env::current_exe())?);
-        command
-            .arg("allow")
-            .arg(client_socket)
-            .uid(approved.uid)
-            .gid(approved.gid);
+        let mut command = if let Some((node, script)) = sdk {
+            if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
+                || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
+            {
+                return Err("E_PEER_PROOF_ISSUED_SDK_RUNNER_REQUIRED");
+            }
+            let mut issued = Command::new(node);
+            issued.arg(script).arg(client_socket);
+            issued.env("GITHUB_ACTIONS", "true");
+            issued.env("RUNNER_ENVIRONMENT", "github-hosted");
+            issued
+        } else {
+            let mut issued = Command::new(io(env::current_exe())?);
+            issued.arg("allow").arg(client_socket);
+            issued
+        };
+        command.uid(approved.uid).gid(approved.gid);
         // Rust CommandExt::uid already clears inherited supplementary
         // groups via setgroups(0, NULL) before changing UID. No pre_exec
         // callback is needed or permitted for this credential transition.
@@ -419,7 +434,16 @@ mod proof {
                 serve(Path::new(&root), Path::new(&socket), Path::new(&issuer))
             }
             (Some(role), Some(issuer), Some(socket), None, None) if role == "issue" => {
-                issue(Path::new(&issuer), Path::new(&socket))
+                issue(Path::new(&issuer), Path::new(&socket), None)
+            }
+            (Some(role), Some(issuer), Some(socket), Some(node), Some(script))
+                if role == "issue-sdk" =>
+            {
+                issue(
+                    Path::new(&issuer),
+                    Path::new(&socket),
+                    Some((Path::new(&node), Path::new(&script))),
+                )
             }
             (Some(role), Some(socket), None, None, None) if role == "allow" => {
                 request(Path::new(&socket), true, false)

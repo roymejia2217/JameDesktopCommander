@@ -110,8 +110,7 @@ test('portable acceptance depends on completed matrix producers and exact immuta
     'producer cannot immediately download a just-finalized upload');
   assert.equal(consumer.steps.filter(s => String(s.uses ?? '').startsWith('actions/upload-artifact@')).length, 1,
     'only the checked installer candidate may be uploaded by the acceptance job');
-  const download = consumer.steps.find(s => s.name ===
-    'Download original uploaded candidate for round-trip acceptance');
+  const download = consumer.steps.find(s => s.id === 'portable_download');
   assert.ok(download && download.uses ===
     'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
   assert.ok(!('name' in download.with) && !('github-token' in download.with) &&
@@ -129,17 +128,18 @@ test('portable acceptance depends on completed matrix producers and exact immuta
     assert.match(String(consumer.env.JDC_CANDIDATE_ARTIFACT_ID),
       new RegExp('needs\\.portable-candidate\\.outputs\\.' + platform + '_artifact_id'));
   }
-  const verify = consumer.steps.find(s => s.name ===
-    'Verify downloaded TAR and smoke extracted native runtime');
-  const idGuard = consumer.steps.find(s => s.name ===
-    'Verify uploaded artifact identity and original TAR checksum');
+  const verify = consumer.steps.find(s => s.id === 'portable_roundtrip');
+  const idGuard = consumer.steps.find(s => s.id === 'artifact_identity_preflight');
   assert.ok(idGuard && verify, 'identity and hash must be checked before extracting or running payload');
   assert.ok(consumer.steps.indexOf(idGuard) < consumer.steps.indexOf(download));
   assert.ok(consumer.steps.indexOf(download) < consumer.steps.indexOf(verify));
   assert.match(verify.run, /distribution-candidate\.mjs roundtrip/);
-  assert.ok(consumer.steps.some(s => s.name === 'Real MCP client acceptance outside checkout'));
-  assert.ok(consumer.steps.some(s => s.name === 'Verify Debian install and remove'));
-  assert.ok(consumer.steps.some(s => s.name === 'Verify Windows installer install and uninstall'));
+  assert.ok(consumer.steps.some(s => s.id === 'packaged_mcp_acceptance' &&
+    /portable-mcp-e2e\.mjs/.test(s.run ?? '')));
+  assert.ok(consumer.steps.some(s => s.id === 'linux_installer_acceptance' &&
+    s.if === "matrix.target == 'linux-x64'"));
+  assert.ok(consumer.steps.some(s => s.id === 'windows_installer_acceptance' &&
+    s.if === "matrix.target == 'win32-x64'"));
 });
 
 test('missing platform artifact output never falls back to the other operating system', async () => {

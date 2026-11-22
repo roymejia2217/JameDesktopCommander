@@ -54,6 +54,7 @@ jobs:
 
     steps:
       - name: Checkout exact candidate source
+        id: producer_checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
@@ -151,6 +152,7 @@ jobs:
 
     steps:
       - name: Checkout exact candidate acceptance source
+        id: acceptance_checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
@@ -168,6 +170,7 @@ jobs:
           npm run build
 
       - name: Verify uploaded artifact identity and original TAR checksum
+        id: artifact_identity_preflight
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -199,6 +202,7 @@ jobs:
         run: node scripts/distribution-candidate.mjs roundtrip
 
       - name: Test packaged MCP client using official SDK
+        id: packaged_mcp_acceptance
         run: node scripts/portable-mcp-e2e.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}"
       - name: Provision real hosted Linux user manager
         if: matrix.target == 'linux-x64'
@@ -226,6 +230,7 @@ jobs:
           sudo loginctl disable-linger "$(id -un)"
 
       - name: Verify installer provenance
+        id: installer_provenance
         run: node scripts/validate-installer-input.mjs "${{ runner.temp }}/jdc-candidate-roundtrip-${{ matrix.target }}" "${{ matrix.target }}" "${{ env.JDC_CANDIDATE_SOURCE_SHA }}"
 
       # Official external binary is downloaded only on disposable CI runners,
@@ -307,6 +312,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
 
       - name: Verify Windows installer install and uninstall
+        id: windows_installer_acceptance
         if: matrix.target == 'win32-x64'
         shell: pwsh
         run: |
@@ -342,6 +348,7 @@ jobs:
             --target "$JDC_INSTALLER_OUTPUT/UNPUBLISHED-jdc-installer-linux-x64.deb"
 
       - name: Verify Debian install and remove
+        id: linux_installer_acceptance
         if: matrix.target == 'linux-x64'
         shell: bash
         run: |
@@ -437,6 +444,7 @@ jobs:
           test ! -e /usr/share/applications/jdc-tunnel-operator.desktop
 
       - name: Retain unpublished installer candidates
+        id: installer_artifact_upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: UNPUBLISHED-jdc-installer-${{ matrix.target }}

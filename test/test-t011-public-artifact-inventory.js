@@ -44,6 +44,23 @@ test('only the five explicitly reviewed public artifact upload surfaces are allo
     'windows-operator-ui-bundle.yml/native-gui',
   ]);
 });
+test('portable artifact policy uses stable step identities independent of display titles', () => {
+  const docs = clone();
+  const job = acceptance(docs);
+  for (const id of ['acceptance_checkout', 'artifact_identity_preflight',
+    'portable_download', 'portable_roundtrip', 'packaged_mcp_acceptance',
+    'installer_provenance', 'windows_installer_acceptance',
+    'linux_installer_acceptance', 'installer_artifact_upload']) {
+    const step = job.steps.find(item => item.id === id);
+    assert.ok(step, `Missing expected acceptance control ${id}`);
+    step.name = `Display label for ${id}`;
+  }
+  assert.equal(validatePublicArtifactInventory(docs), true);
+});
+mustReject('rejects missing stable download identity even with original action and title', docs => {
+  const download = acceptance(docs).steps.find(step => step.id === 'portable_download');
+  download.id = 'unknown_download';
+});
 mustReject('rejects new upload in previously nonuploading workflow', (docs) => {
   docs['ci.yml'].jobs['added-proof'] = {
     'runs-on': 'ubuntu-latest',
@@ -101,7 +118,7 @@ mustReject('rejects acceptance that does not depend on completed upload jobs', d
 });
 mustReject('rejects producer that downloads an unfinalized artifact', docs => {
   candidate(docs).steps.push(structuredClone(acceptance(docs).steps.find(
-    step => step.name === 'Download original uploaded candidate for round-trip acceptance')));
+    step => step.id === 'portable_download')));
 });
 mustReject('reject producer checkout of attacker-nominated PR head SHA', docs => {
   candidate(docs).steps.find(step => step.name === 'Checkout exact candidate source')
@@ -136,25 +153,25 @@ mustReject('rejects missing original TAR fingerprint step', docs => {
 });
 mustReject('rejects download by mutable name instead of immutable ID', docs => {
   const step = acceptance(docs).steps.find(s =>
-    s.name === 'Download original uploaded candidate for round-trip acceptance');
+    s.id === 'portable_download');
   delete step.with['artifact-ids'];
   step.with.name = 'UNPUBLISHED-jdc-portable-${{ matrix.target }}';
 });
 mustReject('rejects cross-run token-based artifact download', docs => {
   acceptance(docs).steps.find(s =>
-    s.name === 'Download original uploaded candidate for round-trip acceptance')
+    s.id === 'portable_download')
     .with['github-token'] = '${{ github.token }}';
 });
 mustReject('rejects bypass of pre-download SHA and identity gate', docs => {
   acceptance(docs).steps = acceptance(docs).steps.filter(s =>
-    s.name !== 'Verify uploaded artifact identity and original TAR checksum');
+    s.id !== 'artifact_identity_preflight');
 });
 mustReject('rejects publisher that uploads installer before real host acceptance', docs => {
   const steps = acceptance(docs).steps;
   const at = steps.findIndex(s => s.name === 'Retain unpublished installer candidates');
   const [upload] = steps.splice(at, 1);
   steps.splice(steps.findIndex(s =>
-    s.name === 'Real MCP client acceptance outside checkout'), 0, upload);
+    s.id === 'packaged_mcp_acceptance'), 0, upload);
 });
 mustReject('rejects producer uploading before recording original SHA-256', docs => {
   const steps = candidate(docs).steps;

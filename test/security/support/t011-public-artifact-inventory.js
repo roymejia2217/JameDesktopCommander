@@ -140,8 +140,7 @@ function validateLinuxOperatorUiArtifactPolicy(nativeUi, portable) {
     step.name === 'Download exact Linux operator UI overlay');
   const nfpm = candidate?.steps?.find(step =>
     step.name === 'Build nFPM Debian installer candidate');
-  const install = candidate?.steps?.find(step =>
-    step.name === 'Verify Debian install and remove');
+  const install = candidate?.steps?.find(step => step.id === 'linux_installer_acceptance');
   if (caller?.uses !== './.github/workflows/linux-operator-ui-bundle.yml' ||
       caller.with !== undefined ||
       download?.uses !== PINNED_DOWNLOAD ||
@@ -227,7 +226,8 @@ export function validatePublicArtifactInventory(workflows) {
   if (candidate.step.with?.name !== 'UNPUBLISHED-jdc-portable-' + matrixTarget ||
       installer.step.with?.name !== 'UNPUBLISHED-jdc-installer-' + matrixTarget ||
       candidate.step.uses !== PINNED_UPLOAD || installer.step.uses !== PINNED_UPLOAD ||
-      candidate.step.id !== 'portable_tar_upload') {
+      candidate.step.id !== 'portable_tar_upload' ||
+      installer.step.id !== 'installer_artifact_upload') {
     reject('candidate/installer upload source identity and pinned actions must match');
   }
   const producer = portable.jobs?.['portable-candidate'];
@@ -260,10 +260,8 @@ export function validatePublicArtifactInventory(workflows) {
       consumer?.env?.JDC_CANDIDATE_TARGET !== matrixTarget) {
     reject('producer and acceptance must bind the same immutable platform/source');
   }
-  const producerCheckout = producer.steps?.find(step => step.name ===
-    'Checkout exact candidate source');
-  const consumerCheckout = consumer.steps?.find(step => step.name ===
-    'Checkout exact candidate acceptance source');
+  const producerCheckout = producer.steps?.find(step => step.id === 'producer_checkout');
+  const consumerCheckout = consumer.steps?.find(step => step.id === 'acceptance_checkout');
   for (const checkout of [producerCheckout, consumerCheckout]) {
     if (checkout?.uses !== PINNED_CHECKOUT ||
         checkout.with?.ref !== SOURCE_SHA ||
@@ -272,12 +270,9 @@ export function validatePublicArtifactInventory(workflows) {
     }
   }
   const tarHash = producer.steps?.find(step => step.id === 'original_tar_sha256');
-  const downloaded = consumer.steps?.find(step =>
-    step.name === 'Download original uploaded candidate for round-trip acceptance');
-  const beforeDownload = consumer.steps?.find(step =>
-    step.name === 'Verify uploaded artifact identity and original TAR checksum');
-  const roundTrip = consumer.steps?.find(step =>
-    step.name === 'Verify downloaded TAR and smoke extracted native runtime');
+  const downloaded = consumer.steps?.find(step => step.id === 'portable_download');
+  const beforeDownload = consumer.steps?.find(step => step.id === 'artifact_identity_preflight');
+  const roundTrip = consumer.steps?.find(step => step.id === 'portable_roundtrip');
   if (!tarHash?.run?.includes('Get-FileHash') ||
       producer.steps.some(step =>
         String(step?.uses ?? '').startsWith('actions/download-artifact@')) ||
@@ -321,16 +316,17 @@ export function validatePublicArtifactInventory(workflows) {
     reject('portable upload path or retention differs from reviewed configuration');
   }
   const acceptanceMustPrecedeInstallerUpload = [
-    'Verify downloaded TAR and smoke extracted native runtime',
-    'Real MCP client acceptance outside checkout',
-    'Verify installer provenance',
-    'Verify Windows installer install and uninstall',
-    'Verify Debian install and remove',
+    ['portable_roundtrip', /distribution-candidate\.mjs roundtrip/],
+    ['packaged_mcp_acceptance', /portable-mcp-e2e\.mjs/],
+    ['installer_provenance', /validate-installer-input\.mjs/],
+    ['windows_installer_acceptance', /windows-installer-acceptance-runner\.ps1/],
+    ['linux_installer_acceptance', /dpkg-deb/],
   ];
   const installerUploadAt = consumer.steps.indexOf(installer.step);
-  if (installerUploadAt < 0 || acceptanceMustPrecedeInstallerUpload.some(name => {
-    const index = consumer.steps.findIndex(step => step.name === name);
-    return index < 0 || index >= installerUploadAt;
+  if (installerUploadAt < 0 || acceptanceMustPrecedeInstallerUpload.some(([id, command]) => {
+    const index = consumer.steps.findIndex(step => step.id === id);
+    return index < 0 || index >= installerUploadAt ||
+      !command.test(consumer.steps[index].run ?? '');
   })) {
     reject('unpublished installers require intact actual MCP and OS acceptance before export');
   }

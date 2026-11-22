@@ -81,7 +81,13 @@ test('Bash syntax validation never executes an agent script or startup injection
     assert.ok(['failed', 'unavailable'].includes(invalid.status));
     await fs.writeFile(target, `echo valid > ${JSON.stringify(marker)}\n`);
     const valid = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
-    assert.ok(['passed', 'unavailable'].includes(valid.status));
+    if (valid.status === 'unavailable') {
+      assert.equal(valid.syntaxStatus, 'unavailable', 'Unavailable parser cannot claim validated syntax');
+    } else {
+      assert.equal(valid.syntaxStatus, 'passed', 'Valid Bash must pass syntax regardless of lint findings');
+      assert.equal(valid.status, valid.lint?.status === 'failed' ? 'failed' : 'passed',
+        'Optional linter violations still produce an aggregate FAILED result');
+    }
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   } finally {
     if (previousBashEnv === undefined) delete process.env.BASH_ENV;

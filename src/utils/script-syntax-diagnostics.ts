@@ -5,6 +5,8 @@ import type { ServerResult } from '../types.js';
 export type ScriptValidationStatus = 'passed' | 'failed' | 'unavailable' | 'skipped';
 export interface ScriptValidation {
     status: ScriptValidationStatus;
+    // Parser verdict is independent of optional linter diagnostics.
+    syntaxStatus: ScriptValidationStatus;
     engine: string;
     scope: 'syntax' | 'syntax-and-lint';
     diagnostics: string[];
@@ -106,7 +108,7 @@ function sanitizedEnvironment(): NodeJS.ProcessEnv {
 }
 
 function unavailable(engine: string, reason: string): ScriptValidation {
-    return { status: 'unavailable', engine, scope: 'syntax', diagnostics: [reason],
+    return { status: 'unavailable', syntaxStatus: 'unavailable', engine, scope: 'syntax', diagnostics: [reason],
         basis: 'submitted-text', persistedRevisionVerified: false };
 }
 
@@ -158,7 +160,7 @@ async function invokeParser(parser: Parser, source: string): Promise<ScriptValid
                 return;
             }
             if (code === 0) {
-                resolve({ status: 'passed', engine: parser.engine, scope: 'syntax',
+                resolve({ status: 'passed', syntaxStatus: 'passed', engine: parser.engine, scope: 'syntax',
                     diagnostics: [], basis: 'submitted-text', persistedRevisionVerified: false });
                 return;
             }
@@ -169,7 +171,7 @@ async function invokeParser(parser: Parser, source: string): Promise<ScriptValid
             const diagnosticText = (stderr || stdout || '').trim();
             const diagnostics = diagnosticText.split(/\r?\n/).filter(Boolean)
                 .slice(0, MAX_MESSAGES).map(line => line.slice(0, 360));
-            resolve({ status: 'failed', engine: parser.engine, scope: 'syntax',
+            resolve({ status: 'failed', syntaxStatus: 'failed', engine: parser.engine, scope: 'syntax',
                 diagnostics: diagnostics.length ? diagnostics : ['Static analysis failed.'],
                 basis: 'submitted-text', persistedRevisionVerified: false });
         });
@@ -185,7 +187,7 @@ export async function checkScriptSyntax(
     filePath: string, submittedText?: string,
 ): Promise<ScriptValidation> {
     if (!isScriptFile(filePath)) {
-        return { status: 'skipped', engine: 'none', scope: 'syntax',
+        return { status: 'skipped', syntaxStatus: 'skipped', engine: 'none', scope: 'syntax',
             diagnostics: [], basis: 'submitted-text', persistedRevisionVerified: false };
     }
     if (submittedText === undefined) {
@@ -206,6 +208,7 @@ export async function checkScriptSyntax(
     const lint = await invokeParser(linter, submittedText);
     return {
         status: lint.status === 'failed' ? 'failed' : 'passed',
+        syntaxStatus: 'passed',
         engine: parser.engine,
         scope: lint.status === 'unavailable' ? 'syntax' : 'syntax-and-lint',
         basis: 'submitted-text', persistedRevisionVerified: false,
@@ -224,7 +227,7 @@ export async function withScriptSyntaxFeedback(
     const diagnostics = report.diagnostics.join('\n');
     const lintState = report.lint ? ' ' + report.lint.engine + ': ' + report.lint.status.toUpperCase() + '.' : '';
     const message = 'Script syntax/lint validation: ' + report.status.toUpperCase() +
-        ' (' + report.engine + ').' + lintState +
+        ' (syntax: ' + report.syntaxStatus.toUpperCase() + ' via ' + report.engine + ').' + lintState +
         (diagnostics ? '\n' + diagnostics : '') +
         '\nAnalyzed submitted text in memory. No script executed or target path reopened.' +
         '\nA successful check does not verify the stored file revision or runtime correctness.';

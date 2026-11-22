@@ -38,6 +38,7 @@ try {
   assert.ok(!bad.isError, 'write succeeded even if its script does not parse');
   assert.match(bad.content[0]?.text ?? '', /successfully wrote/i);
   assert.equal(bad.structuredContent?.scriptValidation?.status, 'failed');
+  assert.equal(bad.structuredContent?.scriptValidation?.syntaxStatus, 'failed');
   assert.match(bad.content[1]?.text ?? '', /FAILED/i);
   const edited = await call(client, 'edit_block', { file_path: script,
     old_string: 'const message = ;',
@@ -45,6 +46,7 @@ try {
     expected_replacements: 1 });
   assert.ok(!edited.isError);
   assert.equal(edited.structuredContent?.scriptValidation?.status, 'passed');
+  assert.equal(edited.structuredContent?.scriptValidation?.syntaxStatus, 'passed');
   assert.match(edited.content.at(-1)?.text ?? '', /PASSED/i);
   await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   assert.match(await fs.readFile(script, 'utf8'), /message = 'valid'/);
@@ -54,6 +56,7 @@ try {
   });
   assert.ok(!appended.isError);
   assert.equal(appended.structuredContent?.scriptValidation?.status, 'unavailable');
+  assert.equal(appended.structuredContent?.scriptValidation?.syntaxStatus, 'unavailable');
   assert.match(appended.content.at(-1)?.text ?? '', /complete source snapshot unavailable/i);
   assert.match(await fs.readFile(script, 'utf8'), /appended/);
 } finally {

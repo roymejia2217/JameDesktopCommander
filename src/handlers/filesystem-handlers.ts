@@ -343,8 +343,17 @@ export async function handleReadMultipleFiles(args: unknown): Promise<ServerResu
  */
 export async function handleWriteFile(args: unknown): Promise<ServerResult> {
     try {
-        const modeProvided = !!(args && typeof args === 'object' &&
-            Object.prototype.hasOwnProperty.call(args, 'mode'));
+        const modeDescriptor = args && typeof args === 'object'
+            ? Object.getOwnPropertyDescriptor(args, 'mode')
+            : undefined;
+        // Only an own data property with a value expresses write intent.
+        // Inherited modes, accessors and `undefined` must not bypass the guard.
+        if (modeDescriptor !== undefined &&
+            !Object.prototype.hasOwnProperty.call(modeDescriptor, 'value')) {
+            return createErrorResponse('Write rejected: mode must be an explicit data property');
+        }
+        const modeProvided = modeDescriptor !== undefined &&
+            modeDescriptor.value !== undefined;
         const parsed = WriteFileArgsSchema.parse(args);
 
         // An omitted `mode` falls back to 'rewrite', which silently destroys

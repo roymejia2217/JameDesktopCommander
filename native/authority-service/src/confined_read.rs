@@ -18,7 +18,7 @@ pub struct ReadDenied;
 #[cfg(target_os = "linux")]
 pub fn read_regular_at(root: &std::fs::File, relative: &Path) -> Result<Vec<u8>, ReadDenied> {
     use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
-    use std::{fs::File, io::Read};
+    use std::{fs::File, io::Read, os::unix::fs::MetadataExt};
     const MAX_BYTES: usize = 1024 * 1024;
 
     if !validate_relative_name(relative) {
@@ -38,7 +38,12 @@ pub fn read_regular_at(root: &std::fs::File, relative: &Path) -> Result<Vec<u8>,
     )
     .map_err(|_| ReadDenied)?;
     let file = File::from(fd);
-    if !file.metadata().map_err(|_| ReadDenied)?.is_file() {
+    let metadata = file.metadata().map_err(|_| ReadDenied)?;
+    // Deny known pre-existing object aliases before exposing bytes.
+    // Link counts alone are NOT proof against a concurrent link creation;
+    // a protected, isolated storage domain and authenticated issuer remain
+    // mandatory independent release gates (#148 and #139).
+    if !metadata.is_file() || metadata.nlink() != 1 {
         return Err(ReadDenied);
     }
     let mut data = Vec::new();

@@ -205,6 +205,34 @@ probe_hash="$(sha256sum "$probe_source" | cut -d ' ' -f1)"
   echo 'E_STORAGE_OPENAT2_PROBE_HASH_MISMATCH' >&2; exit 1;
 }
 sudo -n -u jdc-authority -- "$probe_path" "$isolated" service.bin allow
+# Test a REAL pre-existing same-device hard link whose other pathname is
+# outside a narrower authorized root. Keep exact outside bytes immutable.
+# This cannot prove protection from a link created concurrently with a read.
+read_scope="$isolated/read-scope"
+outside_read="$isolated/outside-read-sentinel.bin"
+sudo -n -u jdc-authority -- mkdir -- "$read_scope"
+sudo -n -u jdc-authority -- cp -- "$service_file" "$read_scope/inside.bin"
+sudo -n -u jdc-authority -- sh -c 'printf OUTSIDE_READ_SENTINEL_UNCHANGED > "$1"' sh "$outside_read"
+outside_read_hash="$(sudo -n -u jdc-authority -- sha256sum "$outside_read" | cut -d ' ' -f1)"
+sudo -n -u jdc-authority -- ln -- "$outside_read" "$read_scope/inside-hardlink.bin"
+[[ "$(sudo -n stat -c '%d:%i' "$outside_read")" == \
+   "$(sudo -n stat -c '%d:%i' "$read_scope/inside-hardlink.bin")" ]] || {
+  echo 'E_STORAGE_PREEXISTING_HARDLINK_IDENTITY_MISMATCH' >&2; exit 1;
+}
+[[ "$(sudo -n stat -c %h "$outside_read")" == 2 ]] || exit 1
+# Negative control: ordinary OS I/O through the hard-link pathname DOES
+# expose the outside sentinel. Otherwise a failing fixture could look secure.
+[[ "$(sudo -n -u jdc-authority -- cat -- "$read_scope/inside-hardlink.bin")" == OUTSIDE_READ_SENTINEL_UNCHANGED ]] || {
+  echo 'E_STORAGE_HARDLINK_ATTACK_PRECONDITION_NOT_REPRODUCED' >&2; exit 1;
+}
+sudo -n -u jdc-authority -- "$probe_path" "$read_scope" inside.bin allow
+sudo -n -u jdc-authority -- "$probe_path" "$read_scope" inside-hardlink.bin deny
+[[ "$(sudo -n -u jdc-authority -- sha256sum "$outside_read" | cut -d ' ' -f1)" == "$outside_read_hash" ]] || {
+  echo 'E_STORAGE_PREEXISTING_HARDLINK_OUTSIDE_BYTES_CHANGED' >&2; exit 1;
+}
+sudo -n -u jdc-authority -- rm -- "$read_scope/inside-hardlink.bin"
+sudo -n -u jdc-authority -- "$probe_path" "$read_scope" inside.bin allow
+echo 'T011_STORAGE_PREEXISTING_MULTILINK_READ_DENIED_NONRELEASE'
 # The same production-compiled native read primitive must reject hostile
 # objects and oversized payloads, not merely show syscall error codes.
 sudo -n -u jdc-authority -- ln -s service.bin "$isolated/blocked-link.bin"

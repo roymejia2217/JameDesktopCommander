@@ -30,6 +30,43 @@ export interface FuzzySearchMetrics {
     } | null;
 }
 
+// A near-exact single-line target must not be lost to the greedy recursive
+// choice of one half of a long document. Inspect complete lines first, using
+// the repository's existing fastest-levenshtein distance implementation.
+// The scan is bounded; if the search is larger, retain the older fallback.
+// This only suggests an exact line to retry. It never applies an edit.
+function findNearExactLine(text: string, query: string): FuzzyMatch | null {
+    const MAX_TEXT = 4 * 1024 * 1024;
+    const MAX_QUERY = 256;
+    const MAX_CANDIDATES = 1024;
+    if (text.length > MAX_TEXT || query.length < 16 || query.length > MAX_QUERY ||
+        query.includes('\n') || query.includes('\r')) return null;
+
+    const tolerance = Math.max(1, Math.floor(query.length * 0.1));
+    let start = 0;
+    let inspected = 0;
+    let best: FuzzyMatch | null = null;
+    while (start < text.length) {
+        const newline = text.indexOf('\n', start);
+        const rawEnd = newline === -1 ? text.length : newline;
+        const end = rawEnd > start && text[rawEnd - 1] === '\r' ? rawEnd - 1 : rawEnd;
+        if (Math.abs(end - start - query.length) <= tolerance) {
+            // Bounded Levenshtein work even on a file of many similar lines.
+            if (++inspected > MAX_CANDIDATES) return null;
+            const value = text.slice(start, end);
+            const editDistance = distance(value, query);
+            if (editDistance <= tolerance &&
+                (best === null || editDistance < best.distance)) {
+                best = { start, end, value, distance: editDistance };
+                if (editDistance === 0) return best;
+            }
+        }
+        if (newline === -1) break;
+        start = newline + 1;
+    }
+    return best;
+}
+
 // Set by iterativeReduction during a search (exactly one terminal call per
 // search) and collected by runFuzzySearch. Single-threaded per context, so a
 // module-level slot is safe.
@@ -42,7 +79,7 @@ let lastIterativeMetrics: FuzzySearchMetrics['iterative'] = null;
 export function runFuzzySearch(text: string, query: string): { result: FuzzyMatch; metrics: FuzzySearchMetrics } {
     const startTime = performance.now();
     lastIterativeMetrics = null;
-    const result = recursiveFuzzyIndexOf(text, query);
+    const result = findNearExactLine(text, query) ?? recursiveFuzzyIndexOf(text, query);
     return {
         result,
         metrics: {

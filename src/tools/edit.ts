@@ -236,7 +236,7 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
                     ...await getDefaultEditorMetadata(resolvedEditPath),
                 },
             } : {}),
-        }, validPath);
+        }, validPath, newContent);
     }
     
     // If exact match found but count doesn't match expected, inform the user

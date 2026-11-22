@@ -397,7 +397,7 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
                 type: "text",
                 text: `Successfully ${modeMessage} ${parsed.path} (${lineCount} lines) ${errorMessage}`
             }],
-        }, resolveAbsolutePath(parsed.path));
+        }, resolveAbsolutePath(parsed.path), parsed.mode === 'rewrite' ? parsed.content : undefined);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         return createErrorResponse(errorMessage);

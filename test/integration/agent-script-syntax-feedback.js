@@ -48,6 +48,14 @@ try {
   assert.match(edited.content.at(-1)?.text ?? '', /PASSED/i);
   await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   assert.match(await fs.readFile(script, 'utf8'), /message = 'valid'/);
+
+  const appended = await call(client, 'write_file', {
+    path: script, content: '\nconsole.log("appended");', mode: 'append'
+  });
+  assert.ok(!appended.isError);
+  assert.equal(appended.structuredContent?.scriptValidation?.status, 'unavailable');
+  assert.match(appended.content.at(-1)?.text ?? '', /complete source snapshot unavailable/i);
+  assert.match(await fs.readFile(script, 'utf8'), /appended/);
 } finally {
   for (const [key, value] of Object.entries(previous)) {
     await call(client, 'set_config_value', { key, value, origin: 'llm' });

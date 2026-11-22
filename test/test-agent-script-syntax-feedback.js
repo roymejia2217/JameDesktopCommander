@@ -11,7 +11,7 @@ test('agent receives a failed syntax diagnostic without executing JavaScript or 
     const target = path.join(dir, 'invalid.js');
     const marker = path.join(dir, 'should-not-exist');
     await fs.writeFile(target, `await ( ;\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');`);
-    const result = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Successfully wrote file' }] }, target);
+    const result = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Successfully wrote file' }] }, target, await fs.readFile(target, 'utf8'));
     assert.equal(result.isError, undefined, 'The saved file is not a failed write');
     assert.equal(result.content[0].text, 'Successfully wrote file');
     assert.match(result.content[1].text, /syntax|lint/i);
@@ -28,7 +28,7 @@ test('valid JavaScript returns PASSED without being executed; non-scripts remain
     const marker = path.join(dir, 'must-not-exist');
     const target = path.join(dir, 'valid.cjs');
     await fs.writeFile(target, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');`);
-    const valid = await checkScriptSyntax(target);
+    const valid = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.equal(valid.status, 'passed');
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
     const original = { content: [{ type: 'text', text: 'Saved' }] };
@@ -44,7 +44,7 @@ test('PowerShell parser rejects bad syntax without evaluating code', async () =>
   try {
     const target = path.join(dir, "agent's invalid.ps1");
     await fs.writeFile(target, 'if ($true { Write-Output 1 }');
-    const actual = await checkScriptSyntax(target);
+    const actual = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['failed', 'unavailable'].includes(actual.status));
     if (process.platform === 'win32') assert.equal(actual.status, 'failed');
   } finally {
@@ -57,10 +57,10 @@ test('Python syntax is parsed but never executed, with explicit unavailability i
     const marker = path.join(dir, 'executed');
     const target = path.join(dir, 'agent.py');
     await fs.writeFile(target, `open(${JSON.stringify(marker)}, 'w').write('executed')\nprint('missing'\n`);
-    const bad = await checkScriptSyntax(target);
+    const bad = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['failed', 'unavailable'].includes(bad.status));
     await fs.writeFile(target, `open(${JSON.stringify(marker)}, 'w').write('executed')\n`);
-    const valid = await checkScriptSyntax(target);
+    const valid = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['passed', 'unavailable'].includes(valid.status));
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   } finally {
@@ -77,10 +77,10 @@ test('Bash syntax validation never executes an agent script or startup injection
     process.env.BASH_ENV = preload;
     const target = path.join(dir, 'agent.sh');
     await fs.writeFile(target, 'if then\necho should-not-run\n');
-    const invalid = await checkScriptSyntax(target);
+    const invalid = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['failed', 'unavailable'].includes(invalid.status));
     await fs.writeFile(target, `echo valid > ${JSON.stringify(marker)}\n`);
-    const valid = await checkScriptSyntax(target);
+    const valid = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['passed', 'unavailable'].includes(valid.status));
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   } finally {
@@ -94,10 +94,10 @@ test('TypeScript without a trusted runtime compiler is explicitly unavailable, n
   try {
     const target = path.join(dir, 'agent.ts');
     await fs.writeFile(target, 'const item: number = 1;');
-    const report = await checkScriptSyntax(target);
+    const report = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.equal(report.status, 'unavailable');
     assert.match(report.diagnostics.join(' '), /TypeScript/);
-    const annotated = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Saved' }] }, target);
+    const annotated = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Saved' }] }, target, await fs.readFile(target, 'utf8'));
     assert.equal(annotated.structuredContent?.scriptValidation?.status, 'unavailable');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -109,7 +109,7 @@ test('PowerShell linter reports warnings only when the standard analyzer is avai
     const target = path.join(dir, 'agent.ps1');
     const marker = path.join(dir, 'never-run');
     await fs.writeFile(target, `Write-Host 'hello'; [System.IO.File]::WriteAllText('${marker}', 'executed')\n`);
-    const report = await checkScriptSyntax(target);
+    const report = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.ok(['passed', 'failed', 'unavailable'].includes(report.status));
     if (report.lint?.status === 'failed') {
       assert.equal(report.status, 'failed');
@@ -126,7 +126,7 @@ test('ShellCheck missing is explicit; syntax PASS never pretends lint PASS', asy
   try {
     const target = path.join(dir, 'agent.sh');
     await fs.writeFile(target, '#!/usr/bin/env bash\nvalue=one\necho $value\n');
-    const report = await checkScriptSyntax(target);
+    const report = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     if (report.status === 'unavailable') return; // Bash parser absent.
     assert.ok(report.lint, 'ShellCheck status must be represented separately from Bash syntax');
     if (report.lint.status === 'unavailable') {
@@ -151,7 +151,7 @@ test('node syntax checker strips startup preload options from the child environm
     await fs.writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed');`);
     await fs.writeFile(source, 'const number = 1;');
     process.env.NODE_OPTIONS = `--require=${preload}`;
-    const report = await checkScriptSyntax(source);
+    const report = await checkScriptSyntax(source, await fs.readFile(source, 'utf8'));
     assert.equal(report.status, 'passed');
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
   } finally {
@@ -165,10 +165,34 @@ test('overlarge scripts report an incomplete check without launching a parser', 
   try {
     const target = path.join(dir, 'large.js');
     await fs.writeFile(target, Buffer.alloc(1024 * 1024 + 1, 'a'));
-    const result = await checkScriptSyntax(target);
+    const result = await checkScriptSyntax(target, await fs.readFile(target, 'utf8'));
     assert.equal(result.status, 'unavailable');
     assert.match(result.diagnostics.join(' '), /1 MiB/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('agent syntax validates submitted snapshot, never reopens a different current path', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'jdc-source-snapshot-'));
+  try {
+    const target = path.join(dir, 'source.cjs');
+    await fs.writeFile(target, 'const value = ;');
+    const validSource = 'const value = 1;';
+    const report = await checkScriptSyntax(target, validSource);
+    assert.equal(report.status, 'passed', 'Must lint submitted bytes, not re-open the current pathname');
+    const response = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Saved' }] },
+      target, validSource);
+    assert.equal(response.structuredContent?.scriptValidation?.status, 'passed');
+    assert.equal(await fs.readFile(target, 'utf8'), 'const value = ;', 'Never rewrites the target');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('incomplete append snapshot reports unavailable rather than checking an unrelated file', async () => {
+  const target = path.join(os.tmpdir(), 'jdc-nonexistent-' + process.pid + '.sh');
+  const response = await withScriptSyntaxFeedback({ content: [{ type: 'text', text: 'Appended' }] }, target);
+  assert.equal(response.structuredContent?.scriptValidation?.status, 'unavailable');
+  assert.match(response.content[1].text, /complete.*source|snapshot/i);
 });

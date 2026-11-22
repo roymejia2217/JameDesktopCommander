@@ -287,6 +287,27 @@ jobs:
         id: native_api_node24
         run: node --test test/security/capability-default-surface.test.cjs
 
+      # Real Windows OS custody + official SDK Client.callTool, non-shipping.
+      # A disposable same-SID adversary must be rejected before native bytes
+      # are released from a previously opened, issuer-owned file HANDLE.
+      - name: Install locked MCP SDK for Windows managed-client evidence
+        id: windows_issued_sdk_dependencies
+        if: matrix.target == 'win32-x64'
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Exercise protected Windows-issued MCP SDK exact native read
+        id: windows_issued_sdk_native_read
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE_BINARY = (Get-Command node -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE_BINARY)) {
+            throw 'Node executable must be absolute'
+          }
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --test windows_guarded_client_pipe protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # The historical N-API receiver and hardlink RED probes are retained on
       # research PRs #131/#147. This production-candidate job no longer builds
       # their unsafe class. Do not count those security acceptance gates as passed.

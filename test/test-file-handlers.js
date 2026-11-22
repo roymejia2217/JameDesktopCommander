@@ -445,6 +445,45 @@ async function testWriteModeGuard() {
     'Rejected write must leave the file untouched');
   console.log('✓ No-mode write to non-empty file rejected, content preserved');
 
+  // A prototype is not an explicit caller-supplied mode. A polluted prototype
+  // must not silently authorize destructive rewrite or an unsolicited append.
+  for (const inheritedMode of ['rewrite', 'append']) {
+    const request = Object.assign(Object.create({ mode: inheritedMode }), {
+      path: GUARD_FILE,
+      content: 'inherited mode must not write\n',
+    });
+    const inherited = await handleWriteFile(request);
+    assert.strictEqual(inherited.isError, true,
+      `Inherited ${inheritedMode} must not count as an explicit write mode`);
+    assert.strictEqual(await fs.readFile(GUARD_FILE, 'utf8'), originalContent,
+      `Inherited ${inheritedMode} must preserve exact existing bytes`);
+  }
+  console.log('✓ Inherited rewrite/append modes rejected without changing bytes');
+
+  // An own property with no value is still an omitted mode after Zod defaulting.
+  const noModeValue = await handleWriteFile({
+    path: GUARD_FILE,
+    content: 'undefined must not overwrite\n',
+    mode: undefined,
+  });
+  assert.strictEqual(noModeValue.isError, true,
+    'Explicit undefined is not an authorization to replace existing content');
+  assert.strictEqual(await fs.readFile(GUARD_FILE, 'utf8'), originalContent);
+
+  // Accessors are not inert caller-owned values and must not grant rewrite.
+  const accessorRequest = { path: GUARD_FILE, content: 'getter must not overwrite\n' };
+  let modeGetterCalls = 0;
+  Object.defineProperty(accessorRequest, 'mode', {
+    enumerable: true,
+    get: () => { modeGetterCalls++; return 'rewrite'; },
+  });
+  const accessorResult = await handleWriteFile(accessorRequest);
+  assert.strictEqual(accessorResult.isError, true,
+    'An accessor must not grant an implicit destructive write');
+  assert.strictEqual(modeGetterCalls, 0,
+    'Untrusted write mode getter must not execute during validation');
+  assert.strictEqual(await fs.readFile(GUARD_FILE, 'utf8'), originalContent);
+
   // The recovery path the error steers the model to: retry with explicit append.
   const appended = await handleWriteFile({ path: GUARD_FILE, content: 'appended line\n', mode: 'append' });
   assert.notStrictEqual(appended.isError, true, 'Explicit append should succeed');

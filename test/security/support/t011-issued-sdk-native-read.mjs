@@ -6,9 +6,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 const LIMIT = 1024 * 1024;
-async function readAttestedNative(socketPath) {
+async function readAttestedNative(socketPath, timeoutMs) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 10000) {
+    throw Error('E_NATIVE_INVALID_TIMEOUT');
+  }
   const channel = connect(socketPath);
-  channel.setTimeout(3000, () => channel.destroy(new Error('E_NATIVE_TIMEOUT')));
+  channel.setTimeout(timeoutMs, () => channel.destroy(new Error('E_NATIVE_TIMEOUT')));
   let frame = Buffer.alloc(0);
   let stage = 'challenge';
   let expected = null;
@@ -40,11 +43,11 @@ async function readAttestedNative(socketPath) {
 }
 
 // Real official MCP Client.callTool -> McpServer.registerTool -> native IPC.
-export async function exerciseIssuedSdkRead(socketPath) {
+export async function exerciseIssuedSdkRead(socketPath, timeoutMs = 3000) {
   const server = new McpServer({ name: 'jdc-t011-issued-peer-nonrelease', version: '1.0.0' });
   server.registerTool('read_file', { inputSchema: {} }, async () => {
     try {
-      const bytes = await readAttestedNative(socketPath);
+      const bytes = await readAttestedNative(socketPath, timeoutMs);
       return { content: [{ type: 'text', text: bytes.toString('base64') }] };
     } catch {
       return { isError: true, content: [{ type: 'text', text: 'E_NATIVE_READ_DENIED' }] };

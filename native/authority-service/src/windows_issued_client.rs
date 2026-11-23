@@ -7,6 +7,7 @@ use crate::{
     policy_epoch::{PolicyFence, ReadTicket},
     windows_creation_custody::OwnerRightsCreationDescriptors,
     windows_opened_read::read_opened_regular,
+    windows_pipe_disclosure::disclose_bounded,
     windows_pipe_peer::{
         observe_client_sid_after_read, observe_process_sid, verify_live_issued_peer_after_read,
     },
@@ -150,20 +151,19 @@ impl IssuedClient {
         })
     }
 
-    /// Admit a single, non-replayable request before native I/O and keep the
-    /// policy epoch stable *through the complete caller-supplied disclosure*.
-    /// The service must first authenticate IPC origin and issue the ticket;
-    /// this function also verifies the real live process/pipe connector.
-    /// No file pathname is reopened and no bytes escape on denied requests.
-    /// This remains a non-shipping primitive: the issuing policy and file
-    /// HANDLE provenance require separately protected SCM/service authority.
-    pub fn read_regular_with_ticket(
+    /// Consume one issued ticket and serialize all native I/O and bounded
+    /// overlapped pipe disclosure against policy revocation. No caller callback
+    /// can leak an owned byte buffer or bypass the service-chosen transport.
+    /// The caller must supply its own authenticated, OVERLAPPED native pipe.
+    /// No arbitrary client pathname is reopened. This does not independently
+    /// establish policy provenance, a trusted root or installed SCM authority.
+    pub fn read_regular_into_pipe(
         &self,
         policy: &PolicyFence,
         ticket: &ReadTicket,
         pipe: BorrowedHandle<'_>,
         file: File,
-        disclose: impl FnOnce(&[u8]) -> Result<(), IdentityDenied>,
+        response_timeout: Duration,
     ) -> Result<(), IdentityDenied> {
         policy
             .execute_once(ticket, || {
@@ -177,8 +177,7 @@ impl IssuedClient {
                     return Err(IdentityDenied);
                 }
                 let bytes = read_opened_regular(file).map_err(|_| IdentityDenied)?;
-                // No owned byte vector may be returned beyond the epoch lock.
-                disclose(&bytes)
+                disclose_bounded(pipe, &bytes, response_timeout)
             })
             .map_err(|_| IdentityDenied)?
     }

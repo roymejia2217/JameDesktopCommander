@@ -9,7 +9,10 @@ use jdc_authority_service::{
 };
 use std::{
     ffi::OsStr,
-    os::windows::{ffi::OsStrExt, io::BorrowedHandle},
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, BorrowedHandle},
+    },
     process::{Command, Stdio},
     ptr,
     time::{SystemTime, UNIX_EPOCH},
@@ -500,8 +503,8 @@ impl Drop for OwnedDiagnostic {
 #[test]
 #[ignore = "Requires official SDK node_modules and JDC_T011_NODE_BINARY; CI exercises explicitly"]
 fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
-    use jdc_authority_service::windows_opened_read::read_opened_regular;
-    use std::path::PathBuf;
+    use jdc_authority_service::windows_issued_client::IssuedClient;
+    use std::{path::PathBuf, time::Duration};
     let node = PathBuf::from(
         std::env::var_os("JDC_T011_NODE_BINARY")
             .expect("test-only pinned Node executable path required"),
@@ -571,14 +574,33 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     );
     // RED with default ACL: a same-SID process obtained PROCESS_DUP_HANDLE.
     // GREEN requires creation-time OWNER RIGHTS on this actual Node SDK child.
-    let child = create_guarded_process(&name, true, node.as_os_str(), &cmd, Some(&diagnostic));
-    assert_eq!(unsafe { ResumeThread(child.thread.0) }, 1);
+    let root = std::env::var("SystemRoot").expect("Windows system root");
+    let diagnostic_path = diagnostic.to_string_lossy();
+    let mut child = IssuedClient::launch_suspended(
+        &node,
+        OsStr::new(&cmd),
+        &[
+            ("JDC_T011_GUARDED_PIPE_NAME", name.as_str()),
+            ("JDC_T011_SDK_DIAGNOSTIC", diagnostic_path.as_ref()),
+            ("SystemRoot", root.as_str()),
+        ],
+    )
+    .expect("native issuer must create a guarded SDK process");
+    child
+        .resume()
+        .expect("native issuer must resume guarded process");
+    assert!(
+        child.resume().is_err(),
+        "issued child cannot be resumed twice"
+    );
     if connect_error == ERROR_IO_PENDING {
         if unsafe { WaitForSingleObject(event.0, 7_000) } != WAIT_OBJECT_0 {
             unsafe { CancelIoEx(server.0, &pending) };
             let mut exit_code = u32::MAX;
             assert_ne!(
-                unsafe { GetExitCodeProcess(child.process.0, &mut exit_code) },
+                unsafe {
+                    GetExitCodeProcess(child.process_handle().as_raw_handle(), &mut exit_code)
+                },
                 0
             );
             let diagnostic_text = std::fs::read_to_string(&diagnostic).unwrap_or_default();
@@ -603,7 +625,7 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     assert_eq!(
         verify_live_issued_peer_after_read(
             unsafe { BorrowedHandle::borrow_raw(server.0) },
-            unsafe { BorrowedHandle::borrow_raw(child.process.0) }
+            child.process_handle()
         ),
         Ok(()),
         "retained issuer process HANDLE must match actual kernel pipe origin"
@@ -654,8 +676,8 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
                 "fixture_guarded_same_sid_intruder",
                 "--nocapture",
             ])
-            .env("JDC_T011_GUARDED_PID", child.pid.to_string())
-            .env("JDC_T011_GUARDED_TID", child.tid.to_string())
+            .env("JDC_T011_GUARDED_PID", child.pid().to_string())
+            .env("JDC_T011_GUARDED_TID", child.tid().to_string())
             .env("JDC_T011_EXPECTED_SID", sid_hex())
             .env("JDC_T011_ATTACKER_PIPE", &name)
             .stdin(Stdio::null())
@@ -664,7 +686,7 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
             .spawn()
             .expect("independent real Windows same-SID read adversary"),
     );
-    assert_ne!(attacker.0.id(), child.pid);
+    assert_ne!(attacker.0.id(), child.pid());
     if connect_error == ERROR_IO_PENDING {
         assert_eq!(
             unsafe { WaitForSingleObject(denied_event.0, 7_000) },
@@ -688,10 +710,19 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     assert!(
         verify_live_issued_peer_after_read(
             unsafe { BorrowedHandle::borrow_raw(denied_pipe.0) },
-            unsafe { BorrowedHandle::borrow_raw(child.process.0) }
+            child.process_handle()
         )
         .is_err(),
         "unissued same-SID PID must not receive file authority"
+    );
+    assert!(
+        child
+            .read_regular_after_request(
+                unsafe { BorrowedHandle::borrow_raw(denied_pipe.0) },
+                retained_file.try_clone().expect("owned file handle clone"),
+            )
+            .is_err(),
+        "native issued-client API must reject actual same-SID intruder before reading bytes"
     );
     let mut denied = b'D';
     overlapped_byte(denied_pipe.0, &mut denied, false);
@@ -705,8 +736,12 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
         "same-SID intruder obtained custody or any protected response bytes"
     );
 
-    let content = read_opened_regular(retained_file)
-        .expect("native module must read only the preopened file object");
+    let content = child
+        .read_regular_after_request(
+            unsafe { BorrowedHandle::borrow_raw(server.0) },
+            retained_file,
+        )
+        .expect("native issued-client API must authenticate OS peer then read only retained file");
     assert_eq!(
         content, BYTES,
         "preopened test file must supply the exact bytes"
@@ -722,16 +757,15 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     // The retained native pipe handle must be closed after the full response.
     drop(server);
     assert_eq!(
-        unsafe { WaitForSingleObject(child.process.0, 8_000) },
-        WAIT_OBJECT_0,
+        child.wait_for_exit(Duration::from_secs(8)),
+        Ok(()),
         "official SDK client must finish the complete native-byte call"
     );
-    let mut exit_code = u32::MAX;
-    assert_ne!(
-        unsafe { GetExitCodeProcess(child.process.0, &mut exit_code) },
-        0
+    assert_eq!(
+        child.exit_code(),
+        Ok(0),
+        "official SDK must verify every returned byte"
     );
-    assert_eq!(exit_code, 0, "official SDK must verify every returned byte");
     assert_eq!(
         std::fs::read(&sentinel).unwrap(),
         BYTES,

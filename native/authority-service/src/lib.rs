@@ -54,6 +54,9 @@ pub mod windows_pipe_peer;
 #[cfg(windows)]
 pub mod windows_opened_read;
 
+#[cfg(windows)]
+pub mod windows_issued_client;
+
 /// This error never carries user-controlled credentials into diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityDenied;

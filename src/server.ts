@@ -1361,6 +1361,20 @@ import { createToolExecutionContext } from './tools/tool-execution-context.js';
 server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
     await ensureOperationalRuntimeInitialized();
 
+    // Fail closed when a caller explicitly REQUIRES native-only handling.
+    // The protected SCM broker is not provisioned; do not fall back to any
+    // legacy pathname handler. This request metadata only tightens behavior:
+    // omitting it does not prove authority, and its presence grants NOTHING.
+    // A future mandatory server-side native mode must be independently enforced.
+    const meta = request.params._meta;
+    if (meta && typeof meta === 'object' &&
+        Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired')) {
+        return {
+            content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
+            isError: true,
+        };
+    }
+
     const args = request.params.arguments;
     const executionContext = createToolExecutionContext(extra);
 

@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { server } from '../dist/server.js';
 import { configManager } from '../dist/config-manager.js';
+import { toolHistory } from '../dist/utils/toolHistory.js';
 
 // Actual JDC src/server.ts tools/call and real read_file handler.
 // NON-AUTHORIZING legacy baseline, not proof of a protected broker.
@@ -45,6 +46,11 @@ test('official SDK reaches actual JDC read_file and native-only calls deny with 
       ]) {
         const result = await sdk.callTool({ name, arguments: args, _meta: strictMeta });
         assert.equal(result.isError, true, name + ' must deny without a native broker');
+        const audited = toolHistory.getRecentCalls({ maxResults: 1 })[0];
+        assert.equal(audited?.toolName, name,
+          name + ' must be audited even when admission is denied');
+        assert.equal(audited?.output?.isError, true,
+          name + ' denial must be recorded as an error');
         assert.ok(result.content.some(item => item.type === 'text' &&
           item.text.includes('E_NATIVE_AUTHORITY_UNAVAILABLE')),
         name + ' should report the exact fail-closed reason');

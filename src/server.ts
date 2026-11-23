@@ -1361,20 +1361,6 @@ import { createToolExecutionContext } from './tools/tool-execution-context.js';
 server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
     await ensureOperationalRuntimeInitialized();
 
-    // Fail closed when a caller explicitly REQUIRES native-only handling.
-    // The protected SCM broker is not provisioned; do not fall back to any
-    // legacy pathname handler. This request metadata only tightens behavior:
-    // omitting it does not prove authority, and its presence grants NOTHING.
-    // A future mandatory server-side native mode must be independently enforced.
-    const meta = request.params._meta;
-    if (meta && typeof meta === 'object' &&
-        Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired')) {
-        return {
-            content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
-            isError: true,
-        };
-    }
-
     const args = request.params.arguments;
     const executionContext = createToolExecutionContext(extra);
 
@@ -1455,7 +1441,23 @@ async function handleCallToolRequest(
         // Using a more structured approach with dedicated handlers
         // (result is declared above so the finally block can read execution status)
 
-        switch (name) {
+        // Requests demanding native-only handling must never reach pathname
+        // operations while the protected broker is unavailable. The marker is
+        // caller-controlled: it can ONLY cause denial, never authorize access.
+        // Execute this inside normal tool telemetry/history/error accounting.
+        const meta = request.params._meta;
+        const nativeRequired = meta && typeof meta === 'object' &&
+            Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired');
+        // Use a non-client-selectable sentinel, never a caller-provided tool
+        // name, so denial still follows the normal accounting path below.
+        switch (nativeRequired ? null : name) {
+            case null:
+                result = {
+                    content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
+                    isError: true,
+                };
+                break;
+
             // Read-only route correlation; no authority to perform lifecycle actions.
             case "tunnel_probe":
                 result = await executeTunnelProbe(args);

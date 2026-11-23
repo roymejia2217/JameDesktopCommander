@@ -50,6 +50,11 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 build --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml
 
+      # Only the disposable SCM acceptance installs/runs these fixtures.
+      - name: Compile SCM-origin issued-client security fixture
+        if: matrix.target == 'win32-x64'
+        run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof --bin jdc-authority-scm-issued-client
+
       - name: Check isolated Windows SCM entry point without compiler warnings
         if: matrix.target == 'win32-x64'
         run: cargo +1.91.1 clippy --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml -- -D warnings

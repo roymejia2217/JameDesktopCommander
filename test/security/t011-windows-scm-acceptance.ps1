@@ -11,8 +11,14 @@ $sc = (Get-Command sc.exe -ErrorAction Stop).Source
 $stage = Join-Path $env:ProgramData ('JDC-T011-SCM-' + [guid]::NewGuid().ToString('N'))
 $binary = Join-Path $stage 'jdc-authority-scm.exe'
 $built = Join-Path (Get-Location).Path 'native/authority-service/target/debug/jdc-authority-scm.exe'
+$proofBuilt = Join-Path (Get-Location).Path 'native/authority-service/target/debug/jdc-authority-scm-issued-proof.exe'
+$clientBuilt = Join-Path (Get-Location).Path 'native/authority-service/target/debug/jdc-authority-scm-issued-client.exe'
+$proofBinary = Join-Path $stage 'jdc-authority-scm-issued-proof.exe'
+$clientBinary = Join-Path $stage 'jdc-authority-scm-issued-client.exe'
 $created = $false
-if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw 'E_SCM_BINARY_NOT_BUILT' }
+foreach ($file in @($built, $proofBuilt, $clientBuilt)) {
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'E_SCM_BINARY_NOT_BUILT' }
+}
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     throw 'E_SCM_SERVICE_PREEXISTS'
 }
@@ -105,9 +111,17 @@ try {
         [System.Security.Principal.SecurityIdentifier])
     Set-RestrictedAcl $stage $true $virtualSid
     Copy-Item -LiteralPath $built -Destination $binary -ErrorAction Stop
-    Set-RestrictedAcl $binary $false $virtualSid
+    Copy-Item -LiteralPath $proofBuilt -Destination $proofBinary -ErrorAction Stop
+    Copy-Item -LiteralPath $clientBuilt -Destination $clientBinary -ErrorAction Stop
+    foreach ($installed in @($binary, $proofBinary, $clientBinary)) {
+        Set-RestrictedAcl $installed $false $virtualSid
+    }
     if ((Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash -ne
-        (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash) {
+        (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -or
+        (Get-FileHash -LiteralPath $proofBuilt -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $proofBinary -Algorithm SHA256).Hash -or
+        (Get-FileHash -LiteralPath $clientBuilt -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $clientBinary -Algorithm SHA256).Hash) {
         throw 'E_SCM_BINARY_PROVENANCE_MISMATCH'
     }
 
@@ -150,9 +164,18 @@ try {
         $config.StartMode -ne 'Manual' -or $config.ServiceType -ne 'Own Process') {
         throw 'E_SCM_SERVICE_IDENTITY_OR_CONFIG_MISMATCH'
     }
-    # The standalone executable MUST NOT function as an interactive helper.
-    $direct = Start-Process -FilePath $binary -PassThru -Wait -ErrorAction Stop
-    if ($direct.ExitCode -eq 0) { throw 'E_SCM_INTERACTIVE_LAUNCH_ACCEPTED' }
+    # Interactive launches must fail with the exact dispatcher/identity-denial
+    # exit code, not an arbitrary crash or an unavailable exit observation.
+    foreach ($fixture in @(
+        @{ Image = $binary; ErrorCode = 'E_SCM_INTERACTIVE_LAUNCH_NOT_DENIED' },
+        @{ Image = $proofBinary; ErrorCode = 'E_SCM_INTERACTIVE_PROOF_NOT_DENIED' },
+        @{ Image = $clientBinary; ErrorCode = 'E_SCM_INTERACTIVE_CHILD_NOT_DENIED' }
+    )) {
+        $direct = Start-Process -FilePath $fixture.Image -PassThru -Wait -ErrorAction Stop
+        if ($null -eq $direct.ExitCode -or [int]$direct.ExitCode -ne 1) {
+            throw $fixture.ErrorCode
+        }
+    }
 
     # sc.exe may return success or failure as the service transitions rapidly;
     # neither return value proves correctness. Inspect the *final SCM state*.
@@ -177,6 +200,32 @@ try {
         Write-Output 'E_SCM_PRIVILEGE_BASELINE_UNREVIEWED: deny-only, non-release'
     }
     Write-Output 'T011-C4o SCM token audit reached terminal denial: PASS (non-release)'
+
+    # The same real SCM identity now issues a protected child from the
+    # administrator-owned staging directory; it never enters RUNNING.
+    & $sc config $serviceName 'binPath=' $proofBinary | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_PROOF_IMAGE_CONFIGURATION_FAILED' }
+    $configured = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $configured -or $configured.PathName -ne $proofBinary) {
+        throw 'E_SCM_PROOF_IMAGE_NOT_PINNED'
+    }
+    & $sc start $serviceName | Out-Null
+    $controller = Get-Service -Name $serviceName -ErrorAction Stop
+    $controller.WaitForStatus(
+        [System.ServiceProcess.ServiceControllerStatus]::Stopped,
+        [timespan]::FromSeconds(15))
+    $issuedState = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $issuedState -or $issuedState.State -ne 'Stopped' -or
+        $issuedState.ExitCode -ne 1066 -or $issuedState.ServiceSpecificExitCode -ne 6 -or
+        $issuedState.ProcessId -ne 0) {
+        throw 'E_SCM_REAL_ISSUED_CHILD_PROOF_FAILED'
+    }
+    if ((Get-ScmDescriptor) -ne $baselineDescriptor) {
+        throw 'E_SCM_PROOF_SERVICE_DACL_CHANGED'
+    }
+    & $sc config $serviceName 'binPath=' $binary | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ORIGINAL_IMAGE_RESTORE_FAILED' }
+    Write-Output 'T011-C4o SCM-issued protected child: PASS (non-release, no MCP authorization)'
 }
 finally {
     $cleanupFailure = $false

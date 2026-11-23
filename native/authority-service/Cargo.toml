@@ -19,6 +19,15 @@ path = "src/main.rs"
 name = "jdc-authority-scm"
 path = "src/windows_scm.rs"
 
+# CI-only SCM origin proof; never included in a candidate distribution.
+[[bin]]
+name = "jdc-authority-scm-issued-proof"
+path = "src/windows_scm_issued_proof.rs"
+
+[[bin]]
+name = "jdc-authority-scm-issued-client"
+path = "src/windows_scm_issued_client.rs"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.190"
 rustix = { version = "=1.1.6", features = ["fs"] }

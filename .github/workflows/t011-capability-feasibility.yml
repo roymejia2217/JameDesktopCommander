@@ -118,6 +118,10 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-service
 
+      - name: Build systemd-issued process origin acceptance fixture
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-systemd-issued-proof --bin jdc-authority-systemd-issued-client
+
       - name: Validate Linux service unit and principal provisioning
         id: linux_systemd_provision
         if: matrix.target == 'linux-x64'

@@ -3,6 +3,7 @@
 //! grant filesystem operations, or start a service.
 
 pub mod confined_read;
+pub mod policy_epoch;
 pub mod token_policy;
 
 #[cfg(test)]

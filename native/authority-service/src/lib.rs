@@ -56,6 +56,9 @@ pub mod windows_pipe_peer;
 pub mod windows_opened_read;
 
 #[cfg(windows)]
+mod windows_pipe_disclosure;
+
+#[cfg(windows)]
 pub mod windows_issued_client;
 
 /// This error never carries user-controlled credentials into diagnostics.

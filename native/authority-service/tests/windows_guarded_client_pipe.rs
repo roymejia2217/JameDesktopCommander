@@ -719,12 +719,12 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     let hostile_ticket = policy.issue_read().expect("test-owned unspent ticket");
     assert!(
         child
-            .read_regular_with_ticket(
+            .read_regular_into_pipe(
                 &policy,
                 &hostile_ticket,
                 unsafe { BorrowedHandle::borrow_raw(denied_pipe.0) },
                 retained_file.try_clone().expect("owned file handle clone"),
-                |_| panic!("hostile peer must never disclose file bytes"),
+                Duration::from_secs(5),
             )
             .is_err(),
         "native issued-client API must reject actual same-SID intruder before reading bytes"
@@ -749,35 +749,22 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
         .try_clone()
         .expect("owned revoked probe handle");
     child
-        .read_regular_with_ticket(
+        .read_regular_into_pipe(
             &policy,
             &issued_ticket,
             unsafe { BorrowedHandle::borrow_raw(server.0) },
             retained_file,
-            |bytes| {
-                assert_eq!(
-                    bytes, BYTES,
-                    "only exact original native bytes may disclose"
-                );
-                let mut response = Vec::with_capacity(5 + bytes.len());
-                response.push(b'A');
-                response.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                response.extend_from_slice(bytes);
-                for mut byte in response {
-                    overlapped_byte(server.0, &mut byte, false);
-                }
-                Ok(())
-            },
+            Duration::from_secs(5),
         )
         .expect("native file read AND wire disclosure must be inside the epoch fence");
     assert!(
         child
-            .read_regular_with_ticket(
+            .read_regular_into_pipe(
                 &policy,
                 &issued_ticket,
                 unsafe { BorrowedHandle::borrow_raw(server.0) },
                 replay_file,
-                |_| panic!("replayed ticket must not disclose"),
+                Duration::from_secs(5),
             )
             .is_err(),
         "one issued ticket can never disclose twice"
@@ -790,12 +777,12 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     );
     assert!(
         child
-            .read_regular_with_ticket(
+            .read_regular_into_pipe(
                 &policy,
                 &revoked_ticket,
                 unsafe { BorrowedHandle::borrow_raw(server.0) },
                 revoked_file,
-                |_| panic!("revoked ticket must never disclose bytes"),
+                Duration::from_secs(5),
             )
             .is_err(),
         "previously issued but unspent ticket must deny after revocation"

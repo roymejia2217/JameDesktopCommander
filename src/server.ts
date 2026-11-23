@@ -1441,13 +1441,19 @@ async function handleCallToolRequest(
         // Using a more structured approach with dedicated handlers
         // (result is declared above so the finally block can read execution status)
 
-        // Requests demanding native-only handling must never reach pathname
-        // operations while the protected broker is unavailable. The marker is
-        // caller-controlled: it can ONLY cause denial, never authorize access.
-        // Execute this inside normal tool telemetry/history/error accounting.
+        // A process launched with --require-native-authority must deny ALL
+        // tool calls while the native broker is unavailable, including shell
+        // tools that could bypass a read-only filesystem denial. The switch
+        // only RESTRICTS this process; it does not authenticate the original
+        // MCP host or grant privileged access. A separate same-user process
+        // can launch ordinary JDC, so this is NOT an OS trust boundary.
+        // A client _meta marker can also request denial, never authorization.
+        // Keep denial inside normal tool history and telemetry accounting.
+        const nativeRequiredByProcess = process.argv.includes('--require-native-authority');
         const meta = request.params._meta;
-        const nativeRequired = meta && typeof meta === 'object' &&
-            Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired');
+        const nativeRequiredByCaller = !!(meta && typeof meta === 'object' &&
+            Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired'));
+        const nativeRequired = nativeRequiredByProcess || nativeRequiredByCaller;
         // Use a non-client-selectable sentinel, never a caller-provided tool
         // name, so denial still follows the normal accounting path below.
         switch (nativeRequired ? null : name) {

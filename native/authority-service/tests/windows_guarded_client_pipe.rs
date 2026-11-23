@@ -503,7 +503,7 @@ impl Drop for OwnedDiagnostic {
 #[test]
 #[ignore = "Requires official SDK node_modules and JDC_T011_NODE_BINARY; CI exercises explicitly"]
 fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
-    use jdc_authority_service::windows_issued_client::IssuedClient;
+    use jdc_authority_service::{policy_epoch::PolicyFence, windows_issued_client::IssuedClient};
     use std::{path::PathBuf, time::Duration};
     let node = PathBuf::from(
         std::env::var_os("JDC_T011_NODE_BINARY")
@@ -715,11 +715,16 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
         .is_err(),
         "unissued same-SID PID must not receive file authority"
     );
+    let policy = PolicyFence::new(10).expect("test-owned native revision");
+    let hostile_ticket = policy.issue_read().expect("test-owned unspent ticket");
     assert!(
         child
-            .read_regular_after_request(
+            .read_regular_with_ticket(
+                &policy,
+                &hostile_ticket,
                 unsafe { BorrowedHandle::borrow_raw(denied_pipe.0) },
                 retained_file.try_clone().expect("owned file handle clone"),
+                |_| panic!("hostile peer must never disclose file bytes"),
             )
             .is_err(),
         "native issued-client API must reject actual same-SID intruder before reading bytes"
@@ -736,23 +741,66 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
         "same-SID intruder obtained custody or any protected response bytes"
     );
 
+    let issued_ticket = policy.issue_read().expect("test-owned legitimate ticket");
+    let replay_file = retained_file
+        .try_clone()
+        .expect("owned replay probe handle");
+    let revoked_file = retained_file
+        .try_clone()
+        .expect("owned revoked probe handle");
     let content = child
-        .read_regular_after_request(
+        .read_regular_with_ticket(
+            &policy,
+            &issued_ticket,
             unsafe { BorrowedHandle::borrow_raw(server.0) },
             retained_file,
+            |bytes| {
+                assert_eq!(
+                    bytes, BYTES,
+                    "only exact original native bytes may disclose"
+                );
+                let mut response = Vec::with_capacity(5 + bytes.len());
+                response.push(b'A');
+                response.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                response.extend_from_slice(bytes);
+                for mut byte in response {
+                    overlapped_byte(server.0, &mut byte, false);
+                }
+                bytes.to_vec()
+            },
         )
-        .expect("native issued-client API must authenticate OS peer then read only retained file");
-    assert_eq!(
-        content, BYTES,
-        "preopened test file must supply the exact bytes"
+        .expect("native file read AND wire disclosure must be inside the epoch fence");
+    assert_eq!(content, BYTES);
+    assert!(
+        child
+            .read_regular_with_ticket(
+                &policy,
+                &issued_ticket,
+                unsafe { BorrowedHandle::borrow_raw(server.0) },
+                replay_file,
+                |_| panic!("replayed ticket must not disclose"),
+            )
+            .is_err(),
+        "one issued ticket can never disclose twice"
     );
-    let mut response = Vec::with_capacity(5 + content.len());
-    response.push(b'A');
-    response.extend_from_slice(&(content.len() as u32).to_be_bytes());
-    response.extend_from_slice(&content);
-    for mut byte in response {
-        overlapped_byte(server.0, &mut byte, false);
-    }
+    let revoked_ticket = policy.issue_read().expect("issued before revocation");
+    policy.revoke().expect("complete test-owned revocation");
+    assert!(
+        policy.issue_read().is_err(),
+        "revoked policy may not issue new reads"
+    );
+    assert!(
+        child
+            .read_regular_with_ticket(
+                &policy,
+                &revoked_ticket,
+                unsafe { BorrowedHandle::borrow_raw(server.0) },
+                revoked_file,
+                |_| panic!("revoked ticket must never disclose bytes"),
+            )
+            .is_err(),
+        "previously issued but unspent ticket must deny after revocation"
+    );
     // The SDK frame reader deliberately requires EOF before returning bytes.
     // The retained native pipe handle must be closed after the full response.
     drop(server);

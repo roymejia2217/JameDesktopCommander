@@ -748,7 +748,7 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
     let revoked_file = retained_file
         .try_clone()
         .expect("owned revoked probe handle");
-    let content = child
+    child
         .read_regular_with_ticket(
             &policy,
             &issued_ticket,
@@ -766,11 +766,10 @@ fn protected_issued_sdk_read_preserves_exact_bytes_and_rejects_same_sid() {
                 for mut byte in response {
                     overlapped_byte(server.0, &mut byte, false);
                 }
-                bytes.to_vec()
+                Ok(())
             },
         )
         .expect("native file read AND wire disclosure must be inside the epoch fence");
-    assert_eq!(content, BYTES);
     assert!(
         child
             .read_regular_with_ticket(

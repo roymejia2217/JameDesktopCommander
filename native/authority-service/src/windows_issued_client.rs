@@ -157,14 +157,14 @@ impl IssuedClient {
     /// No file pathname is reopened and no bytes escape on denied requests.
     /// This remains a non-shipping primitive: the issuing policy and file
     /// HANDLE provenance require separately protected SCM/service authority.
-    pub fn read_regular_with_ticket<T>(
+    pub fn read_regular_with_ticket(
         &self,
         policy: &PolicyFence,
         ticket: &ReadTicket,
         pipe: BorrowedHandle<'_>,
         file: File,
-        disclose: impl FnOnce(&[u8]) -> T,
-    ) -> Result<T, IdentityDenied> {
+        disclose: impl FnOnce(&[u8]) -> Result<(), IdentityDenied>,
+    ) -> Result<(), IdentityDenied> {
         policy
             .execute_once(ticket, || {
                 if !self.resumed {
@@ -177,7 +177,8 @@ impl IssuedClient {
                     return Err(IdentityDenied);
                 }
                 let bytes = read_opened_regular(file).map_err(|_| IdentityDenied)?;
-                Ok(disclose(&bytes))
+                // No owned byte vector may be returned beyond the epoch lock.
+                disclose(&bytes)
             })
             .map_err(|_| IdentityDenied)?
     }

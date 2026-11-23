@@ -4,6 +4,7 @@
 //! custody, installed policy, and an independently approved request source.
 //! No client-supplied binary, command, environment or token is accepted via IPC.
 use crate::{
+    policy_epoch::{PolicyFence, ReadTicket},
     windows_creation_custody::OwnerRightsCreationDescriptors,
     windows_opened_read::read_opened_regular,
     windows_pipe_peer::{
@@ -149,27 +150,37 @@ impl IssuedClient {
         })
     }
 
-    /// After the server has read one complete native request on this pipe,
-    /// attest its live kernel connector against the retained issued HANDLE,
-    /// verify the impersonated client token matches the issuer's real token,
-    /// then read the already-opened file object. No pathname reopening.
-    /// This is not a shipping grant: protected installed-policy/root custody,
-    /// operation framing, and revocation remain separate mandatory gates.
-    pub fn read_regular_after_request(
+    /// Admit a single, non-replayable request before native I/O and keep the
+    /// policy epoch stable *through the complete caller-supplied disclosure*.
+    /// The service must first authenticate IPC origin and issue the ticket;
+    /// this function also verifies the real live process/pipe connector.
+    /// No file pathname is reopened and no bytes escape on denied requests.
+    /// This remains a non-shipping primitive: the issuing policy and file
+    /// HANDLE provenance require separately protected SCM/service authority.
+    pub fn read_regular_with_ticket(
         &self,
+        policy: &PolicyFence,
+        ticket: &ReadTicket,
         pipe: BorrowedHandle<'_>,
         file: File,
-    ) -> Result<Vec<u8>, IdentityDenied> {
-        if !self.resumed {
-            return Err(IdentityDenied);
-        }
-        verify_live_issued_peer_after_read(pipe, self.process_handle())?;
-        let client_sid = observe_client_sid_after_read(pipe)?;
-        let issuer_sid = observe_process_sid()?;
-        if client_sid != issuer_sid {
-            return Err(IdentityDenied);
-        }
-        read_opened_regular(file).map_err(|_| IdentityDenied)
+        disclose: impl FnOnce(&[u8]) -> Result<(), IdentityDenied>,
+    ) -> Result<(), IdentityDenied> {
+        policy
+            .execute_once(ticket, || {
+                if !self.resumed {
+                    return Err(IdentityDenied);
+                }
+                verify_live_issued_peer_after_read(pipe, self.process_handle())?;
+                let client_sid = observe_client_sid_after_read(pipe)?;
+                let issuer_sid = observe_process_sid()?;
+                if client_sid != issuer_sid {
+                    return Err(IdentityDenied);
+                }
+                let bytes = read_opened_regular(file).map_err(|_| IdentityDenied)?;
+                // No owned byte vector may be returned beyond the epoch lock.
+                disclose(&bytes)
+            })
+            .map_err(|_| IdentityDenied)?
     }
 
     pub fn process_handle(&self) -> BorrowedHandle<'_> {

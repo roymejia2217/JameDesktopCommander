@@ -9,7 +9,8 @@ param(
   [Parameter(Mandatory)][string]$ExpectedVersion,
   [Parameter(Mandatory)][string]$NodeExecutable,
   [Parameter(Mandatory)][string]$FirewallSignalEvent,
-  [Parameter(Mandatory)][string]$FirewallResumeEvent
+  [Parameter(Mandatory)][string]$FirewallResumeEvent,
+  [string]$ProtectedInstallRoot = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -101,6 +102,89 @@ if (!(Test-Path -LiteralPath $InstallerPath -PathType Leaf) -or
 Set-Alias -Name node -Value $NodeExecutable -Scope Script
 $env:JDC_CANDIDATE_SOURCE_SHA = $ExpectedCommit
 $version = $ExpectedVersion
+if ($ProtectedInstallRoot) {
+  # The host supplies only the fixed machine-wide candidate root. The caller
+  # has already been bound to a real, separate non-administrator token.
+  $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALLED_ASSERTIONS'
+  $expectedRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ProgramFiles)) 'JameDesktopCommander Managed Candidate'
+  if ($ProtectedInstallRoot -ine $expectedRoot -or
+      !(Test-Path -LiteralPath $expectedRoot -PathType Container)) {
+    throw 'E_PROTECTED_INSTALL_ROOT_INVALID'
+  }
+  function Assert-AccessDenied([scriptblock]$Attempt, [string]$Code) {
+    try { & $Attempt }
+    catch {
+      $cause = $_.Exception
+      while ($null -ne $cause) {
+        if ($cause -is [UnauthorizedAccessException] -or
+            $cause.HResult -eq -2147024891) { return }
+        $cause = $cause.InnerException
+      }
+      throw
+    }
+    throw $Code
+  }
+  foreach ($relative in @('runtime','dist','tools','tools\tunnel-client',
+      'runtime\node.exe','dist\index.js','jdc-tunnel-operator-ui.exe',
+      'tools\tunnel-client\tunnel-client.exe','operator-ui-manifest.json','unins000.exe')) {
+    $item = Get-Item -LiteralPath (Join-Path $expectedRoot $relative) -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw 'E_PROTECTED_INSTALL_REPARSE_COMPONENT'
+    }
+    if (!$item.PSIsContainer) {
+      # Require an actual readable object and then reject a write handle.
+      $null = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256
+      Assert-AccessDenied {
+        $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open,
+          [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $stream.Dispose()
+      } 'E_PROTECTED_INSTALL_WRITE_ALLOWED'
+    }
+  }
+  foreach ($relative in @('','runtime','dist','tools\tunnel-client')) {
+    $directory = if ($relative) { Join-Path $expectedRoot $relative } else { $expectedRoot }
+    $item = Get-Item -LiteralPath $directory -Force
+    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw 'E_PROTECTED_INSTALL_DIRECTORY_INVALID'
+    }
+    $probe = Join-Path $directory ('jdc-custody-probe-' + [guid]::NewGuid().ToString('N'))
+    try {
+      Assert-AccessDenied {
+        $stream = [IO.File]::Open($probe, [IO.FileMode]::CreateNew,
+          [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Dispose()
+      } 'E_PROTECTED_INSTALL_CREATE_ALLOWED'
+    } finally {
+      if (Test-Path -LiteralPath $probe) { [IO.File]::Delete($probe) }
+    }
+  }
+  # A write denial alone does not imply DELETE/rename denial. Exercise
+  # the actual entrypoint and root independently, restoring on unexpected success.
+  $entrypoint = Join-Path $expectedRoot 'dist\index.js'
+  $movedEntry = $entrypoint + '-probe-' + [guid]::NewGuid().ToString('N')
+  try {
+    Assert-AccessDenied {
+      [IO.File]::Move($entrypoint, $movedEntry)
+    } 'E_PROTECTED_INSTALL_ENTRYPOINT_RENAME_ALLOWED'
+  } finally {
+    if (Test-Path -LiteralPath $movedEntry) { [IO.File]::Move($movedEntry, $entrypoint) }
+  }
+  $moved = $expectedRoot + '-probe-' + [guid]::NewGuid().ToString('N')
+  try {
+    Assert-AccessDenied {
+      [IO.Directory]::Move($expectedRoot, $moved)
+    } 'E_PROTECTED_INSTALL_RENAME_ALLOWED'
+  } finally {
+    if (Test-Path -LiteralPath $moved) { [IO.Directory]::Move($moved, $expectedRoot) }
+  }
+  $operator = Join-Path $expectedRoot 'jdc-tunnel-operator-ui.exe'
+  $process = Start-Process -FilePath $operator -ArgumentList '--check-installation' `
+    -WorkingDirectory $expectedRoot -PassThru -Wait
+  if ($process.ExitCode -ne 0) { throw 'E_PROTECTED_INSTALL_BACKEND_FAILED' }
+  Write-Output 'WINDOWS_PROTECTED_INSTALL_CUSTODY=PASS'
+  exit 0
+}
 $setup = $InstallerPath
 $target = Join-Path $env:LOCALAPPDATA 'JDC-isolated-installer-acceptance'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C812A487-AF99-4640-9F77-31DD4A9A7F12}_is1'

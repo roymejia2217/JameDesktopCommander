@@ -84,7 +84,7 @@ jobs:
         run: node --test test/test-filesystem-policy-fail-closed.js
 
       - name: Run distribution security tests
-        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js
+        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js test/test-windows-protected-installation.js
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
@@ -310,6 +310,10 @@ jobs:
           New-Item -ItemType Directory -Path $env:JDC_INSTALLER_OUTPUT -Force | Out-Null
           & $compiler /Qp 'packaging/windows/JameDesktopCommander.iss'
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
+          # Protected-root experiment: same verified inputs, separate AppId,
+          # no upload or release of this administrative candidate.
+          & $compiler /Qp /DJDC_PROTECTED_INSTALL 'packaging/windows/JameDesktopCommander.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'Protected Inno Setup compilation failed' }
 
       - name: Verify Windows installer install and uninstall
         id: windows_installer_acceptance
@@ -318,9 +322,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $setup = Join-Path $env:RUNNER_TEMP 'jdc-installer-output/UNPUBLISHED-jdc-installer-win32-x64.exe'
+          $protectedSetup = Join-Path $env:RUNNER_TEMP 'jdc-installer-output/UNPUBLISHED-jdc-managed-custody-win32-x64.exe'
           $version = (node -p "require('./package.json').version").Trim()
           pwsh -NoProfile -NonInteractive -File test/security/windows-installer-acceptance-runner.ps1 `
-            -InstallerPath $setup -SourceCommit $env:JDC_CANDIDATE_SOURCE_SHA -Version $version
+            -InstallerPath $setup -SourceCommit $env:JDC_CANDIDATE_SOURCE_SHA -Version $version `
+            -ProtectedInstallerPath $protectedSetup
           if ($LASTEXITCODE -ne 0) { throw 'E_INSTALLER_ISOLATED_ACCEPTANCE_FAILED' }
 
       - name: Build nFPM Debian installer candidate

@@ -421,6 +421,20 @@ jobs:
           test -x /usr/bin/jdc
           test -x /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client
           /opt/jame-desktop-commander/tools/tunnel-client/tunnel-client --version | grep '^0\.0\.19' # Installed tunnel client
+          # Validate the experimental managed host against the actual installed
+          # package, without provisioning an identity, profile, key or service.
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          if dpkg-deb --contents "$deb" | grep -F 'jdc-managed-tunnel'; then
+            echo 'Experimental managed tunnel must not be included in the installer' >&2
+            exit 1
+          fi
+          test ! -e /etc/systemd/system/jdc-managed-tunnel.service
+          test ! -e /usr/lib/systemd/system/jdc-managed-tunnel.service
+          test ! -e /etc/sysusers.d/jdc-managed-tunnel.conf
+          test ! -e /usr/lib/sysusers.d/jdc-managed-tunnel.conf
+          systemd-sysusers --dry-run "$(realpath -e -- packaging/experimental/linux/sysusers.d/jdc-managed-tunnel.conf)"
+          systemd-analyze verify "$(realpath -e -- packaging/experimental/linux/systemd/jdc-managed-tunnel.service)"
+          test -f /opt/jame-desktop-commander/dist/index.js
           test -x /opt/jame-desktop-commander/jdc-tunnel-operator-ui
           test -f /opt/jame-desktop-commander/operator-ui-manifest.json
           test -f /usr/share/applications/jdc-tunnel-operator.desktop

@@ -1,0 +1,49 @@
+# Experimental system service, not installed or enabled by ordinary JDC.
+# Requires administrator-provisioned immutable package, profile and credential.
+# Native authority remains unavailable; this unit grants no filesystem access.
+[Unit]
+Description=JDC experimental managed OpenAI tunnel host
+Documentation=https://github.com/roymejia2217/JameDesktopCommander
+After=network-online.target
+Wants=network-online.target
+ConditionFileIsExecutable=/opt/jame-desktop-commander/tools/tunnel-client/tunnel-client
+ConditionFileIsExecutable=/opt/jame-desktop-commander/runtime/node
+ConditionPathExists=/opt/jame-desktop-commander/dist/index.js
+ConditionPathIsDirectory=/etc/jdc/managed-tunnel/profiles
+ConditionPathExists=/etc/jdc/managed-tunnel/control-plane-api-key
+
+[Service]
+Type=exec
+User=jdc-managed-tunnel
+Group=jdc-managed-tunnel
+StateDirectory=jdc-managed-tunnel
+StateDirectoryMode=0700
+RuntimeDirectory=jdc-managed-tunnel
+RuntimeDirectoryMode=0700
+Environment=HOME=/var/lib/jdc-managed-tunnel
+WorkingDirectory=/var/lib/jdc-managed-tunnel
+LoadCredential=control-plane-api-key:/etc/jdc/managed-tunnel/control-plane-api-key
+ExecStart=/opt/jame-desktop-commander/tools/tunnel-client/tunnel-client run --profile-dir /etc/jdc/managed-tunnel/profiles --profile managed --control-plane.api-key=file:%d/control-plane-api-key "--mcp.command=channel=main,command=/opt/jame-desktop-commander/runtime/node /opt/jame-desktop-commander/dist/index.js --require-native-authority --no-onboarding" --mcp.stdio-failure-policy=exit
+Restart=no
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal

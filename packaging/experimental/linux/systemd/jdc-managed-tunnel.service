@@ -23,7 +23,7 @@ RuntimeDirectoryMode=0700
 Environment=HOME=/var/lib/jdc-managed-tunnel
 WorkingDirectory=/var/lib/jdc-managed-tunnel
 LoadCredential=control-plane-api-key:/etc/jdc/managed-tunnel/control-plane-api-key
-ExecStart=/opt/jame-desktop-commander/tools/tunnel-client/tunnel-client run --profile-dir /etc/jdc/managed-tunnel/profiles --profile managed --control-plane.api-key=file:%d/control-plane-api-key "--mcp.command=channel=main,command=/opt/jame-desktop-commander/runtime/node /opt/jame-desktop-commander/dist/index.js --require-native-authority --no-onboarding" --mcp.stdio-failure-policy=exit
+ExecStart=/opt/jame-desktop-commander/tools/tunnel-client/tunnel-client run --profile-dir /etc/jdc/managed-tunnel/profiles --profile managed --control-plane.api-key=file:%d/control-plane-api-key "--mcp.command=channel=main,command=/opt/jame-desktop-commander/runtime/node /opt/jame-desktop-commander/dist/index.js --require-native-authority --no-onboarding" --mcp.stdio-failure-policy=exit --health.unix-socket=/run/jdc-managed-tunnel/health.sock --open-web-ui=false --allow-remote-ui=false
 Restart=no
 TimeoutStartSec=30s
 TimeoutStopSec=15s

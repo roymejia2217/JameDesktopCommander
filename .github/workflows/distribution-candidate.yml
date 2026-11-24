@@ -347,6 +347,13 @@ jobs:
             --packager deb \
             --target "$JDC_INSTALLER_OUTPUT/UNPUBLISHED-jdc-installer-linux-x64.deb"
 
+      - name: Set up pinned Go for upstream tunnel acceptance
+        if: matrix.target == 'linux-x64'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.3'
+          cache: false
+
       - name: Verify Debian install and remove
         id: linux_installer_acceptance
         if: matrix.target == 'linux-x64'
@@ -440,6 +447,26 @@ jobs:
           test -f /usr/share/applications/jdc-tunnel-operator.desktop
           node scripts/operator-ui-bundle.mjs verify-installed /opt/jame-desktop-commander "$JDC_CANDIDATE_SOURCE_SHA" linux-x64
           /opt/jame-desktop-commander/jdc-tunnel-operator-ui --check-installation
+          # Exercise the real installed tunnel-client using the upstream
+          # version-matched control-plane fixture. Only synthetic credentials.
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          upstream="$RUNNER_TEMP/jdc-tunnel-client-test-source"
+          test ! -e "$upstream"
+          test ! -L "$upstream"
+          git init "$upstream"
+          git -C "$upstream" fetch --depth=1 https://github.com/openai/tunnel-client.git 01d67bb4da0d8359b808b4761f8db171ab682cd7
+          git -C "$upstream" checkout --detach FETCH_HEAD
+          test "$(git -C "$upstream" rev-parse HEAD)" = 01d67bb4da0d8359b808b4761f8db171ab682cd7
+          mkdir "$upstream/testsupport/jdcmanagedacceptance"
+          cp test/security/managed_tunnel_e2e_test.go "$upstream/testsupport/jdcmanagedacceptance/"
+          export JDC_MANAGED_TUNNEL_ACCEPTANCE=1
+          export JDC_ACCEPTANCE_SOURCE_ROOT="$GITHUB_WORKSPACE"
+          export GOTOOLCHAIN=local
+          (
+            cd "$upstream"
+            go test -mod=readonly -count=1 -timeout=4m -json ./testsupport/jdcmanagedacceptance
+          ) | tee "$RUNNER_TEMP/jdc-managed-tunnel-acceptance.jsonl"
+          jq -es 'any(.[]; .Action == "pass" and .Test == "TestManagedOfficialTunnelDeniesWithoutBroker") and all(.[]; .Action != "skip" and .Action != "fail")' "$RUNNER_TEMP/jdc-managed-tunnel-acceptance.jsonl"
           sudo dpkg -r jame-desktop-commander
           sudo dpkg --purge jame-desktop-commander
           if dpkg-query -W jame-desktop-commander >/dev/null 2>&1; then

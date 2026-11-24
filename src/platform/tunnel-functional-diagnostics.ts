@@ -114,10 +114,20 @@ export function parseTunnelFunctionalHealth(raw: unknown): TunnelFunctionalDiagn
     const toolsList = child(mcpDetails, 'tools_list');
     const ok = boolean(toolsList, 'ok');
     const complete = boolean(toolsList, 'complete');
-    const discovery = ok === true && complete === true
-        ? 'observed_complete'
-        : ok === false || complete === false
-            ? 'observed_incomplete' : 'unverified';
+    // The official client resets passive catalog evidence to a zero-valued
+    // MCPToolsList, with an empty names array and no observation timestamp.
+    // This is not an incomplete traversal; explicit invalidation sets partial.
+    const names = toolsList?.tool_names;
+    const resetCatalog = ok === false && complete === false &&
+        boolean(toolsList, 'partial') === false &&
+        boolean(toolsList, 'limited') === false &&
+        toolsList?.observed_at === undefined && count(toolsList, 'retained_count') === 0 &&
+        Array.isArray(names) && names.length === 0;
+    const discovery = resetCatalog ? 'unverified'
+        : ok === true && complete === true
+            ? 'observed_complete'
+            : ok === false || complete === false
+                ? 'observed_incomplete' : 'unverified';
     const live = boolean(root, 'live');
     const ready = boolean(root, 'ready');
     const localHealth = live === null || ready === null

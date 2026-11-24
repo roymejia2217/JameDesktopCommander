@@ -1,4 +1,3 @@
-import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -81,7 +80,7 @@ export class DesktopCommanderIntegration {
 
         if (!config) {
             console.debug('[DEBUG] No MCP config found');
-            throw new Error('Desktop Commander MCP not found. Please install it globally via `npm install -g @wonderwhy-er/desktop-commander` or build the local project.');
+            throw new Error('E_LOCAL_MCP_RUNTIME_UNAVAILABLE: repair or rebuild the installed JameDesktopCommander runtime.');
         }
 
         console.log(` - ⏳ Connecting to Local Desktop Commander MCP using: ${config.command} ${config.args.join(' ')}`);
@@ -241,56 +240,22 @@ export class DesktopCommanderIntegration {
     }
 
     async resolveMcpConfig(): Promise<McpConfig | null> {
-        console.debug('[DEBUG] Resolving MCP config...');
-        // Option 1: Development/Local Build
-        // Adjusting path resolution since we are now in src/remote-device and dist is in root/dist
-        // Original: path.resolve(__dirname, '../../dist/index.js')
-        const devPath = path.resolve(__dirname, '../../dist/index.js');
-        console.debug('[DEBUG] Checking local dev path:', devPath);
+        // The remote host and its MCP server belong to the same installed
+        // runtime. Never substitute a PATH-discovered global package.
+        // This selects a deterministic entrypoint; it is not proof of
+        // administrator-protected image custody or original-host identity.
+        const entrypoint = path.resolve(__dirname, '../../dist/index.js');
         try {
-            await fs.access(devPath);
-            console.debug(' - 🔍 Found local MCP server at:', devPath);
+            const entry = await fs.lstat(entrypoint);
+            if (!entry.isFile()) return null;
             return {
-                command: process.execPath, // Use the current node executable
-                args: [devPath],
-                cwd: path.dirname(devPath)
+                command: process.execPath,
+                args: [entrypoint],
+                cwd: path.dirname(entrypoint),
             };
         } catch {
-            console.debug('[DEBUG] Local dev path not found, trying global installation');
-            // Local file not found, continue...
+            return null;
         }
-
-        // Option 2: Global Installation
-        const commandName = 'desktop-commander';
-        console.debug('[DEBUG] Checking for global command:', commandName);
-        try {
-            await new Promise<void>((resolve, reject) => {
-                // Use platform-appropriate command to check if the command exists in PATH
-                // We can't run it directly as it's an stdio MCP server that waits for input
-                const whichCommand = process.platform === 'win32' ? 'where' : 'which';
-                console.debug('[DEBUG] Using platform command:', whichCommand, 'on platform:', process.platform);
-                const check = spawn(whichCommand, [commandName], { windowsHide: true });  // Prevent visible console windows on Windows
-                check.on('error', (err) => {
-                    console.debug('[DEBUG] Spawn error for', whichCommand, ':', err.message);
-                    reject(err);
-                });
-                check.on('close', (code) => {
-                    console.debug('[DEBUG]', whichCommand, 'exited with code:', code);
-                    return code === 0 ? resolve() : reject(new Error('Command not found'));
-                });
-            });
-            console.debug(' - Found global desktop-commander CLI');
-            return {
-                command: commandName,
-                args: []
-            };
-        } catch (err) {
-            console.debug('[DEBUG] Global command not found:', err);
-            // Global command not found
-        }
-
-        console.debug('[DEBUG] No MCP config resolved');
-        return null;
     }
 
     async callClientTool(toolName: string, args: any, metadata?: any) {

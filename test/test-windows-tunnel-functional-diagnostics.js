@@ -246,3 +246,25 @@ test('control-plane causes classify safely without asserting expiry or trusting 
     assert.equal(result.controlPlaneProblem, 'unverified');
   }
 });
+
+// Official tunnel-client v0.0.19 resets the passive catalog to this shape.
+// See pkg/healthstate/mcp.go and pkg/mcpclient/protocol_observation.go.
+test('a reset official catalog is unobserved, not an incomplete traversal', () => {
+  const snapshot = structuredClone(example);
+  snapshot.components.mcp.details.tools_list = {
+    ok: false, complete: false, partial: false, limited: false,
+    retained_count: 0, tool_names: [],
+  };
+  const found = parseTunnelFunctionalHealth(snapshot);
+  assert.equal(found.toolDiscovery, 'unverified');
+  assert.equal(found.operability.remoteRoundTrip, 'not_observed');
+});
+
+test('an explicitly invalidated official catalog remains incomplete', () => {
+  const snapshot = structuredClone(example);
+  snapshot.components.mcp.details.tools_list = {
+    ok: false, complete: false, partial: true, limited: false,
+    retained_count: 0, tool_names: [],
+  };
+  assert.equal(parseTunnelFunctionalHealth(snapshot).toolDiscovery, 'observed_incomplete');
+});

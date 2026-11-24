@@ -248,7 +248,9 @@ fn guidance(reason: &str) -> &'static str {
         "LOCAL_READINESS_UNVERIFIED" => {
             "Local readiness not verified. Check local health diagnostics."
         }
-        "MCP_TOOLS_LIST_UNVERIFIED" => "MCP tools are incomplete. Remote access is unverified.",
+        "MCP_TOOLS_LIST_UNVERIFIED" => {
+            "MCP tool catalog completeness is not verified. Remote access is unverified."
+        }
         "MCP_HANDSHAKE_UNOBSERVED" => "MCP handshake not observed.",
         "TASK_STATUS_UNAVAILABLE" => "Tunnel task unavailable. Check installation.",
         "CLIENT_PROVENANCE_UNVERIFIED" => {
@@ -407,6 +409,14 @@ mod tests {
         assert!(guidance("CONTROL_PLANE_CREDENTIAL_REJECTED").contains("401"));
         assert!(guidance("CONTROL_PLANE_FORBIDDEN").contains("403"));
         assert!(guidance("CONTROL_PLANE_RATE_LIMITED").contains("429"));
+    }
+
+    #[test]
+    fn unverified_tool_catalog_guidance_does_not_assert_incompleteness() {
+        let message = guidance("MCP_TOOLS_LIST_UNVERIFIED");
+        assert!(message.contains("not verified"), "{message}");
+        assert!(!message.contains("are incomplete"), "{message}");
+        assert!(message.contains("Remote access is unverified"), "{message}");
     }
 
     #[test]

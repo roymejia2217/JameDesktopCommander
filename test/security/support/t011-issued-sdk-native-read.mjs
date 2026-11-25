@@ -88,7 +88,9 @@ export async function exerciseIssuedJdcRead(socketPath, createJdcServer, timeout
       operations++;
       try {
         const bytes = await readAttestedNative(socketPath, timeoutMs, signal);
-        return { status: 'read', text: new TextDecoder('utf-8', { fatal: true }).decode(bytes) };
+        // The fixture compares exact native bytes after the MCP round trip.
+        // Preserve an initial BOM as U+FEFF rather than silently stripping it.
+        return { status: 'read', text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) };
       } catch {
         return { status: 'denied' };
       }

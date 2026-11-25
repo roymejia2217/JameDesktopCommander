@@ -65,3 +65,15 @@ test('official MCP SDK tool rejects malformed native lengths', async () => {
     await assert.rejects(exerciseIssuedSdkRead(socket), /E_NATIVE_READ_DENIED/);
   });
 });
+
+test('real JDC dispatcher preserves every UTF-8 byte, including a leading BOM', async () => {
+  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('SERVICE_DOMAIN_BYTES')]);
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(bytes.length);
+  await withNativeFixture(Buffer.concat([Buffer.from('A'), length, bytes]),
+    async (socket) => {
+      const output = await exerciseIssuedJdcRead(socket, createJdcServer);
+      assert.deepEqual(output, bytes);
+      assert.equal(output.equals(Buffer.from('SERVICE_DOMAIN_BYTES')), false);
+    });
+});

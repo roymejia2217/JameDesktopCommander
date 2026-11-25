@@ -44,6 +44,11 @@ function Write-SanitizedChildEvidence {
     $_ -cmatch '^E_INSTALLER_INNO_EXIT_CODE_-?[1-9][0-9]{0,9}$'
   } | Select-Object -Last 1)
   if ($innoCode.Count -eq 1) { Write-Output $innoCode[0] }
+  # Fixed child cleanup evidence only; never echo arbitrary exception text.
+  foreach ($code in @('E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE',
+      'E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')) {
+    if ($diagnostics -ccontains $code) { Write-Output $code }
+  }
   $privateEvidence = $diagnostics -join [char]10
   if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
     Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'

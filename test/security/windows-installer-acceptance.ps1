@@ -125,6 +125,25 @@ if ($ProtectedInstallRoot) {
     }
     throw $Code
   }
+  function Assert-ProtectedMutationDenied([scriptblock]$Mutation, [scriptblock]$Undo, [string]$Code) {
+    $state = @{ Changed = $false }
+    $failure = $null
+    try {
+      Assert-AccessDenied { & $Mutation $state } $Code
+      if ($state.Changed) { throw $Code }
+    } catch {
+      $failure = $_
+      throw
+    } finally {
+      if ($state.Changed) {
+        try { & $Undo }
+        catch {
+          if ($null -eq $failure) { throw }
+          [Console]::Error.WriteLine('E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+        }
+      }
+    }
+  }
   # Request individual native mutation rights without altering any object.
   # Only ERROR_ACCESS_DENIED proves a negative access result.
   Add-Type -TypeDefinition @'
@@ -135,13 +154,78 @@ public static class JdcInstallerAccessProbe {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
         IntPtr security, uint disposition, uint flags, IntPtr template);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString {
+        public ushort Length, MaximumLength;
+        public IntPtr Buffer;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes {
+        public uint Length;
+        public IntPtr RootDirectory, ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor, SecurityQualityOfService;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoStatusBlock {
+        public IntPtr Status, Information;
+    }
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtOpenFile(out SafeFileHandle handle, uint desiredAccess,
+        ref ObjectAttributes attributes, out IoStatusBlock ioStatus, uint shareAccess, uint openOptions);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor);
+
     public static int OpenExisting(string path, uint access) {
-        // OPEN_EXISTING, share read/write/delete, backup semantics and no final reparse follow.
-        using (SafeFileHandle handle = CreateFileW(path, access, 7, IntPtr.Zero, 3,
-            0x02200000, IntPtr.Zero)) {
-            if (handle.IsInvalid) return Marshal.GetLastWin32Error();
-            return 0;
+        // The fixture uses only local drive-qualified filesystem paths.
+        // NtOpenFile without FILE_SYNCHRONOUS_IO_* requests exactly access.
+        // CreateFileW adds rights even in overlapped mode; that is not proof.
+        if (path.Length < 3 || path[1] != ':' || path[2] != '\\' ||
+            path.IndexOf('\0') >= 0 || path.Length > 32000) return -1;
+        string nativePath = @"\??\" + path;
+        IntPtr nameBuffer = IntPtr.Zero, namePointer = IntPtr.Zero;
+        SafeFileHandle handle = null;
+        try {
+            nameBuffer = Marshal.StringToHGlobalUni(nativePath);
+            var name = new UnicodeString {
+                Length = checked((ushort)(nativePath.Length * 2)),
+                MaximumLength = checked((ushort)((nativePath.Length + 1) * 2)),
+                Buffer = nameBuffer
+            };
+            namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+            Marshal.StructureToPtr(name, namePointer, false);
+            var attributes = new ObjectAttributes {
+                Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes)),
+                ObjectName = namePointer, Attributes = 0x40 // OBJ_CASE_INSENSITIVE
+            };
+            IoStatusBlock io;
+            // Share all; existing object only; do not follow a final reparse point.
+            int status = NtOpenFile(out handle, access, ref attributes, out io, 7, 0x00200000);
+            if (status == 0 && handle != null && !handle.IsInvalid) return 0;
+            return status == unchecked((int)0xC0000022) ? 5 : -1;
+        } finally {
+            if (handle != null) handle.Dispose();
+            if (namePointer != IntPtr.Zero) Marshal.FreeHGlobal(namePointer);
+            if (nameBuffer != IntPtr.Zero) Marshal.FreeHGlobal(nameBuffer);
         }
+    }
+
+    // Retain an ACL restoration handle before denying SYNCHRONIZE on the
+    // disposable calibration directory. Never use this on the install root.
+    public static SafeFileHandle OpenCalibrationAcl(string path) {
+        SafeFileHandle handle = CreateFileW(path, 0x00040000, 7, IntPtr.Zero, 3,
+            0x02200000, IntPtr.Zero);
+        if (handle.IsInvalid) {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new System.ComponentModel.Win32Exception(error);
+        }
+        return handle;
+    }
+    public static void SetCalibrationDacl(SafeFileHandle handle, byte[] descriptor) {
+        if (!SetKernelObjectSecurity(handle, 4, descriptor))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
 }
 '@
@@ -200,6 +284,40 @@ public static class JdcInstallerAccessProbe {
         [JdcInstallerAccessProbe]::OpenExisting($controlFile, [uint32][Security.AccessControl.FileSystemRights]::AppendData) -ne 5) {
       throw 'E_PROTECTED_WRITE_PROBE_CONTROL_FAILED'
     }
+    # A directory with WRITE_DAC but without SYNCHRONIZE is a positive
+    # control for exact native access. Retain a handle to restore its ACL.
+    $exactDirectory = Join-Path $control 'exact-directory'
+    New-Item -ItemType Directory -Path $exactDirectory -ErrorAction Stop | Out-Null
+    $originalDescriptor = (Get-Acl -LiteralPath $exactDirectory).GetSecurityDescriptorBinaryForm()
+    $aclHandle = [JdcInstallerAccessProbe]::OpenCalibrationAcl($exactDirectory)
+    $exactFailure = $null
+    try {
+      $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($originalDescriptor, 0)
+      $synchronize = [uint32][Security.AccessControl.FileSystemRights]::Synchronize
+      $denySync = [Security.AccessControl.CommonAce]::new(
+        [Security.AccessControl.AceFlags]::None,
+        [Security.AccessControl.AceQualifier]::AccessDenied, [int]$synchronize,
+        $identity.User, $false, $null)
+      $descriptor.DiscretionaryAcl.InsertAce(0, $denySync)
+      $descriptorBytes = [byte[]]::new($descriptor.BinaryLength)
+      $descriptor.GetBinaryForm($descriptorBytes, 0)
+      [JdcInstallerAccessProbe]::SetCalibrationDacl($aclHandle, $descriptorBytes)
+      $writeDac = [uint32][Security.AccessControl.FileSystemRights]::ChangePermissions
+      if ([JdcInstallerAccessProbe]::OpenExisting($exactDirectory, $synchronize) -ne 5 -or
+          [JdcInstallerAccessProbe]::OpenExisting($exactDirectory, $writeDac) -ne 0) {
+        throw 'E_PROTECTED_EXACT_ACCESS_CALIBRATION_FAILED'
+      }
+    } catch {
+      $exactFailure = $_
+      throw
+    } finally {
+      try {
+        [JdcInstallerAccessProbe]::SetCalibrationDacl($aclHandle, $originalDescriptor)
+      } catch {
+        if ($null -eq $exactFailure) { throw }
+        [Console]::Error.WriteLine('E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+      } finally { $aclHandle.Dispose() }
+    }
   } catch {
     $calibrationFailure = $_
     throw
@@ -248,35 +366,29 @@ public static class JdcInstallerAccessProbe {
       Assert-ProtectedAccessDenied $item.FullName $right
     }
     $probe = Join-Path $directory ('jdc-custody-probe-' + [guid]::NewGuid().ToString('N'))
-    try {
-      Assert-AccessDenied {
-        $stream = [IO.File]::Open($probe, [IO.FileMode]::CreateNew,
-          [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $stream.Dispose()
-      } 'E_PROTECTED_INSTALL_CREATE_ALLOWED'
-    } finally {
-      if (Test-Path -LiteralPath $probe) { [IO.File]::Delete($probe) }
-    }
+    Assert-ProtectedMutationDenied {
+      param($state)
+      $stream = [IO.File]::Open($probe, [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::None)
+      $state.Changed = $true
+      $stream.Dispose()
+    } { [IO.File]::Delete($probe) } 'E_PROTECTED_INSTALL_CREATE_ALLOWED'
   }
   # A write denial alone does not imply DELETE/rename denial. Exercise
   # the actual entrypoint and root independently, restoring on unexpected success.
   $entrypoint = Join-Path $expectedRoot 'dist\index.js'
   $movedEntry = $entrypoint + '-probe-' + [guid]::NewGuid().ToString('N')
-  try {
-    Assert-AccessDenied {
-      [IO.File]::Move($entrypoint, $movedEntry)
-    } 'E_PROTECTED_INSTALL_ENTRYPOINT_RENAME_ALLOWED'
-  } finally {
-    if (Test-Path -LiteralPath $movedEntry) { [IO.File]::Move($movedEntry, $entrypoint) }
-  }
+  Assert-ProtectedMutationDenied {
+    param($state)
+    [IO.File]::Move($entrypoint, $movedEntry)
+    $state.Changed = $true
+  } { [IO.File]::Move($movedEntry, $entrypoint) } 'E_PROTECTED_INSTALL_ENTRYPOINT_RENAME_ALLOWED'
   $moved = $expectedRoot + '-probe-' + [guid]::NewGuid().ToString('N')
-  try {
-    Assert-AccessDenied {
-      [IO.Directory]::Move($expectedRoot, $moved)
-    } 'E_PROTECTED_INSTALL_RENAME_ALLOWED'
-  } finally {
-    if (Test-Path -LiteralPath $moved) { [IO.Directory]::Move($moved, $expectedRoot) }
-  }
+  Assert-ProtectedMutationDenied {
+    param($state)
+    [IO.Directory]::Move($expectedRoot, $moved)
+    $state.Changed = $true
+  } { [IO.Directory]::Move($moved, $expectedRoot) } 'E_PROTECTED_INSTALL_RENAME_ALLOWED'
   $operator = Join-Path $expectedRoot 'jdc-tunnel-operator-ui.exe'
   $process = Start-Process -FilePath $operator -ArgumentList '--check-installation' `
     -WorkingDirectory $expectedRoot -PassThru -Wait

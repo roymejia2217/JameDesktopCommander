@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 const installer = read('../packaging/windows/JameDesktopCommander.iss');
@@ -76,4 +77,35 @@ test('cleanup checks and calibration cleanup are guarded against secondary failu
   assert.ok(runner.includes("catch { $cleanupFailures.Add('CHILD_DISPOSE') }"));
   assert.ok(child.includes('$calibrationFailure = $_'));
   assert.ok(child.includes('if ($null -eq $calibrationFailure) { throw }'));
+});
+
+test('directory custody probes do not silently add SYNCHRONIZE access', () => {
+  assert.ok(child.includes('NtOpenFile'));
+  assert.ok(child.includes('E_PROTECTED_EXACT_ACCESS_CALIBRATION_FAILED'));
+  assert.ok(child.includes('SetKernelObjectSecurity'));
+});
+
+test('mutating custody probes preserve failures and only undo confirmed changes', () => {
+  assert.ok(child.includes('function Assert-ProtectedMutationDenied'));
+  assert.ok(child.includes('$state.Changed'));
+  assert.ok(child.includes('E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE'));
+  for (const code of ['E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE',
+    'E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE']) {
+    assert.ok(runner.includes(code), code);
+  }
+});
+
+test('Windows mutation probe preserves the primary error and skips unneeded cleanup', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const start = child.indexOf('  function Assert-AccessDenied(');
+  const end = child.indexOf('  # Request individual native mutation rights', start);
+  assert.ok(start >= 0 && end > start);
+  const exercise = "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n$observed = @{ Undo = 0 }\nAssert-ProtectedMutationDenied {\n  param($state)\n  throw [UnauthorizedAccessException]::new()\n} { $observed.Undo++ } 'E_UNEXPECTED_SUCCESS'\nif ($observed.Undo -ne 0) { throw 'denied operation attempted cleanup' }\ntry {\n  Assert-ProtectedMutationDenied {\n    param($state)\n    $state.Changed = $true\n  } { $observed.Undo++; throw 'SYNTHETIC_CLEANUP_FAILURE' } 'E_PRIMARY_PROBE_FAILURE'\n  throw 'unexpected successful probe'\n} catch {\n  if ($_.Exception.Message -cne 'E_PRIMARY_PROBE_FAILURE') { throw }\n}\nif ($observed.Undo -ne 1) { throw 'cleanup count mismatch' }\nWrite-Output 'MUTATION_CLEANUP_PRIMARY_PRESERVED'";
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    child.slice(start, end) + '\n' + exercise], { encoding: 'utf8', timeout: 12000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MUTATION_CLEANUP_PRIMARY_PRESERVED/);
+  assert.match(result.stderr, /E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE/);
+  assert.doesNotMatch(result.stderr, /SYNTHETIC_CLEANUP_FAILURE/);
 });

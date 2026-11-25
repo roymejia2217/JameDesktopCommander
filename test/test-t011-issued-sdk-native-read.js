@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { unlink } from 'node:fs/promises';
-import { exerciseIssuedSdkRead } from './security/support/t011-issued-sdk-native-read.mjs';
+import { exerciseIssuedSdkRead, exerciseIssuedJdcRead } from './security/support/t011-issued-sdk-native-read.mjs';
+import { createJdcServer } from '../dist/server.js';
 
 async function withNativeFixture(reply, evaluate) {
   const socketPath = process.platform === 'win32'
@@ -37,6 +38,16 @@ test('official MCP SDK tool returns exact native bytes over real OS stream', asy
     async (socket) => {
       const output = await exerciseIssuedSdkRead(socket);
       assert.deepEqual(output, bytes);
+    });
+});
+
+test('real JDC dispatcher routes the fixed managed read across an OS stream', async () => {
+  const bytes = Buffer.from('SERVICE_DOMAIN_BYTES');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(bytes.length);
+  await withNativeFixture(Buffer.concat([Buffer.from('A'), length, bytes]),
+    async (socket) => {
+      assert.deepEqual(await exerciseIssuedJdcRead(socket, createJdcServer), bytes);
     });
 });
 

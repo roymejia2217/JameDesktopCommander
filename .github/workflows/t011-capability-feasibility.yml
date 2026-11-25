@@ -193,15 +193,11 @@ jobs:
         with:
           node-version: 24
 
-      - name: Bundle official MCP SDK test client from the locked dependency tree
+      - name: Build real JDC runtime for the protected issuer acceptance
         if: matrix.target == 'linux-x64'
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          mkdir -p .tmp
-          node node_modules/esbuild/bin/esbuild \
-            test/security/support/t011-issued-sdk-native-read.mjs \
-            --bundle --platform=node --format=esm --target=node24 \
-            --outfile=.tmp/t011-issued-sdk-native-read.mjs
+          npm run build
 
       - name: Test Linux storage isolation and outside-object integrity
         if: matrix.target == 'linux-x64'

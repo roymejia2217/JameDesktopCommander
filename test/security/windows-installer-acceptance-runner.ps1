@@ -341,10 +341,17 @@ try {
         if (!$child.WaitForExit(30000)) { $cleanupFailures.Add('CHILD_PROCESS') }
       }
     } catch { $cleanupFailures.Add('CHILD_PROCESS') }
-    $child.Dispose()
+    try { $child.Dispose() }
+    catch { $cleanupFailures.Add('CHILD_DISPOSE') }
   }
-  if ($null -ne $signalEvent) { $signalEvent.Dispose() }
-  if ($null -ne $resumeEvent) { $resumeEvent.Dispose() }
+  if ($null -ne $signalEvent) {
+    try { $signalEvent.Dispose() }
+    catch { $cleanupFailures.Add('SIGNAL_EVENT') }
+  }
+  if ($null -ne $resumeEvent) {
+    try { $resumeEvent.Dispose() }
+    catch { $cleanupFailures.Add('RESUME_EVENT') }
+  }
   # The runner is disposable, but CI still verifies complete owned cleanup.
   if ($null -ne $createdAccount) {
     try {
@@ -358,10 +365,11 @@ try {
     catch { $cleanupFailures.Add('LOCAL_USER') }
   }
   foreach ($path in @($stage, $stdout, $stderr)) {
-    if (Test-Path -LiteralPath $path) {
-      try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
-      catch { $cleanupFailures.Add('OWNED_FILES') }
-    }
+    try {
+      if (Test-Path -LiteralPath $path -ErrorAction Stop) {
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+      }
+    } catch { $cleanupFailures.Add('OWNED_FILES') }
   }
   if ($cleanupFailures.Count -ne 0) {
     $cleanupMessage = 'E_INSTALLER_ISOLATED_TEST_CLEANUP_FAILED_' + ($cleanupFailures -join '_')

@@ -125,8 +125,8 @@ if ($ProtectedInstallRoot) {
     }
     throw $Code
   }
-  # Request native DELETE/FILE_DELETE_CHILD without deleting or renaming
-  # anything. Only ERROR_ACCESS_DENIED proves a negative access result.
+  # Request individual native mutation rights without altering any object.
+  # Only ERROR_ACCESS_DENIED proves a negative access result.
   Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -147,17 +147,29 @@ public static class JdcInstallerAccessProbe {
 '@
   $deleteAccess = [uint32][Security.AccessControl.FileSystemRights]::Delete
   $deleteChildAccess = [uint32][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+  # Each request is separate: aggregate GENERIC_WRITE denial is not evidence
+  # that FILE_WRITE_DATA, FILE_APPEND_DATA or ACL changes are denied.
+  $mutationRights = @(
+    [uint32][Security.AccessControl.FileSystemRights]::WriteData
+    [uint32][Security.AccessControl.FileSystemRights]::AppendData
+    [uint32][Security.AccessControl.FileSystemRights]::WriteExtendedAttributes
+    [uint32][Security.AccessControl.FileSystemRights]::WriteAttributes
+    [uint32][Security.AccessControl.FileSystemRights]::ChangePermissions
+    [uint32][Security.AccessControl.FileSystemRights]::TakeOwnership
+  )
   function Assert-ProtectedAccessDenied([string]$Path, [uint32]$Access) {
     $result = [JdcInstallerAccessProbe]::OpenExisting($Path, $Access)
-    if ($result -eq 0) { throw 'E_PROTECTED_INSTALL_DELETE_ACCESS_ALLOWED' }
-    if ($result -ne 5) { throw 'E_PROTECTED_INSTALL_DELETE_ACCESS_UNVERIFIED' }
+    if ($result -eq 0) { throw 'E_PROTECTED_MUTATION_ACCESS_ALLOWED' }
+    if ($result -ne 5) { throw 'E_PROTECTED_MUTATION_ACCESS_UNVERIFIED' }
   }
   # Calibrate on a child-owned disposable directory, including DELETE
   # granted on an existing file while creation of another file is denied.
   $control = Join-Path $env:TEMP ('jdc-delete-control-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $control -ErrorAction Stop | Out-Null
-  $originalAcl = Get-Acl -LiteralPath $control
+  $originalAcl = $null
+  $calibrationFailure = $null
   try {
+    $originalAcl = Get-Acl -LiteralPath $control
     $controlFile = Join-Path $control 'existing.txt'
     [IO.File]::WriteAllText($controlFile, 'synthetic')
     $controlAcl = Get-Acl -LiteralPath $control
@@ -175,9 +187,32 @@ public static class JdcInstallerAccessProbe {
         [JdcInstallerAccessProbe]::OpenExisting($control, $deleteChildAccess) -ne 0) {
       throw 'E_PROTECTED_DELETE_PROBE_CONTROL_FAILED'
     }
+    # Deny only APPEND_DATA, while WRITE_DATA remains available. This is the
+    # adversarial case that a generic write-only check would falsely accept.
+    $fileAcl = Get-Acl -LiteralPath $controlFile
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $identity.User, [Security.AccessControl.FileSystemRights]::AppendData,
+      [Security.AccessControl.AccessControlType]::Deny))
+    Set-Acl -LiteralPath $controlFile -AclObject $fileAcl
+    $genericWrite = [uint32]0x40000000 # Win32 GENERIC_WRITE
+    if ([JdcInstallerAccessProbe]::OpenExisting($controlFile, $genericWrite) -ne 5 -or
+        [JdcInstallerAccessProbe]::OpenExisting($controlFile, [uint32][Security.AccessControl.FileSystemRights]::WriteData) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($controlFile, [uint32][Security.AccessControl.FileSystemRights]::AppendData) -ne 5) {
+      throw 'E_PROTECTED_WRITE_PROBE_CONTROL_FAILED'
+    }
+  } catch {
+    $calibrationFailure = $_
+    throw
   } finally {
-    Set-Acl -LiteralPath $control -AclObject $originalAcl
-    Remove-Item -LiteralPath $control -Recurse -Force
+    try {
+      if ($null -ne $originalAcl) {
+        Set-Acl -LiteralPath $control -AclObject $originalAcl
+      }
+      Remove-Item -LiteralPath $control -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($null -eq $calibrationFailure) { throw }
+      [Console]::Error.WriteLine('E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+    }
   }
   foreach ($relative in @('runtime','dist','tools','tools\tunnel-client',
       'runtime\node.exe','dist\index.js','jdc-tunnel-operator-ui.exe',
@@ -187,6 +222,9 @@ public static class JdcInstallerAccessProbe {
       throw 'E_PROTECTED_INSTALL_REPARSE_COMPONENT'
     }
     Assert-ProtectedAccessDenied $item.FullName $deleteAccess
+    foreach ($right in $mutationRights) {
+      Assert-ProtectedAccessDenied $item.FullName $right
+    }
     if (!$item.PSIsContainer) {
       # Require an actual readable object and then reject a write handle.
       $null = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256
@@ -206,6 +244,9 @@ public static class JdcInstallerAccessProbe {
     }
     Assert-ProtectedAccessDenied $item.FullName $deleteAccess
     Assert-ProtectedAccessDenied $directory $deleteChildAccess
+    foreach ($right in $mutationRights) {
+      Assert-ProtectedAccessDenied $item.FullName $right
+    }
     $probe = Join-Path $directory ('jdc-custody-probe-' + [guid]::NewGuid().ToString('N'))
     try {
       Assert-AccessDenied {

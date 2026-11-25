@@ -61,3 +61,19 @@ test('protected cleanup preserves the primary acceptance failure', () => {
   assert.match(runner, /\$primaryFailure = \$_/);
   assert.match(runner, /if \(\$null -eq \$primaryFailure\) \{ throw \$cleanupMessage \}/);
 });
+
+test('protected custody independently denies narrow content and metadata mutation rights', () => {
+  for (const right of ['WriteData','AppendData','WriteExtendedAttributes','WriteAttributes','ChangePermissions','TakeOwnership']) {
+    assert.ok(child.includes('FileSystemRights]::' + right) || child.includes("'" + right + "'"), right);
+  }
+  assert.ok(child.includes('Assert-ProtectedAccessDenied $item.FullName $right'));
+  assert.ok(child.includes('E_PROTECTED_WRITE_PROBE_CONTROL_FAILED'));
+  assert.ok(child.includes('E_PROTECTED_MUTATION_ACCESS_UNVERIFIED'));
+});
+
+test('cleanup checks and calibration cleanup are guarded against secondary failure', () => {
+  assert.ok(runner.includes("try {\n      if (Test-Path -LiteralPath $path -ErrorAction Stop)"));
+  assert.ok(runner.includes("catch { $cleanupFailures.Add('CHILD_DISPOSE') }"));
+  assert.ok(child.includes('$calibrationFailure = $_'));
+  assert.ok(child.includes('if ($null -eq $calibrationFailure) { throw }'));
+});

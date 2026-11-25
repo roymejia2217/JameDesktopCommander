@@ -104,7 +104,8 @@ export function flushDeferredMessages() {
 
 deferLog('info', 'Loading server.ts');
 
-export const server = new Server(
+function makeServer(): Server {
+    return new Server(
     {
         name: "desktop-commander",
         version: VERSION,
@@ -117,16 +118,18 @@ export const server = new Server(
             logging: {},    // Add logging capability for console redirection
         },
     },
-);
+    );
+}
 
-// Add handler for resources/list method
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
+// Register the same MCP resources for every startup composition.
+function registerResourceHandlers(target: Server): void {
+target.setRequestHandler(ListResourcesRequestSchema, async () => {
     return {
         resources: listUiResources(),
     };
 });
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+target.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const { uri } = request.params;
     const response = await readUiResource(uri);
     if (response) {
@@ -137,12 +140,13 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 });
 
 // Add handler for prompts/list method
-server.setRequestHandler(ListPromptsRequestSchema, async () => {
+target.setRequestHandler(ListPromptsRequestSchema, async () => {
     // Return an empty list of prompts
     return {
         prompts: [],
     };
 });
+}
 
 // Store current client info (simple variable)
 let currentClient = { name: 'uninitialized', version: 'uninitialized' };
@@ -263,7 +267,8 @@ export async function ensureOperationalRuntimeInitialized(): Promise<void> {
 }
 
 // Add handler for initialization method - capture client info
-server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequest) => {
+function registerInitializeHandler(target: Server): void {
+target.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequest) => {
     try {
         // Extract and store current client information
         const clientInfo = request.params?.clientInfo;
@@ -296,6 +301,7 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
         throw error;
     }
 });
+}
 
 // Export current client info for access by other modules
 export { currentClient, currentCallIsRemote, currentRemoteClient };
@@ -319,7 +325,8 @@ function shouldIncludeTool(toolName: string): boolean {
     return true;
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+function registerListToolsHandler(target: Server): void {
+target.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
         // logToStderr('debug', 'Generating tools list...');
 
@@ -1353,12 +1360,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         throw error;
     }
 });
+}
 
 import * as handlers from './handlers/index.js';
+import { handleManagedRead, type ManagedReadOperation } from './handlers/managed-read.js';
 import { ServerResult, type ToolExecutionContext } from './types.js';
 import { createToolExecutionContext } from './tools/tool-execution-context.js';
 
-server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
+function registerCallToolHandler(target: Server, managedRead?: ManagedReadOperation): void {
+target.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
     await ensureOperationalRuntimeInitialized();
 
     const args = request.params.arguments;
@@ -1372,14 +1382,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest,
     // UI interactions are tracked separately via mcp_ui_event.
     const isUiOriginCall = !!(args && typeof args === 'object' && (args as any).origin === 'ui');
     if (isUiOriginCall) {
-        return runInUiOriginCallContext(() => handleCallToolRequest(request, executionContext));
+        return runInUiOriginCallContext(() => handleCallToolRequest(request, executionContext, managedRead));
     }
-    return handleCallToolRequest(request, executionContext);
+    return handleCallToolRequest(request, executionContext, managedRead);
 });
+}
 
 async function handleCallToolRequest(
     request: CallToolRequest,
     executionContext: ToolExecutionContext,
+    managedRead?: ManagedReadOperation,
 ): Promise<ServerResult> {
     const { name, arguments: args } = request.params;
     const startTime = Date.now();
@@ -1420,10 +1432,10 @@ async function handleCallToolRequest(
             setCurrentRemoteClient(null);
         }
 
-        if (name === 'set_config_value' && args && typeof args === 'object' && 'key' in args) {
+        if (!managedRead && name === 'set_config_value' && args && typeof args === 'object' && 'key' in args) {
             telemetryData.set_config_value_key_name = (args as any).key;
         }
-        if (name === 'get_prompts' && args && typeof args === 'object') {
+        if (!managedRead && name === 'get_prompts' && args && typeof args === 'object') {
             const promptArgs = args as any;
             telemetryData.action = promptArgs.action;
             if (promptArgs.category) {
@@ -1436,7 +1448,7 @@ async function handleCallToolRequest(
         }
 
         // Track tool call
-        trackToolCall(name, args);
+        trackToolCall(name, managedRead ? undefined : args);
 
         // Using a more structured approach with dedicated handlers
         // (result is declared above so the finally block can read execution status)
@@ -1453,15 +1465,17 @@ async function handleCallToolRequest(
         const meta = request.params._meta;
         const nativeRequiredByCaller = !!(meta && typeof meta === 'object' &&
             Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired'));
-        const nativeRequired = nativeRequiredByProcess || nativeRequiredByCaller;
+        const nativeRequired = !!managedRead || nativeRequiredByProcess || nativeRequiredByCaller;
         // Use a non-client-selectable sentinel, never a caller-provided tool
         // name, so denial still follows the normal accounting path below.
         switch (nativeRequired ? null : name) {
             case null:
-                result = {
-                    content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
-                    isError: true,
-                };
+                result = managedRead && name === 'read_file'
+                    ? await handleManagedRead(managedRead, args, executionContext.signal)
+                    : {
+                        content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
+                        isError: true,
+                    };
                 break;
 
             // Read-only route correlation; no authority to perform lifecycle actions.
@@ -1723,7 +1737,15 @@ async function handleCallToolRequest(
         ];
 
         if (!EXCLUDED_TOOLS.includes(name)) {
-            toolHistory.addCall(name, args, result, duration);
+            if (managedRead) {
+                // Managed content and paths must never be written into legacy history.
+                toolHistory.addCall(name, {}, {
+                    content: [{ type: 'text', text: '[managed operation: content omitted]' }],
+                    isError,
+                }, duration);
+            } else {
+                toolHistory.addCall(name, args, result, duration);
+            }
         }
 
         // Track success or failure based on result
@@ -1736,6 +1758,7 @@ async function handleCallToolRequest(
             console.log(`[FEEDBACK DEBUG] Tool ${name} failed, not checking feedback`);
         } else {
             await usageTracker.trackSuccess(name);
+            if (managedRead) return result;
             console.log(`[FEEDBACK DEBUG] Tool ${name} succeeded, checking feedback...`);
 
             // Check if should show onboarding (before feedback - first-time users are priority)
@@ -1873,5 +1896,22 @@ async function handleCallToolRequest(
     }
 }
 
-// Add no-op handlers so Visual Studio initialization succeeds
-server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
+/**
+ * Compose the same JDC MCP server with a startup-owned managed read operation.
+ * No caller-supplied metadata, CLI switch or environment value can install it.
+ * Until a protected launcher and broker enroll this dependency, the default
+ * runtime retains its existing native-required fail-closed behavior.
+ * JDC's operational state remains process-scoped: use one connected server
+ * instance per process.
+ */
+export function createJdcServer(options: Readonly<{ managedRead?: ManagedReadOperation }> = {}): Server {
+    const target = makeServer();
+    registerResourceHandlers(target);
+    registerInitializeHandler(target);
+    registerListToolsHandler(target);
+    registerCallToolHandler(target, options.managedRead);
+    target.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
+    return target;
+}
+
+export const server = createJdcServer();

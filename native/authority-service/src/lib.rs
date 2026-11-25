@@ -36,6 +36,8 @@ pub mod peer_policy;
 pub mod linux_message_origin;
 #[cfg(target_os = "linux")]
 pub mod linux_peer;
+#[cfg(target_os = "linux")]
+pub mod linux_read_disclosure;
 
 #[cfg(all(target_os = "linux", test))]
 mod linux_cross_principal;

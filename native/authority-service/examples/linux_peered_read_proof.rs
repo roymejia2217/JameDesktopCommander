@@ -8,10 +8,11 @@
 #[cfg(target_os = "linux")]
 mod proof {
     use jdc_authority_service::{
-        confined_read::read_regular_at,
-        linux_message_origin::{enable_writer_credentials, receive_attested_byte},
+        linux_message_origin::enable_writer_credentials,
         linux_peer::observe_kernel_peer,
+        linux_read_disclosure::read_attested_regular_into_socket,
         peer_policy::{verify_distinct_peer, DedicatedAccount},
+        policy_epoch::PolicyFence,
         verify_service_identity,
     };
     use std::{
@@ -264,6 +265,8 @@ mod proof {
             fs::Permissions::from_mode(0o600),
         ))?;
         let (approved_pid, pinned) = receive_attestation(&issuer_listener)?;
+        // Fixed disposable policy, not a durable installed-policy source.
+        let policy = PolicyFence::new(1).map_err(|_| "E_PEER_PROOF_POLICY")?;
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut foreign_denied = false;
         let mut same_uid_denied = false;
@@ -324,23 +327,21 @@ mod proof {
             // The handshake ensures that Linux installs SCM_CREDENTIALS before
             // the only request byte can be sent by the original process.
             io(conn.write_all(b"C"))?;
-            let request = receive_attested_byte(&conn, peer)
-                .map_err(|_| "E_PEER_PROOF_WRITER_NOT_ATTESTED")?;
-            if request != b'R' {
-                return Err("E_PEER_PROOF_INVALID_REQUEST");
-            }
             // The client supplies NO pathname, root, epoch, PID, UID or authority.
-            // The test fixture selects the sole fixed filename.
-            let bytes = read_regular_at(&root_fd, Path::new("service.bin"))
-                .map_err(|_| "E_PEER_PROOF_NATIVE_READ_DENIED")?;
-            if bytes != AUTHORIZED_CONTENT {
-                return Err("E_PEER_PROOF_UNEXPECTED_OBJECT_BYTES");
-            }
-            let length =
-                u32::try_from(bytes.len()).map_err(|_| "E_PEER_PROOF_RESPONSE_TOO_LARGE")?;
-            io(conn.write_all(b"A"))?;
-            io(conn.write_all(&length.to_be_bytes()))?;
-            io(conn.write_all(&bytes))?;
+            // The issuer-approved peer receives only the service-selected file.
+            // The independent native/SDK client still checks the exact bytes.
+            let ticket = policy.issue_read().map_err(|_| "E_PEER_PROOF_POLICY")?;
+            read_attested_regular_into_socket(
+                &policy,
+                &ticket,
+                &conn,
+                peer,
+                &root_fd,
+                Path::new("service.bin"),
+                Duration::from_secs(3),
+            )
+            .map_err(|_| "E_PEER_PROOF_NATIVE_READ_DENIED")?;
+            policy.revoke().map_err(|_| "E_PEER_PROOF_POLICY")?;
             authentic_read = true;
         }
         eprintln!("T011_LINUX_ROOT_ISSUED_PEER_BOUND_READ_PASS_NONRELEASE");

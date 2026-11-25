@@ -320,10 +320,10 @@ peer_server_log=''
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == \
    "$outside_hash" ]] || { echo 'E_PEER_PROOF_OUTSIDE_CHANGED' >&2; exit 1; }
 echo 'T011_LINUX_REAL_SERVICE_PEER_BOUND_READ_PASS_NONRELEASE'
-# Independent official MCP SDK tool call, this time from the exact
-# root-issued Node process whose live PID is attested by the native server.
-# It is a disposable SDK-to-kernel proof, NOT the shipping desktop MCP host.
-sdk_bundle="$(realpath -e -- .tmp/t011-issued-sdk-native-read.mjs)"
+# Official SDK calls the real JDC dispatcher from the root-issued Node
+# process whose live PID is attested by the native server. The fixed-object
+# adapter is disposable, not a shipping enrollment or general read policy.
+sdk_bundle="$(realpath -e -- test/security/support/t011-issued-sdk-native-read.mjs)"
 node_binary="$(realpath -e -- "$(command -v node)")"
 [[ "$("$node_binary" --version)" == v24.* ]] || exit 1
 sudo -n -u jdc-mcp-client -- "$node_binary" --version >/dev/null
@@ -333,6 +333,20 @@ sudo -n install -o root -g root -m 0555 -- "$sdk_bundle" "$sdk_installed"
    "$(sudo -n sha256sum "$sdk_installed" | cut -d ' ' -f1)" ]] || exit 1
 [[ "$(sudo -n stat -c '%U:%G:%a' "$sdk_installed")" == 'root:root:555' ]] || exit 1
 sudo -n -u jdc-mcp-client -- test -r "$sdk_installed"
+# Stage the already built runtime and its locked dependency tree. The issued
+# account must not be able to alter either the code or a dependency.
+sudo -n cp -a --no-preserve=ownership -- dist node_modules package.json "$base/"
+sudo -n chmod -R go-w -- "$base/dist" "$base/node_modules" "$base/package.json"
+if [[ -n "$(sudo -n find "$base/dist" "$base/node_modules" "$base/package.json" \
+  \( ! -uid 0 -o \( ! -type l -a -perm /022 \) \) -print -quit)" ]]; then
+  echo 'E_REAL_JDC_RUNTIME_CUSTODY' >&2; exit 1
+fi
+while IFS= read -r -d '' link; do
+  resolved="$(sudo -n realpath -e -- "$link")"
+  [[ "$resolved" == "$base/"* ]] || { echo 'E_REAL_JDC_EXTERNAL_DEPENDENCY' >&2; exit 1; }
+done < <(sudo -n find "$base/dist" "$base/node_modules" -type l -print0)
+sudo -n install -d -o "$client_uid" -g "$client_gid" -m 0700 -- "$base/client-state"
+sudo -n -u jdc-mcp-client -- test -r "$base/dist/server.js"
 sdk_socket="$peer_socket_dir/sdk-accepted.sock"
 sdk_issuer_socket="$peer_socket_dir/sdk-issuer.sock"
 peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-peered.XXXXXXXX)"
@@ -360,6 +374,8 @@ if ! sdk_issuer_output="$(sudo -n -- env GITHUB_ACTIONS=true \
 fi
 grep -Fq 'T011_LINUX_ROOT_ISSUED_OFFICIAL_SDK_NATIVE_BYTES_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_TOOL_NOT_PROVEN' >&2; exit 1; }
+grep -Fq 'T011_LINUX_ROOT_ISSUED_REAL_JDC_MANAGED_READ_PASS_NONRELEASE' \
+  <<<"$sdk_issuer_output" || { echo 'E_REAL_JDC_DISPATCH_NOT_PROVEN' >&2; exit 1; }
 sudo -n -u nobody -- "$peer_binary" deny "$sdk_socket"
 sudo -n -u jdc-mcp-client -- "$peer_binary" impersonate "$sdk_socket"
 if ! wait "$peer_server_pid"; then

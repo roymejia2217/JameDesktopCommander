@@ -5,7 +5,8 @@
 param(
   [Parameter(Mandatory)][string]$InstallerPath,
   [Parameter(Mandatory)][string]$SourceCommit,
-  [Parameter(Mandatory)][string]$Version
+  [Parameter(Mandatory)][string]$Version,
+  [Parameter(Mandatory)][string]$ProtectedInstallerPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,8 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or
   throw 'E_INSTALLER_EPHEMERAL_WINDOWS_RUNNER_REQUIRED'
 }
 if ($SourceCommit -notmatch '^[0-9a-f]{40}$' -or $Version -notmatch '^\d+\.\d+\.\d+$' -or
-    !(Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+    !(Test-Path -LiteralPath $InstallerPath -PathType Leaf) -or
+    !(Test-Path -LiteralPath $ProtectedInstallerPath -PathType Leaf)) {
   throw 'E_INSTALLER_UNVERIFIED_SOURCE'
 }
 Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
@@ -42,6 +44,11 @@ function Write-SanitizedChildEvidence {
     $_ -cmatch '^E_INSTALLER_INNO_EXIT_CODE_-?[1-9][0-9]{0,9}$'
   } | Select-Object -Last 1)
   if ($innoCode.Count -eq 1) { Write-Output $innoCode[0] }
+  # Fixed child cleanup evidence only; never echo arbitrary exception text.
+  foreach ($code in @('E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE',
+      'E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')) {
+    if ($diagnostics -ccontains $code) { Write-Output $code }
+  }
   $privateEvidence = $diagnostics -join [char]10
   if ($privateEvidence.Contains('Windows startup registry drift during installer acceptance')) {
     Write-Output 'E_INSTALLER_STARTUP_REGISTRY_DRIFT'
@@ -63,6 +70,7 @@ $createdAccount = $null
 $child = $null
 $signalEvent = $null
 $resumeEvent = $null
+$primaryFailure = $null
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
 $installerHash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
 try {
@@ -192,6 +200,142 @@ try {
     throw 'E_INSTALLER_CHILD_SUCCESS_WITNESS_MISSING'
   }
   Write-Output 'WINDOWS_ISOLATED_PRINCIPAL_ACCEPTANCE=PASS'
+  $child.Dispose()
+  $child = $null
+
+  # Separate clean-room administrative candidate, never a migration or a
+  # privileged launch of the per-user installation. Reuse the isolated user.
+  $protectedRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ProgramFiles)) 'JameDesktopCommander Managed Candidate'
+  $protectedKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B3A49286-DB7B-4BD1-B84D-9DC922260810}_is1'
+  $protectedShortcut = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::CommonPrograms)) 'JameDesktopCommander Managed Candidate - Tunnel Operator.lnk'
+  foreach ($path in @($protectedRoot, $protectedKey, $protectedShortcut)) {
+    if (Test-Path -LiteralPath $path) { throw 'E_PROTECTED_INSTALL_PREEXISTING_RESOURCE' }
+  }
+  $protectedSetup = Join-Path $stage 'UNPUBLISHED-jdc-managed-custody-win32-x64.exe'
+  Copy-Item -LiteralPath $ProtectedInstallerPath -Destination $protectedSetup -ErrorAction Stop
+  if ((Get-FileHash -LiteralPath $protectedSetup -Algorithm SHA256).Hash -cne
+      (Get-FileHash -LiteralPath $ProtectedInstallerPath -Algorithm SHA256).Hash) {
+    throw 'E_PROTECTED_INSTALL_STAGED_BINARY_HASH_MISMATCH'
+  }
+  function Invoke-ProtectedInstaller([string]$Executable, [string[]]$Arguments) {
+    $process = Start-Process -FilePath $Executable -ArgumentList $Arguments `
+      -WorkingDirectory $stage -Wait -PassThru -ErrorAction Stop
+    try { return $process.ExitCode } finally { $process.Dispose() }
+  }
+  $installArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
+  $protectedUninstaller = Join-Path $protectedRoot 'unins000.exe'
+  $protectedUninstallData = Join-Path $protectedRoot 'unins000.dat'
+  $uninstallerHash = $null
+  $uninstallDataHash = $null
+  $protectedFailure = $null
+  $custodyVerified = $false
+  try {
+    # /DIR must not redirect an elevated payload away from the fixed root.
+    # Inno code 7 specifically witnesses PrepareToInstall refusing the target.
+    $wrongTarget = Join-Path $stage 'wrong-install-root'
+    if ((Invoke-ProtectedInstaller $protectedSetup ($installArgs + @('/DIR="' + $wrongTarget + '"'))) -ne 7 -or
+        (Test-Path -LiteralPath $wrongTarget) -or (Test-Path -LiteralPath $protectedRoot)) {
+      throw 'E_PROTECTED_INSTALL_REDIRECT_ACCEPTED'
+    }
+    if ((Invoke-ProtectedInstaller $protectedSetup $installArgs) -ne 0) {
+      throw 'E_PROTECTED_INSTALL_FAILED'
+    }
+    if (!(Test-Path -LiteralPath $protectedKey) -or !(Test-Path -LiteralPath $protectedShortcut) -or
+        !(Test-Path -LiteralPath $protectedUninstaller -PathType Leaf) -or
+        !(Test-Path -LiteralPath $protectedUninstallData -PathType Leaf)) {
+      throw 'E_PROTECTED_INSTALL_REGISTRATION_MISSING'
+    }
+    $registration = Get-ItemProperty -LiteralPath $protectedKey
+    if ($registration.DisplayName -cne 'JameDesktopCommander Managed Candidate' -or
+        $registration.DisplayVersion -cne $Version -or
+        [IO.Path]::GetFullPath($registration.InstallLocation).TrimEnd('\') -ine $protectedRoot) {
+      throw 'E_PROTECTED_INSTALL_REGISTRATION_MISMATCH'
+    }
+    foreach ($path in @($protectedRoot, $protectedUninstaller, $protectedUninstallData)) {
+      if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID'
+      }
+    }
+    $uninstallerHash = (Get-FileHash -LiteralPath $protectedUninstaller -Algorithm SHA256).Hash
+    $uninstallDataHash = (Get-FileHash -LiteralPath $protectedUninstallData -Algorithm SHA256).Hash
+    & $node (Join-Path $stage 'scripts/operator-ui-bundle.mjs') verify-installed $protectedRoot $SourceCommit
+    if ($LASTEXITCODE -ne 0) { throw 'E_PROTECTED_INSTALL_OVERLAY_INVALID' }
+    $entrypoint = Join-Path $protectedRoot 'dist\index.js'
+    $before = (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash
+    if ((Invoke-ProtectedInstaller $protectedSetup $installArgs) -ne 7) {
+      throw 'E_PROTECTED_INSTALL_ADOPTION_ACCEPTED'
+    }
+    $child = Start-Process -FilePath $pwsh -Credential $credential -LoadUserProfile `
+      -ArgumentList ($arguments + @('-ProtectedInstallRoot', ('"' + $protectedRoot + '"'))) `
+      -WorkingDirectory $stage -PassThru -RedirectStandardOutput $stdout `
+      -RedirectStandardError $stderr -ErrorAction Stop
+    if (!$child.WaitForExit(180000)) { throw 'E_PROTECTED_INSTALL_CHILD_TIMEOUT' }
+    if ($child.ExitCode -ne 0) {
+      Write-SanitizedChildEvidence -ErrorPath $stderr
+      throw 'E_PROTECTED_INSTALL_CHILD_FAILED'
+    }
+    if ((Get-Content -LiteralPath $stdout -Raw) -notmatch '(?m)^WINDOWS_PROTECTED_INSTALL_CUSTODY=PASS\r?$' -or
+        (Get-FileHash -LiteralPath $entrypoint -Algorithm SHA256).Hash -cne $before) {
+      throw 'E_PROTECTED_INSTALL_CUSTODY_WITNESS_MISSING'
+    }
+    $custodyVerified = $true
+    Assert-HostFirewallSnapshotUnchanged -Before $firewallBefore -Current (Get-FirewallSnapshot) -Phase INSTALLED
+  } catch {
+    $protectedFailure = $_
+    throw
+  } finally {
+    try {
+    # Do not race the child or uninstall a pre-existing product.
+    if ($null -ne $child) {
+      if (!$child.HasExited) {
+        $child.Kill()
+        if (!$child.WaitForExit(30000)) { throw 'E_PROTECTED_INSTALL_CHILD_CLEANUP_TIMEOUT' }
+      }
+      $child.Dispose()
+      $child = $null
+    }
+    if ($custodyVerified -and $null -ne $uninstallerHash) {
+      if ($null -eq $uninstallDataHash) { throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID' }
+      $uninstallItem = Get-Item -LiteralPath $protectedUninstaller -Force
+      $dataItem = Get-Item -LiteralPath $protectedUninstallData -Force
+      $rootItem = Get-Item -LiteralPath $protectedRoot -Force
+      if (!$rootItem.PSIsContainer -or $uninstallItem.PSIsContainer -or $dataItem.PSIsContainer -or
+          ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+          ($uninstallItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+          ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+          (Get-FileHash -LiteralPath $protectedUninstaller -Algorithm SHA256).Hash -cne $uninstallerHash -or
+          (Get-FileHash -LiteralPath $protectedUninstallData -Algorithm SHA256).Hash -cne $uninstallDataHash) {
+        throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID'
+      }
+      if ((Invoke-ProtectedInstaller $protectedUninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')) -ne 0) {
+        throw 'E_PROTECTED_INSTALL_UNINSTALL_FAILED'
+      }
+    }
+    if (!$custodyVerified -and (Test-Path -LiteralPath $protectedRoot)) {
+      # The disposable runner will be destroyed; do not elevate an untrusted uninstaller.
+      throw 'E_PROTECTED_INSTALL_CUSTODY_CLEANUP_UNSAFE'
+    }
+    foreach ($path in @($protectedRoot, $protectedKey, $protectedShortcut)) {
+      if (Test-Path -LiteralPath $path) { throw 'E_PROTECTED_INSTALL_RESOURCE_REMAINS' }
+    }
+    Assert-HostFirewallSnapshotUnchanged -Before $firewallBefore -Current (Get-FirewallSnapshot) -Phase UNINSTALLED
+    } catch {
+      if ($null -eq $protectedFailure) { throw }
+      # Preserve the pending primary exception; disclose only fixed cleanup evidence.
+      $cleanupCode = $_.Exception.Message
+      if ($cleanupCode -cmatch '^E_PROTECTED_INSTALL_[A-Z_]+$') {
+        [Console]::Error.WriteLine($cleanupCode)
+      } else {
+        [Console]::Error.WriteLine('E_PROTECTED_INSTALL_CLEANUP_AFTER_PRIMARY_FAILURE')
+      }
+    }
+  }
+  Write-Output 'WINDOWS_PROTECTED_INSTALL_CUSTODY=PASS'
+ } catch {
+  $primaryFailure = $_
+  throw
  } finally {
   # Reap the child before unloading/deleting its profile even when the host
   # observer fails, times out, or rejects an actual firewall modification.
@@ -202,10 +346,17 @@ try {
         if (!$child.WaitForExit(30000)) { $cleanupFailures.Add('CHILD_PROCESS') }
       }
     } catch { $cleanupFailures.Add('CHILD_PROCESS') }
-    $child.Dispose()
+    try { $child.Dispose() }
+    catch { $cleanupFailures.Add('CHILD_DISPOSE') }
   }
-  if ($null -ne $signalEvent) { $signalEvent.Dispose() }
-  if ($null -ne $resumeEvent) { $resumeEvent.Dispose() }
+  if ($null -ne $signalEvent) {
+    try { $signalEvent.Dispose() }
+    catch { $cleanupFailures.Add('SIGNAL_EVENT') }
+  }
+  if ($null -ne $resumeEvent) {
+    try { $resumeEvent.Dispose() }
+    catch { $cleanupFailures.Add('RESUME_EVENT') }
+  }
   # The runner is disposable, but CI still verifies complete owned cleanup.
   if ($null -ne $createdAccount) {
     try {
@@ -219,13 +370,15 @@ try {
     catch { $cleanupFailures.Add('LOCAL_USER') }
   }
   foreach ($path in @($stage, $stdout, $stderr)) {
-    if (Test-Path -LiteralPath $path) {
-      try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
-      catch { $cleanupFailures.Add('OWNED_FILES') }
-    }
+    try {
+      if (Test-Path -LiteralPath $path -ErrorAction Stop) {
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+      }
+    } catch { $cleanupFailures.Add('OWNED_FILES') }
   }
   if ($cleanupFailures.Count -ne 0) {
-    throw ('E_INSTALLER_ISOLATED_TEST_CLEANUP_FAILED_' +
-      ($cleanupFailures -join '_'))
+    $cleanupMessage = 'E_INSTALLER_ISOLATED_TEST_CLEANUP_FAILED_' + ($cleanupFailures -join '_')
+    if ($null -eq $primaryFailure) { throw $cleanupMessage }
+    [Console]::Error.WriteLine($cleanupMessage)
   }
 }

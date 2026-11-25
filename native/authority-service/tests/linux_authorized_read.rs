@@ -64,6 +64,7 @@ fn actual_native_read_discloses_exact_bytes_once() {
         Duration::from_secs(1)
     )
     .is_ok());
+    client.write_all(b"R").unwrap();
     assert!(
         read_attested_regular_into_socket(
             &policy,
@@ -76,6 +77,11 @@ fn actual_native_read_discloses_exact_bytes_once() {
         )
         .is_err(),
         "replay must never consume another request or disclose bytes"
+    );
+    assert_eq!(
+        jdc_authority_service::linux_message_origin::receive_attested_byte(&server, peer).unwrap(),
+        b'R',
+        "rejected replay must leave a valid queued request untouched"
     );
     drop(server);
     let mut frame = Vec::new();

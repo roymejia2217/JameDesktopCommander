@@ -1,3 +1,4 @@
+import { addAbortListener } from 'node:events';
 import { z } from 'zod';
 import type { ServerResult } from '../types.js';
 
@@ -46,8 +47,18 @@ export async function handleManagedRead(
     const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
     if (bounded.aborted) return reject('E_NATIVE_READ_CANCELLED');
     const { path, offset, length } = parsed.data;
+    let abortListener: ReturnType<typeof addAbortListener> | undefined;
+    const cancelled = new Promise<never>((_resolve, rejectAbort) => {
+        abortListener = addAbortListener(bounded, () => rejectAbort(new Error('E_NATIVE_READ_CANCELLED')));
+    });
     try {
-        const reply = await operation(Object.freeze({ path, offset, length }), bounded);
+        // Attach both settlement handlers before invoking the broker. A
+        // late result or rejection cannot escape after the caller cancels.
+        const pending = Promise.resolve().then(() => {
+            bounded.throwIfAborted();
+            return operation(Object.freeze({ path, offset, length }), bounded);
+        });
+        const reply = await Promise.race([pending, cancelled]);
         if (bounded.aborted) return reject('E_NATIVE_READ_CANCELLED');
         switch (reply.status) {
             case 'read':
@@ -64,5 +75,7 @@ export async function handleManagedRead(
     } catch {
         return reject(bounded.aborted
             ? 'E_NATIVE_READ_CANCELLED' : 'E_NATIVE_AUTHORITY_UNAVAILABLE');
+    } finally {
+        abortListener?.[Symbol.dispose]();
     }
 }

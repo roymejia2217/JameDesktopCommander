@@ -100,8 +100,10 @@ fn disclose_bounded(
 }
 
 /// Consume a service-issued ticket, check the kernel connector and actual
-/// writer, read through the retained root, and disclose the bounded response
-/// while the same epoch lock is held. No owned file bytes leave this function.
+/// writer, and stage the bounded read through the retained root. Revalidate
+/// the epoch before disclosing under the lock. A stalled read can retain
+/// a worker but cannot hold the revocation lock or disclose after revocation.
+/// No owned file bytes leave this function.
 ///
 /// The caller must have enabled SCM_CREDENTIALS before inviting the request,
 /// established protected issuer identity, channel custody and root admission,
@@ -119,18 +121,21 @@ pub fn read_attested_regular_into_socket(
     timeout: Duration,
 ) -> Result<(), IdentityDenied> {
     policy
-        .execute_once(ticket, || {
-            if !valid_timeout(timeout) || observe_kernel_peer(socket)? != expected_peer {
-                return Err(IdentityDenied);
-            }
-            socket
-                .set_read_timeout(Some(timeout))
-                .map_err(|_| IdentityDenied)?;
-            if receive_attested_byte(socket, expected_peer)? != b'R' {
-                return Err(IdentityDenied);
-            }
-            let bytes = read_regular_at(root, relative).map_err(|_| IdentityDenied)?;
-            disclose_bounded(socket, &bytes, timeout)
-        })
+        .prepare_and_disclose_once(
+            ticket,
+            || {
+                if !valid_timeout(timeout) || observe_kernel_peer(socket)? != expected_peer {
+                    return Err(IdentityDenied);
+                }
+                socket
+                    .set_read_timeout(Some(timeout))
+                    .map_err(|_| IdentityDenied)?;
+                if receive_attested_byte(socket, expected_peer)? != b'R' {
+                    return Err(IdentityDenied);
+                }
+                read_regular_at(root, relative).map_err(|_| IdentityDenied)
+            },
+            |bytes| disclose_bounded(socket, &bytes, timeout),
+        )
         .map_err(|_| IdentityDenied)?
 }

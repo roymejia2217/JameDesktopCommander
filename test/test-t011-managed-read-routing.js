@@ -62,3 +62,22 @@ test('managed JDC routes read_file only to the enrolled operation, without persi
     await server.close();
   }
 });
+
+test('managed read returns on cancellation even if the broker has not settled', { timeout: 2000 }, async () => {
+  const { handleManagedRead } = await import('../dist/handlers/managed-read.js');
+  const controller = new AbortController();
+  let complete;
+  const pending = new Promise(resolve => { complete = resolve; });
+  try {
+    const result = handleManagedRead((_request, signal) => {
+      assert.equal(signal.aborted, false);
+      controller.abort();
+      return pending;
+    }, { path: '/managed/inside.txt' }, controller.signal);
+    const answer = await result;
+    assert.equal(answer.isError, true);
+    assert.equal(answer.content[0].text, 'E_NATIVE_READ_CANCELLED');
+  } finally {
+    complete({ status: 'read', text: 'LATE_PROTECTED_BYTES' });
+  }
+});

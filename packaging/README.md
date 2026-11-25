@@ -31,6 +31,29 @@ for platform-specific installable artifacts.
   commit, platform and runtime entrypoint. The validation module in scripts/
   validate-installer-input.mjs is an input guard, **not** a package builder.
 
+## Experimental Windows protected installation custody (#270)
+
+The existing Inno Setup definition also accepts the explicit compile-time
+`/DJDC_PROTECTED_INSTALL` switch for a clean-room, CI-only administrative
+candidate. This is not a second shipping installer, a migration, or a
+release authorization. It uses the same verified inputs, a distinct AppId,
+a fixed Program Files root and no privileged post-install launch. The normal
+per-user installer and its acceptance remain unchanged. The experimental
+executable is not uploaded as a distribution artifact.
+
+The protected variant refuses a redirected target or an existing target;
+upgrade, adoption and migration are deliberately unsupported in this slice.
+The existing hosted Windows acceptance runner installs it administratively,
+checks registration and UI overlay identity, then uses the real isolated
+non-administrator account to check executable/entrypoint write denial,
+selected directory creation and rename denial, and the actual read-only
+operator backend invocation. It checks the expected Inno pre-install exit
+code on redirect/adoption attempts and removes the owned package and shortcut
+without changing the firewall. This is a bounded custody acceptance, not a
+proof of every dependency's launch-time identity, an elevated same-SID threat
+model, or independent local-operator authorization. Do not enable credential
+or lifecycle mutations from the GUI on the basis of this experiment alone.
+
 ## Pinned official OpenAI Secure MCP Tunnel dependency
 
 The Windows x64 and Debian amd64 **unpublished** installer candidates include

@@ -9,7 +9,8 @@ param(
   [Parameter(Mandatory)][string]$ExpectedVersion,
   [Parameter(Mandatory)][string]$NodeExecutable,
   [Parameter(Mandatory)][string]$FirewallSignalEvent,
-  [Parameter(Mandatory)][string]$FirewallResumeEvent
+  [Parameter(Mandatory)][string]$FirewallResumeEvent,
+  [string]$ProtectedInstallRoot = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -101,6 +102,300 @@ if (!(Test-Path -LiteralPath $InstallerPath -PathType Leaf) -or
 Set-Alias -Name node -Value $NodeExecutable -Scope Script
 $env:JDC_CANDIDATE_SOURCE_SHA = $ExpectedCommit
 $version = $ExpectedVersion
+if ($ProtectedInstallRoot) {
+  # The host supplies only the fixed machine-wide candidate root. The caller
+  # has already been bound to a real, separate non-administrator token.
+  $script:AcceptancePhase = 'E_INSTALLER_ACCEPTANCE_PHASE_INSTALLED_ASSERTIONS'
+  $expectedRoot = Join-Path ([Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ProgramFiles)) 'JameDesktopCommander Managed Candidate'
+  if ($ProtectedInstallRoot -ine $expectedRoot -or
+      !(Test-Path -LiteralPath $expectedRoot -PathType Container)) {
+    throw 'E_PROTECTED_INSTALL_ROOT_INVALID'
+  }
+  function Assert-AccessDenied([scriptblock]$Attempt, [string]$Code) {
+    try { & $Attempt }
+    catch {
+      $cause = $_.Exception
+      while ($null -ne $cause) {
+        if ($cause -is [UnauthorizedAccessException] -or
+            $cause.HResult -eq -2147024891) { return }
+        $cause = $cause.InnerException
+      }
+      throw
+    }
+    throw $Code
+  }
+  function Assert-ProtectedMutationDenied([scriptblock]$Mutation, [scriptblock]$Undo, [string]$Code) {
+    $state = @{ Changed = $false }
+    $failure = $null
+    try {
+      Assert-AccessDenied { & $Mutation $state } $Code
+      if ($state.Changed) { throw $Code }
+    } catch {
+      $failure = $_
+      throw
+    } finally {
+      if ($state.Changed) {
+        try { & $Undo }
+        catch {
+          if ($null -eq $failure) { throw }
+          [Console]::Error.WriteLine('E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+        }
+      }
+    }
+  }
+  # Request individual native mutation rights without altering any object.
+  # Only ERROR_ACCESS_DENIED proves a negative access result.
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class JdcInstallerAccessProbe {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString {
+        public ushort Length, MaximumLength;
+        public IntPtr Buffer;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes {
+        public uint Length;
+        public IntPtr RootDirectory, ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor, SecurityQualityOfService;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoStatusBlock {
+        public IntPtr Status, Information;
+    }
+    [DllImport("ntdll.dll", ExactSpelling = true)]
+    private static extern int NtOpenFile(out SafeFileHandle handle, uint desiredAccess,
+        ref ObjectAttributes attributes, out IoStatusBlock ioStatus, uint shareAccess, uint openOptions);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor);
+
+    public static int OpenExisting(string path, uint access) {
+        // The fixture uses only local drive-qualified filesystem paths.
+        // NtOpenFile without FILE_SYNCHRONOUS_IO_* requests exactly access.
+        // CreateFileW adds rights even in overlapped mode; that is not proof.
+        if (path.Length < 3 || path[1] != ':' || path[2] != '\\' ||
+            path.IndexOf('\0') >= 0 || path.Length > 32000) return -1;
+        string nativePath = @"\??\" + path;
+        IntPtr nameBuffer = IntPtr.Zero, namePointer = IntPtr.Zero;
+        SafeFileHandle handle = null;
+        try {
+            nameBuffer = Marshal.StringToHGlobalUni(nativePath);
+            var name = new UnicodeString {
+                Length = checked((ushort)(nativePath.Length * 2)),
+                MaximumLength = checked((ushort)((nativePath.Length + 1) * 2)),
+                Buffer = nameBuffer
+            };
+            namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+            Marshal.StructureToPtr(name, namePointer, false);
+            var attributes = new ObjectAttributes {
+                Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes)),
+                ObjectName = namePointer, Attributes = 0x40 // OBJ_CASE_INSENSITIVE
+            };
+            IoStatusBlock io;
+            // Share all; existing object only; do not follow a final reparse point.
+            int status = NtOpenFile(out handle, access, ref attributes, out io, 7, 0x00200000);
+            if (status == 0 && handle != null && !handle.IsInvalid) return 0;
+            return status == unchecked((int)0xC0000022) ? 5 : -1;
+        } finally {
+            if (handle != null) handle.Dispose();
+            if (namePointer != IntPtr.Zero) Marshal.FreeHGlobal(namePointer);
+            if (nameBuffer != IntPtr.Zero) Marshal.FreeHGlobal(nameBuffer);
+        }
+    }
+
+    // Retain an ACL restoration handle before denying SYNCHRONIZE on the
+    // disposable calibration directory. Never use this on the install root.
+    public static SafeFileHandle OpenCalibrationAcl(string path) {
+        SafeFileHandle handle = CreateFileW(path, 0x00040000, 7, IntPtr.Zero, 3,
+            0x02200000, IntPtr.Zero);
+        if (handle.IsInvalid) {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw new System.ComponentModel.Win32Exception(error);
+        }
+        return handle;
+    }
+    public static void SetCalibrationDacl(SafeFileHandle handle, byte[] descriptor) {
+        if (!SetKernelObjectSecurity(handle, 4, descriptor))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+}
+'@
+  $deleteAccess = [uint32][Security.AccessControl.FileSystemRights]::Delete
+  $deleteChildAccess = [uint32][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+  # Each request is separate: aggregate GENERIC_WRITE denial is not evidence
+  # that FILE_WRITE_DATA, FILE_APPEND_DATA or ACL changes are denied.
+  $mutationRights = @(
+    [uint32][Security.AccessControl.FileSystemRights]::WriteData
+    [uint32][Security.AccessControl.FileSystemRights]::AppendData
+    [uint32][Security.AccessControl.FileSystemRights]::WriteExtendedAttributes
+    [uint32][Security.AccessControl.FileSystemRights]::WriteAttributes
+    [uint32][Security.AccessControl.FileSystemRights]::ChangePermissions
+    [uint32][Security.AccessControl.FileSystemRights]::TakeOwnership
+  )
+  function Assert-ProtectedAccessDenied([string]$Path, [uint32]$Access) {
+    $result = [JdcInstallerAccessProbe]::OpenExisting($Path, $Access)
+    if ($result -eq 0) { throw 'E_PROTECTED_MUTATION_ACCESS_ALLOWED' }
+    if ($result -ne 5) { throw 'E_PROTECTED_MUTATION_ACCESS_UNVERIFIED' }
+  }
+  # Calibrate on a child-owned disposable directory, including DELETE
+  # granted on an existing file while creation of another file is denied.
+  $control = Join-Path $env:TEMP ('jdc-delete-control-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $control -ErrorAction Stop | Out-Null
+  $originalAcl = $null
+  $calibrationFailure = $null
+  try {
+    $originalAcl = Get-Acl -LiteralPath $control
+    $controlFile = Join-Path $control 'existing.txt'
+    [IO.File]::WriteAllText($controlFile, 'synthetic')
+    $controlAcl = Get-Acl -LiteralPath $control
+    $controlAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $identity.User, [Security.AccessControl.FileSystemRights]::CreateFiles,
+      [Security.AccessControl.AccessControlType]::Deny))
+    Set-Acl -LiteralPath $control -AclObject $controlAcl
+    Assert-AccessDenied {
+      $handle = [IO.File]::Open((Join-Path $control 'new.txt'), [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::None)
+      $handle.Dispose()
+    } 'E_PROTECTED_DELETE_PROBE_CONTROL_FAILED'
+    if ([JdcInstallerAccessProbe]::OpenExisting($controlFile, $deleteAccess) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($control, $deleteAccess) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($control, $deleteChildAccess) -ne 0) {
+      throw 'E_PROTECTED_DELETE_PROBE_CONTROL_FAILED'
+    }
+    # Deny only APPEND_DATA, while WRITE_DATA remains available. This is the
+    # adversarial case that a generic write-only check would falsely accept.
+    $fileAcl = Get-Acl -LiteralPath $controlFile
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $identity.User, [Security.AccessControl.FileSystemRights]::AppendData,
+      [Security.AccessControl.AccessControlType]::Deny))
+    Set-Acl -LiteralPath $controlFile -AclObject $fileAcl
+    $genericWrite = [uint32]0x40000000 # Win32 GENERIC_WRITE
+    if ([JdcInstallerAccessProbe]::OpenExisting($controlFile, $genericWrite) -ne 5 -or
+        [JdcInstallerAccessProbe]::OpenExisting($controlFile, [uint32][Security.AccessControl.FileSystemRights]::WriteData) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($controlFile, [uint32][Security.AccessControl.FileSystemRights]::AppendData) -ne 5) {
+      throw 'E_PROTECTED_WRITE_PROBE_CONTROL_FAILED'
+    }
+    # A directory with WRITE_DAC but without SYNCHRONIZE is a positive
+    # control for exact native access. Retain a handle to restore its ACL.
+    $exactDirectory = Join-Path $control 'exact-directory'
+    New-Item -ItemType Directory -Path $exactDirectory -ErrorAction Stop | Out-Null
+    $originalDescriptor = (Get-Acl -LiteralPath $exactDirectory).GetSecurityDescriptorBinaryForm()
+    $aclHandle = [JdcInstallerAccessProbe]::OpenCalibrationAcl($exactDirectory)
+    $exactFailure = $null
+    try {
+      $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($originalDescriptor, 0)
+      $synchronize = [uint32][Security.AccessControl.FileSystemRights]::Synchronize
+      $denySync = [Security.AccessControl.CommonAce]::new(
+        [Security.AccessControl.AceFlags]::None,
+        [Security.AccessControl.AceQualifier]::AccessDenied, [int]$synchronize,
+        $identity.User, $false, $null)
+      $descriptor.DiscretionaryAcl.InsertAce(0, $denySync)
+      $descriptorBytes = [byte[]]::new($descriptor.BinaryLength)
+      $descriptor.GetBinaryForm($descriptorBytes, 0)
+      [JdcInstallerAccessProbe]::SetCalibrationDacl($aclHandle, $descriptorBytes)
+      $writeDac = [uint32][Security.AccessControl.FileSystemRights]::ChangePermissions
+      if ([JdcInstallerAccessProbe]::OpenExisting($exactDirectory, $synchronize) -ne 5 -or
+          [JdcInstallerAccessProbe]::OpenExisting($exactDirectory, $writeDac) -ne 0) {
+        throw 'E_PROTECTED_EXACT_ACCESS_CALIBRATION_FAILED'
+      }
+    } catch {
+      $exactFailure = $_
+      throw
+    } finally {
+      try {
+        [JdcInstallerAccessProbe]::SetCalibrationDacl($aclHandle, $originalDescriptor)
+      } catch {
+        if ($null -eq $exactFailure) { throw }
+        [Console]::Error.WriteLine('E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+      } finally { $aclHandle.Dispose() }
+    }
+  } catch {
+    $calibrationFailure = $_
+    throw
+  } finally {
+    try {
+      if ($null -ne $originalAcl) {
+        Set-Acl -LiteralPath $control -AclObject $originalAcl
+      }
+      Remove-Item -LiteralPath $control -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($null -eq $calibrationFailure) { throw }
+      [Console]::Error.WriteLine('E_PROTECTED_CALIBRATION_CLEANUP_AFTER_PRIMARY_FAILURE')
+    }
+  }
+  foreach ($relative in @('runtime','dist','tools','tools\tunnel-client',
+      'runtime\node.exe','dist\index.js','jdc-tunnel-operator-ui.exe',
+      'tools\tunnel-client\tunnel-client.exe','operator-ui-manifest.json','unins000.exe','unins000.dat')) {
+    $item = Get-Item -LiteralPath (Join-Path $expectedRoot $relative) -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw 'E_PROTECTED_INSTALL_REPARSE_COMPONENT'
+    }
+    Assert-ProtectedAccessDenied $item.FullName $deleteAccess
+    foreach ($right in $mutationRights) {
+      Assert-ProtectedAccessDenied $item.FullName $right
+    }
+    if (!$item.PSIsContainer) {
+      # Require an actual readable object and then reject a write handle.
+      $null = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256
+      Assert-AccessDenied {
+        $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open,
+          [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $stream.Dispose()
+      } 'E_PROTECTED_INSTALL_WRITE_ALLOWED'
+    }
+  }
+  Assert-ProtectedAccessDenied (Split-Path -Parent $expectedRoot) $deleteChildAccess
+  foreach ($relative in @('','runtime','dist','tools','tools\tunnel-client')) {
+    $directory = if ($relative) { Join-Path $expectedRoot $relative } else { $expectedRoot }
+    $item = Get-Item -LiteralPath $directory -Force
+    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw 'E_PROTECTED_INSTALL_DIRECTORY_INVALID'
+    }
+    Assert-ProtectedAccessDenied $item.FullName $deleteAccess
+    Assert-ProtectedAccessDenied $directory $deleteChildAccess
+    foreach ($right in $mutationRights) {
+      Assert-ProtectedAccessDenied $item.FullName $right
+    }
+    $probe = Join-Path $directory ('jdc-custody-probe-' + [guid]::NewGuid().ToString('N'))
+    Assert-ProtectedMutationDenied {
+      param($state)
+      $stream = [IO.File]::Open($probe, [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::None)
+      $state.Changed = $true
+      $stream.Dispose()
+    } { [IO.File]::Delete($probe) } 'E_PROTECTED_INSTALL_CREATE_ALLOWED'
+  }
+  # A write denial alone does not imply DELETE/rename denial. Exercise
+  # the actual entrypoint and root independently, restoring on unexpected success.
+  $entrypoint = Join-Path $expectedRoot 'dist\index.js'
+  $movedEntry = $entrypoint + '-probe-' + [guid]::NewGuid().ToString('N')
+  Assert-ProtectedMutationDenied {
+    param($state)
+    [IO.File]::Move($entrypoint, $movedEntry)
+    $state.Changed = $true
+  } { [IO.File]::Move($movedEntry, $entrypoint) } 'E_PROTECTED_INSTALL_ENTRYPOINT_RENAME_ALLOWED'
+  $moved = $expectedRoot + '-probe-' + [guid]::NewGuid().ToString('N')
+  Assert-ProtectedMutationDenied {
+    param($state)
+    [IO.Directory]::Move($expectedRoot, $moved)
+    $state.Changed = $true
+  } { [IO.Directory]::Move($moved, $expectedRoot) } 'E_PROTECTED_INSTALL_RENAME_ALLOWED'
+  $operator = Join-Path $expectedRoot 'jdc-tunnel-operator-ui.exe'
+  $process = Start-Process -FilePath $operator -ArgumentList '--check-installation' `
+    -WorkingDirectory $expectedRoot -PassThru -Wait
+  if ($process.ExitCode -ne 0) { throw 'E_PROTECTED_INSTALL_BACKEND_FAILED' }
+  Write-Output 'WINDOWS_PROTECTED_INSTALL_CUSTODY=PASS'
+  exit 0
+}
 $setup = $InstallerPath
 $target = Join-Path $env:LOCALAPPDATA 'JDC-isolated-installer-acceptance'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C812A487-AF99-4640-9F77-31DD4A9A7F12}_is1'

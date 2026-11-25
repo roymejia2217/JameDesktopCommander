@@ -125,13 +125,68 @@ if ($ProtectedInstallRoot) {
     }
     throw $Code
   }
+  # Request native DELETE/FILE_DELETE_CHILD without deleting or renaming
+  # anything. Only ERROR_ACCESS_DENIED proves a negative access result.
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class JdcInstallerAccessProbe {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    public static int OpenExisting(string path, uint access) {
+        // OPEN_EXISTING, share read/write/delete, backup semantics and no final reparse follow.
+        using (SafeFileHandle handle = CreateFileW(path, access, 7, IntPtr.Zero, 3,
+            0x02200000, IntPtr.Zero)) {
+            if (handle.IsInvalid) return Marshal.GetLastWin32Error();
+            return 0;
+        }
+    }
+}
+'@
+  $deleteAccess = [uint32][Security.AccessControl.FileSystemRights]::Delete
+  $deleteChildAccess = [uint32][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+  function Assert-ProtectedAccessDenied([string]$Path, [uint32]$Access) {
+    $result = [JdcInstallerAccessProbe]::OpenExisting($Path, $Access)
+    if ($result -eq 0) { throw 'E_PROTECTED_INSTALL_DELETE_ACCESS_ALLOWED' }
+    if ($result -ne 5) { throw 'E_PROTECTED_INSTALL_DELETE_ACCESS_UNVERIFIED' }
+  }
+  # Calibrate on a child-owned disposable directory, including DELETE
+  # granted on an existing file while creation of another file is denied.
+  $control = Join-Path $env:TEMP ('jdc-delete-control-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $control -ErrorAction Stop | Out-Null
+  $originalAcl = Get-Acl -LiteralPath $control
+  try {
+    $controlFile = Join-Path $control 'existing.txt'
+    [IO.File]::WriteAllText($controlFile, 'synthetic')
+    $controlAcl = Get-Acl -LiteralPath $control
+    $controlAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $identity.User, [Security.AccessControl.FileSystemRights]::CreateFiles,
+      [Security.AccessControl.AccessControlType]::Deny))
+    Set-Acl -LiteralPath $control -AclObject $controlAcl
+    Assert-AccessDenied {
+      $handle = [IO.File]::Open((Join-Path $control 'new.txt'), [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write, [IO.FileShare]::None)
+      $handle.Dispose()
+    } 'E_PROTECTED_DELETE_PROBE_CONTROL_FAILED'
+    if ([JdcInstallerAccessProbe]::OpenExisting($controlFile, $deleteAccess) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($control, $deleteAccess) -ne 0 -or
+        [JdcInstallerAccessProbe]::OpenExisting($control, $deleteChildAccess) -ne 0) {
+      throw 'E_PROTECTED_DELETE_PROBE_CONTROL_FAILED'
+    }
+  } finally {
+    Set-Acl -LiteralPath $control -AclObject $originalAcl
+    Remove-Item -LiteralPath $control -Recurse -Force
+  }
   foreach ($relative in @('runtime','dist','tools','tools\tunnel-client',
       'runtime\node.exe','dist\index.js','jdc-tunnel-operator-ui.exe',
-      'tools\tunnel-client\tunnel-client.exe','operator-ui-manifest.json','unins000.exe')) {
+      'tools\tunnel-client\tunnel-client.exe','operator-ui-manifest.json','unins000.exe','unins000.dat')) {
     $item = Get-Item -LiteralPath (Join-Path $expectedRoot $relative) -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
       throw 'E_PROTECTED_INSTALL_REPARSE_COMPONENT'
     }
+    Assert-ProtectedAccessDenied $item.FullName $deleteAccess
     if (!$item.PSIsContainer) {
       # Require an actual readable object and then reject a write handle.
       $null = Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256
@@ -142,12 +197,15 @@ if ($ProtectedInstallRoot) {
       } 'E_PROTECTED_INSTALL_WRITE_ALLOWED'
     }
   }
-  foreach ($relative in @('','runtime','dist','tools\tunnel-client')) {
+  Assert-ProtectedAccessDenied (Split-Path -Parent $expectedRoot) $deleteChildAccess
+  foreach ($relative in @('','runtime','dist','tools','tools\tunnel-client')) {
     $directory = if ($relative) { Join-Path $expectedRoot $relative } else { $expectedRoot }
     $item = Get-Item -LiteralPath $directory -Force
     if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
       throw 'E_PROTECTED_INSTALL_DIRECTORY_INVALID'
     }
+    Assert-ProtectedAccessDenied $item.FullName $deleteAccess
+    Assert-ProtectedAccessDenied $directory $deleteChildAccess
     $probe = Join-Path $directory ('jdc-custody-probe-' + [guid]::NewGuid().ToString('N'))
     try {
       Assert-AccessDenied {

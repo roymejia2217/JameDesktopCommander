@@ -65,6 +65,7 @@ $createdAccount = $null
 $child = $null
 $signalEvent = $null
 $resumeEvent = $null
+$primaryFailure = $null
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
 $installerHash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
 try {
@@ -220,7 +221,10 @@ try {
   }
   $installArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
   $protectedUninstaller = Join-Path $protectedRoot 'unins000.exe'
+  $protectedUninstallData = Join-Path $protectedRoot 'unins000.dat'
   $uninstallerHash = $null
+  $uninstallDataHash = $null
+  $protectedFailure = $null
   $custodyVerified = $false
   try {
     # /DIR must not redirect an elevated payload away from the fixed root.
@@ -234,7 +238,8 @@ try {
       throw 'E_PROTECTED_INSTALL_FAILED'
     }
     if (!(Test-Path -LiteralPath $protectedKey) -or !(Test-Path -LiteralPath $protectedShortcut) -or
-        !(Test-Path -LiteralPath $protectedUninstaller -PathType Leaf)) {
+        !(Test-Path -LiteralPath $protectedUninstaller -PathType Leaf) -or
+        !(Test-Path -LiteralPath $protectedUninstallData -PathType Leaf)) {
       throw 'E_PROTECTED_INSTALL_REGISTRATION_MISSING'
     }
     $registration = Get-ItemProperty -LiteralPath $protectedKey
@@ -243,7 +248,13 @@ try {
         [IO.Path]::GetFullPath($registration.InstallLocation).TrimEnd('\') -ine $protectedRoot) {
       throw 'E_PROTECTED_INSTALL_REGISTRATION_MISMATCH'
     }
+    foreach ($path in @($protectedRoot, $protectedUninstaller, $protectedUninstallData)) {
+      if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID'
+      }
+    }
     $uninstallerHash = (Get-FileHash -LiteralPath $protectedUninstaller -Algorithm SHA256).Hash
+    $uninstallDataHash = (Get-FileHash -LiteralPath $protectedUninstallData -Algorithm SHA256).Hash
     & $node (Join-Path $stage 'scripts/operator-ui-bundle.mjs') verify-installed $protectedRoot $SourceCommit
     if ($LASTEXITCODE -ne 0) { throw 'E_PROTECTED_INSTALL_OVERLAY_INVALID' }
     $entrypoint = Join-Path $protectedRoot 'dist\index.js'
@@ -266,7 +277,11 @@ try {
     }
     $custodyVerified = $true
     Assert-HostFirewallSnapshotUnchanged -Before $firewallBefore -Current (Get-FirewallSnapshot) -Phase INSTALLED
+  } catch {
+    $protectedFailure = $_
+    throw
   } finally {
+    try {
     # Do not race the child or uninstall a pre-existing product.
     if ($null -ne $child) {
       if (!$child.HasExited) {
@@ -277,11 +292,16 @@ try {
       $child = $null
     }
     if ($custodyVerified -and $null -ne $uninstallerHash) {
+      if ($null -eq $uninstallDataHash) { throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID' }
       $uninstallItem = Get-Item -LiteralPath $protectedUninstaller -Force
+      $dataItem = Get-Item -LiteralPath $protectedUninstallData -Force
       $rootItem = Get-Item -LiteralPath $protectedRoot -Force
-      if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      if (!$rootItem.PSIsContainer -or $uninstallItem.PSIsContainer -or $dataItem.PSIsContainer -or
+          ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
           ($uninstallItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-          (Get-FileHash -LiteralPath $protectedUninstaller -Algorithm SHA256).Hash -cne $uninstallerHash) {
+          ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+          (Get-FileHash -LiteralPath $protectedUninstaller -Algorithm SHA256).Hash -cne $uninstallerHash -or
+          (Get-FileHash -LiteralPath $protectedUninstallData -Algorithm SHA256).Hash -cne $uninstallDataHash) {
         throw 'E_PROTECTED_INSTALL_UNINSTALLER_CUSTODY_INVALID'
       }
       if ((Invoke-ProtectedInstaller $protectedUninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')) -ne 0) {
@@ -296,8 +316,21 @@ try {
       if (Test-Path -LiteralPath $path) { throw 'E_PROTECTED_INSTALL_RESOURCE_REMAINS' }
     }
     Assert-HostFirewallSnapshotUnchanged -Before $firewallBefore -Current (Get-FirewallSnapshot) -Phase UNINSTALLED
+    } catch {
+      if ($null -eq $protectedFailure) { throw }
+      # Preserve the pending primary exception; disclose only fixed cleanup evidence.
+      $cleanupCode = $_.Exception.Message
+      if ($cleanupCode -cmatch '^E_PROTECTED_INSTALL_[A-Z_]+$') {
+        [Console]::Error.WriteLine($cleanupCode)
+      } else {
+        [Console]::Error.WriteLine('E_PROTECTED_INSTALL_CLEANUP_AFTER_PRIMARY_FAILURE')
+      }
+    }
   }
   Write-Output 'WINDOWS_PROTECTED_INSTALL_CUSTODY=PASS'
+ } catch {
+  $primaryFailure = $_
+  throw
  } finally {
   # Reap the child before unloading/deleting its profile even when the host
   # observer fails, times out, or rejects an actual firewall modification.
@@ -331,7 +364,8 @@ try {
     }
   }
   if ($cleanupFailures.Count -ne 0) {
-    throw ('E_INSTALLER_ISOLATED_TEST_CLEANUP_FAILED_' +
-      ($cleanupFailures -join '_'))
+    $cleanupMessage = 'E_INSTALLER_ISOLATED_TEST_CLEANUP_FAILED_' + ($cleanupFailures -join '_')
+    if ($null -eq $primaryFailure) { throw $cleanupMessage }
+    [Console]::Error.WriteLine($cleanupMessage)
   }
 }

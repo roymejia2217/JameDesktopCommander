@@ -41,3 +41,23 @@ test('failed custody never authorizes an elevated package uninstaller', () => {
   assert.match(runner, /if \(\$custodyVerified -and \$null -ne \$uninstallerHash\)/);
   assert.match(runner, /E_PROTECTED_INSTALL_CUSTODY_CLEANUP_UNSAFE/);
 });
+
+test('protected acceptance independently probes delete rights and both uninstall inputs', () => {
+  assert.match(child, /CreateFileW/);
+  assert.match(child, /Assert-ProtectedAccessDenied \$item.FullName \$deleteAccess/);
+  assert.match(child, /Assert-ProtectedAccessDenied \$directory \$deleteChildAccess/);
+  assert.match(child, /Assert-ProtectedAccessDenied \(Split-Path -Parent \$expectedRoot\) \$deleteChildAccess/);
+  assert.match(child, /'unins000\.dat'/);
+  assert.match(child, /E_PROTECTED_DELETE_PROBE_CONTROL_FAILED/);
+  assert.match(runner, /\$protectedUninstallData = Join-Path \$protectedRoot 'unins000.dat'/);
+  assert.match(runner, /\$uninstallDataHash = \(Get-FileHash -LiteralPath \$protectedUninstallData/);
+  assert.match(runner, /\(Get-FileHash -LiteralPath \$protectedUninstallData -Algorithm SHA256\).Hash -cne \$uninstallDataHash/);
+  assert.match(runner, /\$dataItem.Attributes -band \[IO.FileAttributes\]::ReparsePoint/);
+});
+
+test('protected cleanup preserves the primary acceptance failure', () => {
+  assert.match(runner, /\$protectedFailure = \$_/);
+  assert.match(runner, /if \(\$null -eq \$protectedFailure\) \{ throw \}/);
+  assert.match(runner, /\$primaryFailure = \$_/);
+  assert.match(runner, /if \(\$null -eq \$primaryFailure\) \{ throw \$cleanupMessage \}/);
+});

@@ -6,20 +6,22 @@
 //! OS-process proof, NOT a shipping original desktop MCP host, managed
 //! installation, or durable policy and revocation mechanism.
 #[cfg(target_os = "linux")]
+use jdc_authority_service::{linux_peer::observe_kernel_peer, peer_policy::DedicatedAccount};
+#[cfg(target_os = "linux")]
+#[path = "../src/linux_fixture_issuer.rs"]
+mod fixture_issuer;
+#[cfg(target_os = "linux")]
 mod proof {
     use jdc_authority_service::{
-        linux_message_origin::enable_writer_credentials,
-        linux_peer::observe_kernel_peer,
+        linux_message_origin::enable_writer_credentials, linux_peer::observe_kernel_peer,
         linux_read_disclosure::read_attested_regular_into_socket,
-        peer_policy::{verify_distinct_peer, DedicatedAccount},
-        policy_epoch::PolicyFence,
-        verify_service_identity,
+        peer_policy::verify_distinct_peer, policy_epoch::PolicyFence, verify_service_identity,
     };
     use std::{
         env,
         fs::{self, File},
         io::{Read, Write},
-        mem::{size_of, zeroed, MaybeUninit},
+        mem::{size_of, zeroed},
         os::{
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::{
@@ -39,32 +41,7 @@ mod proof {
         result.map_err(|_| "E_PEER_PROOF_IO")
     }
 
-    // Resolve a fixture-only external principal through the OS, never client text.
-    fn fixture_client() -> Result<DedicatedAccount, &'static str> {
-        let mut passwd = MaybeUninit::<libc::passwd>::zeroed();
-        let mut found = ptr::null_mut();
-        let mut scratch = [0 as libc::c_char; 16_384];
-        let code = unsafe {
-            libc::getpwnam_r(
-                c"jdc-mcp-client".as_ptr(),
-                passwd.as_mut_ptr(),
-                scratch.as_mut_ptr(),
-                scratch.len(),
-                &mut found,
-            )
-        };
-        if code != 0 || found.is_null() {
-            return Err("E_PEER_PROOF_CLIENT_ACCOUNT_MISSING");
-        }
-        let passwd = unsafe { passwd.assume_init() };
-        if passwd.pw_uid == 0 || passwd.pw_gid == 0 {
-            return Err("E_PEER_PROOF_CLIENT_ACCOUNT_ROOT");
-        }
-        Ok(DedicatedAccount {
-            uid: passwd.pw_uid,
-            gid: passwd.pw_gid,
-        })
-    }
+    use super::fixture_issuer::{fixture_client, receive_attestation};
 
     // Root-only CI issuer: the child is created under the OS-managed client
     // account, never by the interactive MCP user or a user-writable launcher.
@@ -103,13 +80,13 @@ mod proof {
     fn issue(
         issuer_socket: &Path,
         client_socket: &Path,
-        sdk: Option<(&Path, &Path)>,
+        sdk: Option<(&Path, &Path, bool)>,
     ) -> Result<(), &'static str> {
         if unsafe { libc::getuid() } != 0 || unsafe { libc::geteuid() } != 0 {
             return Err("E_PEER_PROOF_ISSUER_NOT_ROOT");
         }
         let approved = fixture_client()?;
-        let mut command = if let Some((node, script)) = sdk {
+        let mut command = if let Some((node, script, cancel_before_commit)) = sdk {
             if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
                 || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
             {
@@ -117,6 +94,9 @@ mod proof {
             }
             let mut issued = Command::new(node);
             issued.arg(script).arg(client_socket);
+            if cancel_before_commit {
+                issued.arg("--hosted-cancel-before-commit");
+            }
             issued.env("GITHUB_ACTIONS", "true");
             issued.env("RUNNER_ENVIRONMENT", "github-hosted");
             issued
@@ -151,83 +131,6 @@ mod proof {
             let _ = child.wait();
         }
         outcome
-    }
-
-    fn receive_attestation(listener: &UnixListener) -> Result<(u32, OwnedFd), &'static str> {
-        let mut ready = libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut ready, 1, 5_000) } != 1 || ready.revents & libc::POLLIN == 0 {
-            return Err("E_PEER_PROOF_ISSUER_TIMEOUT");
-        }
-        let (channel, _) = io(listener.accept())?;
-        let issuer = observe_kernel_peer(&channel).map_err(|_| "E_PEER_PROOF_ISSUER_IDENTITY")?;
-        if issuer.pid <= 0 || issuer.uid != 0 || issuer.gid != 0 {
-            return Err("E_PEER_PROOF_UNPROTECTED_ISSUER");
-        }
-        io(channel.set_read_timeout(Some(Duration::from_secs(3))))?;
-        let mut pid_bytes = [0u8; 4];
-        let mut vector = libc::iovec {
-            iov_base: pid_bytes.as_mut_ptr().cast(),
-            iov_len: pid_bytes.len(),
-        };
-        let mut ancillary = [0usize; 8];
-        let mut message: libc::msghdr = unsafe { zeroed() };
-        message.msg_iov = &mut vector;
-        message.msg_iovlen = 1;
-        message.msg_control = ancillary.as_mut_ptr().cast();
-        message.msg_controllen = size_of::<[usize; 8]>();
-        if unsafe { libc::recvmsg(channel.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC) } != 4
-            || message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
-        {
-            return Err("E_PEER_PROOF_ISSUER_RECV");
-        }
-        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
-        if header.is_null() {
-            return Err("E_PEER_PROOF_ISSUER_NO_PIDFD");
-        }
-        let checked = unsafe { &*header };
-        if checked.cmsg_level != libc::SOL_SOCKET
-            || checked.cmsg_type != libc::SCM_RIGHTS
-            || checked.cmsg_len as usize
-                != unsafe { libc::CMSG_LEN(size_of::<libc::c_int>() as u32) } as usize
-            || !unsafe { libc::CMSG_NXTHDR(&message, header) }.is_null()
-        {
-            return Err("E_PEER_PROOF_ISSUER_DESCRIPTOR_FORMAT");
-        }
-        let raw = unsafe { ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>()) };
-        if raw < 0 {
-            return Err("E_PEER_PROOF_ISSUER_INVALID_DESCRIPTOR");
-        }
-        let pinned = unsafe { OwnedFd::from_raw_fd(raw) };
-        let client_pid = u32::from_be_bytes(pid_bytes);
-        if client_pid == 0 {
-            return Err("E_PEER_PROOF_ISSUER_INVALID_PID");
-        }
-        // pidfd is kernel-maintained; unlike a numeric PID its identity
-        // survives process exit and prevents PID-reuse authorization.
-        let info = io(fs::read_to_string(format!(
-            "/proc/self/fdinfo/{}",
-            pinned.as_raw_fd()
-        )))?;
-        let observed_pid = info
-            .lines()
-            .find_map(|line| line.strip_prefix("Pid:"))
-            .and_then(|text| text.trim().parse::<u32>().ok());
-        if observed_pid != Some(client_pid) {
-            return Err("E_PEER_PROOF_ISSUER_PIDFD_MISMATCH");
-        }
-        let mut state = libc::pollfd {
-            fd: pinned.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut state, 1, 0) } != 0 {
-            return Err("E_PEER_PROOF_ISSUER_CLIENT_NOT_LIVE");
-        }
-        Ok((client_pid, pinned))
     }
 
     fn serve(root: &Path, socket: &Path, issuer_socket: &Path) -> Result<(), &'static str> {
@@ -438,12 +341,16 @@ mod proof {
                 issue(Path::new(&issuer), Path::new(&socket), None)
             }
             (Some(role), Some(issuer), Some(socket), Some(node), Some(script))
-                if role == "issue-sdk" =>
+                if (role == "issue-sdk" || role == "issue-sdk-cancel") && args.next().is_none() =>
             {
                 issue(
                     Path::new(&issuer),
                     Path::new(&socket),
-                    Some((Path::new(&node), Path::new(&script))),
+                    Some((
+                        Path::new(&node),
+                        Path::new(&script),
+                        role == "issue-sdk-cancel",
+                    )),
                 )
             }
             (Some(role), Some(socket), None, None, None) if role == "allow" => {

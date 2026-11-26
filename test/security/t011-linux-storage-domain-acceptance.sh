@@ -27,6 +27,8 @@ attacker="$base/attacker-owned"
 bind_alias=''
 peer_server_pid=''
 peer_server_log=''
+mutation_issuer_pid=''
+mutation_issuer_log=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
 # The mountpoint's immediate parent belongs to the trusted administrator,
@@ -41,6 +43,16 @@ cleanup() {
   if [[ -n "$peer_server_pid" ]]; then
     kill "$peer_server_pid" 2>/dev/null || :
     wait "$peer_server_pid" 2>/dev/null || :
+  fi
+  if [[ -n "$mutation_issuer_pid" ]]; then
+    kill "$mutation_issuer_pid" 2>/dev/null || :
+    wait "$mutation_issuer_pid" 2>/dev/null || :
+  fi
+  if [[ -n "$mutation_issuer_log" ]]; then
+    if [[ "$code" -ne 0 && -f "$mutation_issuer_log" ]]; then
+      cat -- "$mutation_issuer_log" >&2
+    fi
+    rm -f -- "$mutation_issuer_log" || code=1
   fi
   if [[ -n "$peer_server_log" ]]; then
     # Preserve failing native-service diagnostics in the CI job log before
@@ -71,7 +83,8 @@ cleanup() {
 trap cleanup EXIT
 # The real kernel must supply a separate mount device. Never fake an
 # isolated root by putting two directories on the same filesystem.
-sudo -n mount -t tmpfs -o "size=8m,mode=0700,uid=$service_uid,gid=$service_gid" tmpfs "$isolated"
+sudo -n mount -t tmpfs -o "size=8m,mode=0700,nosuid,nodev,uid=$service_uid,gid=$service_gid" tmpfs "$isolated"
+sudo -n mount --make-private "$isolated"
 mountpoint -q "$isolated"
 [[ "$(stat -c %d "$isolated")" != "$(stat -c %d "$attacker")" ]] || {
   echo 'E_STORAGE_DOMAIN_SAME_DEVICE' >&2; exit 1;
@@ -83,8 +96,26 @@ sudo -n -u jdc-authority -- sh -c 'printf SERVICE_DOMAIN_BYTES > "$1"' sh "$serv
 sudo -n -u nobody -- sh -c 'printf OUTSIDE_DOMAIN_SENTINEL_UNCHANGED > "$1"' sh "$outside_file"
 outside_hash="$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)"
 
-# This fixture verifies actual OS custody and kernel I/O only.
-# Native root admission is tracked separately; do not credit it here.
+# The existing hosted harness now also runs the nonshipping journaled
+# engine under the actual service identity, on this exact dedicated tmpfs.
+# Cargo's artifact metadata selects the lib-test executable unambiguously.
+admission_source="$(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib --no-run --message-format=json |
+  jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "jdc_authority_service" and .profile.test == true and .executable != null) | .executable] | if length == 1 then .[0] else error("expected one authority lib test executable") end')"
+admission_probe="$base/admission-probe"
+sudo -n install -o root -g root -m 0555 -- "$admission_source" "$admission_probe"
+[[ "$(sha256sum "$admission_source" | cut -d ' ' -f1)" == "$(sha256sum "$admission_probe" | cut -d ' ' -f1)" ]] || exit 1
+run_admission_probe() {
+  local test_name="$1" marker="$2" output
+  if ! output="$(sudo -n -u jdc-authority -- env JDC_T011_ADMITTED_MOUNT="$isolated" "$admission_probe" --ignored --exact "$test_name" --nocapture 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  printf '%s\n' "$output"
+  grep -Fxq "$marker" <<< "$output"
+  grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' <<< "$output"
+}
+run_admission_probe journaled_mutations::tests::hosted_verified_mount_executes_journaled_native_mutations T011_LINUX_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE
+admission_db_hash="$(sudo -n -u jdc-authority -- sha256sum "$isolated/.jdc-state/policy.sqlite3" | cut -d ' ' -f1)"
 
 # Exercise real read, in-place rewrite, append, rename and unlink under
 # BOTH valid principals. Without these positive controls, an unavailable
@@ -125,6 +156,11 @@ expect_denied append sudo -n -u nobody -- sh -c 'printf INJECTED >> "$1"' sh "$s
 expect_denied rename sudo -n -u nobody -- mv -- "$service_file" "$attacker/stolen-service.bin"
 expect_denied unlink sudo -n -u nobody -- rm -- "$service_file"
 expect_denied create sudo -n -u nobody -- touch -- "$isolated/injected.bin"
+expect_denied admission_read sudo -n -u nobody -- cat -- "$isolated/admission-final.bin"
+expect_denied admission_db_read sudo -n -u nobody -- cat -- "$isolated/.jdc-state/policy.sqlite3"
+expect_denied admission_db_replace sudo -n -u nobody -- cp -- "$outside_file" "$isolated/.jdc-state/policy.sqlite3"
+[[ "$(sudo -n -u jdc-authority -- cat -- "$isolated/admission-final.bin")" == REWRITE ]] || exit 1
+[[ "$(sudo -n -u jdc-authority -- sha256sum "$isolated/.jdc-state/policy.sqlite3" | cut -d ' ' -f1)" == "$admission_db_hash" ]] || exit 1
 [[ ! -e "$attacker/stolen-service.bin" && ! -e "$isolated/injected.bin" ]] || {
   echo 'E_STORAGE_PROTECTED_NAMESPACE_CHANGED' >&2; exit 1;
 }
@@ -182,6 +218,7 @@ findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/dev/n
   echo 'E_STORAGE_BIND_ALIAS_SERVICE_CANNOT_READ_EXTERIOR' >&2; exit 1;
 }
 echo 'T011_STORAGE_ADMIN_BIND_ALIAS_EXPOSES_OUTSIDE_OBJECT_NONRELEASE'
+run_admission_probe journaled_mutations::tests::hosted_verified_mount_rejects_child_bind_mount T011_LINUX_ADMITTED_MOUNT_CHILD_DENIED_NONRELEASE
 # The bind alias is another mount path, not a hard link. A link-count
 # postcheck alone therefore cannot distinguish this imported file object.
 [[ "$(sudo -n stat -c %h "$outside_file")" == 1 &&
@@ -398,5 +435,119 @@ if findmnt --kernel --mountpoint "$bind_alias" --noheadings --output TARGET >/de
 fi
 [[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
 [[ "$(sudo -n -u jdc-authority -- cat "$service_file")" == SERVICE_DOMAIN_BYTES ]]
+run_admission_probe journaled_mutations::tests::hosted_verified_mount_readmits_after_child_removed T011_LINUX_ADMITTED_MOUNT_RESTORED_NONRELEASE
+# The same real SDK mutation sequence now crosses an independently issued
+# process boundary and the admitted volume; its journal starts at sequence 5.
+mutation_source="$(realpath -e -- test/security/support/t011-issued-sdk-native-mutations.mjs)"
+mutation_installed="$base/test/security/support/t011-issued-sdk-native-mutations.mjs"
+sudo -n install -d -o root -g root -m 0755 -- "$base/test" "$base/test/security" "$base/test/security/support"
+sudo -n install -o root -g root -m 0555 -- "$mutation_source" "$mutation_installed"
+[[ "$(sha256sum "$mutation_source" | cut -d ' ' -f1)" == "$(sudo -n sha256sum "$mutation_installed" | cut -d ' ' -f1)" ]] || exit 1
+mutation_socket="$peer_socket_dir/mutation.sock"
+mutation_issuer_socket="$peer_socket_dir/mutation-issuer.sock"
+mutation_ready="$base/mutation-ready.fifo"
+sudo -n mkfifo -m 0600 -- "$mutation_ready"
+sudo -n chown "$(id -u):$service_gid" "$mutation_ready"
+sudo -n chmod 0620 "$mutation_ready"
+mutation_done="$base/mutation-probes-done.fifo"
+sudo -n mkfifo -m 0600 -- "$mutation_done"
+sudo -n chown "$(id -u):$service_gid" "$mutation_done"
+sudo -n chmod 0640 "$mutation_done"
+exec {mutation_ready_fd}<>"$mutation_ready"
+exec {mutation_done_fd}<>"$mutation_done"
+peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-mutations.XXXXXXXX)"
+timeout --kill-after=2s 45s sudo -n -u jdc-authority -- env \
+  JDC_T011_ADMITTED_MOUNT="$isolated" JDC_T011_MUTATION_SOCKET="$mutation_socket" \
+  JDC_T011_MUTATION_ISSUER_SOCKET="$mutation_issuer_socket" JDC_T011_MUTATION_READY_FIFO="$mutation_ready" \
+  JDC_T011_MUTATION_PROBES_DONE_FIFO="$mutation_done" \
+  "$admission_probe" --ignored --exact journaled_mutations::tests::hosted_root_issued_sdk_to_journaled_native_mutations --nocapture \
+  {mutation_ready_fd}>&- {mutation_done_fd}>&- >"$peer_server_log" 2>&1 &
+peer_server_pid=$!
+if ! IFS= read -r -t 8 -u "$mutation_ready_fd" mutation_ready_marker || [[ "$mutation_ready_marker" != JDC_MUTATION_LISTENERS_READY ]]; then
+  echo 'E_MUTATION_LISTENER_NOT_READY' >&2; exit 1
+fi
+if sudo -n -u jdc-mcp-client -- "$peer_binary" issue-sdk \
+    "$mutation_issuer_socket" "$mutation_socket" "$node_binary" "$mutation_installed" {mutation_ready_fd}>&- {mutation_done_fd}>&-; then
+  echo 'E_MUTATION_UNTRUSTED_ISSUER_ACCEPTED' >&2; exit 1
+fi
+mutation_issuer_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-mutation-issuer.XXXXXXXX)"
+timeout --kill-after=2s 40s sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+  "$peer_binary" issue-sdk "$mutation_issuer_socket" "$mutation_socket" "$node_binary" "$mutation_installed" \
+  {mutation_ready_fd}>&- {mutation_done_fd}>&- >"$mutation_issuer_log" 2>&1 &
+mutation_issuer_pid=$!
+# Do not launch negative probes until the service actually holds the
+# authenticated connection. Keep the challenge withheld until both exit.
+if ! IFS= read -r -t 8 -u "$mutation_ready_fd" mutation_ready_marker || [[ "$mutation_ready_marker" != JDC_MUTATION_AUTHENTIC_HELD ]]; then
+  echo 'E_MUTATION_AUTHENTIC_CONNECTION_NOT_HELD' >&2; exit 1
+fi
+exec {mutation_ready_fd}>&-
+sudo -n -u nobody -- "$peer_binary" deny "$mutation_socket" {mutation_done_fd}>&-
+sudo -n -u jdc-mcp-client -- "$peer_binary" impersonate "$mutation_socket" {mutation_done_fd}>&-
+printf '%s\n' JDC_MUTATION_PROBES_DONE >&"$mutation_done_fd"
+exec {mutation_done_fd}>&-
+if ! wait "$mutation_issuer_pid"; then
+  echo 'E_MUTATION_ISSUED_SDK_FAILED' >&2; exit 1
+fi
+mutation_issuer_pid=''
+if ! wait "$peer_server_pid"; then
+  echo 'E_MUTATION_NATIVE_SERVER_FAILED' >&2; exit 1
+fi
+peer_server_pid=''
+grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_MUTATION_CLIENT_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_MUTATION_LIVE_ISSUED_CLIENT_DISTINCT_PEERS_DENIED_NONRELEASE "$peer_server_log"
+grep -Fxq T011_LINUX_ROOT_ISSUED_REAL_JDC_JOURNALED_MUTATIONS_PASS_NONRELEASE "$peer_server_log"
+grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$peer_server_log"
+[[ "$(sudo -n -u jdc-authority -- cat "$isolated/final.txt")" == REWRITE-LOST ]] || exit 1
+sudo -n -u jdc-authority -- test ! -e "$isolated/report.txt"
+expect_denied client_mutation_db_read sudo -n -u jdc-mcp-client -- cat "$isolated/.jdc-state/policy.sqlite3"
+expect_denied client_mutation_direct_write sudo -n -u jdc-mcp-client -- sh -c 'printf INJECTED >> "$1"' sh "$isolated/final.txt"
+[[ "$(sudo -n -u jdc-authority -- cat "$isolated/final.txt")" == REWRITE-LOST ]] || exit 1
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
+cat -- "$peer_server_log" "$mutation_issuer_log"
+rm -f -- "$peer_server_log" "$mutation_issuer_log"
+peer_server_log=''
+mutation_issuer_log=''
+# A fresh root-issued SDK process must cancel after staging, using the
+# same admitted volume and journal (sequence 10 -> rejected sequence 11).
+# Reuse the existing bounded FIFO readiness and owned child cleanup.
+cancel_socket="$peer_socket_dir/mutation-cancel.sock"
+cancel_issuer_socket="$peer_socket_dir/mutation-cancel-issuer.sock"
+exec {mutation_ready_fd}<>"$mutation_ready"
+peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-cancel.XXXXXXXX)"
+timeout --kill-after=2s 45s sudo -n -u jdc-authority -- env \
+  JDC_T011_ADMITTED_MOUNT="$isolated" JDC_T011_MUTATION_SOCKET="$cancel_socket" \
+  JDC_T011_MUTATION_ISSUER_SOCKET="$cancel_issuer_socket" JDC_T011_MUTATION_READY_FIFO="$mutation_ready" \
+  "$admission_probe" --ignored --exact journaled_mutations::tests::hosted_root_issued_sdk_cancelled_staged_mutation_never_publishes --nocapture \
+  {mutation_ready_fd}>&- >"$peer_server_log" 2>&1 &
+peer_server_pid=$!
+if ! IFS= read -r -t 8 -u "$mutation_ready_fd" mutation_ready_marker || [[ "$mutation_ready_marker" != JDC_MUTATION_CANCEL_LISTENERS_READY ]]; then
+  echo 'E_MUTATION_CANCEL_LISTENERS_NOT_READY' >&2; exit 1
+fi
+exec {mutation_ready_fd}>&-
+mutation_issuer_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-cancel-issuer.XXXXXXXX)"
+timeout --kill-after=2s 40s sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+  "$peer_binary" issue-sdk-cancel "$cancel_issuer_socket" "$cancel_socket" "$node_binary" "$mutation_installed" \
+  >"$mutation_issuer_log" 2>&1 &
+mutation_issuer_pid=$!
+if ! wait "$mutation_issuer_pid"; then
+  echo 'E_MUTATION_CANCEL_ISSUED_SDK_FAILED' >&2; exit 1
+fi
+mutation_issuer_pid=''
+if ! wait "$peer_server_pid"; then
+  echo 'E_MUTATION_CANCEL_NATIVE_SERVICE_FAILED' >&2; exit 1
+fi
+peer_server_pid=''
+grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_ADMITTED_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$peer_server_log"
+grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$peer_server_log"
+sudo -n -u jdc-authority -- test ! -e "$isolated/cancelled.txt"
+sudo -n -u jdc-authority -- test ! -e "$isolated/.jdc-stage"
+[[ "$(sudo -n -u jdc-authority -- cat "$isolated/final.txt")" == REWRITE-LOST ]] || exit 1
+[[ "$(sudo -n -u nobody -- sha256sum "$outside_file" | cut -d ' ' -f1)" == "$outside_hash" ]] || exit 1
+cat -- "$peer_server_log" "$mutation_issuer_log"
+rm -f -- "$peer_server_log" "$mutation_issuer_log"
+peer_server_log=''
+mutation_issuer_log=''
+echo 'T011_LINUX_OFFICIAL_SDK_TO_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE'
 echo 'T011_STORAGE_EXTERIOR_BYTES_UNCHANGED'
 echo 'T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE'

@@ -42,6 +42,23 @@ pub mod linux_read_disclosure;
 #[cfg(all(target_os = "linux", test))]
 mod linux_cross_principal;
 
+// Until protected whole-volume admission exists, the mutation engine is
+// exercised only in native tests. No shipping or broker entrypoint uses it.
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod journaled_mutations;
+#[cfg(all(target_os = "linux", test))]
+mod linux_managed_mount;
+#[cfg(all(target_os = "linux", test))]
+mod linux_managed_mutations;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod managed_mutation_contract;
+#[cfg(all(windows, test))]
+mod windows_managed_mutations;
+#[cfg(all(windows, test))]
+mod windows_managed_volume;
+#[cfg(all(windows, test))]
+mod windows_mutation_pipe;
+
 #[cfg(windows)]
 pub mod windows_token;
 

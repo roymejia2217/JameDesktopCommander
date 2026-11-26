@@ -1,0 +1,754 @@
+//! Nonshipping, bounded named-pipe transport for the local mutation proof.
+//! Not a cross-principal issuer or grant. The trusted fixture creates the
+//! pipe and owns the guarded process throughout the exchange. The connector
+//! PID does not alone authenticate a writer of a delegated handle.
+use crate::{
+    windows_pipe_peer::{observe_client_sid_after_read, verify_live_issued_peer_after_read},
+    IdentityDenied,
+};
+use std::{
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    ptr,
+    time::{Duration, Instant},
+};
+use windows_sys::Win32::{
+    Foundation::{
+        GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
+        ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
+    Storage::FileSystem::{
+        ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+    },
+    System::{
+        Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
+            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+        },
+        Threading::{CreateEventW, GetProcessId, WaitForSingleObject},
+        IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
+    },
+};
+pub(super) struct MutationPipe(OwnedHandle);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Progress {
+    Bytes(usize),
+    PendingTimeout,
+    PendingTimeoutCancelled,
+    PeerClosed,
+}
+fn event() -> Result<OwnedHandle, IdentityDenied> {
+    let raw = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+    if raw.is_null() {
+        return Err(IdentityDenied);
+    }
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+fn deadline(timeout: Duration) -> Result<Instant, IdentityDenied> {
+    if timeout < Duration::from_millis(1) || timeout > Duration::from_secs(30) {
+        return Err(IdentityDenied);
+    }
+    Instant::now().checked_add(timeout).ok_or(IdentityDenied)
+}
+fn remaining(end: Instant) -> Result<u32, IdentityDenied> {
+    let millis = end
+        .checked_duration_since(Instant::now())
+        .ok_or(IdentityDenied)?
+        .as_millis();
+    if millis == 0 {
+        return Err(IdentityDenied);
+    }
+    u32::try_from(millis).map_err(|_| IdentityDenied)
+}
+fn is_peer_close(error: u32) -> bool {
+    matches!(
+        error,
+        ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED
+    )
+}
+// Once an overlapped operation is submitted, its storage must outlive it.
+// Drain cancellation before returning; fail-stop this disposable proof
+// on an unobservable completion, as in the existing disclosure primitive.
+fn finish(
+    pipe: BorrowedHandle<'_>,
+    ov: &mut OVERLAPPED,
+    started: i32,
+    millis: u32,
+    on_failure: impl FnOnce(Progress),
+) -> Result<usize, IdentityDenied> {
+    if started == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_IO_PENDING {
+            if is_peer_close(error) {
+                on_failure(Progress::PeerClosed);
+            }
+            return Err(IdentityDenied);
+        }
+        let wait = unsafe { WaitForSingleObject(ov.hEvent, millis) };
+        if wait != WAIT_OBJECT_0 {
+            unsafe { CancelIoEx(pipe.as_raw_handle(), ov) };
+            if unsafe { WaitForSingleObject(ov.hEvent, 5000) } != WAIT_OBJECT_0 {
+                std::process::abort();
+            }
+            let mut discarded = 0;
+            let completed =
+                unsafe { GetOverlappedResult(pipe.as_raw_handle(), ov, &mut discarded, 0) };
+            let error = if completed == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            if error == ERROR_IO_INCOMPLETE {
+                std::process::abort();
+            }
+            if wait == WAIT_TIMEOUT {
+                on_failure(if error == ERROR_OPERATION_ABORTED {
+                    Progress::PendingTimeoutCancelled
+                } else {
+                    Progress::PendingTimeout
+                });
+            }
+            return Err(IdentityDenied);
+        }
+    }
+    let mut count = 0;
+    if unsafe { GetOverlappedResult(pipe.as_raw_handle(), ov, &mut count, 0) } == 0 {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_IO_INCOMPLETE {
+            std::process::abort();
+        }
+        if is_peer_close(error) {
+            on_failure(Progress::PeerClosed);
+        }
+        return Err(IdentityDenied);
+    }
+    Ok(count as usize)
+}
+impl MutationPipe {
+    pub(super) fn create(name: &str, first: bool) -> Result<Self, IdentityDenied> {
+        Self::create_with_instances(name, first, 2)
+    }
+    fn create_with_instances(
+        name: &str,
+        first: bool,
+        instances: u32,
+    ) -> Result<Self, IdentityDenied> {
+        if !name.starts_with(r"\\.\pipe\JDC-T011-MUTATION-")
+            || name.len() > 200
+            || name.contains('\0')
+        {
+            return Err(IdentityDenied);
+        }
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        // Default local fixture DACL only; independent-principal pipe
+        // custody must be supplied by the protected hosted issuer.
+        let raw = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX
+                    | FILE_FLAG_OVERLAPPED
+                    | if first {
+                        FILE_FLAG_FIRST_PIPE_INSTANCE
+                    } else {
+                        0
+                    },
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                instances,
+                8192,
+                8192,
+                0,
+                ptr::null(),
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(IdentityDenied);
+        }
+        Ok(Self(unsafe { OwnedHandle::from_raw_handle(raw) }))
+    }
+    pub(super) fn connect(&self, timeout: Duration) -> Result<(), IdentityDenied> {
+        let end = deadline(timeout)?;
+        let event = event()?;
+        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+        ov.hEvent = event.as_raw_handle();
+        let millis = remaining(end)?;
+        let started = unsafe { ConnectNamedPipe(self.0.as_raw_handle(), &mut ov) };
+        if started == 0 && unsafe { GetLastError() } == ERROR_PIPE_CONNECTED {
+            return Ok(());
+        }
+        finish(self.0.as_handle(), &mut ov, started, millis, |_| {})?;
+        Ok(())
+    }
+    pub(super) fn challenge(&self, issued: BorrowedHandle<'_>) -> Result<(), IdentityDenied> {
+        let mut connector = 0;
+        if unsafe { GetNamedPipeClientProcessId(self.0.as_raw_handle(), &mut connector) } == 0
+            || connector == 0
+            || unsafe { GetProcessId(issued.as_raw_handle()) } != connector
+            || unsafe { WaitForSingleObject(issued.as_raw_handle(), 0) } != WAIT_TIMEOUT
+        {
+            return Err(IdentityDenied);
+        }
+        crate::windows_pipe_disclosure::write_chunk(self.0.as_handle(), b"C", 3000)
+    }
+    fn read_attested(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+        data: &mut [u8],
+        end: Instant,
+        progress: &mut impl FnMut(Progress),
+    ) -> Result<(), IdentityDenied> {
+        self.read_checked(data, end, progress, || {
+            verify_live_issued_peer_after_read(self.0.as_handle(), issued)?;
+            if observe_client_sid_after_read(self.0.as_handle())? != sid {
+                return Err(IdentityDenied);
+            }
+            Ok(())
+        })
+    }
+    fn read_checked(
+        &self,
+        mut data: &mut [u8],
+        end: Instant,
+        progress: &mut impl FnMut(Progress),
+        mut attest: impl FnMut() -> Result<(), IdentityDenied>,
+    ) -> Result<(), IdentityDenied> {
+        while !data.is_empty() {
+            let event = event()?;
+            let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+            ov.hEvent = event.as_raw_handle();
+            let millis = remaining(end)?;
+            let capacity = data.len().min(16 * 1024);
+            let started = unsafe {
+                ReadFile(
+                    self.0.as_raw_handle(),
+                    data.as_mut_ptr(),
+                    capacity as u32,
+                    ptr::null_mut(),
+                    &mut ov,
+                )
+            };
+            let count = finish(self.0.as_handle(), &mut ov, started, millis, &mut *progress)?;
+            if count == 0 || count > capacity || Instant::now() >= end {
+                return Err(IdentityDenied);
+            }
+            attest()?;
+            if Instant::now() >= end {
+                return Err(IdentityDenied);
+            }
+            progress(Progress::Bytes(count));
+            data = &mut data[count..];
+        }
+        Ok(())
+    }
+    pub(super) fn receive(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, IdentityDenied> {
+        self.receive_observed(issued, sid, limit, timeout, |_| {})
+    }
+    fn receive_observed(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+        limit: usize,
+        timeout: Duration,
+        mut progress: impl FnMut(Progress),
+    ) -> Result<Vec<u8>, IdentityDenied> {
+        if limit == 0 || limit > 1024 * 1024 + 8192 || sid.is_empty() {
+            return Err(IdentityDenied);
+        }
+        let end = deadline(timeout)?;
+        let mut header = [0u8; 4];
+        self.read_attested(issued, sid, &mut header, end, &mut progress)?;
+        let size = u32::from_be_bytes(header) as usize;
+        if size == 0 || size > limit {
+            return Err(IdentityDenied);
+        }
+        let mut payload = vec![0u8; size];
+        self.read_attested(issued, sid, &mut payload, end, &mut progress)?;
+        Ok(payload)
+    }
+    pub(super) fn reply(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+        byte: u8,
+    ) -> Result<(), IdentityDenied> {
+        if !matches!(byte, b'A' | b'D') {
+            return Err(IdentityDenied);
+        }
+        crate::windows_pipe_disclosure::write_chunk(self.0.as_handle(), &[byte], 3000)?;
+        // Bounded acknowledgment proves the client read the reply before
+        // we close the instance. No unbounded FlushFileBuffers is used.
+        let mut ack = [0u8; 1];
+        self.read_attested(
+            issued,
+            sid,
+            &mut ack,
+            deadline(Duration::from_secs(3))?,
+            &mut |_| {},
+        )?;
+        if ack != *b"K" {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+}
+
+/// Distinct transport for a preconnected, issuer-owned channel. Connector
+/// PID and pipe impersonation cannot identify its later writer. This local
+/// experiment does not establish protected issuer or distinct-token custody.
+/// The channel retains the exact creation-time process object with reduced
+/// rights; callers cannot substitute another process for individual requests.
+pub(super) struct IssuerConnectedMutationPipe {
+    pipe: MutationPipe,
+    issued_process: OwnedHandle,
+    issuer_process: Option<OwnedHandle>,
+}
+
+impl IssuerConnectedMutationPipe {
+    pub(super) fn issue_local(
+        name: &str,
+        executable: &std::path::Path,
+        command: &std::ffi::OsStr,
+        environment: &[(&str, &str)],
+        diagnostics: BorrowedHandle<'_>,
+    ) -> Result<(Self, crate::windows_issued_client::IssuedClient), IdentityDenied> {
+        use crate::windows_issued_client::IssuedClient;
+        use windows_sys::Win32::{
+            Foundation::{CompareObjectHandles, DuplicateHandle},
+            Storage::FileSystem::SYNCHRONIZE,
+            System::Threading::{GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+        let (pipe, endpoint) = Self::local_pair(name)?;
+        let child = IssuedClient::launch_suspended_with_local_channel(
+            executable,
+            command,
+            environment,
+            endpoint.as_handle(),
+            diagnostics,
+        )?;
+        // Close the issuer's client-end copy before any protocol traffic.
+        drop(endpoint);
+        let current = unsafe { GetCurrentProcess() };
+        let mut reduced = ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                current,
+                child.process_handle().as_raw_handle(),
+                current,
+                &mut reduced,
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                0,
+                0,
+            )
+        } == 0
+            || reduced.is_null()
+        {
+            return Err(IdentityDenied);
+        }
+        let issued_process = unsafe { OwnedHandle::from_raw_handle(reduced) };
+        if unsafe {
+            CompareObjectHandles(
+                issued_process.as_raw_handle(),
+                child.process_handle().as_raw_handle(),
+            )
+        } == 0
+        {
+            return Err(IdentityDenied);
+        }
+        let channel = Self {
+            pipe,
+            issued_process,
+            issuer_process: None,
+        };
+        if !channel.is_live() {
+            return Err(IdentityDenied);
+        }
+        Ok((channel, child))
+    }
+
+    /// Transfer the connected server endpoint and reduced client/issuer
+    /// process handles to a separate same-token test service. The launcher
+    /// owns the explicit inheritance list, and this consumes its copies.
+    pub(super) fn launch_local_service(
+        self,
+        executable: &std::path::Path,
+        command: &std::ffi::OsStr,
+        environment: &[(&str, &str)],
+        diagnostics: BorrowedHandle<'_>,
+    ) -> Result<crate::windows_issued_client::IssuedClient, IdentityDenied> {
+        let mut connector = 0;
+        if self.issuer_process.is_some()
+            || !self.is_live()
+            || unsafe { GetNamedPipeClientProcessId(self.pipe.0.as_raw_handle(), &mut connector) }
+                == 0
+            || connector != std::process::id()
+        {
+            return Err(IdentityDenied);
+        }
+        crate::windows_issued_client::IssuedClient::launch_suspended_with_local_service(
+            executable,
+            command,
+            environment,
+            self.pipe.0.as_handle(),
+            diagnostics,
+            self.issued_process.as_handle(),
+        )
+    }
+
+    /// The numeric environment values are only indices into handles that
+    /// the trusted local fixture actually inherited at process creation.
+    /// Validate object types, inheritance, origin, and liveness. Never use
+    /// this constructor for production or as a cross-principal grant.
+    pub(super) fn from_local_service() -> Result<Self, IdentityDenied> {
+        use windows_sys::Win32::{
+            Foundation::{
+                DuplicateHandle, GetHandleInformation, SetHandleInformation, DUPLICATE_SAME_ACCESS,
+                HANDLE, HANDLE_FLAG_INHERIT,
+            },
+            Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE, SYNCHRONIZE},
+            System::{
+                Pipes::{GetNamedPipeInfo, PIPE_SERVER_END},
+                Threading::{GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            },
+        };
+        let raw_pipe = std::io::stdin().as_raw_handle();
+        let inherited_pin = |name: &str| -> Result<HANDLE, IdentityDenied> {
+            let value = std::env::var(name).map_err(|_| IdentityDenied)?;
+            let raw = value.parse::<usize>().map_err(|_| IdentityDenied)? as HANDLE;
+            if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+                return Err(IdentityDenied);
+            }
+            Ok(raw)
+        };
+        let client = inherited_pin("JDC_T011_LOCAL_CLIENT_PIN")?;
+        let issuer = inherited_pin("JDC_T011_LOCAL_ISSUER_PIN")?;
+        if raw_pipe.is_null()
+            || raw_pipe == INVALID_HANDLE_VALUE
+            || client == issuer
+            || client == raw_pipe
+            || issuer == raw_pipe
+        {
+            return Err(IdentityDenied);
+        }
+        for raw in [raw_pipe, client, issuer] {
+            let mut flags = 0;
+            if unsafe { GetHandleInformation(raw, &mut flags) } == 0
+                || flags & HANDLE_FLAG_INHERIT == 0
+                || unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, 0) } == 0
+            {
+                return Err(IdentityDenied);
+            }
+        }
+        let mut pipe_flags = 0;
+        let mut connector = 0;
+        let client_id = unsafe { GetProcessId(client) };
+        let issuer_id = unsafe { GetProcessId(issuer) };
+        if unsafe { GetFileType(raw_pipe) } != FILE_TYPE_PIPE
+            || unsafe {
+                GetNamedPipeInfo(
+                    raw_pipe,
+                    &mut pipe_flags,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            } == 0
+            || pipe_flags & PIPE_SERVER_END == 0
+            || unsafe { GetNamedPipeClientProcessId(raw_pipe, &mut connector) } == 0
+            || connector != issuer_id
+            || issuer_id == 0
+            || client_id == 0
+            || issuer_id == client_id
+            || issuer_id == std::process::id()
+            || client_id == std::process::id()
+        {
+            return Err(IdentityDenied);
+        }
+        // The original inherited handles are non-inheritable now and live
+        // until this test process exits. Own independent reduced duplicates
+        // for the Rust service object; never adopt an unvalidated integer.
+        let current = unsafe { GetCurrentProcess() };
+        let duplicate =
+            |raw: HANDLE, access: u32, options: u32| -> Result<OwnedHandle, IdentityDenied> {
+                let mut result = ptr::null_mut();
+                if unsafe {
+                    DuplicateHandle(current, raw, current, &mut result, access, 0, options)
+                } == 0
+                    || result.is_null()
+                {
+                    return Err(IdentityDenied);
+                }
+                Ok(unsafe { OwnedHandle::from_raw_handle(result) })
+            };
+        let pipe = duplicate(raw_pipe, 0, DUPLICATE_SAME_ACCESS)?;
+        let issued_process = duplicate(client, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0)?;
+        let issuer_process = duplicate(issuer, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0)?;
+        let own_sid = crate::windows_pipe_peer::observe_process_sid()?;
+        if crate::windows_pipe_peer::observe_process_handle_sid(issued_process.as_handle())?
+            != own_sid
+            || crate::windows_pipe_peer::observe_process_handle_sid(issuer_process.as_handle())?
+                != own_sid
+        {
+            return Err(IdentityDenied);
+        }
+        let channel = Self {
+            pipe: MutationPipe(pipe),
+            issued_process,
+            issuer_process: Some(issuer_process),
+        };
+        if !channel.is_live() {
+            return Err(IdentityDenied);
+        }
+        Ok(channel)
+    }
+
+    fn local_pair(name: &str) -> Result<(MutationPipe, OwnedHandle), IdentityDenied> {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+        };
+        let pipe = MutationPipe::create_with_instances(name, true, 1)?;
+        // Connect ourselves before issuance. No client-side path open and
+        // no FILE_CREATE_PIPE_INSTANCE grant on the inherited endpoint.
+        let client = OpenOptions::new()
+            .access_mode(0x0012019B)
+            .custom_flags(FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)
+            .open(name)
+            .map_err(|_| IdentityDenied)?;
+        pipe.connect(Duration::from_secs(3))?;
+        let mut connector = 0;
+        if unsafe { GetNamedPipeClientProcessId(pipe.0.as_raw_handle(), &mut connector) } == 0
+            || connector != std::process::id()
+        {
+            return Err(IdentityDenied);
+        }
+        Ok((pipe, client.into()))
+    }
+
+    pub(super) fn matches_issued_process(&self, candidate: BorrowedHandle<'_>) -> bool {
+        use windows_sys::Win32::Foundation::CompareObjectHandles;
+        self.is_live()
+            && unsafe {
+                CompareObjectHandles(
+                    self.issued_process.as_raw_handle(),
+                    candidate.as_raw_handle(),
+                )
+            } != 0
+    }
+
+    pub(super) fn is_live(&self) -> bool {
+        let live = |process: &OwnedHandle| {
+            (unsafe { GetProcessId(process.as_raw_handle()) }) != 0
+                && unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_TIMEOUT
+        };
+        live(&self.issued_process) && self.issuer_process.as_ref().is_none_or(live)
+    }
+
+    fn ensure_live(&self) -> Result<(), IdentityDenied> {
+        if self.is_live() {
+            Ok(())
+        } else {
+            Err(IdentityDenied)
+        }
+    }
+
+    /// Readiness is a synchronization signal, never an identity or grant.
+    pub(super) fn await_ready(&self) -> Result<(), IdentityDenied> {
+        let mut ready = [0u8; 1];
+        self.pipe.read_checked(
+            &mut ready,
+            deadline(Duration::from_secs(25))?,
+            &mut |_| {},
+            || self.ensure_live(),
+        )?;
+        if ready != *b"R" {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+    pub(super) fn challenge(&self) -> Result<(), IdentityDenied> {
+        self.ensure_live()?;
+        crate::windows_pipe_disclosure::write_chunk(self.pipe.0.as_handle(), b"C", 3000)
+    }
+    pub(super) fn receive(
+        &self,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, IdentityDenied> {
+        if limit == 0 || limit > 1024 * 1024 + 8192 {
+            return Err(IdentityDenied);
+        }
+        let end = deadline(timeout)?;
+        let mut header = [0u8; 4];
+        self.pipe
+            .read_checked(&mut header, end, &mut |_| {}, || self.ensure_live())?;
+        let size = u32::from_be_bytes(header) as usize;
+        if size == 0 || size > limit {
+            return Err(IdentityDenied);
+        }
+        let mut payload = vec![0; size];
+        self.pipe
+            .read_checked(&mut payload, end, &mut |_| {}, || self.ensure_live())?;
+        Ok(payload)
+    }
+    pub(super) fn reply(&self, byte: u8) -> Result<(), IdentityDenied> {
+        self.ensure_live()?;
+        if !matches!(byte, b'A' | b'D') {
+            return Err(IdentityDenied);
+        }
+        crate::windows_pipe_disclosure::write_chunk(self.pipe.0.as_handle(), &[byte], 3000)?;
+        let mut ack = [0u8; 1];
+        self.pipe.read_checked(
+            &mut ack,
+            deadline(Duration::from_secs(3))?,
+            &mut |_| {},
+            || self.ensure_live(),
+        )?;
+        if ack != *b"K" {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::OpenOptions,
+        os::windows::fs::OpenOptionsExt,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use windows_sys::Win32::{
+        Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT},
+        System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    #[test]
+    fn actual_pipe_frames_reject_wrong_sid_oversize() {
+        actual_pipe_frames(0..3);
+    }
+    #[test]
+    fn actual_pipe_frames_reject_truncation_on_peer_close() {
+        actual_pipe_frames(3..4);
+    }
+    #[test]
+    fn actual_pipe_frames_reject_stall_on_cancelled_timeout() {
+        actual_pipe_frames(4..5);
+    }
+    fn actual_pipe_frames(modes: std::ops::Range<u8>) {
+        let pid = unsafe { GetCurrentProcessId() };
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | 0x00100000, 0, pid) };
+        assert!(!raw.is_null());
+        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let sid = crate::windows_pipe_peer::observe_process_sid().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Same-process local transport tests only; not process custody.
+        for mode in modes {
+            let name = format!(r"\\.\pipe\JDC-T011-MUTATION-{pid}-{unique}-{mode}");
+            std::thread::scope(|scope| {
+                // All owned handles/channels close before scope joins on unwind.
+                let pipe = MutationPipe::create(&name, true).unwrap();
+                let (hold, release) = std::sync::mpsc::channel();
+                let (partial, received) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    let client = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .custom_flags(
+                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | FILE_FLAG_OVERLAPPED,
+                        )
+                        .open(name)
+                        .unwrap();
+                    let mut challenge = [0u8; 1];
+                    let event = event().unwrap();
+                    let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+                    ov.hEvent = event.as_raw_handle();
+                    let started = unsafe {
+                        ReadFile(
+                            client.as_raw_handle(),
+                            challenge.as_mut_ptr(),
+                            1,
+                            ptr::null_mut(),
+                            &mut ov,
+                        )
+                    };
+                    assert_eq!(
+                        finish(client.as_handle(), &mut ov, started, 2000, |_| {}),
+                        Ok(1)
+                    );
+                    assert_eq!(challenge, *b"C");
+                    let write = |bytes: &[u8]| {
+                        crate::windows_pipe_disclosure::write_chunk(client.as_handle(), bytes, 2000)
+                            .unwrap()
+                    };
+                    match mode {
+                        0 | 3 => {
+                            write(&5u32.to_be_bytes());
+                            write(b"AB");
+                            // Do not write the suffix/close until the server
+                            // actually observed both partial payload bytes.
+                            received.recv_timeout(Duration::from_secs(3)).unwrap();
+                            if mode == 3 {
+                                return;
+                            }
+                            write(b"CDE");
+                        }
+                        1 => write(&5u32.to_be_bytes()),
+                        2 => write(&6u32.to_be_bytes()),
+                        _ => {}
+                    }
+                    release.recv_timeout(Duration::from_secs(3)).unwrap();
+                });
+                pipe.connect(Duration::from_secs(2)).unwrap();
+                pipe.challenge(process.as_handle()).unwrap();
+                let wrong = vec![1, 0, 0, 0, 0, 0, 0, 0];
+                let expected = if mode == 1 { &wrong } else { &sid };
+                let timeout = if mode == 4 {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(2)
+                };
+                let mut observed = Vec::new();
+                let mut bytes = 0;
+                let result =
+                    pipe.receive_observed(process.as_handle(), expected, 5, timeout, |event| {
+                        observed.push(event);
+                        if let Progress::Bytes(n) = event {
+                            bytes += n;
+                            if matches!(mode, 0 | 3) && bytes == 6 {
+                                partial.send(()).unwrap();
+                            }
+                        }
+                    });
+                if mode == 0 {
+                    assert_eq!(result, Ok(b"ABCDE".to_vec()));
+                    assert_eq!(bytes, 9);
+                } else {
+                    assert_eq!(result, Err(IdentityDenied));
+                }
+                match mode {
+                    0 => assert!(observed.len() >= 3),
+                    1 => assert!(observed.is_empty()),
+                    2 => assert_eq!(bytes, 4),
+                    3 => {
+                        assert_eq!(bytes, 6);
+                        assert_eq!(observed.last(), Some(&Progress::PeerClosed));
+                    }
+                    4 => assert_eq!(observed, [Progress::PendingTimeoutCancelled]),
+                    _ => unreachable!(),
+                }
+                if mode != 3 {
+                    hold.send(()).unwrap();
+                }
+            });
+        }
+    }
+}

@@ -94,13 +94,27 @@ impl PolicyFence {
         prepare: impl FnOnce() -> Result<T, E>,
         disclose: impl FnOnce(T) -> Result<(), E>,
     ) -> Result<Result<(), E>, EpochDenied> {
+        self.prepare_and_commit_once(ticket, prepare, disclose)
+    }
+
+    /// Private preparation may hold bytes or an unpublished staging object;
+    /// it must never modify the target or expose usable authority. The
+    /// commit callback runs only with the still-current epoch fenced.
+    /// Revocation can win while private preparation is in progress.
+    #[cfg(any(target_os = "linux", all(windows, test)))]
+    pub(crate) fn prepare_and_commit_once<T, U, E>(
+        &self,
+        ticket: &ReadTicket,
+        prepare: impl FnOnce() -> Result<T, E>,
+        commit: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<Result<U, E>, EpochDenied> {
         self.claim(ticket)?;
         self.execute(ticket.revision, || ())?;
         let prepared = match prepare() {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
-        self.execute(ticket.revision, || disclose(prepared))
+        self.execute(ticket.revision, || commit(prepared))
     }
 
     /// Hold a shared read lock through the caller's bounded native I/O AND

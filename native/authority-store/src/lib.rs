@@ -5,6 +5,8 @@
 //! Path-based opening is for offline feasibility testing ONLY; any production
 //! broker MUST obtain and protect an OS-anchored storage handle and policy owner.
 
+pub mod mutation_journal;
+
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::{path::Path, time::Duration};
 

@@ -1364,10 +1364,15 @@ target.setRequestHandler(ListToolsRequestSchema, async () => {
 
 import * as handlers from './handlers/index.js';
 import { handleManagedRead, type ManagedReadOperation } from './handlers/managed-read.js';
+import { createManagedMutationDispatcher, type ManagedMutationOperation } from './handlers/managed-mutation.js';
 import { ServerResult, type ToolExecutionContext } from './types.js';
 import { createToolExecutionContext } from './tools/tool-execution-context.js';
 
-function registerCallToolHandler(target: Server, managedRead?: ManagedReadOperation): void {
+type ManagedOperations = Readonly<{ managedRead?: ManagedReadOperation; managedMutation?: ManagedMutationOperation }>;
+
+type ManagedDispatchers = Readonly<{ managedRead?: ManagedReadOperation; managedMutation?: ReturnType<typeof createManagedMutationDispatcher> }>;
+
+function registerCallToolHandler(target: Server, operations: ManagedDispatchers): void {
 target.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest, extra): Promise<ServerResult> => {
     await ensureOperationalRuntimeInitialized();
 
@@ -1382,17 +1387,19 @@ target.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest,
     // UI interactions are tracked separately via mcp_ui_event.
     const isUiOriginCall = !!(args && typeof args === 'object' && (args as any).origin === 'ui');
     if (isUiOriginCall) {
-        return runInUiOriginCallContext(() => handleCallToolRequest(request, executionContext, managedRead));
+        return runInUiOriginCallContext(() => handleCallToolRequest(request, executionContext, operations));
     }
-    return handleCallToolRequest(request, executionContext, managedRead);
+    return handleCallToolRequest(request, executionContext, operations);
 });
 }
 
 async function handleCallToolRequest(
     request: CallToolRequest,
     executionContext: ToolExecutionContext,
-    managedRead?: ManagedReadOperation,
+    operations: ManagedDispatchers,
 ): Promise<ServerResult> {
+    const { managedRead, managedMutation } = operations;
+    const managed = !!managedRead || !!managedMutation;
     const { name, arguments: args } = request.params;
     const startTime = Date.now();
     // Hoisted above the try so the finally block can read them when emitting the
@@ -1432,10 +1439,10 @@ async function handleCallToolRequest(
             setCurrentRemoteClient(null);
         }
 
-        if (!managedRead && name === 'set_config_value' && args && typeof args === 'object' && 'key' in args) {
+        if (!managed && name === 'set_config_value' && args && typeof args === 'object' && 'key' in args) {
             telemetryData.set_config_value_key_name = (args as any).key;
         }
-        if (!managedRead && name === 'get_prompts' && args && typeof args === 'object') {
+        if (!managed && name === 'get_prompts' && args && typeof args === 'object') {
             const promptArgs = args as any;
             telemetryData.action = promptArgs.action;
             if (promptArgs.category) {
@@ -1448,7 +1455,7 @@ async function handleCallToolRequest(
         }
 
         // Track tool call
-        trackToolCall(name, managedRead ? undefined : args);
+        trackToolCall(name, managed ? undefined : args);
 
         // Using a more structured approach with dedicated handlers
         // (result is declared above so the finally block can read execution status)
@@ -1465,13 +1472,15 @@ async function handleCallToolRequest(
         const meta = request.params._meta;
         const nativeRequiredByCaller = !!(meta && typeof meta === 'object' &&
             Object.prototype.hasOwnProperty.call(meta, 'jdc.nativeAuthorityRequired'));
-        const nativeRequired = !!managedRead || nativeRequiredByProcess || nativeRequiredByCaller;
+        const nativeRequired = managed || nativeRequiredByProcess || nativeRequiredByCaller;
         // Use a non-client-selectable sentinel, never a caller-provided tool
         // name, so denial still follows the normal accounting path below.
         switch (nativeRequired ? null : name) {
             case null:
                 result = managedRead && name === 'read_file'
                     ? await handleManagedRead(managedRead, args, executionContext.signal)
+                    : managedMutation && (name === 'write_file' || name === 'move_file')
+                    ? await managedMutation(name, args, executionContext.signal)
                     : {
                         content: [{ type: 'text', text: 'E_NATIVE_AUTHORITY_UNAVAILABLE: no authenticated native broker' }],
                         isError: true,
@@ -1736,16 +1745,24 @@ async function handleCallToolRequest(
             'track_ui_event'
         ];
 
-        if (!EXCLUDED_TOOLS.includes(name)) {
-            if (managedRead) {
-                // Managed content and paths must never be written into legacy history.
-                toolHistory.addCall(name, {}, {
-                    content: [{ type: 'text', text: '[managed operation: content omitted]' }],
-                    isError,
-                }, duration);
-            } else {
-                toolHistory.addCall(name, args, result, duration);
+        if (managed) {
+            // The broker outcome is authoritative. Legacy usage/onboarding
+            // bookkeeping cannot turn a committed mutation into a failure,
+            // block its acknowledgment, or persist its arguments/results.
+            if (!EXCLUDED_TOOLS.includes(name)) {
+                try {
+                    toolHistory.addCall(name, {}, {
+                        content: [{ type: 'text', text: '[managed operation: content omitted]' }],
+                        isError,
+                    }, duration);
+                } catch {
+                    // History is not part of the broker transaction.
+                }
             }
+            return result;
+        }
+        if (!EXCLUDED_TOOLS.includes(name)) {
+            toolHistory.addCall(name, args, result, duration);
         }
 
         // Track success or failure based on result
@@ -1758,7 +1775,6 @@ async function handleCallToolRequest(
             console.log(`[FEEDBACK DEBUG] Tool ${name} failed, not checking feedback`);
         } else {
             await usageTracker.trackSuccess(name);
-            if (managedRead) return result;
             console.log(`[FEEDBACK DEBUG] Tool ${name} succeeded, checking feedback...`);
 
             // Check if should show onboarding (before feedback - first-time users are priority)
@@ -1866,6 +1882,12 @@ async function handleCallToolRequest(
         return result;
     } catch (error) {
         isError = true;
+        if (managed) {
+            // Do not disclose arbitrary errors in managed mode. A mutation
+            // failure whose origin is uncertain must not invite a retry.
+            return { content: [{ type: 'text', text: managedMutation && (name === 'write_file' || name === 'move_file')
+                ? 'E_NATIVE_MUTATION_OUTCOME_UNKNOWN' : 'E_NATIVE_AUTHORITY_UNAVAILABLE' }], isError: true };
+        }
         const errorMessage = error instanceof Error ? error.message : String(error);
 
         // Track the failure
@@ -1887,29 +1909,37 @@ async function handleCallToolRequest(
         // capture layer, so server_call_tool reflects only genuine
         // agent-driven tool calls.
         if (name !== 'track_ui_event') {
-            capture_call_tool('server_call_tool', {
+            const report = () => capture_call_tool('server_call_tool', {
                 ...telemetryData,
                 duration_ms: Date.now() - startTime,
                 is_error: String(isError),
             });
+            if (managed) {
+                try { report(); } catch { /* no authority or outcome depends on telemetry */ }
+            } else {
+                report();
+            }
         }
     }
 }
 
 /**
- * Compose the same JDC MCP server with a startup-owned managed read operation.
+ * Compose the same JDC MCP server with startup-owned managed operations.
  * No caller-supplied metadata, CLI switch or environment value can install it.
  * Until a protected launcher and broker enroll this dependency, the default
  * runtime retains its existing native-required fail-closed behavior.
  * JDC's operational state remains process-scoped: use one connected server
  * instance per process.
  */
-export function createJdcServer(options: Readonly<{ managedRead?: ManagedReadOperation }> = {}): Server {
+export function createJdcServer(options: ManagedOperations = {}): Server {
     const target = makeServer();
     registerResourceHandlers(target);
     registerInitializeHandler(target);
     registerListToolsHandler(target);
-    registerCallToolHandler(target, options.managedRead);
+    registerCallToolHandler(target, Object.freeze({
+        managedRead: options.managedRead,
+        managedMutation: options.managedMutation ? createManagedMutationDispatcher(options.managedMutation) : undefined,
+    }));
     target.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
     return target;
 }

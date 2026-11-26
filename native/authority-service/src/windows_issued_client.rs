@@ -128,6 +128,10 @@ impl IssuedClient {
         if created == 0 {
             return Err(IdentityDenied);
         }
+        Self::from_process_information(info)
+    }
+
+    fn from_process_information(info: PROCESS_INFORMATION) -> Result<Self, IdentityDenied> {
         // A partially populated PROCESS_INFORMATION must never strand an
         // unowned suspended process, even after an unexpected OS failure.
         if info.hProcess.is_null() || info.hThread.is_null() {
@@ -149,6 +153,217 @@ impl IssuedClient {
             tid: info.dwThreadId,
             resumed: false,
         })
+    }
+
+    /// Test-only current-token launch with one preconnected channel and one
+    /// diagnostic file. Not a protected cross-principal issuer or a grant.
+    #[cfg(test)]
+    pub(crate) fn launch_suspended_with_local_channel(
+        executable: &Path,
+        command_line: &OsStr,
+        environment: &[(&str, &str)],
+        endpoint: BorrowedHandle<'_>,
+        diagnostics: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::launch_suspended_with_inherited_channel(
+            executable,
+            command_line,
+            environment,
+            endpoint,
+            diagnostics,
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn launch_suspended_with_local_service(
+        executable: &Path,
+        command_line: &OsStr,
+        environment: &[(&str, &str)],
+        endpoint: BorrowedHandle<'_>,
+        diagnostics: BorrowedHandle<'_>,
+        client_process: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::launch_suspended_with_inherited_channel(
+            executable,
+            command_line,
+            environment,
+            endpoint,
+            diagnostics,
+            Some(client_process),
+        )
+    }
+
+    #[cfg(test)]
+    fn launch_suspended_with_inherited_channel(
+        executable: &Path,
+        command_line: &OsStr,
+        environment: &[(&str, &str)],
+        endpoint: BorrowedHandle<'_>,
+        diagnostics: BorrowedHandle<'_>,
+        client_process: Option<BorrowedHandle<'_>>,
+    ) -> Result<Self, IdentityDenied> {
+        use windows_sys::Win32::{
+            Foundation::{
+                DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, ERROR_INSUFFICIENT_BUFFER,
+                HANDLE,
+            },
+            Storage::FileSystem::SYNCHRONIZE,
+            System::Threading::{
+                DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+                UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            },
+        };
+        if !executable.is_absolute() || !executable.is_file() {
+            return Err(IdentityDenied);
+        }
+        let app = wide(executable.as_os_str())?;
+        let mut command = wide(command_line)?;
+        let mut token = ptr::null_mut();
+        let current = unsafe { GetCurrentProcess() };
+        if unsafe { OpenProcessToken(current, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(IdentityDenied);
+        }
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let descriptors = OwnerRightsCreationDescriptors::from_primary_token(token.as_handle())?;
+        let attributes = descriptors.borrow_attributes();
+
+        // Only private duplicates are inheritable. The originals and other
+        // fixture resources remain noninheritable and never enter this list.
+        let duplicate = |source: BorrowedHandle<'_>| -> Result<OwnedHandle, IdentityDenied> {
+            let mut result = ptr::null_mut();
+            if unsafe {
+                DuplicateHandle(
+                    current,
+                    source.as_raw_handle(),
+                    current,
+                    &mut result,
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+                || result.is_null()
+            {
+                return Err(IdentityDenied);
+            }
+            Ok(unsafe { OwnedHandle::from_raw_handle(result) })
+        };
+        let input = duplicate(endpoint)?;
+        let output = duplicate(diagnostics)?;
+        let mut handles: Vec<HANDLE> = vec![input.as_raw_handle(), output.as_raw_handle()];
+        // A separate service inherits only reduced process handles in
+        // addition to the connected server endpoint and diagnostics.
+        let pin = |source: HANDLE| -> Result<OwnedHandle, IdentityDenied> {
+            let mut result = ptr::null_mut();
+            if unsafe {
+                DuplicateHandle(
+                    current,
+                    source,
+                    current,
+                    &mut result,
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    1,
+                    0,
+                )
+            } == 0
+                || result.is_null()
+            {
+                return Err(IdentityDenied);
+            }
+            Ok(unsafe { OwnedHandle::from_raw_handle(result) })
+        };
+        let client_pin = client_process
+            .map(|source| pin(source.as_raw_handle()))
+            .transpose()?;
+        let issuer_pin = if client_pin.is_some() {
+            Some(pin(current)?)
+        } else {
+            None
+        };
+        let mut child_environment = environment.to_vec();
+        if child_environment.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("JDC_T011_LOCAL_CLIENT_PIN")
+                || name.eq_ignore_ascii_case("JDC_T011_LOCAL_ISSUER_PIN")
+        }) {
+            return Err(IdentityDenied);
+        }
+        let client_value;
+        let issuer_value;
+        if let (Some(client), Some(issuer)) = (&client_pin, &issuer_pin) {
+            handles.extend([client.as_raw_handle(), issuer.as_raw_handle()]);
+            client_value = (client.as_raw_handle() as usize).to_string();
+            issuer_value = (issuer.as_raw_handle() as usize).to_string();
+            // These values are indices into the inherited kernel handle
+            // table, never independent identity attestations or grants.
+            child_environment.push(("JDC_T011_LOCAL_CLIENT_PIN", &client_value));
+            child_environment.push(("JDC_T011_LOCAL_ISSUER_PIN", &issuer_value));
+        }
+        let mut env = environment_block(&child_environment)?;
+        let mut needed = 0usize;
+        if unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut needed) } != 0
+            || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
+            || !(1..=65536).contains(&needed)
+        {
+            return Err(IdentityDenied);
+        }
+        let mut storage = vec![0usize; needed.div_ceil(std::mem::size_of::<usize>())];
+        let list = storage.as_mut_ptr().cast();
+        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut needed) } == 0 {
+            return Err(IdentityDenied);
+        }
+        struct AttributeList(*mut std::ffi::c_void);
+        impl Drop for AttributeList {
+            fn drop(&mut self) {
+                unsafe { DeleteProcThreadAttributeList(self.0) };
+            }
+        }
+        let _list = AttributeList(list);
+        if unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast(),
+                std::mem::size_of_val(handles.as_slice()),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        } == 0
+        {
+            return Err(IdentityDenied);
+        }
+        let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+        startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = input.as_raw_handle();
+        startup.StartupInfo.hStdOutput = output.as_raw_handle();
+        startup.StartupInfo.hStdError = output.as_raw_handle();
+        startup.lpAttributeList = list;
+        let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let created = unsafe {
+            CreateProcessW(
+                app.as_ptr(),
+                command.as_mut_ptr(),
+                attributes.process(),
+                attributes.primary_thread(),
+                1,
+                CREATE_SUSPENDED
+                    | CREATE_NO_WINDOW
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                env.as_mut_ptr().cast(),
+                ptr::null(),
+                &startup.StartupInfo,
+                &mut info,
+            )
+        };
+        if created == 0 {
+            return Err(IdentityDenied);
+        }
+        Self::from_process_information(info)
     }
 
     /// Consume one issued ticket and serialize all native I/O and bounded

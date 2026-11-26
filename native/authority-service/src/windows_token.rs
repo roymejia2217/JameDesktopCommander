@@ -224,7 +224,9 @@ where
     Ok(names)
 }
 
-fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> {
+fn native_privilege_records(
+    info: &RawInfo,
+) -> Result<(Vec<LUID_AND_ATTRIBUTES>, Vec<PrivilegeRecord>), TokenUnverifiable> {
     let prefix = mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
     let count: u32 = info.fixed()?;
     let count = count as usize;
@@ -253,6 +255,12 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
         });
         slots.push(slot);
     }
+    validated_enabled_privilege_indices(&records).ok_or(TokenUnverifiable)?;
+    Ok((slots, records))
+}
+
+fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> {
+    let (slots, records) = native_privilege_records(info)?;
     resolve_enabled_privilege_names(&records, |index| {
         let mut buf = [0u16; 256];
         let mut chars = buf.len() as u32;
@@ -272,6 +280,10 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
         String::from_utf16(&buf[..chars as usize]).map_err(|_| TokenUnverifiable)
     })
 }
+#[cfg(test)]
+#[path = "windows_fixture_token_tests.rs"]
+mod fixture_tests;
+
 fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
     let label: TOKEN_MANDATORY_LABEL = info.fixed()?;
     // RawInfo::sid performs pointer and complete-length checks first.

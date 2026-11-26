@@ -350,6 +350,94 @@ Official references:
    of the unsafe N-API receiver. A valid issuer alone never grants content
    access.
 
+### Windows preconnected mutation transport — nonshipping experiment
+
+The current-token local experiment passes a connected, bounded duplex pipe
+endpoint to the suspended Node process through an explicit process-creation
+handle allowlist; its diagnostics use a separate file. Node does not open the
+pipe by name. The endpoint is a channel capability, not a filesystem handle,
+global namespace grant, reusable admission credential, or proof of the writer's
+SID. The fixed SDK request plan is deliberately not a shipping protocol.
+
+A subsequent real Windows local fixture transfers the preconnected server
+endpoint to a separate native service process using an explicit inheritance
+allowlist. The issuer retains the exact created client process object, and
+passes reduced process references (query-limited-information and synchronize)
+for itself and the client. The service validates the inherited handle types,
+pipe endpoint, connector process, observed primary-token SIDs and liveness;
+original inherited handles are made non-inheritable and remain scoped to the
+service subprocess lifetime. The environment numbers only locate inherited
+handles and do not authorize a caller. The service alone executes the native
+mutation plan and owns its SQLite journal. The issuer verifies exact final
+bytes and sequence, including a committed operation whose acknowledgement is
+lost. Both fixtures use the current token; separate processes are not distinct
+security principals. The local CI gate is a prerequisite, not an admission
+or anti-delegation proof.
+
+This experiment does not revise the approved admission contract above.
+A distinct protected issuer must still establish primary-token provenance,
+same-session creation, service-side handle custody and independently verified
+attacker denial. The local default pipe DACL and same-token fixture cannot
+establish those properties. A retained process handle alone cannot establish
+per-message writer identity or prevent an intentionally cooperating issued
+client from forwarding its capability. Any production delegation policy or
+change to the earlier no-handle requirement needs independent approval.
+The hosted NTFS admission and outside-object integrity gates remain mandatory.
+
+#### Required Windows issuer environment preflight (nonrelease)
+
+Before treating the hosted issuer as eligible to launch independent primary
+tokens, the existing NTFS acceptance harness now explicitly executes native
+observations under the service, client and attacker credentials. Their actual
+TokenUser and TokenOwner must match the independently provisioned role, all
+four SIDs must differ, the primary token session must match the issuer,
+integrity must be medium, and administrator/SYSTEM membership and the
+fixture's prohibited privilege inventory must be absent (not merely disabled).
+This is a deliberately conservative disposable-fixture contract, not a
+production token allowlist.
+
+The issuer is observed separately with its own token, using the bounded native
+TokenPrivileges inventory and exact locally resolved LUIDs for
+SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege. The gate requires
+both privileges to be present; their presence alone is not proof of successful
+CreateProcessAsUserW or protected custody. The fixture does not enable or
+assign privileges, change session IDs, or attempt a less constrained fallback.
+On the local Windows validation host the former privilege is absent; the
+latter is present but disabled (session 0). The ordinary storage-domain
+verdict remains scoped to the original storage proof; the independent issuer
+prerequisite has its own mandatory marker and failure path. Hosted execution
+is still required, and neither successful prerequisite observation nor the
+local same-token handoff replaces the actual cross-principal SDK-to-NTFS
+mutation acceptance.
+
+#### Linux request cancellation at the native publication fence (nonrelease)
+
+An actual local SDK cancellation after staging (not process termination) is
+now exercised with the issued process kept alive until the native service
+reports a terminal journal verdict. Process liveness alone was insufficient:
+the original test path could commit after the SDK closed its request socket.
+The Linux SDK mutation fixture now requires an idle, live request connection
+at the publication fence, rejecting EOF, half-close, unexpected pending data
+or a socket observation error. The actual staged cancellation must record
+Rejected with the expected sequence/digest, remove the stage, preserve the
+outside sentinel, and leave no destination object or retry. This is one
+commit-time observation, not an asynchronous revocation acknowledgement or a
+promise that a disconnect after commit admission can undo a kernel rename.
+The regular six-request SDK plan and the local cancellation case are separate
+mandatory CI checks before admitted-mount acceptance. The hosted harness also
+requires a fresh root-issued SDK child on the same admitted journal, advancing
+sequence 10 to a rejected sequence 11 without altering final.txt or the outside
+sentinel. That path is compiled, not yet demonstrated on a hosted runner.
+The local proof runs with the same UID. Windows cancellation/authority claims
+remain independently gated. The Node runtime must still prove protection from
+same-UID process inspection; the native Rust client's non-dumpable setting is
+not inherited as a verified post-exec Node property.
+
+The disposable Windows token observations are isolated in a private
+`cfg(test)` child module. The SCM observer retains its no-output contract;
+fixture outputs are fixed verdict markers only, not SID, session or privilege
+inventories. Neither an issuer preflight nor a marker grants launch authority.
+
 ### Mandatory decision experiment
 
 The **next non-shipping functional increment**, once its issuer/principal

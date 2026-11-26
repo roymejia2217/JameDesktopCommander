@@ -188,16 +188,80 @@ jobs:
           grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
 
       - name: Use pinned Node 24 for disposable issuer-to-MCP-SDK proof
-        if: matrix.target == 'linux-x64'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
+      - name: Install locked MCP SDK for protected issuer acceptance
+        id: issued_sdk_dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - name: Build real JDC runtime for the protected issuer acceptance
-        if: matrix.target == 'linux-x64'
+        id: issued_sdk_runtime
+        run: npm run build
+
+      # Same-token local prerequisite, not a protected cross-principal or
+      # hosted NTFS verdict. Execute the real SDK, not just a compiled test.
+      - name: Test Windows inherited SDK mutation channel (local nonrelease)
+        id: windows_issuer_connected_sdk_local_mutations
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE)) {
+            throw 'E_STORAGE_NODE_PATH_NOT_ABSOLUTE'
+          }
+          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_windows_real_sdk_issuer_connected_mutation_channel -- --ignored --exact --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if (-not ($result -contains 'T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE') -or
+              -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+            throw 'E_STORAGE_LOCAL_ISSUED_SDK_VERDICT_MISSING'
+          }
+
+      # Proves actual kernel handoff to a separate native service process.
+      # This same-token local proof is not the hosted distinct-principal gate.
+      - name: Test Windows issued SDK handoff to separate native service
+        id: windows_issuer_connected_sdk_separate_service
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE)) {
+            throw 'E_STORAGE_NODE_PATH_NOT_ABSOLUTE'
+          }
+          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_windows_issuer_hands_channel_to_separate_native_service -- --ignored --exact --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if (-not ($result -contains 'T011_WINDOWS_SEPARATE_NATIVE_SERVICE_SDK_MUTATIONS_PASS_NONRELEASE') -or
+              -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+            throw 'E_STORAGE_SEPARATE_NATIVE_SERVICE_VERDICT_MISSING'
+          }
+
+      # Run the real SDK against the native journal before the privileged
+      # hosted storage proof; no local result counts as admitted-mount evidence.
+      - name: Test Linux SDK native mutations and staged cancellation
+        id: linux_issued_sdk_local_mutations
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JDC_T011_NODE
+          JDC_T011_NODE="$(command -v node)"
+          [[ "$JDC_T011_NODE" = /* && -x "$JDC_T011_NODE" ]]
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_real_jdc_sdk_to_journaled_native_mutations -- --ignored --exact --nocapture 2>&1 | tee "$log"
+          grep -Fxq T011_LINUX_LOCAL_SDK_NATIVE_JOURNAL_EXACT_BYTES_PASS_NONRELEASE "$log"
+          grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_real_sdk_cancelled_staged_mutation_never_publishes -- --ignored --exact --nocapture 2>&1 | tee "$log"
+          grep -Fxq T011_LINUX_REAL_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$log"
+          grep -Fxq T011_LINUX_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$log"
+          grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
 
       - name: Test Linux storage isolation and outside-object integrity
         if: matrix.target == 'linux-x64'
@@ -295,11 +359,6 @@ jobs:
       # Real Windows OS custody + official SDK Client.callTool, non-shipping.
       # A disposable same-SID adversary must be rejected before native bytes
       # are released from a previously opened, issuer-owned file HANDLE.
-      - name: Install locked MCP SDK for Windows managed-client evidence
-        id: windows_issued_sdk_dependencies
-        if: matrix.target == 'win32-x64'
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
       - name: Exercise protected Windows-issued MCP SDK exact native read
         id: windows_issued_sdk_native_read
         if: matrix.target == 'win32-x64'

@@ -30,6 +30,14 @@ use windows_sys::Win32::{
 };
 const FULL: u32 = 0x1f01ff;
 const MODIFY: u32 = 0x1301bf;
+
+// This entire module is cfg(test). Report fixed check identifiers and numeric
+// kernel errors only, never paths, tokens, SIDs, or ACL contents. Every failed
+// check retains the existing deny verdict (including expected negatives).
+fn admission_denied(check: &'static str, code: Option<u32>) -> MutationError {
+    eprintln!("T011_WINDOWS_VOLUME_ADMISSION_DENIED check={check} os_code={code:?}");
+    MutationError::Denied
+}
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
@@ -59,7 +67,7 @@ fn open_directory(path: &Path) -> Result<File, MutationError> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(|_| MutationError::Denied)
+        .map_err(|e| admission_denied("directory-open", e.raw_os_error().map(|n| n as u32)))
 }
 fn final_guid_path(file: &File) -> Result<String, MutationError> {
     let mut b = vec![0u16; 32768];
@@ -71,15 +79,24 @@ fn final_guid_path(file: &File) -> Result<String, MutationError> {
             FILE_NAME_NORMALIZED | VOLUME_NAME_GUID,
         )
     } as usize;
-    if n == 0 || n >= b.len() {
-        return Err(MutationError::Denied);
+    if n == 0 {
+        return Err(admission_denied(
+            "final-guid-api",
+            Some(unsafe { GetLastError() }),
+        ));
     }
-    String::from_utf16(&b[..n]).map_err(|_| MutationError::Denied)
+    if n >= b.len() {
+        return Err(admission_denied("final-guid-length", None));
+    }
+    String::from_utf16(&b[..n]).map_err(|_| admission_denied("final-guid-encoding", None))
 }
 fn info(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, MutationError> {
     let mut m = MaybeUninit::uninit();
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), m.as_mut_ptr()) } == 0 {
-        return Err(MutationError::Denied);
+        return Err(admission_denied(
+            "file-information",
+            Some(unsafe { GetLastError() }),
+        ));
     }
     Ok(unsafe { m.assume_init() })
 }
@@ -92,11 +109,13 @@ struct VolumeIdentity {
 fn volume_identity(file: &File) -> Result<VolumeIdentity, MutationError> {
     let guid = final_guid_path(file)?;
     let m = info(file)?;
-    if !valid_guid_root(&guid)
-        || m.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+    if !valid_guid_root(&guid) {
+        return Err(admission_denied("observed-guid-root-syntax", None));
+    }
+    if m.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
         || m.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("volume-root-attributes", None));
     }
     let mut fs = [0u16; 32];
     if unsafe {
@@ -111,9 +130,14 @@ fn volume_identity(file: &File) -> Result<VolumeIdentity, MutationError> {
             fs.len() as u32,
         )
     } == 0
-        || fs[..5] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0]
     {
-        return Err(MutationError::Denied);
+        return Err(admission_denied(
+            "volume-information-api",
+            Some(unsafe { GetLastError() }),
+        ));
+    }
+    if fs[..5] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0] {
+        return Err(admission_denied("volume-filesystem", None));
     }
     let mut id = MaybeUninit::<FILE_ID_INFO>::uninit();
     if unsafe {
@@ -125,7 +149,10 @@ fn volume_identity(file: &File) -> Result<VolumeIdentity, MutationError> {
         )
     } == 0
     {
-        return Err(MutationError::Denied);
+        return Err(admission_denied(
+            "volume-file-id",
+            Some(unsafe { GetLastError() }),
+        ));
     }
     let id = unsafe { id.assume_init() };
     Ok(VolumeIdentity {
@@ -147,22 +174,26 @@ fn check_mounts(guid: &str, drive: &str) -> Result<(), MutationError> {
         )
     } == 0
     {
-        return Err(MutationError::Denied);
+        return Err(admission_denied(
+            "mount-paths-api",
+            Some(unsafe { GetLastError() }),
+        ));
     }
     // Exactly the issuer's one drive letter, not an additional mounted folder.
     let want = wide(drive);
     if count as usize != want.len() + 1 || paths[..want.len()] != want || paths[want.len()] != 0 {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("mount-paths-not-exclusive", None));
     }
     let mut name = [0u16; 1024];
     let handle =
         unsafe { FindFirstVolumeMountPointW(w.as_ptr(), name.as_mut_ptr(), name.len() as u32) };
     if handle != INVALID_HANDLE_VALUE {
         unsafe { FindVolumeMountPointClose(handle) };
-        return Err(MutationError::Denied);
+        return Err(admission_denied("nested-mount-present", None));
     }
-    if unsafe { GetLastError() } != ERROR_NO_MORE_FILES {
-        return Err(MutationError::Denied);
+    let code = unsafe { GetLastError() };
+    if code != ERROR_NO_MORE_FILES {
+        return Err(admission_denied("nested-mount-enumeration", Some(code)));
     }
     Ok(())
 }
@@ -177,18 +208,24 @@ impl Drop for Local {
 }
 fn copy_sid(sid: *mut c_void) -> Result<Vec<u8>, MutationError> {
     if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("sid-structure", None));
     }
     let len = unsafe { GetLengthSid(sid) } as usize;
     if !(8..=68).contains(&len) {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("sid-length", None));
     }
     Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), len) }.to_vec())
 }
 pub(super) fn sid_bytes(s: &str) -> Result<Vec<u8>, MutationError> {
     let mut sid = ptr::null_mut();
-    if s.len() > 192 || unsafe { ConvertStringSidToSidW(wide(s).as_ptr(), &mut sid) } == 0 {
-        return Err(MutationError::Denied);
+    if s.len() > 192 {
+        return Err(admission_denied("sid-input-length", None));
+    }
+    if unsafe { ConvertStringSidToSidW(wide(s).as_ptr(), &mut sid) } == 0 {
+        return Err(admission_denied(
+            "sid-conversion",
+            Some(unsafe { GetLastError() }),
+        ));
     }
     let _owned = Local(sid);
     copy_sid(sid)
@@ -203,7 +240,7 @@ fn check_aces(aces: &[Ace], service: &[u8], flags: u8) -> Result<(), MutationErr
     let admin = sid_bytes("S-1-5-32-544")?;
     let system = sid_bytes("S-1-5-18")?;
     if service == admin || service == system || aces.len() != 3 {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("acl-principal-count", None));
     }
     for (sid, mask) in [
         (admin.as_slice(), FULL),
@@ -216,7 +253,7 @@ fn check_aces(aces: &[Ace], service: &[u8], flags: u8) -> Result<(), MutationErr
             .count()
             != 1
         {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("acl-exact-ace-contract", None));
         }
     }
     Ok(())
@@ -247,28 +284,40 @@ fn security(
         )
     };
     let _descriptor = Local(sd);
-    if status != 0 || sd.is_null() || acl.is_null() || unsafe { IsValidAcl(acl) } == 0 {
-        return Err(MutationError::Denied);
+    if status != 0 {
+        return Err(admission_denied("security-info-api", Some(status)));
+    }
+    if sd.is_null() || acl.is_null() || unsafe { IsValidAcl(acl) } == 0 {
+        return Err(admission_denied("security-descriptor-structure", None));
     }
     let owner = copy_sid(owner)?;
     if owner != issuer_owner && (root || owner != service) {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("object-owner", None));
     }
     let (mut control, mut rev) = (0u16, 0u32);
-    if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut rev) } == 0
-        || (root && control & SE_DACL_PROTECTED == 0)
-        || (!root && control & SE_DACL_PROTECTED != 0)
-    {
-        return Err(MutationError::Denied);
+    if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut rev) } == 0 {
+        return Err(admission_denied(
+            "descriptor-control-api",
+            Some(unsafe { GetLastError() }),
+        ));
+    }
+    if (root && control & SE_DACL_PROTECTED == 0) || (!root && control & SE_DACL_PROTECTED != 0) {
+        return Err(admission_denied("acl-inheritance-protection", None));
     }
     if unsafe { (*acl).AceCount } != 3 {
-        return Err(MutationError::Denied);
+        return Err(admission_denied("acl-ace-count", None));
     }
     let mut aces = Vec::new();
     for i in 0..3 {
         let mut raw = ptr::null_mut();
-        if unsafe { GetAce(acl, i, &mut raw) } == 0 || raw.is_null() {
-            return Err(MutationError::Denied);
+        if unsafe { GetAce(acl, i, &mut raw) } == 0 {
+            return Err(admission_denied(
+                "acl-get-ace-api",
+                Some(unsafe { GetLastError() }),
+            ));
+        }
+        if raw.is_null() {
+            return Err(admission_denied("acl-null-ace", None));
         }
         // IsValidAcl and GetAce validate the OS-returned ACL; check the
         // fixed header and contained SID length before using SID APIs.
@@ -277,12 +326,13 @@ fn security(
         let offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
         let n = header.AceSize as usize;
         if header.AceType != 0 || n < offset + 8 {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("acl-ace-header", None));
         }
         let bytes = unsafe { std::slice::from_raw_parts(raw.cast::<u8>().add(offset), n - offset) };
-        let len = crate::token_policy::bounded_sid_bytes(bytes).ok_or(MutationError::Denied)?;
+        let len = crate::token_policy::bounded_sid_bytes(bytes)
+            .ok_or_else(|| admission_denied("acl-ace-sid-bounds", None))?;
         if len != bytes.len() {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("acl-ace-sid-length", None));
         }
         let sid = copy_sid(unsafe { raw.cast::<u8>().add(offset).cast() })?;
         aces.push(Ace {
@@ -315,18 +365,20 @@ impl VerifiedVolume {
         owner: &str,
     ) -> Result<Self, MutationError> {
         if !valid_drive(drive) || !valid_guid_root(guid) {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("issuer-volume-input", None));
         }
         let service = sid_bytes(service)?;
         let owner = sid_bytes(owner)?;
-        if service == owner || observe_process_sid().map_err(|_| MutationError::Denied)? != service
+        if service == owner
+            || observe_process_sid().map_err(|_| admission_denied("process-sid-query", None))?
+                != service
         {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("process-principal", None));
         }
         let root = open_directory(Path::new(guid))?;
         let identity = volume_identity(&root)?;
         if !identity.guid.eq_ignore_ascii_case(guid) {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("issuer-volume-identity", None));
         }
         let result = Self {
             root,
@@ -339,18 +391,25 @@ impl VerifiedVolume {
         Ok(result)
     }
     pub(super) fn revalidate(&self) -> Result<(), MutationError> {
-        if observe_process_sid().map_err(|_| MutationError::Denied)? != self.service
-            || volume_identity(&self.root)? != self.identity
-            || volume_identity(&open_directory(Path::new(&self.drive))?)? != self.identity
+        if observe_process_sid().map_err(|_| admission_denied("process-sid-query", None))?
+            != self.service
         {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("process-principal-revalidation", None));
+        }
+        if volume_identity(&self.root)? != self.identity {
+            return Err(admission_denied("held-root-identity", None));
+        }
+        if volume_identity(&open_directory(Path::new(&self.drive))?)? != self.identity {
+            return Err(admission_denied("drive-root-identity", None));
         }
         check_mounts(&self.identity.guid, &self.drive)?;
         security(&self.root, &self.service, &self.owner, true, true)
     }
     pub(super) fn root_handle(&self) -> Result<File, MutationError> {
         self.revalidate()?;
-        self.root.try_clone().map_err(|_| MutationError::Denied)
+        self.root.try_clone().map_err(|e| {
+            admission_denied("root-handle-duplicate", e.raw_os_error().map(|n| n as u32))
+        })
     }
     pub(super) fn journal_path(&self) -> Result<PathBuf, MutationError> {
         self.revalidate()?;
@@ -371,7 +430,12 @@ impl VerifiedVolume {
             {
                 Ok(f) => f,
                 Err(e) if !required && e.raw_os_error() == Some(2) => continue,
-                Err(_) => return Err(MutationError::Denied),
+                Err(e) => {
+                    return Err(admission_denied(
+                        "journal-file-open",
+                        e.raw_os_error().map(|n| n as u32),
+                    ))
+                }
             };
             self.check_child(&file, &format!(".jdc-state\\{name}"), false)?;
             security(&file, &self.service, &self.owner, false, false)?;
@@ -388,11 +452,16 @@ impl VerifiedVolume {
         if (m.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
             || m.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || (!directory && m.nNumberOfLinks != 1)
-            || m.dwVolumeSerialNumber != info(&self.root)?.dwVolumeSerialNumber
-            || !final_guid_path(file)?
-                .eq_ignore_ascii_case(&format!("{}{relative}", self.identity.guid))
         {
-            return Err(MutationError::Denied);
+            return Err(admission_denied("journal-child-attributes", None));
+        }
+        if m.dwVolumeSerialNumber != info(&self.root)?.dwVolumeSerialNumber {
+            return Err(admission_denied("journal-child-volume", None));
+        }
+        if !final_guid_path(file)?
+            .eq_ignore_ascii_case(&format!("{}{relative}", self.identity.guid))
+        {
+            return Err(admission_denied("journal-child-path", None));
         }
         Ok(())
     }

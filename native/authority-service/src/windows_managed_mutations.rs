@@ -337,9 +337,19 @@ impl Domain {
             0,
             FILE_OPEN_IF,
         )
-        .map_err(|_| MutationError::Denied)?;
-        regular(&root, &lock)?;
-        let (revision, state) = open_state()?;
+        .map_err(|status| {
+            eprintln!(
+                "T011_WINDOWS_DOMAIN_ADMISSION_DENIED check=exclusive-lock-open ntstatus=0x{:08x}",
+                status as u32
+            );
+            MutationError::Denied
+        })?;
+        regular(&root, &lock).inspect_err(|_| {
+            eprintln!("T011_WINDOWS_DOMAIN_ADMISSION_DENIED check=exclusive-lock-object");
+        })?;
+        let (revision, state) = open_state().inspect_err(|_| {
+            eprintln!("T011_WINDOWS_DOMAIN_ADMISSION_DENIED check=protected-state");
+        })?;
         Ok((
             Self {
                 root,

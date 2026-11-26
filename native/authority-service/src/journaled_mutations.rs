@@ -142,11 +142,16 @@ impl JournaledDomain {
         let volume = VerifiedVolume::open(drive, guid, service, owner)?;
         let (native, (journal, epoch)) = Domain::new_fixture_with(volume.root_handle()?, || {
             let db = volume.journal_path()?;
-            let journal =
-                Journal::open_existing(&db, domain).map_err(|_| MutationError::RecoveryRequired)?;
+            let journal = Journal::open_existing(&db, domain).map_err(|_| {
+                eprintln!("T011_WINDOWS_DOMAIN_ADMISSION_DENIED check=journal-open");
+                MutationError::RecoveryRequired
+            })?;
             let epoch = journal
                 .snapshot()
-                .map_err(|_| MutationError::RecoveryRequired)?
+                .map_err(|_| {
+                    eprintln!("T011_WINDOWS_DOMAIN_ADMISSION_DENIED check=journal-snapshot");
+                    MutationError::RecoveryRequired
+                })?
                 .epoch;
             volume.revalidate()?;
             Ok((epoch, (journal, epoch)))

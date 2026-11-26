@@ -286,7 +286,7 @@ fn request_digest_is_bound_to_domain_epoch_sequence_operation_and_bytes() {
             1,
             &Operation::Append {
                 name: "a",
-                bytes: b"abd"
+                bytes: b"ab!"
             }
         )
         .unwrap()

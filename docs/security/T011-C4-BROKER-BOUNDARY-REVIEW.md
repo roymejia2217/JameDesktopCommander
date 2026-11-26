@@ -427,9 +427,14 @@ The regular six-request SDK plan and the local cancellation case are separate
 mandatory CI checks before admitted-mount acceptance. The hosted harness also
 requires a fresh root-issued SDK child on the same admitted journal, advancing
 sequence 10 to a rejected sequence 11 without altering final.txt or the outside
-sentinel. That path is compiled, not yet demonstrated on a hosted runner.
-The local proof runs with the same UID. Windows cancellation/authority claims
-remain independently gated. The Node runtime must still prove protection from
+sentinel. On candidate `64c869ac82f9ae437dfbe265cb12f386111f0935`, GitHub
+Actions run 45902743027, Linux job 140192174194, completed successfully and
+emitted `T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE`, including the root-issued
+SDK cancellation and distinct-peer rejection markers. This is hosted fixture
+evidence, not production acceptance. Windows job 140192173828 failed during
+positive NTFS admission before the first journaled mutation. Windows
+cancellation/authority claims remain independently gated.
+The local proof runs with the same UID. The Node runtime must still prove protection from
 same-UID process inspection; the native Rust client's non-dumpable setting is
 not inherited as a verified post-exec Node property.
 

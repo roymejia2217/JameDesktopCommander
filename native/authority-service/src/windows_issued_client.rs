@@ -92,6 +92,25 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
     ) -> Result<Self, IdentityDenied> {
+        Self::launch_suspended_with_observation(executable, command_line, environment, false)
+    }
+
+    /// Only the fixed SCM issuer role may create an observable proof child.
+    /// This does not grant the observer a launch, thread or file capability.
+    pub fn launch_scm_observable_fixture(
+        executable: &Path,
+        command_line: &OsStr,
+        environment: &[(&str, &str)],
+    ) -> Result<Self, IdentityDenied> {
+        Self::launch_suspended_with_observation(executable, command_line, environment, true)
+    }
+
+    fn launch_suspended_with_observation(
+        executable: &Path,
+        command_line: &OsStr,
+        environment: &[(&str, &str)],
+        observable: bool,
+    ) -> Result<Self, IdentityDenied> {
         if !executable.is_absolute() || !executable.is_file() {
             return Err(IdentityDenied);
         }
@@ -103,9 +122,11 @@ impl IssuedClient {
             return Err(IdentityDenied);
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let descriptors = OwnerRightsCreationDescriptors::from_primary_token(unsafe {
-            BorrowedHandle::borrow_raw(token.as_raw_handle())
-        })?;
+        let descriptors = if observable {
+            OwnerRightsCreationDescriptors::from_scm_issuer_primary_token(token.as_handle())?
+        } else {
+            OwnerRightsCreationDescriptors::from_primary_token(token.as_handle())?
+        };
         let attributes = descriptors.borrow_attributes();
 
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };

@@ -16,6 +16,12 @@ $clientBuilt = Join-Path (Get-Location).Path 'native/authority-service/target/de
 $proofBinary = Join-Path $stage 'jdc-authority-scm-issued-proof.exe'
 $clientBinary = Join-Path $stage 'jdc-authority-scm-issued-client.exe'
 $created = $false
+$issuerName = 'JameDesktopCommanderIssuer'
+$issuerAccount = "NT SERVICE\$issuerName"
+$issuerCreated = $false
+if (Get-Service -Name $issuerName -ErrorAction SilentlyContinue) {
+    throw 'E_SCM_ISSUER_PREEXISTS'
+}
 foreach ($file in @($built, $proofBuilt, $clientBuilt)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'E_SCM_BINARY_NOT_BUILT' }
 }
@@ -54,8 +60,8 @@ if (Get-LocalUser -Name $attackerName -ErrorAction SilentlyContinue) {
 $descriptorPath = Join-Path (Get-Location).Path 'packaging/experimental/windows/jdc-authority-service.sddl'
 $expectedSddl = (Get-Content -LiteralPath $descriptorPath -Raw -ErrorAction Stop).Trim()
 
-function Get-ScmDescriptor {
-    $result = @(& $sc sdshow $serviceName)
+function Get-ScmDescriptor([string] $name = $serviceName) {
+    $result = @(& $sc sdshow $name)
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_SDSHOW_FAILED' }
     $sddl = @($result | Where-Object { $_.Trim() -match '^[DOGS]:' } | Select-Object -First 1)
     if ($sddl.Count -ne 1) { throw 'E_SCM_SDDL_MISSING' }
@@ -85,12 +91,63 @@ function Assert-ScmDacl([string] $sddl) {
         }
     }
 }
+# The proof rendezvous is administrator-owned; only the fixed issuer may
+# write inside handoff, and the independent authority is a read-only observer.
+function Assert-DualRoleAcl([string] $target, $authoritySid, $issuerSid, [System.Security.AccessControl.FileSystemRights] $issuerRights, [bool] $protected) {
+    $acl = Get-Acl -LiteralPath $target
+    if ($protected -and -not $acl.AreAccessRulesProtected) { throw 'E_SCM_HANDOFF_ACL_INHERITED' }
+    $sync = [System.Security.AccessControl.FileSystemRights]::Synchronize
+    $expected = @{
+        'S-1-5-32-544' = [int][System.Security.AccessControl.FileSystemRights]::FullControl
+        'S-1-5-18' = [int][System.Security.AccessControl.FileSystemRights]::FullControl
+        $authoritySid.Value = [int]([System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor $sync)
+        $issuerSid.Value = [int]($issuerRights -bor $sync)
+    }
+    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne $expected.Count) { throw 'E_SCM_HANDOFF_ACL_UNEXPECTED_GRANT' }
+    $seen = @{}
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Value
+        if ($seen.ContainsKey($sid) -or -not $expected.ContainsKey($sid) -or
+            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+            [int]$rule.FileSystemRights -ne $expected[$sid]) {
+            throw 'E_SCM_HANDOFF_ACL_UNEXPECTED_GRANT'
+        }
+        $seen[$sid] = $true
+    }
+}
+function Set-DualRoleAcl([string] $target, [bool] $directory, $authoritySid, $issuerSid, [System.Security.AccessControl.FileSystemRights] $issuerRights) {
+    $acl = Get-Acl -LiteralPath $target
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+        $acl.RemoveAccessRuleSpecific($rule)
+    }
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($directory) {
+        $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    }
+    foreach ($entry in @(
+        @{ Sid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'); Rights = [System.Security.AccessControl.FileSystemRights]::FullControl },
+        @{ Sid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'); Rights = [System.Security.AccessControl.FileSystemRights]::FullControl },
+        @{ Sid = $authoritySid; Rights = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute },
+        @{ Sid = $issuerSid; Rights = $issuerRights }
+    )) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $entry.Sid, $entry.Rights, $inherit, [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow))
+    }
+    Set-Acl -LiteralPath $target -AclObject $acl
+    Assert-DualRoleAcl $target $authoritySid $issuerSid $issuerRights $true
+}
+
 function Invoke-ScmAsAttacker([pscredential] $identity, [string[]] $arguments) {
     $child = Start-Process -FilePath $sc -Credential $identity -ArgumentList $arguments -WorkingDirectory $env:windir -PassThru -Wait -ErrorAction Stop
     if ($null -eq $child.ExitCode) { throw 'E_SCM_ATTACKER_EXIT_UNAVAILABLE' }
     return [int]$child.ExitCode
 }
 
+$primaryFailure = $null
 try {
     New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
     & $sc create $serviceName 'type=' 'own' 'start=' 'demand' 'binPath=' $binary | Out-Null
@@ -226,14 +283,117 @@ try {
     & $sc config $serviceName 'binPath=' $binary | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ORIGINAL_IMAGE_RESTORE_FAILED' }
     Write-Output 'T011-C4o SCM-issued protected child: PASS (non-release, no MCP authorization)'
+
+    # Two fixed, separate SCM virtual accounts; no token-launch or debug
+    # privileges. The issuer retains its suspended child until the observer
+    # has proved limited access and all negative kernel access checks.
+    $issuerCommand = '"' + $proofBinary + '" --issuer-observer-proof'
+    $observerCommand = '"' + $proofBinary + '" --authority-observer-proof'
+    & $sc create $issuerName 'type=' 'own' 'start=' 'demand' 'binPath=' $issuerCommand | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_CREATE_FAILED' }
+    $issuerCreated = $true
+    & $sc config $issuerName 'obj=' $issuerAccount | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_ACCOUNT_FAILED' }
+    & $sc sidtype $issuerName restricted | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_RESTRICTED_SID_FAILED' }
+    & $sc sdset $issuerName $expectedSddl | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_SDSET_FAILED' }
+    Assert-ScmDacl (Get-ScmDescriptor $issuerName)
+    foreach ($name in @($issuerName, $serviceName)) {
+        & $sc privs $name SeChangeNotifyPrivilege | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'E_SCM_FIXTURE_PRIVILEGE_RESTRICTION_FAILED' }
+    }
+    $issuerSid = ([System.Security.Principal.NTAccount]::new($issuerAccount)).Translate(
+        [System.Security.Principal.SecurityIdentifier])
+    if ($issuerSid.Value -eq $virtualSid.Value) { throw 'E_SCM_IDENTITIES_NOT_DISTINCT' }
+    $rx = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
+    $modify = [System.Security.AccessControl.FileSystemRights]::Modify
+    Set-DualRoleAcl $stage $true $virtualSid $issuerSid $rx
+    foreach ($installed in @($proofBinary, $clientBinary)) {
+        Set-DualRoleAcl $installed $false $virtualSid $issuerSid $rx
+    }
+    $handoff = Join-Path $stage 'handoff'
+    New-Item -ItemType Directory -Path $handoff -ErrorAction Stop | Out-Null
+    Set-DualRoleAcl $handoff $true $virtualSid $issuerSid $modify
+    & $sc config $serviceName 'binPath=' $observerCommand | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_OBSERVER_IMAGE_CONFIGURATION_FAILED' }
+    $issuerConfig = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
+    $observerConfig = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $issuerConfig -or $issuerConfig.StartName -ne $issuerAccount -or
+        $issuerConfig.PathName -ne $issuerCommand -or $issuerConfig.StartMode -ne 'Manual' -or
+        $issuerConfig.ServiceType -ne 'Own Process' -or
+        $null -eq $observerConfig -or $observerConfig.StartName -ne $virtualAccount -or
+        $observerConfig.PathName -ne $observerCommand) {
+        throw 'E_SCM_DISTINCT_FIXTURE_CONFIG_MISMATCH'
+    }
+    & $sc start $issuerName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_START_FAILED' }
+    $issuerController = Get-Service -Name $issuerName -ErrorAction Stop
+    $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [timespan]::FromSeconds(15))
+    $record = Join-Path $handoff 'issued-process.txt'
+    $recordItem = Get-Item -LiteralPath $record -ErrorAction Stop
+    if ($recordItem.PSIsContainer -or ($recordItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $recordItem.Length -gt 128 -or (Get-Acl -LiteralPath $record).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $issuerSid.Value) {
+        throw 'E_SCM_HANDOFF_RECORD_CUSTODY'
+    }
+    Assert-DualRoleAcl $record $virtualSid $issuerSid $modify $false
+    & $sc start $serviceName | Out-Null
+    $controller = Get-Service -Name $serviceName -ErrorAction Stop
+    $controller.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
+    $observerState = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $observerState -or $observerState.State -ne 'Stopped' -or
+        $observerState.ExitCode -ne 1066 -or $observerState.ServiceSpecificExitCode -ne 8 -or
+        $observerState.ProcessId -ne 0) { throw 'E_SCM_DISTINCT_OBSERVER_PROOF_FAILED' }
+
+    & $sc stop $issuerName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_STOP_FAILED' }
+    $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
+    $issuerState = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
+    if ($null -eq $issuerState -or $issuerState.State -ne 'Stopped' -or
+        $issuerState.ExitCode -ne 1066 -or $issuerState.ServiceSpecificExitCode -ne 10 -or
+        $issuerState.ProcessId -ne 0) { throw 'E_SCM_ISSUER_CLEANUP_FAILED' }
+    if ((Get-ScmDescriptor) -ne $baselineDescriptor) { throw 'E_SCM_PROOF_SERVICE_DACL_CHANGED' }
+    Assert-ScmDacl (Get-ScmDescriptor $issuerName)
+    & $sc config $serviceName 'binPath=' $binary | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ORIGINAL_IMAGE_RESTORE_FAILED' }
+}
+catch {
+    $primaryFailure = $_
 }
 finally {
     $cleanupFailure = $false
-    if ($created) {
-        & $sc delete $serviceName | Out-Null
-        if ($LASTEXITCODE -ne 0) { $cleanupFailure = $true }
+    $issuerStopped = $true
+    if ($issuerCreated) {
+        try {
+            $issuerController = Get-Service -Name $issuerName -ErrorAction Stop
+            if ($issuerController.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+                & $sc stop $issuerName | Out-Null
+                $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(60))
+            }
+            $issuerState = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
+            if ($null -eq $issuerState -or $issuerState.State -ne 'Stopped' -or $issuerState.ProcessId -ne 0) {
+                throw 'E_SCM_ISSUER_CLEANUP_FAILED'
+            }
+            & $sc delete $issuerName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_CLEANUP_FAILED' }
+        }
+        catch { $issuerStopped = $false; $cleanupFailure = $true }
     }
-    if (Test-Path -LiteralPath $stage) {
+    $authorityStopped = $true
+    if ($created) {
+        try {
+            $controller = Get-Service -Name $serviceName -ErrorAction Stop
+            $controller.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
+            $state = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+            if ($null -eq $state -or $state.State -ne 'Stopped' -or $state.ProcessId -ne 0) {
+                throw 'E_SCM_AUTHORITY_CLEANUP_FAILED'
+            }
+            & $sc delete $serviceName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'E_SCM_AUTHORITY_CLEANUP_FAILED' }
+        }
+        catch { $authorityStopped = $false; $cleanupFailure = $true }
+    }
+    if ($issuerStopped -and $authorityStopped -and (Test-Path -LiteralPath $stage)) {
         try { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
         catch { $cleanupFailure = $true }
     }
@@ -241,5 +401,10 @@ finally {
         try { Remove-LocalUser -Name $attackerName -ErrorAction Stop }
         catch { $cleanupFailure = $true }
     }
-    if ($cleanupFailure) { throw 'E_SCM_EPHEMERAL_CLEANUP_FAILED' }
+    if ($cleanupFailure) {
+        if ($null -eq $primaryFailure) { throw 'E_SCM_EPHEMERAL_CLEANUP_FAILED' }
+        Write-Warning 'E_SCM_EPHEMERAL_CLEANUP_FAILED'
+    }
 }
+if ($null -ne $primaryFailure) { throw $primaryFailure }
+Write-Output 'T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE'

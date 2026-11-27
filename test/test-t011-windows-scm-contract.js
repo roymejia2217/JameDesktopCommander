@@ -41,3 +41,18 @@ test('SCM dispatcher is compiled and linted by existing required Windows native 
   assert.ok(workflow.includes('cargo +1.91.1 clippy --locked --bin jdc-authority-scm --manifest-path native/authority-service/Cargo.toml -- -D warnings'));
   assert.doesNotMatch(workflow, /^  scm-only-validation:/m);
 });
+
+test('SCM distinct-principal observation is a mandatory nonrelease experiment', () => {
+  const proof = fs.readFileSync(path.join(root, 'native/authority-service/src/windows_scm_issued_proof.rs'), 'utf8');
+  const acceptance = fs.readFileSync(path.join(root, 'test/security/t011-windows-scm-acceptance.ps1'), 'utf8');
+  assert.match(proof, /--issuer-observer-proof/);
+  assert.match(proof, /--authority-observer-proof/);
+  assert.match(acceptance, /JameDesktopCommanderIssuer/);
+  assert.match(acceptance, /T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE/);
+  assert.match(acceptance, /ServiceSpecificExitCode -ne 8/);
+  assert.match(acceptance, /ServiceSpecificExitCode -ne 10/);
+  assert.match(acceptance, /privs.*SeChangeNotifyPrivilege/);
+  assert.match(acceptance, /E_SCM_ISSUER_CLEANUP_FAILED/);
+  const denyOnly = fs.readFileSync(path.join(root, binaryPath), 'utf8');
+  assert.doesNotMatch(denyOnly, /ServiceState::Running|ServiceControlAccept::STOP/);
+});

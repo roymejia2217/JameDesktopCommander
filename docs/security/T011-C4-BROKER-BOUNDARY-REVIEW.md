@@ -428,6 +428,54 @@ is still required, and neither successful prerequisite observation nor the
 local same-token handoff replaces the actual cross-principal SDK-to-NTFS
 mutation acceptance.
 
+#### Windows distinct SCM principal observation (nonrelease)
+
+The native job on `e13322027b37443102859a48eb0ec7f6191f6b7b`
+(run 45933296360, Windows job 140290627251) again rejected the old
+CreateProcessAsUserW prerequisite. Do not grant SeAssignPrimaryTokenPrivilege,
+SeIncreaseQuotaPrivilege or SeDebugPrivilege to an interactive issuer.
+
+The next bounded SCM experiment provisions the fixed authority and issuer
+virtual accounts independently, using restricted service SIDs, protected
+service-object DACLs and a RequiredPrivileges list limited to the traversal
+privilege. Actual token inspection requires the correct role, primary token,
+restricted SID, no elevated group, and no other privilege even disabled.
+The issuer creates and retains a suspended child under its own primary
+token with process and thread DACLs applied at creation. The only additional
+observer ACE is PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE for the
+fixed authority SID on the process, never the thread. Before child issuance
+the issuer also limits its own process DACL; SCM creation itself is under
+trusted administrative provisioning, not a proof against pre-existing
+same-account handles.
+
+A disposable protected rendezvous file identifies the two live kernel process
+objects by PID and creation time. The observer resolves the fixed SCM service,
+matches its live process identity, opens only the reduced process handles,
+rejects a stale creation stamp and requires exact access-denied results for
+handle duplication, memory access, termination, thread manipulation and ACL
+mutation. The issuer, not the independent observer, checks the actual primary
+token of its child using the original handle. Microsoft documents separate
+token-object access checks and a cross-account privilege limitation for
+OpenProcessToken; the observer must not receive debug privilege.
+The fixture verifies the observer cannot write the rendezvous file and
+requires explicit terminal cleanup of the suspended child and both services.
+
+This is a kernel-object observation experiment, not a production attestation
+protocol: the file is only a test rendezvous protected by administrative
+provisioning, not a durable or authenticated MCP grant. The trusted issuer's
+RUNNING state denotes test readiness only; the separate deny-only SCM binary
+is unchanged. No Node child or mutation is executed by this experiment.
+Hosted positive and negative results are still required before integrating
+the preconnected SDK channel, admitted NTFS journal and cancellation with
+these principals. Existing storage and issuer prerequisite gates stay
+mandatory; the new proof cannot replace them on the strength of a local
+unit-test result.
+
+References:
+<https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken>.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after
@@ -531,6 +579,13 @@ A separate lightweight kernel experiment with ordinary Node processes
 verified all five inspection denials against the root-created namespace,
 with positive READ controls against an ordinary same-UID/GID process.
 That experiment does not substitute for the hosted SDK acceptance.
+Candidate `fb041f669427cf33cbcfe82fd1e94fcdef0db078` subsequently passed
+the actual hosted Linux native job 140296781765 (run 45935227835), including
+the mandatory protected SDK read, journaled mutations and staged cancellation
+gates, and emitted `T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE`. The Windows
+job 140296781554 passed local SDK cancellation, separate-process handoff and
+admitted NTFS mutations, but failed the old distinct issuer prerequisite.
+This is scoped nonrelease evidence, not production acceptance.
 References: Linux kernel `security/commoncap.c` and
 `security/apparmor/task.c`, user_namespaces(7), ioctl_nsfs(2).
 

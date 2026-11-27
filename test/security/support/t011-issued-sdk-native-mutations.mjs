@@ -1,7 +1,7 @@
 // Nonrelease vertical proof. Local Windows uses a guarded same-token child;
 // hosted Linux uses the separately issued client and admitted mount.
 import { connect, Socket } from 'node:net';
-import { readSync, writeSync } from 'node:fs';
+import { readSync, writeSync, writeFileSync } from 'node:fs';
 import { addAbortListener, once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -26,14 +26,16 @@ if (!['linux', 'win32'].includes(process.platform) || !socketPath ||
       : (!localHome || process.argv.length !== (windowsCancellation ? 6 : localCancellation ? 5 : 4)))) {
   throw Error('E_MUTATION_FIXTURE_ARGS');
 }
+const home = hosted ? fileURLToPath(new URL('../../../client-state/', import.meta.url)) : localHome;
 if (hosted) {
+  writeFileSync(new URL('../../../client-state/sdk-state-proof', import.meta.url),
+    'JDC_PRIVATE_SDK_STATE', { flag: 'wx', mode: 0o600 });
   // Private issuer readiness socket, separate from the mutation transport.
   const release = Buffer.alloc(1);
   if (writeSync(0, 'R') !== 1 || readSync(0, release, 0, 1, null) !== 1 || release[0] !== 0x41) {
     throw Error('E_T011_SDK_STARTUP_PROTOCOL');
   }
 }
-const home = hosted ? fileURLToPath(new URL('../../../client-state/', import.meta.url)) : localHome;
 process.env.HOME = home;
 process.env.DESKTOP_COMMANDER_CONFIG_DIR = home;
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';

@@ -613,6 +613,29 @@ hosts must deny rather than use a weaker runtime. References:
 <https://manpages.ubuntu.com/manpages/noble/man8/apparmor_parser.8.html>,
 <https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html>.
 
+#### Linux SDK state custody (nonrelease, hosted verdict pending)
+
+The issued SDK previously used a writable host directory shared by processes
+of the dedicated client UID. Process inspection denial alone does not
+protect that directory. The root fixture now creates a fresh mount namespace,
+makes propagation recursively private, and mounts a bounded tmpfs (16 MiB,
+4096 inodes, nosuid/nodev/noexec) at the root-owned empty state mountpoint
+before entering the root-created user namespace and dropping credentials.
+The issuer pins the mount namespace and checks its owning user namespace.
+The actual SDK must exclusively create a fixed, non-secret state canary before
+readiness. The issuer checks the real filesystem type, device, owner, mode,
+mount flags, file identity and exact bytes, then repeats the checks after
+a separate unconfined same-UID process attempts read/write opens through
+both the host path and the SDK's procfs root. The ordinary same-UID control
+must still traverse its target's procfs root. No request is attested until
+these checks pass. Read, mutations and staged cancellation each require a
+fresh private state verdict; the host state must remain empty and unmounted
+afterward. Cleanup refuses recursive deletion through a visible state mount.
+
+This only isolates ephemeral fixture client state. It does not establish
+durable policy custody, prevent denial-of-service signals, or authorize
+production deployment. The actual hosted kernel acceptance remains mandatory.
+
 The disposable Windows token observations are isolated in a private
 `cfg(test)` child module. The SCM observer retains its no-output contract;
 fixture outputs are fixed verdict markers only, not SID, session or privilege

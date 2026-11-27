@@ -22,18 +22,20 @@ mod proof {
     };
     use std::{
         env,
+        ffi::CString,
         fs::{self, File},
         io::{Read, Write},
         mem::{size_of, zeroed},
         os::{
             fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
             unix::{
+                ffi::OsStrExt,
                 fs::{MetadataExt, PermissionsExt},
                 net::{UnixListener, UnixStream},
                 process::CommandExt,
             },
         },
-        path::Path,
+        path::{Path, PathBuf},
         process::{Command, ExitCode, Stdio},
         ptr,
         time::{Duration, Instant},
@@ -114,7 +116,7 @@ mod proof {
         Ok(())
     }
 
-    fn inspect_same_uid(pid: u32, protected: bool) -> Result<(), &'static str> {
+    fn inspect_same_uid(pid: u32, state: Option<&Path>) -> Result<(), &'static str> {
         let account = fixture_client()?;
         if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
             || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
@@ -133,7 +135,23 @@ mod proof {
         }
         fixture_pid(pid, account)?;
         let proc = format!("/proc/{pid}");
-        if protected {
+        if let Some(state) = state {
+            // The same UID must not traverse the host mountpoint or enter
+            // the issued client's private state through procfs.
+            let private = PathBuf::from(format!("{proc}/root")).join(
+                state
+                    .strip_prefix("/")
+                    .map_err(|_| "E_PEER_SDK_STATE_PATH")?,
+            );
+            for target in [
+                state.join("sdk-state-proof"),
+                private.join("sdk-state-proof"),
+            ] {
+                inspection_denied(File::open(&target))?;
+                inspection_denied(fs::OpenOptions::new().write(true).open(&target))?;
+            }
+            inspection_denied(fs::read_link(format!("{proc}/root")))?;
+            inspection_denied(fs::read_link(format!("{proc}/ns/mnt")))?;
             inspection_denied(fs::read_link(format!("{proc}/exe")))?;
             inspection_denied(fs::read_link(format!("{proc}/fd/0")))?;
             inspection_denied(File::open(format!("{proc}/maps")))?;
@@ -160,14 +178,35 @@ mod proof {
                 return Err("E_PEER_SDK_INSPECTION_CONTROL_FD");
             }
             io(File::open(format!("{proc}/maps")))?;
+            io(fs::read_link(format!("{proc}/root")))?;
+            io(fs::read_link(format!("{proc}/ns/mnt")))?;
+            // A real unconfined same-UID process can traverse the ordinary
+            // target's procfs root, not merely read the symlink.
+            io(fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!("{proc}/root/dev/null")))?;
         }
         fixture_pid(pid, account)
     }
 
-    fn run_inspector(account: DedicatedAccount, pid: u32, role: &str) -> Result<(), &'static str> {
-        let status = io(Command::new(io(env::current_exe())?)
-            .arg(role)
-            .arg(pid.to_string())
+    fn run_inspector(
+        account: DedicatedAccount,
+        pid: u32,
+        state: Option<&Path>,
+    ) -> Result<(), &'static str> {
+        let mut command = Command::new(io(env::current_exe())?);
+        command
+            .arg(if state.is_some() {
+                "inspect-protected"
+            } else {
+                "inspect-control"
+            })
+            .arg(pid.to_string());
+        if let Some(state) = state {
+            command.arg(state);
+        }
+        let status = io(command
             .env_clear()
             .env("GITHUB_ACTIONS", "true")
             .env("RUNNER_ENVIRONMENT", "github-hosted")
@@ -182,6 +221,7 @@ mod proof {
     }
 
     // Linux UAPI: include/uapi/linux/nsfs.h, _IO(0xb7, 2/4).
+    const NS_GET_USERNS: libc::c_ulong = 0xb701;
     const NS_GET_PARENT: libc::c_ulong = 0xb702;
     const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
 
@@ -210,6 +250,151 @@ mod proof {
             return Err("E_PEER_SDK_NAMESPACE_PARENT");
         }
         Ok(ns)
+    }
+
+    // The host exposes only an empty root-owned mountpoint. Each issued
+    // SDK receives a fresh private tmpfs, never the previous client's state.
+    const STATE_PROOF: &[u8] = b"JDC_PRIVATE_SDK_STATE";
+
+    fn sdk_state_path(node: &Path) -> Result<PathBuf, &'static str> {
+        Ok(node
+            .parent()
+            .ok_or("E_PEER_SDK_STATE_PATH")?
+            .join("client-state"))
+    }
+
+    fn verify_host_state(state: &Path) -> Result<fs::Metadata, &'static str> {
+        let meta = io(fs::symlink_metadata(state))?;
+        let parent = io(fs::symlink_metadata(
+            state.parent().ok_or("E_PEER_SDK_STATE_PATH")?,
+        ))?;
+        if !meta.is_dir()
+            || meta.uid() != 0
+            || meta.gid() != 0
+            || meta.mode() & 0o7777 != 0o700
+            || meta.dev() != parent.dev()
+            || io(fs::canonicalize(state))? != state
+            || io(fs::read_dir(state))?.next().is_some()
+        {
+            return Err("E_PEER_SDK_HOST_STATE_CUSTODY");
+        }
+        Ok(meta)
+    }
+
+    fn mount_sdk_state(node: &Path, account: DedicatedAccount) -> Result<(), &'static str> {
+        let state = sdk_state_path(node)?;
+        verify_host_state(&state)?;
+        let target =
+            CString::new(state.as_os_str().as_bytes()).map_err(|_| "E_PEER_SDK_STATE_PATH")?;
+        let options = CString::new(format!(
+            "size=16m,nr_inodes=4096,mode=0700,uid={},gid={}",
+            account.uid, account.gid
+        ))
+        .map_err(|_| "E_PEER_SDK_STATE_OPTIONS")?;
+        // Before entering the child user namespace, isolate propagation.
+        // Never mount in the host namespace or grant mount privileges to Node.
+        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_CREATE");
+        }
+        if unsafe {
+            libc::mount(
+                ptr::null(),
+                c"/".as_ptr(),
+                ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                ptr::null(),
+            )
+        } != 0
+        {
+            return Err("E_PEER_SDK_MOUNT_PROPAGATION");
+        }
+        if unsafe {
+            libc::mount(
+                c"tmpfs".as_ptr(),
+                target.as_ptr(),
+                c"tmpfs".as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                options.as_ptr().cast(),
+            )
+        } != 0
+        {
+            return Err("E_PEER_SDK_STATE_MOUNT");
+        }
+        Ok(())
+    }
+
+    fn sdk_mount_namespace(pid: u32) -> Result<File, &'static str> {
+        let namespace = io(File::open(format!("/proc/{pid}/ns/mnt")))?;
+        let issuer_mount = io(File::open("/proc/self/ns/mnt"))?;
+        let issuer_user = io(File::open("/proc/self/ns/user"))?;
+        if same_namespace(&namespace, &issuer_mount)? {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_SHARED");
+        }
+        let raw = unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_USERNS) };
+        if raw < 0 {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_OWNER");
+        }
+        let owner = unsafe { File::from_raw_fd(raw) };
+        if !same_namespace(&owner, &issuer_user)? {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_OWNER");
+        }
+        Ok(namespace)
+    }
+
+    fn verify_sdk_state(
+        pid: u32,
+        state: &Path,
+        namespace: &File,
+        account: DedicatedAccount,
+    ) -> Result<(u64, u64, u64, u64), &'static str> {
+        if !same_namespace(namespace, &sdk_mount_namespace(pid)?)? {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_CHANGED");
+        }
+        let host = verify_host_state(state)?;
+        let private = PathBuf::from(format!("/proc/{pid}/root")).join(
+            state
+                .strip_prefix("/")
+                .map_err(|_| "E_PEER_SDK_STATE_PATH")?,
+        );
+        let dir = io(File::open(&private))?;
+        let meta = io(dir.metadata())?;
+        let mut stat: libc::statfs = unsafe { zeroed() };
+        let mut vfs: libc::statvfs = unsafe { zeroed() };
+        let flags = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+        if !meta.is_dir()
+            || meta.uid() != account.uid
+            || meta.gid() != account.gid
+            || meta.mode() & 0o7777 != 0o700
+            || meta.dev() == host.dev()
+            || unsafe { libc::fstatfs(dir.as_raw_fd(), &mut stat) } != 0
+            || stat.f_type != libc::TMPFS_MAGIC
+            || unsafe { libc::fstatvfs(dir.as_raw_fd(), &mut vfs) } != 0
+            || vfs.f_flag & flags != flags
+        {
+            return Err("E_PEER_SDK_PRIVATE_STATE_CUSTODY");
+        }
+        // The known SDK writes a fixed canary before signaling readiness.
+        // Verify the actual file object and its exact non-secret bytes.
+        let proof_path = private.join("sdk-state-proof");
+        let proof = io(fs::symlink_metadata(&proof_path))?;
+        if !proof.is_file()
+            || proof.dev() != meta.dev()
+            || proof.uid() != account.uid
+            || proof.gid() != account.gid
+            || proof.mode() & 0o7777 != 0o600
+            || proof.nlink() != 1
+            || proof.len() != STATE_PROOF.len() as u64
+        {
+            return Err("E_PEER_SDK_PRIVATE_STATE_PROOF");
+        }
+        let mut bytes = Vec::new();
+        io(io(File::open(&proof_path))?
+            .take(STATE_PROOF.len() as u64 + 1)
+            .read_to_end(&mut bytes))?;
+        if bytes != STATE_PROOF {
+            return Err("E_PEER_SDK_PRIVATE_STATE_PROOF");
+        }
+        Ok((meta.dev(), meta.ino(), proof.dev(), proof.ino()))
     }
 
     fn exact_mapping(text: &str, id: u32) -> bool {
@@ -249,9 +434,10 @@ mod proof {
         pid: u32,
         channel: &mut UnixStream,
         account: DedicatedAccount,
-    ) -> Result<File, &'static str> {
+    ) -> Result<(File, File), &'static str> {
         readiness_byte(channel, b'N')?;
         let ns = sdk_namespace(pid)?;
+        let mount_ns = sdk_mount_namespace(pid)?;
         for (key, id) in [("uid_map", account.uid), ("gid_map", account.gid)] {
             if id == 0 {
                 return Err("E_PEER_SDK_NAMESPACE_MAP");
@@ -265,7 +451,7 @@ mod proof {
         verify_sdk_namespace(pid, &ns, account)?;
         io(channel.write_all(b"M"))?;
         readiness_byte(channel, b'R')?;
-        Ok(ns)
+        Ok((ns, mount_ns))
     }
 
     fn verify_sdk_credentials(pid: u32, account: DedicatedAccount) -> Result<(), &'static str> {
@@ -310,6 +496,7 @@ mod proof {
         let mut channel = UnixStream::from(io(std::io::stdin().as_fd().try_clone_to_owned())?);
         io(channel.set_read_timeout(Some(Duration::from_secs(5))))?;
         io(channel.set_write_timeout(Some(Duration::from_secs(5))))?;
+        mount_sdk_state(node, account)?;
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
             return Err("E_PEER_SDK_NAMESPACE_CREATE");
         }
@@ -345,6 +532,7 @@ mod proof {
         pid: u32,
         pin: &OwnedFd,
         namespace: &File,
+        mount_namespace: &File,
         account: DedicatedAccount,
     ) -> Result<(), &'static str> {
         let live = || {
@@ -376,6 +564,8 @@ mod proof {
             return Err("E_PEER_SDK_NAMESPACE_EXEC");
         }
         label()?;
+        let state = sdk_state_path(node)?;
+        let initial = verify_sdk_state(pid, &state, mount_namespace, account)?;
         let mut control = io(Command::new("/usr/bin/sleep")
             .arg("30")
             .env_clear()
@@ -383,14 +573,18 @@ mod proof {
             .gid(account.gid)
             .stdin(std::process::Stdio::null())
             .spawn())?;
-        let observed = run_inspector(account, control.id(), "inspect-control");
+        let observed = run_inspector(account, control.id(), None);
         let stopped = control.kill();
         let reaped = control.wait();
         io(stopped)?;
         io(reaped)?;
         observed?;
-        run_inspector(account, pid, "inspect-protected")?;
+        run_inspector(account, pid, Some(&state))?;
         live()?;
+        if initial != verify_sdk_state(pid, &state, mount_namespace, account)? {
+            return Err("E_PEER_SDK_STATE_IDENTITY_CHANGED");
+        }
+        eprintln!("T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE");
         verify_sdk_namespace(pid, namespace, account)?;
         verify_sdk_credentials(pid, account)?;
         label()?;
@@ -490,8 +684,16 @@ mod proof {
             let pidfd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
             if let Some((node, _, _)) = sdk {
                 let startup = readiness.as_mut().ok_or("E_PEER_SDK_STARTUP_PROTOCOL")?;
-                let namespace = prepare_sdk_namespace(child.id(), startup, approved)?;
-                verify_sdk_process_custody(node, child.id(), &pidfd, &namespace, approved)?;
+                let (namespace, mount_namespace) =
+                    prepare_sdk_namespace(child.id(), startup, approved)?;
+                verify_sdk_process_custody(
+                    node,
+                    child.id(),
+                    &pidfd,
+                    &namespace,
+                    &mount_namespace,
+                    approved,
+                )?;
             }
             let channel = io(UnixStream::connect(issuer_socket))?;
             io(channel.set_write_timeout(Some(Duration::from_secs(3))))?;
@@ -501,6 +703,10 @@ mod proof {
             }
             if !io(child.wait())?.success() {
                 return Err("E_PEER_PROOF_ISSUED_CLIENT_FAILED");
+            }
+            if let Some((node, _, _)) = sdk {
+                // No client state or mount may survive in the host view.
+                verify_host_state(&sdk_state_path(node)?)?;
             }
             eprintln!("T011_LINUX_ROOT_ISSUED_CLIENT_EXACT_BYTES_NONRELEASE");
             Ok(())
@@ -742,13 +948,14 @@ mod proof {
                     role == "launch-sdk-cancel",
                 )
             }
-            (Some(role), Some(pid), None, None, None)
-                if role == "inspect-control" || role == "inspect-protected" =>
+            (Some(role), Some(pid), state, None, None)
+                if (role == "inspect-control" && state.is_none())
+                    || (role == "inspect-protected" && state.is_some()) =>
             {
                 pid.to_str()
                     .and_then(|value| value.parse::<u32>().ok())
                     .ok_or("E_PEER_SDK_INSPECTION_PID")
-                    .and_then(|pid| inspect_same_uid(pid, role == "inspect-protected"))
+                    .and_then(|pid| inspect_same_uid(pid, state.as_deref().map(Path::new)))
             }
             (Some(role), Some(socket), None, None, None) if role == "allow" => {
                 request(Path::new(&socket), true, false)

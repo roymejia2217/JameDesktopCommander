@@ -29,6 +29,30 @@ test('cross-volume proof includes positive links, genuine denials and outside in
   }
 });
 
+test('hosted SDK state is private to the issued mount namespace for all three real SDK paths', () => {
+  const harness = fs.readFileSync(path.join(repo, linux), 'utf8');
+  const issuer = fs.readFileSync(path.join(repo,
+    'native/authority-service/examples/linux_peered_read_proof.rs'), 'utf8');
+  assert.match(harness, /install -d -o root -g root -m 0700 -- "\$base\/client-state"/);
+  const launch = issuer.slice(issuer.indexOf('fn launch_sdk('), issuer.indexOf('fn verify_sdk_process_custody('));
+  assert.ok(launch.indexOf('mount_sdk_state(') >= 0);
+  assert.ok(launch.indexOf('mount_sdk_state(') < launch.indexOf('libc::unshare(libc::CLONE_NEWUSER)'));
+  assert.match(issuer, /libc::CLONE_NEWNS/);
+  assert.match(issuer, /libc::MS_PRIVATE/);
+  assert.match(issuer, /libc::MS_NOEXEC/);
+  assert.match(issuer, /NS_GET_USERNS/);
+  assert.match(issuer, /verify_sdk_state/);
+  assert.match(issuer, /\/root\/|\/root\{/);
+  assert.match(issuer, /T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE/);
+  assert.equal((harness.match(/grep -Fxq .*T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE/g) || []).length, 3);
+  for (const fixture of ['t011-issued-sdk-native-read.mjs', 't011-issued-sdk-native-mutations.mjs']) {
+    const source = fs.readFileSync(path.join(repo, 'test/security/support', fixture), 'utf8');
+    const canary = source.indexOf('sdk-state-proof');
+    const ready = source.indexOf("writeSync(0, 'R')");
+    assert.ok(canary >= 0 && ready > canary, 'real SDK must prove private write before release');
+  }
+});
+
 test('hosted Linux SDK issuance requires enforced process custody before native attestation', () => {
   const script = fs.readFileSync(path.join(repo, linux), 'utf8');
   const issuer = fs.readFileSync(path.join(repo,

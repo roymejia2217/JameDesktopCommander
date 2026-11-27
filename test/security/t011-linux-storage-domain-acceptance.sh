@@ -102,6 +102,10 @@ cleanup() {
   if ! remove_sdk_profile; then
     echo 'E_STORAGE_SDK_PROFILE_CLEANUP_UNVERIFIED' >&2; exit 1
   fi
+  # Never recursively remove a client-state mount visible in the host.
+  if findmnt --kernel --mountpoint "$base/client-state" --noheadings --output TARGET >/dev/null; then
+    echo 'E_STORAGE_SDK_STATE_CLEANUP_MOUNT_ACTIVE' >&2; exit 1
+  fi
   sudo -n rm -rf -- "$base" || code=1
   exit "$code"
 }
@@ -436,7 +440,9 @@ while IFS= read -r -d '' link; do
   resolved="$(sudo -n realpath -e -- "$link")"
   [[ "$resolved" == "$base/"* ]] || { echo 'E_REAL_JDC_EXTERNAL_DEPENDENCY' >&2; exit 1; }
 done < <(sudo -n find "$base/dist" "$base/node_modules" -type l -print0)
-sudo -n install -d -o "$client_uid" -g "$client_gid" -m 0700 -- "$base/client-state"
+# The host view must remain inaccessible and empty; the issued process
+# receives a private tmpfs at the same path before dropping privileges.
+sudo -n install -d -o root -g root -m 0700 -- "$base/client-state"
 sudo -n -u jdc-mcp-client -- test -r "$base/dist/server.js"
 sdk_socket="$peer_socket_dir/sdk-accepted.sock"
 sdk_issuer_socket="$peer_socket_dir/sdk-issuer.sock"
@@ -465,6 +471,7 @@ if ! sdk_issuer_output="$(sudo -n -- env GITHUB_ACTIONS=true \
 fi
 grep -Fxq 'T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_PROCESS_CUSTODY_NOT_PROVEN' >&2; exit 1; }
+grep -Fxq 'T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE' <<<"$sdk_issuer_output"
 grep -Fq 'T011_LINUX_ROOT_ISSUED_OFFICIAL_SDK_NATIVE_BYTES_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_TOOL_NOT_PROVEN' >&2; exit 1; }
 grep -Fq 'T011_LINUX_ROOT_ISSUED_REAL_JDC_MANAGED_READ_PASS_NONRELEASE' \
@@ -550,6 +557,7 @@ if ! wait "$peer_server_pid"; then
 fi
 peer_server_pid=''
 grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_MUTATION_CLIENT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_MUTATION_LIVE_ISSUED_CLIENT_DISTINCT_PEERS_DENIED_NONRELEASE "$peer_server_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_REAL_JDC_JOURNALED_MUTATIONS_PASS_NONRELEASE "$peer_server_log"
@@ -595,6 +603,7 @@ if ! wait "$peer_server_pid"; then
 fi
 peer_server_pid=''
 grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ADMITTED_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$peer_server_log"
 grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$peer_server_log"
@@ -607,6 +616,11 @@ rm -f -- "$peer_server_log" "$mutation_issuer_log"
 peer_server_log=''
 mutation_issuer_log=''
 remove_sdk_profile
+if findmnt --kernel --mountpoint "$base/client-state" --noheadings --output TARGET >/dev/null; then
+  echo 'E_STORAGE_SDK_STATE_MOUNT_PROPAGATED' >&2; exit 1
+fi
+[[ "$(sudo -n stat -c '%u:%g:%a' "$base/client-state")" == '0:0:700' ]]
+[[ -z "$(sudo -n find "$base/client-state" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 echo 'T011_LINUX_OFFICIAL_SDK_TO_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE'
 echo 'T011_STORAGE_EXTERIOR_BYTES_UNCHANGED'
 echo 'T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE'

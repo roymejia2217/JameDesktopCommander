@@ -1,7 +1,7 @@
 // Non-shipping SDK/native integration. Identity is attested by the Rust
 // kernel-peer fixture, never by this JavaScript module or its MCP input.
 import { connect } from 'node:net';
-import { readSync, writeSync } from 'node:fs';
+import { readSync, writeSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -136,11 +136,13 @@ if (process.argv[1]?.endsWith('t011-issued-sdk-native-read.mjs') && process.argv
   }
   // The root issuer owns the other end of this anonymous readiness socket.
   // No broker request is made before post-exec kernel custody is verified.
+  const home = fileURLToPath(new URL('./client-state/', import.meta.url));
+  writeFileSync(new URL('./client-state/sdk-state-proof', import.meta.url),
+    'JDC_PRIVATE_SDK_STATE', { flag: 'wx', mode: 0o600 });
   const release = Buffer.alloc(1);
   if (writeSync(0, 'R') !== 1 || readSync(0, release, 0, 1, null) !== 1 || release[0] !== 0x41) {
     throw Error('E_T011_SDK_STARTUP_PROTOCOL');
   }
-  const home = fileURLToPath(new URL('./client-state/', import.meta.url));
   process.env.HOME = home;
   process.env.DESKTOP_COMMANDER_CONFIG_DIR = home;
   process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';

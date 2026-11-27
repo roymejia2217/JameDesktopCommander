@@ -92,6 +92,19 @@ test('hosted NTFS active owner rejects real incoming and outgoing mounts before 
   assert.match(script, /E_STORAGE_NESTED_MOUNT_REJECT_CHANGED_DB/);
 });
 
+test('hosted NTFS mount transitions verify partition ownership and preserve the primary failure', () => {
+  const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
+  assert.doesNotMatch(script, /Start-Process -FilePath mountvol\.exe/);
+  assert.match(script, /Add-PartitionAccessPath -DiskNumber \$partition\.DiskNumber -PartitionNumber \$partition\.PartitionNumber/);
+  assert.match(script, /Remove-PartitionAccessPath -DiskNumber \$partition\.DiskNumber -PartitionNumber \$partition\.PartitionNumber/);
+  assert.match(script, /E_STORAGE_ALIAS_TARGET_MISMATCH/);
+  assert.match(script, /E_STORAGE_ALIAS_UNPROVEN_REPARSE/);
+  assert.match(script, /\$primaryFailure = \$null/);
+  assert.match(script, /catch \{\s+\$primaryFailure =/);
+  assert.match(script, /if \(\$null -ne \$primaryFailure\) \{ throw \$primaryFailure \}/);
+  assert.match(script, /E_STORAGE_CLEANUP_FAILED_/);
+});
+
 test('hosted NTFS acceptance verifies all dedicated primary tokens and denies absent issuer privileges', () => {
   const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
   const preflight = script.indexOf("Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites'");

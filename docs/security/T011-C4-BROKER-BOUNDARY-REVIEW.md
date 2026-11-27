@@ -452,6 +452,18 @@ positive and both incoming and outgoing mount negatives with unchanged
 journal bytes, exact denial reasons, and successful readmission after removal.
 No real mount transition is performed on a developer workstation.
 
+Candidate `6b21c83d0ce143149a3ad9c4b18bbef3a9a38473`, hosted native run
+45918855692, Windows job 140244473887, emitted
+`T011_WINDOWS_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE` under the dedicated
+service account. The following active-owner mount transition failed, and
+cleanup masked the primary failure with alias-removal/VHD-state errors.
+Linux native job 140244474082 passed. The Windows test issuer now uses the
+Storage provider's partition access-path cmdlets, checks exact GUID and path
+ownership before removal, confirms absence and rejects unknown reparse points.
+It retains the primary failure independently of cleanup, and never detaches
+or recursively removes an unverified topology. This fixture correction is
+not evidence that either hosted mount transition has passed yet.
+
 The local proof runs with the same UID. The Node runtime must still prove protection from
 same-UID process inspection; the native Rust client's non-dumpable setting is
 not inherited as a verified post-exec Node property.

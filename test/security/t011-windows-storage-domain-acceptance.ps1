@@ -26,6 +26,8 @@ $createdUsers = [System.Collections.Generic.List[string]]::new()
 $attached = $false
 $admissionAlias = $null
 $admissionAliasAttached = $false
+$admissionAliasTarget = $null
+$primaryFailure = $null
 $letter = @('R','S','T','U','V','W') | Where-Object {
     -not (Test-Path -LiteralPath ("${_}:\"))
 } | Select-Object -First 1
@@ -301,28 +303,79 @@ function Invoke-DiskPart([string] $content) {
         }
     }
 }
-# Use the OS mount manager, with the same owned-child bound as DiskPart.
-function Invoke-AdmissionMountVol([string] $mountPath, [string] $argument) {
-    $log = Join-Path $env:RUNNER_TEMP "JDC-148-$guid-mountvol-$([guid]::NewGuid().ToString('N')).stdout"
-    $errLog = "$log.stderr"
-    try {
-        $child = Start-Process -FilePath mountvol.exe -ArgumentList @($mountPath, $argument) -PassThru -RedirectStandardOutput $log -RedirectStandardError $errLog
-        Wait-FixtureProcess $child
-        if ($child.ExitCode -ne 0) { throw 'E_STORAGE_MOUNTVOL_FAILED' }
-        return ([string](Get-Content -LiteralPath $log -Raw)).Trim()
-    } finally {
-        Remove-Item -LiteralPath $log,$errLog -Force -ErrorAction SilentlyContinue
+# Use the Windows Storage provider directly. Never parse localized command
+# output or delete a mount without proving which partition owns the path.
+function Get-AdmissionPartition([string] $targetGuid) {
+    $partitions = @(Get-Partition -ErrorAction Stop | Where-Object {
+        $_.AccessPaths -contains $targetGuid
+    })
+    if ($partitions.Count -ne 1) { throw 'E_STORAGE_ALIAS_TARGET_UNVERIFIABLE' }
+    return $partitions[0]
+}
+function Get-AdmissionAliasOwner {
+    $path = $admissionAlias.TrimEnd('\')
+    $owners = @(Get-Partition -ErrorAction Stop | Where-Object {
+        @($_.AccessPaths | Where-Object { $_ -and $_.TrimEnd('\') -ieq $path }).Count -gt 0
+    })
+    if ($owners.Count -gt 1) { throw 'E_STORAGE_ALIAS_TARGET_MISMATCH' }
+    if ($owners.Count -eq 1) { return $owners[0] }
+}
+function Confirm-AdmissionAliasRemoved {
+    if ($null -ne (Get-AdmissionAliasOwner)) { throw 'E_STORAGE_ADMISSION_ALIAS_REMOVAL_UNVERIFIED' }
+    $item = Get-Item -LiteralPath $admissionAlias.TrimEnd('\') -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'E_STORAGE_ALIAS_UNPROVEN_REPARSE'
     }
+    $script:admissionAliasAttached = $false
+    $script:admissionAliasTarget = $null
+}
+function Add-AdmissionAlias([string] $targetGuid) {
+    # Until absence is proven, even a pre-existing reparse point prevents
+    # recursive cleanup. No target is owned before that initial check.
+    $script:admissionAliasAttached = $true
+    $script:admissionAliasTarget = $null
+    Confirm-AdmissionAliasRemoved
+    $partition = Get-AdmissionPartition $targetGuid
+    # Mark uncertainty before invoking the provider. A failed call may have
+    # changed state; cleanup must re-observe the actual partition ownership.
+    $script:admissionAliasTarget = $targetGuid
+    $script:admissionAliasAttached = $true
+    try {
+        Add-PartitionAccessPath -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -AccessPath $admissionAlias -ErrorAction Stop | Out-Null
+    } catch {
+        throw "E_STORAGE_ALIAS_ADD_HRESULT_$('{0:X8}' -f $_.Exception.HResult)"
+    }
+    $owner = Get-AdmissionAliasOwner
+    if ($null -eq $owner -or $owner.AccessPaths -notcontains $targetGuid) {
+        throw 'E_STORAGE_ALIAS_TARGET_MISMATCH'
+    }
+    $item = Get-Item -LiteralPath $admissionAlias.TrimEnd('\') -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'E_STORAGE_ADMISSION_ALIAS_NOT_PROVEN'
+    }
+}
+function Remove-AdmissionAlias {
+    $owner = Get-AdmissionAliasOwner
+    if ($null -ne $owner) {
+        if (-not $admissionAliasTarget -or $owner.AccessPaths -notcontains $admissionAliasTarget) {
+            throw 'E_STORAGE_ALIAS_TARGET_MISMATCH'
+        }
+        $partition = Get-AdmissionPartition $admissionAliasTarget
+        if ($owner.DiskNumber -ne $partition.DiskNumber -or $owner.PartitionNumber -ne $partition.PartitionNumber) {
+            throw 'E_STORAGE_ALIAS_TARGET_MISMATCH'
+        }
+        try {
+            Remove-PartitionAccessPath -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -AccessPath $admissionAlias -ErrorAction Stop
+        } catch {
+            throw "E_STORAGE_ALIAS_REMOVE_HRESULT_$('{0:X8}' -f $_.Exception.HResult)"
+        }
+    }
+    # Failed creation with no actual mount is not a removal failure. Unknown
+    # reparse points are never traversed or deleted by the fixture cleanup.
+    Confirm-AdmissionAliasRemoved
 }
 # Coordinate a real, already-open service owner with a trusted mount-manager
 # transition using redirected standard streams, not a client grant or polling.
-function Confirm-AdmissionAliasRemoved {
-    $item = Get-Item -LiteralPath $admissionAlias.TrimEnd('\') -Force -ErrorAction Stop
-    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw 'E_STORAGE_ADMISSION_ALIAS_REMOVAL_UNVERIFIED'
-    }
-    $script:admissionAliasAttached = $false
-}
 function Invoke-ActiveAdmissionAliasProbe([string] $targetGuid,
     [ValidateSet('mount-paths-not-exclusive','nested-mount-present')][string] $expectedCheck) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
@@ -357,11 +410,7 @@ function Invoke-ActiveAdmissionAliasProbe([string] $targetGuid,
             }
             $ready = $line.Result -ceq 'T011_WINDOWS_ACTIVE_VOLUME_OWNER_READY_NONRELEASE'
         }
-        $script:admissionAliasAttached = $true
-        Invoke-AdmissionMountVol $admissionAlias $targetGuid | Out-Null
-        if ((Invoke-AdmissionMountVol $admissionAlias '/L') -ine $targetGuid) {
-            throw 'E_STORAGE_ADMISSION_ALIAS_NOT_PROVEN'
-        }
+        Add-AdmissionAlias $targetGuid
         $child.StandardInput.WriteLine('CHECK')
         $child.StandardInput.Flush()
         $child.StandardInput.Close()
@@ -583,8 +632,7 @@ exit
     Invoke-ActiveAdmissionAliasProbe $volumeGuid 'mount-paths-not-exclusive'
     Invoke-AdmissionProbe 'journaled_mutations::tests::hosted_verified_volume_rejects_alternate_mount' 'T011_WINDOWS_ADMITTED_VOLUME_ALIAS_DENIED_NONRELEASE'
     if ((Get-FileHash -LiteralPath $admissionDb -Algorithm SHA256).Hash -ne $admissionHash) { throw 'E_STORAGE_ALIAS_REJECT_CHANGED_DB' }
-    Invoke-AdmissionMountVol $admissionAlias '/D' | Out-Null
-    Confirm-AdmissionAliasRemoved
+    Remove-AdmissionAlias
     # Hosted-only outgoing mount: the source directory belongs to our
     # disposable VHD, never the system volume. The existing outside volume
     # is only the mount target; no operation traverses this mounted path.
@@ -602,8 +650,7 @@ exit
     if ((Get-FileHash -LiteralPath $admissionDb -Algorithm SHA256).Hash -ne $admissionHash) {
         throw 'E_STORAGE_NESTED_MOUNT_REJECT_CHANGED_DB'
     }
-    Invoke-AdmissionMountVol $admissionAlias '/D' | Out-Null
-    Confirm-AdmissionAliasRemoved
+    Remove-AdmissionAlias
     [IO.Directory]::Delete($admissionAlias.TrimEnd('\'), $false)
     Write-Output 'T011_WINDOWS_ACTIVE_NESTED_MOUNT_DENIED_NONRELEASE'
     Invoke-AdmissionProbe 'journaled_mutations::tests::hosted_verified_volume_readmits_after_alias_removed' 'T011_WINDOWS_ADMITTED_VOLUME_RESTORED_NONRELEASE'
@@ -802,6 +849,11 @@ exit
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_principal_matches_expected_role' 'T011_WINDOWS_FIXTURE_CLIENT_TOKEN_PASS_NONRELEASE' $client.Credential
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_principal_matches_expected_role' 'T011_WINDOWS_FIXTURE_ATTACKER_TOKEN_PASS_NONRELEASE' $attacker.Credential
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites' 'T011_WINDOWS_DISTINCT_ISSUER_PREREQUISITES_PASS_NONRELEASE' $null
+} catch {
+    $primaryFailure = $_
+    $code = $_.Exception.Message
+    if ($code -notmatch '^E_[A-Z0-9_]+$') { $code = 'E_STORAGE_UNCLASSIFIED_FAILURE' }
+    [Console]::Error.WriteLine("T011_WINDOWS_STORAGE_PRIMARY_FAILURE $code")
 } finally {
     $cleanupErrors = [System.Collections.Generic.List[string]]::new()
     if ($null -ne $peerReadyWatcher) {
@@ -832,8 +884,7 @@ exit
     catch { $cleanupErrors.Add('OWNED_PROCESS_STOP_UNVERIFIED') }
     if (-not $processStateUncertain -and $rootOwned -and $admissionAliasAttached) {
         try {
-            Invoke-AdmissionMountVol $admissionAlias '/D' | Out-Null
-            Confirm-AdmissionAliasRemoved
+            Remove-AdmissionAlias
         } catch { $cleanupErrors.Add('ADMISSION_ALIAS_REMOVE') }
     }
     if (-not $processStateUncertain -and $rootOwned -and -not $admissionAliasAttached -and (Test-Path -LiteralPath $vhd)) {
@@ -869,6 +920,9 @@ exit
         catch { $cleanupErrors.Add('ACCOUNT_REMOVE') }
     }
     if ($cleanupErrors.Count -gt 0) {
-        throw "E_STORAGE_CLEANUP_FAILED_$($cleanupErrors -join '_')"
+        $cleanupCode = "E_STORAGE_CLEANUP_FAILED_$($cleanupErrors -join '_')"
+        [Console]::Error.WriteLine($cleanupCode)
+        if ($null -eq $primaryFailure) { throw $cleanupCode }
     }
 }
+if ($null -ne $primaryFailure) { throw $primaryFailure }

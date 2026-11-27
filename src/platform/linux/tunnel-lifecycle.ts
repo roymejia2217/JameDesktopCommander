@@ -54,8 +54,36 @@ const defaultRun = (executable: string, args: readonly string[]): Promise<string
   new Promise((resolve, reject) => {
     execFile(executable, [...args], {
       shell: false, encoding: 'utf8', timeout: 10000, maxBuffer: 65536,
-    }, (error, stdout) => error ? reject(new Error(executable + ' operation failed')) : resolve(stdout));
+    }, (error, stdout) => error ? reject(error) : resolve(stdout));
   });
+
+/** Preserve a finite set of machine-readable reasons, never child output or paths. */
+function sanitizedCommandFailure(executable: string, error: unknown): Error {
+  const manager = executable === 'systemctl';
+  const prefix = manager ? 'E_TUNNEL_USER_MANAGER' : 'E_TUNNEL_CLIENT';
+  let reason = prefix + '_FAILED';
+  try {
+    if (error !== null && typeof error === 'object') {
+      const code = 'code' in error ? error.code : undefined;
+      if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM' || code === 'ETIMEDOUT') {
+        reason = code;
+      } else if (code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        reason = 'E_TUNNEL_SUBPROCESS_OUTPUT_LIMIT';
+      } else if (typeof code === 'number' && Number.isSafeInteger(code) && code !== 0) {
+        reason = prefix + '_NONZERO';
+      } else if ('signal' in error && typeof error.signal === 'string' &&
+          /^SIG[A-Z0-9]+$/.test(error.signal)) {
+        reason = 'E_TUNNEL_SUBPROCESS_TERMINATED';
+      }
+    }
+  } catch {
+    // Untrusted exception accessors cannot introduce a second failure.
+    reason = prefix + '_FAILED';
+  }
+  return Object.assign(new Error(manager
+    ? 'Linux tunnel user manager command failed.'
+    : 'Linux tunnel client command failed.'), { code: reason });
+}
 
 function safePath(value: string): string {
   if (!path.posix.isAbsolute(value) || /[%$"\\\u0000-\u001f\u007f]/.test(value)) {
@@ -601,10 +629,8 @@ export async function runLinuxTunnelCommand(
   const run = async (executable: string, parts: readonly string[]): Promise<string> => {
     try {
       return await externalRun(executable, parts);
-    } catch {
-      throw new Error(executable === 'systemctl'
-        ? 'Linux tunnel user manager command failed.'
-        : 'Linux tunnel client command failed.');
+    } catch (error) {
+      throw sanitizedCommandFailure(executable, error);
     }
   };
   const systemctl = (parts: readonly string[]) => run('systemctl', ['--user', ...parts]);

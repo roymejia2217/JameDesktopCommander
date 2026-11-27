@@ -378,6 +378,24 @@ try {
     assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
   }
 
+  for (const [code, reason] of [
+    ['E_TUNNEL_USER_MANAGER_FAILED', /user service manager/i],
+    ['E_TUNNEL_USER_MANAGER_NONZERO', /user service manager.*failed/i],
+    ['E_TUNNEL_CLIENT_FAILED', /official tunnel client/i],
+    ['E_TUNNEL_CLIENT_NONZERO', /official tunnel client.*failed/i],
+    ['E_TUNNEL_SUBPROCESS_TERMINATED', /terminated/i],
+    ['E_TUNNEL_SUBPROCESS_OUTPUT_LIMIT', /output limit/i],
+  ]) {
+    errors.length = 0;
+    await runTunnel(['status'], {
+      ...dependencies,
+      statusTunnel: async () => { throw Object.assign(new Error(sensitive), { code }); },
+    });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], reason);
+    assert.doesNotMatch(errors[0], /provider-api-key-CANARY|runtime[.]key|Private/);
+  }
+
   errors.length = 0;
   // An untrusted error may expose a throwing code accessor. Even classifying
   // the exception must not create an uncaught secret-bearing exception.

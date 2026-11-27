@@ -88,6 +88,32 @@ test('Linux tunnel redacts subprocess diagnostic details from user-manager failu
   );
 });
 
+test('Linux user-manager failures retain only actionable structured subprocess reasons', async () => {
+  const secret = 'private path and bearer CANARY_SECRET';
+  const cases = [
+    [{ code: 'ENOENT' }, 'ENOENT'],
+    [{ code: 'EACCES' }, 'EACCES'],
+    [{ code: 'EPERM' }, 'EPERM'],
+    [{ code: 'ETIMEDOUT' }, 'ETIMEDOUT'],
+    [{ code: 1 }, 'E_TUNNEL_USER_MANAGER_NONZERO'],
+    [{ code: null, signal: 'SIGTERM' }, 'E_TUNNEL_SUBPROCESS_TERMINATED'],
+    [{ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }, 'E_TUNNEL_SUBPROCESS_OUTPUT_LIMIT'],
+    [{ code: secret }, 'E_TUNNEL_USER_MANAGER_FAILED'],
+  ];
+  for (const [details, expected] of cases) {
+    await assert.rejects(runLinuxTunnelCommand(['status'], {
+      platform: 'linux', uid: () => 1000, home: '/nonexecuted/fixture/home',
+      run: async () => { throw Object.assign(new Error(secret), details); },
+    }), error => {
+      assert.equal(error.code, expected);
+      assert.equal(error.message, 'Linux tunnel user manager command failed.');
+      assert.equal(error.cause, undefined);
+      assert.ok(!JSON.stringify(error).includes(secret));
+      return true;
+    });
+  }
+});
+
 test('Linux tunnel redacts client doctor subprocess errors', {
   skip: process.platform !== 'linux',
 }, async () => {
@@ -105,7 +131,7 @@ test('Linux tunnel redacts client doctor subprocess errors', {
       run: async (executable, args) => {
         calls.push([executable, ...args]);
         if (executable === 'systemctl') return '';
-        throw new Error(sensitive);
+        throw Object.assign(new Error(sensitive), { code: 1 });
       },
     };
     await assert.rejects(runLinuxTunnelCommand([
@@ -113,6 +139,8 @@ test('Linux tunnel redacts client doctor subprocess errors', {
       '--profile-dir', profiles, '--profile', 'jdc',
     ], dependencies), (error) => {
       assert.equal(error.message, 'Linux tunnel client command failed.');
+      assert.equal(error.code, 'E_TUNNEL_CLIENT_NONZERO');
+      assert.equal(error.cause, undefined);
       assert.ok(!error.message.includes(client));
       assert.ok(!error.message.includes('SECRET_VALUE'));
       return true;

@@ -571,6 +571,18 @@ function tunnelCliFailureCode(error: unknown): string {
             return 'E_TUNNEL_DEPENDENCY_NOT_FOUND';
         case 'ETIMEDOUT':
             return 'E_TUNNEL_TIMEOUT';
+        case 'E_TUNNEL_USER_MANAGER_FAILED':
+            return 'E_TUNNEL_USER_MANAGER_FAILED: user service manager unavailable';
+        case 'E_TUNNEL_USER_MANAGER_NONZERO':
+            return 'E_TUNNEL_USER_MANAGER_NONZERO: user service manager command failed';
+        case 'E_TUNNEL_CLIENT_FAILED':
+            return 'E_TUNNEL_CLIENT_FAILED: official tunnel client unavailable';
+        case 'E_TUNNEL_CLIENT_NONZERO':
+            return 'E_TUNNEL_CLIENT_NONZERO: official tunnel client command failed';
+        case 'E_TUNNEL_SUBPROCESS_TERMINATED':
+            return 'E_TUNNEL_SUBPROCESS_TERMINATED: external command terminated';
+        case 'E_TUNNEL_SUBPROCESS_OUTPUT_LIMIT':
+            return 'E_TUNNEL_SUBPROCESS_OUTPUT_LIMIT: external command exceeded output limit';
         case 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED':
             return 'E_TUNNEL_EFFECTIVE_UNIT_UNVERIFIED: effective systemd unit is not trusted';
         case 'E_TUNNEL_RESTART_NOT_ACTIVE':

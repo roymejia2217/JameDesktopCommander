@@ -29,6 +29,8 @@ peer_server_pid=''
 peer_server_log=''
 mutation_issuer_pid=''
 mutation_issuer_log=''
+sdk_profile=''
+sdk_node=''
 mkdir -- "$isolated" "$attacker"
 chmod 0711 "$base"
 # The mountpoint's immediate parent belongs to the trusted administrator,
@@ -37,6 +39,26 @@ chmod 0711 "$base"
 sudo -n chown root:root "$base"
 sudo -n chown nobody:"$(id -gn nobody)" "$attacker"
 sudo -n chmod 0700 "$attacker"
+remove_sdk_profile() {
+  [[ -n "$sdk_profile" ]] || return 0
+  # The dedicated client UID belongs only to this disposable fixture.
+  # Prevent new executions before observing that its processes have exited.
+  sudo -n chmod 0500 -- "$sdk_node" || return 1
+  local probe inventory
+  probe="$(sudo -n sh -c 'pgrep -u "$1" >/dev/null; rc=$?; [ "$rc" -eq 1 ] && printf "%s\n" JDC_NO_CLIENT_PROCESSES' sh "$client_uid")" || return 1
+  if [[ "$probe" != JDC_NO_CLIENT_PROCESSES ]]; then
+    echo 'E_STORAGE_SDK_PROFILE_PROCESS_STATE_UNVERIFIED' >&2; return 1
+  fi
+  inventory="$(sudo -n cat /sys/kernel/security/apparmor/profiles)" || return 1
+  if grep -Fxq "$sdk_node (enforce)" <<< "$inventory"; then
+    sudo -n apparmor_parser -R -K "$sdk_profile" || return 1
+  fi
+  inventory="$(sudo -n cat /sys/kernel/security/apparmor/profiles)" || return 1
+  if grep -Fq "$sdk_node (" <<< "$inventory"; then
+    echo 'E_STORAGE_SDK_PROFILE_REMAINS_LOADED' >&2; return 1
+  fi
+  sdk_profile=''
+}
 cleanup() {
   local code=$?
   trap - EXIT
@@ -77,6 +99,9 @@ cleanup() {
     echo 'E_STORAGE_CLEANUP_VOLUME_ACTIVE' >&2; exit 1
   fi
   [[ "$base" == /tmp/jdc-t011-storage.* ]] || exit 1
+  if ! remove_sdk_profile; then
+    echo 'E_STORAGE_SDK_PROFILE_CLEANUP_UNVERIFIED' >&2; exit 1
+  fi
   sudo -n rm -rf -- "$base" || code=1
   exit "$code"
 }
@@ -361,9 +386,38 @@ echo 'T011_LINUX_REAL_SERVICE_PEER_BOUND_READ_PASS_NONRELEASE'
 # process whose live PID is attested by the native server. The fixed-object
 # adapter is disposable, not a shipping enrollment or general read policy.
 sdk_bundle="$(realpath -e -- test/security/support/t011-issued-sdk-native-read.mjs)"
-node_binary="$(realpath -e -- "$(command -v node)")"
-[[ "$("$node_binary" --version)" == v24.* ]] || exit 1
-sudo -n -u jdc-mcp-client -- "$node_binary" --version >/dev/null
+node_source="$(realpath -e -- "$(command -v node)")"
+[[ "$("$node_source" --version)" == v24.* ]] || exit 1
+command -v apparmor_parser >/dev/null
+command -v pgrep >/dev/null
+[[ "$base" =~ ^/tmp/jdc-t011-storage\.[[:alnum:]]{8}$ ]] || exit 1
+node_binary="$base/sdk-node"
+sdk_node="$node_binary"
+sudo -n install -o root -g "$client_gid" -m 0550 -- "$node_source" "$node_binary"
+[[ "$(sha256sum "$node_source" | cut -d ' ' -f1)" == "$(sudo -n sha256sum "$node_binary" | cut -d ' ' -f1)" ]] || exit 1
+profiles="$(sudo -n cat /sys/kernel/security/apparmor/profiles)"
+if grep -Fq "$sdk_node (" <<< "$profiles"; then
+  echo 'E_STORAGE_SDK_PROFILE_PREEXISTS' >&2; exit 1
+fi
+# A new, path-attached profile applies atomically at exec of this exact
+# root-owned copy. File/network permissions are deliberately not the storage
+# boundary: DAC, mounts and the native broker remain responsible for that.
+# No unconfined transitions or external executable launches are permitted.
+sdk_profile="$base/sdk-client.apparmor"
+sudo -n tee "$sdk_profile" >/dev/null <<EOF
+"$node_binary" {
+  /** rwmkl,
+  "$node_binary" ix,
+  network,
+  unix,
+  signal,
+  deny ptrace (readby, tracedby),
+}
+EOF
+sudo -n chmod 0600 -- "$sdk_profile"
+sudo -n apparmor_parser -a -K "$sdk_profile"
+profiles="$(sudo -n cat /sys/kernel/security/apparmor/profiles)"
+grep -Fxq "$sdk_node (enforce)" <<< "$profiles"
 sdk_installed="$base/t011-issued-sdk-native-read.mjs"
 sudo -n install -o root -g root -m 0555 -- "$sdk_bundle" "$sdk_installed"
 [[ "$(sha256sum "$sdk_bundle" | cut -d ' ' -f1)" == \
@@ -409,6 +463,8 @@ if ! sdk_issuer_output="$(sudo -n -- env GITHUB_ACTIONS=true \
   "$sdk_issuer_socket" "$sdk_socket" "$node_binary" "$sdk_installed" 2>&1)"; then
   printf '%s\n' "$sdk_issuer_output" >&2; exit 1
 fi
+grep -Fxq 'T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE' \
+  <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_PROCESS_CUSTODY_NOT_PROVEN' >&2; exit 1; }
 grep -Fq 'T011_LINUX_ROOT_ISSUED_OFFICIAL_SDK_NATIVE_BYTES_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_TOOL_NOT_PROVEN' >&2; exit 1; }
 grep -Fq 'T011_LINUX_ROOT_ISSUED_REAL_JDC_MANAGED_READ_PASS_NONRELEASE' \
@@ -493,6 +549,7 @@ if ! wait "$peer_server_pid"; then
   echo 'E_MUTATION_NATIVE_SERVER_FAILED' >&2; exit 1
 fi
 peer_server_pid=''
+grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_MUTATION_CLIENT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_MUTATION_LIVE_ISSUED_CLIENT_DISTINCT_PEERS_DENIED_NONRELEASE "$peer_server_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_REAL_JDC_JOURNALED_MUTATIONS_PASS_NONRELEASE "$peer_server_log"
@@ -537,6 +594,7 @@ if ! wait "$peer_server_pid"; then
   echo 'E_MUTATION_CANCEL_NATIVE_SERVICE_FAILED' >&2; exit 1
 fi
 peer_server_pid=''
+grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ADMITTED_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$peer_server_log"
 grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$peer_server_log"
@@ -548,6 +606,7 @@ cat -- "$peer_server_log" "$mutation_issuer_log"
 rm -f -- "$peer_server_log" "$mutation_issuer_log"
 peer_server_log=''
 mutation_issuer_log=''
+remove_sdk_profile
 echo 'T011_LINUX_OFFICIAL_SDK_TO_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE'
 echo 'T011_STORAGE_EXTERIOR_BYTES_UNCHANGED'
 echo 'T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE'

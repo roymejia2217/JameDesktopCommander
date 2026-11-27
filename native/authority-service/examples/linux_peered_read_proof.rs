@@ -77,6 +77,184 @@ mod proof {
         Ok(())
     }
 
+    // Observe only the fixed fixture processes. A permission error is the
+    // expected negative result; missing/dead targets are not evidence.
+    fn inspection_denied<T>(result: std::io::Result<T>) -> Result<(), &'static str> {
+        match result {
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) =>
+            {
+                Ok(())
+            }
+            _ => Err("E_PEER_SDK_INSPECTION_NOT_DENIED"),
+        }
+    }
+
+    fn fixture_pid(pid: u32, account: DedicatedAccount) -> Result<(), &'static str> {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err("E_PEER_SDK_INSPECTION_PID");
+        }
+        let status = io(fs::read_to_string(format!("/proc/{pid}/status")))?;
+        for (key, expected) in [("Uid:", account.uid), ("Gid:", account.gid)] {
+            let line = status
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .ok_or("E_PEER_SDK_INSPECTION_IDENTITY")?;
+            let ids: Vec<_> = line.split_whitespace().collect();
+            if ids.len() != 4 || ids.iter().any(|id| id.parse::<u32>() != Ok(expected)) {
+                return Err("E_PEER_SDK_INSPECTION_IDENTITY");
+            }
+        }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return Err("E_PEER_SDK_INSPECTION_TARGET_NOT_LIVE");
+        }
+        Ok(())
+    }
+
+    fn inspect_same_uid(pid: u32, protected: bool) -> Result<(), &'static str> {
+        let account = fixture_client()?;
+        if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
+            || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
+            || unsafe { libc::getuid() } != account.uid
+            || unsafe { libc::geteuid() } != account.uid
+            || unsafe { libc::getgid() } != account.gid
+            || unsafe { libc::getegid() } != account.gid
+        {
+            return Err("E_PEER_SDK_INSPECTION_PRINCIPAL");
+        }
+        fixture_pid(pid, account)?;
+        let proc = format!("/proc/{pid}");
+        if protected {
+            inspection_denied(fs::read_link(format!("{proc}/exe")))?;
+            inspection_denied(fs::read_link(format!("{proc}/fd/0")))?;
+            inspection_denied(File::open(format!("{proc}/maps")))?;
+            inspection_denied(File::open(format!("{proc}/mem")))?;
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+            if raw < 0 || raw > i64::from(i32::MAX) {
+                return Err("E_PEER_SDK_INSPECTION_PIDFD");
+            }
+            let pin = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+            let duplicate =
+                unsafe { libc::syscall(libc::SYS_pidfd_getfd, pin.as_raw_fd(), 0i32, 0u32) };
+            if duplicate >= 0 {
+                if duplicate <= i64::from(i32::MAX) {
+                    drop(unsafe { OwnedFd::from_raw_fd(duplicate as i32) });
+                }
+                return Err("E_PEER_SDK_DESCRIPTOR_DUPLICATED");
+            }
+            inspection_denied::<()>(Err(std::io::Error::last_os_error()))?;
+        } else {
+            // Positive READ-mode controls distinguish actual confinement
+            // from a broken procfs, mismatched identity or missing target.
+            io(fs::read_link(format!("{proc}/exe")))?;
+            if io(fs::read_link(format!("{proc}/fd/0")))? != Path::new("/dev/null") {
+                return Err("E_PEER_SDK_INSPECTION_CONTROL_FD");
+            }
+            io(File::open(format!("{proc}/maps")))?;
+        }
+        fixture_pid(pid, account)
+    }
+
+    fn run_inspector(account: DedicatedAccount, pid: u32, role: &str) -> Result<(), &'static str> {
+        let status = io(Command::new(io(env::current_exe())?)
+            .arg(role)
+            .arg(pid.to_string())
+            .env_clear()
+            .env("GITHUB_ACTIONS", "true")
+            .env("RUNNER_ENVIRONMENT", "github-hosted")
+            .uid(account.uid)
+            .gid(account.gid)
+            .stdin(std::process::Stdio::null())
+            .status())?;
+        if !status.success() {
+            return Err("E_PEER_SDK_INSPECTION_FAILED");
+        }
+        Ok(())
+    }
+
+    fn verify_sdk_process_custody(
+        node: &Path,
+        pid: u32,
+        pin: &OwnedFd,
+        account: DedicatedAccount,
+    ) -> Result<(), &'static str> {
+        let live = || {
+            let mut state = libc::pollfd {
+                fd: pin.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut state, 1, 0) } != 0 {
+                return Err("E_PEER_SDK_INSPECTION_TARGET_EXITED");
+            }
+            Ok(())
+        };
+        let label = || {
+            let mut value = String::new();
+            io(File::open(format!("/proc/{pid}/attr/apparmor/current")))?
+                .take(512)
+                .read_to_string(&mut value)
+                .map_err(|_| "E_PEER_SDK_PROFILE_UNVERIFIABLE")?;
+            if value.trim_end_matches('\n') != format!("{} (enforce)", node.display()) {
+                return Err("E_PEER_SDK_PROFILE_NOT_ENFORCING");
+            }
+            Ok(())
+        };
+        live()?;
+        fixture_pid(pid, account)?;
+        label()?;
+        let mut control = io(Command::new("/usr/bin/sleep")
+            .arg("30")
+            .env_clear()
+            .uid(account.uid)
+            .gid(account.gid)
+            .stdin(std::process::Stdio::null())
+            .spawn())?;
+        let observed = run_inspector(account, control.id(), "inspect-control");
+        let stopped = control.kill();
+        let reaped = control.wait();
+        io(stopped)?;
+        io(reaped)?;
+        observed?;
+        run_inspector(account, pid, "inspect-protected")?;
+        live()?;
+        label()?;
+        eprintln!("T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE");
+        Ok(())
+    }
+
+    fn verify_sdk_image(node: &Path, account: DedicatedAccount) -> Result<(), &'static str> {
+        let parent = node.parent().ok_or("E_PEER_SDK_IMAGE_CUSTODY")?;
+        let name = parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("jdc-t011-storage."))
+            .ok_or("E_PEER_SDK_IMAGE_CUSTODY")?;
+        if parent.parent() != Some(Path::new("/tmp"))
+            || name.len() != 8
+            || !name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || node.file_name().and_then(|name| name.to_str()) != Some("sdk-node")
+            || io(fs::canonicalize(node))? != node
+        {
+            return Err("E_PEER_SDK_IMAGE_CUSTODY");
+        }
+        let dir = io(fs::symlink_metadata(parent))?;
+        let image = io(fs::symlink_metadata(node))?;
+        if !dir.is_dir()
+            || dir.uid() != 0
+            || dir.gid() != 0
+            || dir.mode() & 0o7777 != 0o711
+            || !image.is_file()
+            || image.uid() != 0
+            || image.gid() != account.gid
+            || image.mode() & 0o7777 != 0o550
+            || image.nlink() != 1
+        {
+            return Err("E_PEER_SDK_IMAGE_CUSTODY");
+        }
+        Ok(())
+    }
+
     fn issue(
         issuer_socket: &Path,
         client_socket: &Path,
@@ -92,7 +270,10 @@ mod proof {
             {
                 return Err("E_PEER_PROOF_ISSUED_SDK_RUNNER_REQUIRED");
             }
+            verify_sdk_image(node, approved)?;
             let mut issued = Command::new(node);
+            issued.env_clear().env("PATH", "/usr/bin:/bin");
+            issued.stdin(std::process::Stdio::null());
             issued.arg(script).arg(client_socket);
             if cancel_before_commit {
                 issued.arg("--hosted-cancel-before-commit");
@@ -117,6 +298,9 @@ mod proof {
                 return Err("E_PEER_PROOF_ISSUER_PIDFD");
             }
             let pidfd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+            if let Some((node, _, _)) = sdk {
+                verify_sdk_process_custody(node, child.id(), &pidfd, approved)?;
+            }
             let channel = io(UnixStream::connect(issuer_socket))?;
             io(channel.set_write_timeout(Some(Duration::from_secs(3))))?;
             send_attestation(&channel, child.id(), pidfd.as_raw_fd())?;
@@ -352,6 +536,14 @@ mod proof {
                         role == "issue-sdk-cancel",
                     )),
                 )
+            }
+            (Some(role), Some(pid), None, None, None)
+                if role == "inspect-control" || role == "inspect-protected" =>
+            {
+                pid.to_str()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or("E_PEER_SDK_INSPECTION_PID")
+                    .and_then(|pid| inspect_same_uid(pid, role == "inspect-protected"))
             }
             (Some(role), Some(socket), None, None, None) if role == "allow" => {
                 request(Path::new(&socket), true, false)

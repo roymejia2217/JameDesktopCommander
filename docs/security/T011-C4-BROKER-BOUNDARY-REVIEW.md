@@ -1,11 +1,29 @@
 # T011-C4 - Out-of-process filesystem broker: security design gate
 
-**Status:** PROPOSED FOR INDEPENDENT REVIEW; NOT ACCEPTED OR IMPLEMENTED.
+**Status:** TECHNICAL-DIRECTOR REVIEW RECORDED; BOUNDED NONSHIPPING VALIDATION AUTHORIZED; PRODUCTION NOT ACCEPTED.
 **Base:** protected `main` at `a2c660aab9b3268ae525ccd1ccb4b2798318de47` (2026-11-13).
 **Scope:** #139, subject to independent #148 and #124 gates. No runtime/service/release grant.
 **Canonical inventories:** [filesystem handlers](T011-C-HANDLER-CALLGRAPH-DECISION.md),
 [object isolation](T011-HARDLINK-OBJECT-ISOLATION-DECISION.md),
 [filesystem boundary](T011-FILESYSTEM-CAPABILITY-BOUNDARY.md).
+
+## Accountable review decision (2026-11-26)
+
+The project owner explicitly authorizes the technical director to perform the
+adversarial design review and choose the next bounded implementation. There
+is no designated external reviewer; do not invent one or block research on
+a fictitious approval. The director's review is not independent external
+certification. Independent evidence means actual separately executed kernel
+and hosted CI acceptance against the exact candidate, with unchanged negative
+controls. Record assumptions, failures, limitations and the release verdict.
+The owner retains production-release authority; all #124, #139, #148,
+postmerge, provenance and fail-closed requirements remain mandatory.
+
+This decision authorizes the specific hosted AppArmor process-custody
+experiment below. It also permits technical design and bounded nonshipping
+implementation of the Windows issuer without a nonexistent reviewer.
+No production activation, privilege change on a developer host, generic
+privileged launcher, or automatic P0 closure is approved.
 
 ## 1. Evidence versus implementation
 
@@ -464,9 +482,42 @@ It retains the primary failure independently of cleanup, and never detaches
 or recursively removes an unverified topology. This fixture correction is
 not evidence that either hosted mount transition has passed yet.
 
-The local proof runs with the same UID. The Node runtime must still prove protection from
-same-UID process inspection; the native Rust client's non-dumpable setting is
-not inherited as a verified post-exec Node property.
+#### Linux post-exec SDK process custody (technical decision, nonrelease)
+
+The native Rust client's non-dumpable state cannot be assumed to survive
+exec of Node. Yama scope 1 alone does not deny every ptrace READ-mode check,
+including procfs descriptor links. Select an enforced AppArmor profile
+attached to a uniquely staged, root-owned, byte-verified Node executable
+in the existing disposable hosted fixture. The issuer verifies exact
+path/owner/group/mode/link count and the live process label before sending
+its pidfd. The profile denies ptrace readby/tracedby without peer exceptions,
+does not grant unconfined execution, and permits execution only of the
+staged image. DAC and native storage/mount policy still supply object
+isolation; the profile is not a production filesystem or network sandbox.
+
+A real second process under the dedicated client UID/GID must pass procfs
+READ-mode controls against a live ordinary same-UID process, then receive
+only EACCES/EPERM for the issued Node executable link, descriptor link,
+maps/mem opens and pidfd_getfd. Missing objects, exited processes and
+unsupported syscalls fail the test. No protected bytes are read or printed
+by the negative probe. Keep the target pidfd alive, observe its enforced
+label before and after inspection, and only then attest. Require this
+verdict for SDK read, journaled mutations and cancellation, retaining
+existing legitimate operation, same-UID/foreign-peer and outside-byte
+controls. No global Yama/sysctl changes. Remove only the unique profile
+after preventing new fixture image launches and establishing that the
+dedicated UID has no remaining processes; otherwise retain the fixture
+and fail the disposable job. Never load this profile on developer hosts.
+
+This is an experiment for the Ubuntu hosted target, not a claim of portable
+production MAC availability, protection from a trusted administrator, all
+possible process inspection interfaces, signal denial, or mutable client
+state integrity. Actual hosted profile enforcement and negative/positive
+controls are required before calling the experiment successful. Unsupported
+hosts must deny rather than use a weaker runtime. References:
+<https://manpages.ubuntu.com/manpages/noble/man5/apparmor.d.5.html>,
+<https://manpages.ubuntu.com/manpages/noble/man8/apparmor_parser.8.html>,
+<https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html>.
 
 The disposable Windows token observations are isolated in a private
 `cfg(test)` child module. The SCM observer retains its no-output contract;
@@ -475,8 +526,8 @@ inventories. Neither an issuer preflight nor a marker grants launch authority.
 
 ### Mandatory decision experiment
 
-The **next non-shipping functional increment**, once its issuer/principal
-model receives independent review, is an official SDK MCP session under a
+The **next non-shipping functional increment**, under a recorded technical
+decision for its issuer/principal model, is an official SDK MCP session under a
 *real* issued managed-client process, with one broker-held regular-file read
 and exact output bytes. Its negative controls must independently demonstrate:
 
@@ -509,9 +560,10 @@ What exact revocation and rollback evidence is required?
 
 ## 6. Acceptance sequence and review decision record
 
-1. Independent security reviewers must decide supported storage/volume/mount
-   models, service/client principals, IPC custody, anti-rollback mechanism and
-   the exact object-origin invariant; record concrete approval or rejection.
+1. The technical director must decide supported storage/volume/mount models,
+   service/client principals, IPC custody, anti-rollback mechanism and the
+   exact object-origin invariant; record concrete approval or rejection and
+   independently executed acceptance evidence.
 2. Preserve the original hard-link and namespace-swap RED evidence. On real
    disposable Linux, prove an actual `jdc-authority` server serves one valid
    bounded read, rejects a foreign client, stale/replayed/revoked operations,
@@ -531,7 +583,7 @@ What exact revocation and rollback evidence is required?
    installers and independently checked postmerge `main`. Never bypass the
    existing production isolation gate to make research code reachable.
 
-**Open reviewer decisions:** Which operator owns immutable roots? Which
+**Open technical decisions:** Which operator owns immutable roots? Which
 filesystems and external aliases are permitted? What OS-protected monotonic
 state survives rollback/reinstall? How is the actual interactive-user MCP
 launched as a verified client without granting access to another same-UID/SID
@@ -539,9 +591,11 @@ process? How are transferred descriptors excluded? How are previously sent
 bytes distinguished from revocation-acknowledged future sends? What evidence
 proves Windows named-pipe parity?
 
-**Disposition:** REVIEW REQUIRED / NO IMPLEMENTATION PERMISSION.
-The current `main` continues deny-only for the native authority; #124, #139
-and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
+**Disposition:** BOUNDED NONSHIPPING EXPERIMENT AUTHORIZED BY TECHNICAL
+DIRECTOR; EXACT-HOST EVIDENCE REQUIRED; NO PRODUCTION IMPLEMENTATION OR
+RELEASE PERMISSION. The current `main` continues deny-only for the native
+authority; #124, #139 and #148 remain P0. `releaseEligible:false` and
+production NO-GO remain.
 
 ## Official primitive references
 

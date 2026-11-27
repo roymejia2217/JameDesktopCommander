@@ -411,7 +411,7 @@ sudo -n tee "$sdk_profile" >/dev/null <<EOF
   network,
   unix,
   signal,
-  deny ptrace (readby, tracedby),
+  deny ptrace (readby, tracedby), # codespell:ignore readby
 }
 EOF
 sudo -n chmod 0600 -- "$sdk_profile"

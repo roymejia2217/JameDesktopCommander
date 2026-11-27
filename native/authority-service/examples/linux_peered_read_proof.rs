@@ -13,9 +13,12 @@ mod fixture_issuer;
 #[cfg(target_os = "linux")]
 mod proof {
     use jdc_authority_service::{
-        linux_message_origin::enable_writer_credentials, linux_peer::observe_kernel_peer,
+        linux_message_origin::enable_writer_credentials,
+        linux_peer::observe_kernel_peer,
         linux_read_disclosure::read_attested_regular_into_socket,
-        peer_policy::verify_distinct_peer, policy_epoch::PolicyFence, verify_service_identity,
+        peer_policy::{verify_distinct_peer, DedicatedAccount},
+        policy_epoch::PolicyFence,
+        verify_service_identity,
     };
     use std::{
         env,

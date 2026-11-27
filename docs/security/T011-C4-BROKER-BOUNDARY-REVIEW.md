@@ -490,7 +490,7 @@ including procfs descriptor links. Select an enforced AppArmor profile
 attached to a uniquely staged, root-owned, byte-verified Node executable
 in the existing disposable hosted fixture. The issuer verifies exact
 path/owner/group/mode/link count and the live process label before sending
-its pidfd. The profile denies ptrace readby/tracedby without peer exceptions,
+its pidfd. The profile denies incoming ptrace read and trace operations without peer exceptions,
 does not grant unconfined execution, and permits execution only of the
 staged image. DAC and native storage/mount policy still supply object
 isolation; the profile is not a production filesystem or network sandbox.

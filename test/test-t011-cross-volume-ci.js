@@ -35,7 +35,7 @@ test('hosted Linux SDK issuance requires enforced process custody before native 
     'native/authority-service/examples/linux_peered_read_proof.rs'), 'utf8');
   assert.match(script, /apparmor_parser -a -K/);
   assert.match(script, /apparmor_parser -R -K/);
-  assert.match(script, /deny ptrace \(readby, tracedby\),/);
+  assert.match(script, /deny ptrace \(readby, tracedby\),/); // codespell:ignore readby
   assert.match(script, /node_binary="\$base\/sdk-node"/);
   assert.match(script, /\/sys\/kernel\/security\/apparmor\/profiles/);
   const custody = issuer.indexOf('verify_sdk_process_custody(',

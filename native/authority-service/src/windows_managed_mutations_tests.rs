@@ -330,6 +330,54 @@ fn replaced_destination_is_not_published_over() {
     assert!(!f.0.join(STAGE).exists());
 }
 
+#[test]
+fn hardlink_substitution_during_rewrite_preserves_outside_object() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    let sentinel = outside.0.join("sentinel");
+    fs::write(&sentinel, b"OUTSIDE").unwrap();
+    let original_identity = identity(&File::open(&sentinel).unwrap()).unwrap();
+    let d = f.domain();
+    run(
+        &d,
+        Operation::Create {
+            name: "a",
+            bytes: b"before",
+        },
+    )
+    .unwrap();
+    let ticket = d.issue().unwrap();
+    let result = d.execute(
+        &ticket,
+        Operation::Rewrite {
+            name: "a",
+            bytes: b"new",
+        },
+        &AtomicBool::new(false),
+        || {
+            fs::rename(f.0.join("a"), f.0.join("original")).unwrap();
+            fs::hard_link(&sentinel, f.0.join("a")).unwrap();
+            let alias = File::open(f.0.join("a")).unwrap();
+            assert_eq!(identity(&alias).unwrap(), original_identity);
+            assert_eq!(info(&alias).unwrap().nNumberOfLinks, 2);
+            assert_eq!(f.bytes("a"), b"OUTSIDE");
+        },
+    );
+    assert_eq!(outside.bytes("sentinel"), b"OUTSIDE");
+    assert_eq!(
+        identity(&File::open(&sentinel).unwrap()).unwrap(),
+        original_identity
+    );
+    assert_eq!(f.bytes("a"), b"OUTSIDE");
+    assert_eq!(
+        identity(&File::open(f.0.join("a")).unwrap()).unwrap(),
+        original_identity
+    );
+    assert_eq!(f.bytes("original"), b"before");
+    assert!(!f.0.join(STAGE).exists());
+    assert_eq!(result, Err(MutationError::Denied));
+}
+
 #[derive(Clone, Copy)]
 enum Fault {
     BeforeRename,

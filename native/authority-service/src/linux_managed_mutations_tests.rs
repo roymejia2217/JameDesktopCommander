@@ -342,6 +342,55 @@ fn replaced_target_is_not_published_over() {
 }
 
 #[test]
+fn hardlink_substitution_during_rewrite_preserves_outside_object() {
+    let f = Fixture::new();
+    let outside = Fixture::new();
+    let sentinel = outside.0.join("sentinel");
+    fs::write(&sentinel, b"OUTSIDE").unwrap();
+    let original = fs::metadata(&sentinel).unwrap();
+    let d = f.domain();
+    run(
+        &d,
+        Operation::Create {
+            name: "a",
+            bytes: b"before",
+        },
+    )
+    .unwrap();
+    let ticket = d.issue().unwrap();
+    let result = d.execute_with(
+        &ticket,
+        Operation::Rewrite {
+            name: "a",
+            bytes: b"new",
+        },
+        &AtomicBool::new(false),
+        || {
+            fs::rename(f.0.join("a"), f.0.join("original")).unwrap();
+            fs::hard_link(&sentinel, f.0.join("a")).unwrap();
+            let alias = fs::metadata(f.0.join("a")).unwrap();
+            assert_eq!(
+                (alias.dev(), alias.ino(), alias.nlink()),
+                (original.dev(), original.ino(), 2)
+            );
+            assert_eq!(f.bytes("a"), b"OUTSIDE");
+        },
+    );
+    assert_eq!(outside.bytes("sentinel"), b"OUTSIDE");
+    let observed = fs::metadata(&sentinel).unwrap();
+    assert_eq!(
+        (observed.dev(), observed.ino(), observed.nlink()),
+        (original.dev(), original.ino(), 2)
+    );
+    let alias = fs::metadata(f.0.join("a")).unwrap();
+    assert_eq!((alias.dev(), alias.ino()), (original.dev(), original.ino()));
+    assert_eq!(f.bytes("a"), b"OUTSIDE");
+    assert_eq!(f.bytes("original"), b"before");
+    assert!(!f.0.join(".jdc-stage").exists());
+    assert_eq!(result, Err(MutationError::Denied));
+}
+
+#[test]
 fn foreign_staging_entry_requires_recovery_without_deleting_it() {
     let f = Fixture::new();
     let d = f.domain();

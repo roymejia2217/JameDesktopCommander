@@ -8,6 +8,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 const LIMIT = 1024 * 1024;
+// Fixed diagnostic labels for the disposable hosted fixture only. Never
+// propagate a native exception message, path, stack, or response bytes.
+function nativeReadFailure(error) {
+  if (error?.message === 'E_NATIVE_READ_DENIED') return 'E_NATIVE_READ_PROTOCOL';
+  if (['EACCES', 'EPERM', 'ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTCONN', 'ETIMEDOUT', 'ABORT_ERR'].includes(error?.code)) {
+    return `E_NATIVE_READ_TRANSPORT_${error.code}`;
+  }
+  if (error?.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return 'E_NATIVE_READ_ENCODING';
+  return 'E_NATIVE_READ_UNCLASSIFIED';
+}
 async function readAttestedNative(socketPath, timeoutMs, signal) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 10000) {
     throw Error('E_NATIVE_INVALID_TIMEOUT');
@@ -82,6 +92,7 @@ export async function exerciseIssuedSdkRead(socketPath, timeoutMs = 3000) {
 export async function exerciseIssuedJdcRead(socketPath, createJdcServer, timeoutMs = 3000) {
   const approved = '/managed/service.bin';
   let operations = 0;
+  let failure = null;
   const server = createJdcServer({
     managedRead: async (request, signal) => {
       if (request.path !== approved) return { status: 'denied' };
@@ -92,7 +103,8 @@ export async function exerciseIssuedJdcRead(socketPath, createJdcServer, timeout
         // The fixture compares exact native bytes after the MCP round trip.
         // Preserve an initial BOM as U+FEFF rather than silently stripping it.
         return { status: 'read', text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) };
-      } catch {
+      } catch (error) {
+        failure = nativeReadFailure(error);
         return { status: 'denied' };
       }
     },
@@ -119,7 +131,8 @@ export async function exerciseIssuedJdcRead(socketPath, createJdcServer, timeout
     const reply = await sdk.callTool({ name: 'read_file', arguments: { path: approved } });
     if (reply.isError || reply.content?.length !== 1 ||
         reply.content[0]?.type !== 'text' || operations !== 1) {
-      throw Error('E_REAL_JDC_NATIVE_READ_DENIED');
+      const reason = failure ?? (operations === 1 ? 'E_NATIVE_READ_REPLY' : 'E_NATIVE_READ_DISPATCH');
+      throw Error(`E_REAL_JDC_NATIVE_READ_DENIED: ${reason}`);
     }
     return Buffer.from(reply.content[0].text, 'utf8');
   } finally {

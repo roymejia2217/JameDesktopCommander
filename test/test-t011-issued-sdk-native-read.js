@@ -77,3 +77,21 @@ test('real JDC dispatcher preserves every UTF-8 byte, including a leading BOM', 
       assert.equal(output.equals(Buffer.from('SERVICE_DOMAIN_BYTES')), false);
     });
 });
+
+test('issued JDC read distinguishes real transport failure from native rejection without leaking the socket path', async () => {
+  const missing = process.platform === 'win32'
+    ? `\\\\.\\pipe\\jdc-issued-sdk-missing-${randomUUID()}`
+    : path.join(tmpdir(), `jdc-issued-sdk-missing-${randomUUID()}.sock`);
+  await assert.rejects(exerciseIssuedJdcRead(missing, createJdcServer), error => {
+    assert.equal(error.message, 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_TRANSPORT_ENOENT');
+    assert.ok(!error.message.includes(missing));
+    return true;
+  });
+  await withNativeFixture(Buffer.from('D'), async socket => {
+    await assert.rejects(exerciseIssuedJdcRead(socket, createJdcServer), error => {
+      assert.equal(error.message, 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_PROTOCOL');
+      assert.ok(!error.message.includes(socket));
+      return true;
+    });
+  });
+});

@@ -43,6 +43,21 @@ test('hosted Linux SDK issuance requires enforced process custody before native 
   const attestation = issuer.indexOf('send_attestation(&channel', custody);
   assert.ok(custody >= 0 && attestation > custody);
   assert.match(issuer, /\/attr\/apparmor\/current/);
+  // The target profile alone cannot exclude an unconfined same-UID peer.
+  // A root-created user namespace must precede the credential drop and exec.
+  assert.match(issuer, /libc::unshare\(libc::CLONE_NEWUSER\)/);
+  assert.match(issuer, /NS_GET_OWNER_UID/);
+  assert.match(issuer, /NS_GET_PARENT/);
+  assert.match(issuer, /uid_map/);
+  assert.match(issuer, /gid_map/);
+  assert.match(issuer, /PR_SET_NO_NEW_PRIVS/);
+  assert.match(issuer, /verify_sdk_namespace/);
+  assert.match(issuer, /launch-sdk/);
+  for (const fixture of ['t011-issued-sdk-native-read.mjs', 't011-issued-sdk-native-mutations.mjs']) {
+    const source = fs.readFileSync(path.join(repo, 'test/security/support', fixture), 'utf8');
+    assert.match(source, /writeSync\(0, /);
+    assert.match(source, /readSync\(0, /);
+  }
   assert.match(issuer, /SYS_pidfd_getfd/);
   assert.match(issuer, /Some\(libc::EACCES\) \| Some\(libc::EPERM\)/);
   assert.match(issuer, /inspect-control/);

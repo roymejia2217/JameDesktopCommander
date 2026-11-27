@@ -1,6 +1,7 @@
 // Nonrelease vertical proof. Local Windows uses a guarded same-token child;
 // hosted Linux uses the separately issued client and admitted mount.
 import { connect, Socket } from 'node:net';
+import { readSync, writeSync } from 'node:fs';
 import { addAbortListener, once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -24,6 +25,13 @@ if (!['linux', 'win32'].includes(process.platform) || !socketPath ||
         process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted')
       : (!localHome || process.argv.length !== (windowsCancellation ? 6 : localCancellation ? 5 : 4)))) {
   throw Error('E_MUTATION_FIXTURE_ARGS');
+}
+if (hosted) {
+  // Private issuer readiness socket, separate from the mutation transport.
+  const release = Buffer.alloc(1);
+  if (writeSync(0, 'R') !== 1 || readSync(0, release, 0, 1, null) !== 1 || release[0] !== 0x41) {
+    throw Error('E_T011_SDK_STARTUP_PROTOCOL');
+  }
 }
 const home = hosted ? fileURLToPath(new URL('../../../client-state/', import.meta.url)) : localHome;
 process.env.HOME = home;

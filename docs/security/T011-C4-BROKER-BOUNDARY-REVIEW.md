@@ -507,18 +507,35 @@ not evidence that either hosted mount transition has passed yet.
 #### Linux post-exec SDK process custody (technical decision, nonrelease)
 
 The native Rust client's non-dumpable state cannot be assumed to survive
-exec of Node. Yama scope 1 alone does not deny every ptrace READ-mode check,
-including procfs descriptor links. Select an enforced AppArmor profile
-attached to a uniquely staged, root-owned, byte-verified Node executable
-in the existing disposable hosted fixture. The issuer verifies exact
-path/owner/group/mode/link count and the live process label before sending
-its pidfd. The profile denies incoming ptrace read and trace operations without peer exceptions,
-does not grant unconfined execution, and permits execution only of the
-staged image. DAC and native storage/mount policy still supply object
-isolation; the profile is not a production filesystem or network sandbox.
+exec of Node. Yama scope 1 alone does not deny every ptrace READ-mode check.
+Candidate `4e034f25bc02caf2bbbbd1c7c0367e84c41b0a6b`, native run
+45931757252, Linux job 140285739378, failed the same-UID inspector with
+`E_PEER_SDK_INSPECTION_NOT_DENIED` despite the target profile being enforced.
+AppArmor's kernel tracee check can be skipped for an unconfined tracer.
+The profile is retained as defense in depth, not the process custody boundary.
 
-A real second process under the dedicated client UID/GID must pass procfs
-READ-mode controls against a live ordinary same-UID process, then receive
+The selected replacement experiment creates a fresh user namespace in a
+single-threaded root fixture process before dropping credentials. Its
+privileged parent pins that namespace, checks root ownership and its exact
+parent namespace through nsfs ioctls, and writes only the one-ID UID and
+GID maps. The child clears supplementary groups, sets all real/effective/
+saved IDs to the dedicated account, sets no-new-privileges, and execs the
+root-owned byte-verified Node image without an intermediate shell. A private
+socketpair synchronizes namespace creation, mapping, Node readiness and
+release. The issuer verifies the namespace identity and maps, actual Node
+image, credential fields, empty capabilities and enforced AppArmor label
+before attesting the live pidfd. No UID 0 mapping is introduced.
+The Node fixture cannot request broker I/O before the issuer releases it.
+
+A separate lightweight kernel experiment with ordinary Node processes
+verified all five inspection denials against the root-created namespace,
+with positive READ controls against an ordinary same-UID/GID process.
+That experiment does not substitute for the hosted SDK acceptance.
+References: Linux kernel `security/commoncap.c` and
+`security/apparmor/task.c`, user_namespaces(7), ioctl_nsfs(2).
+
+A real, explicitly unconfined second process under the dedicated client
+UID/GID must pass procfs READ-mode controls against a live ordinary same-UID process, then receive
 only EACCES/EPERM for the issued Node executable link, descriptor link,
 maps/mem opens and pidfd_getfd. Missing objects, exited processes and
 unsupported syscalls fail the test. No protected bytes are read or printed

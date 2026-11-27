@@ -26,7 +26,7 @@ mod proof {
         io::{Read, Write},
         mem::{size_of, zeroed},
         os::{
-            fd::{AsRawFd, FromRawFd, OwnedFd},
+            fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
             unix::{
                 fs::{MetadataExt, PermissionsExt},
                 net::{UnixListener, UnixStream},
@@ -34,7 +34,7 @@ mod proof {
             },
         },
         path::Path,
-        process::{Command, ExitCode},
+        process::{Command, ExitCode, Stdio},
         ptr,
         time::{Duration, Instant},
     };
@@ -125,6 +125,12 @@ mod proof {
         {
             return Err("E_PEER_SDK_INSPECTION_PRINCIPAL");
         }
+        // The adversary must actually be outside AppArmor confinement.
+        // A constrained inspector could otherwise produce a false denial.
+        let label = io(fs::read_to_string("/proc/self/attr/apparmor/current"))?;
+        if label.trim_end_matches('\n') != "unconfined" {
+            return Err("E_PEER_SDK_INSPECTOR_CONFINED");
+        }
         fixture_pid(pid, account)?;
         let proc = format!("/proc/{pid}");
         if protected {
@@ -175,10 +181,170 @@ mod proof {
         Ok(())
     }
 
+    // Linux UAPI: include/uapi/linux/nsfs.h, _IO(0xb7, 2/4).
+    const NS_GET_PARENT: libc::c_ulong = 0xb702;
+    const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
+
+    fn same_namespace(left: &File, right: &File) -> Result<bool, &'static str> {
+        let left = io(left.metadata())?;
+        let right = io(right.metadata())?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+
+    fn sdk_namespace(pid: u32) -> Result<File, &'static str> {
+        let ns = io(File::open(format!("/proc/{pid}/ns/user")))?;
+        let issuer = io(File::open("/proc/self/ns/user"))?;
+        let mut owner: libc::uid_t = u32::MAX;
+        if same_namespace(&ns, &issuer)?
+            || unsafe { libc::ioctl(ns.as_raw_fd(), NS_GET_OWNER_UID, &mut owner) } != 0
+            || owner != 0
+        {
+            return Err("E_PEER_SDK_NAMESPACE_OWNER");
+        }
+        let raw = unsafe { libc::ioctl(ns.as_raw_fd(), NS_GET_PARENT) };
+        if raw < 0 {
+            return Err("E_PEER_SDK_NAMESPACE_PARENT");
+        }
+        let parent = unsafe { File::from_raw_fd(raw) };
+        if !same_namespace(&parent, &issuer)? {
+            return Err("E_PEER_SDK_NAMESPACE_PARENT");
+        }
+        Ok(ns)
+    }
+
+    fn exact_mapping(text: &str, id: u32) -> bool {
+        id != 0
+            && text
+                .split_whitespace()
+                .map(str::parse::<u32>)
+                .eq([Ok(id), Ok(id), Ok(1)])
+    }
+
+    fn verify_sdk_namespace(
+        pid: u32,
+        expected: &File,
+        account: DedicatedAccount,
+    ) -> Result<(), &'static str> {
+        if !same_namespace(expected, &sdk_namespace(pid)?)? {
+            return Err("E_PEER_SDK_NAMESPACE_CHANGED");
+        }
+        for (key, id) in [("uid_map", account.uid), ("gid_map", account.gid)] {
+            if !exact_mapping(&io(fs::read_to_string(format!("/proc/{pid}/{key}")))?, id) {
+                return Err("E_PEER_SDK_NAMESPACE_MAP");
+            }
+        }
+        Ok(())
+    }
+
+    fn readiness_byte(channel: &mut UnixStream, expected: u8) -> Result<(), &'static str> {
+        let mut byte = [0u8; 1];
+        io(channel.read_exact(&mut byte))?;
+        if byte[0] != expected {
+            return Err("E_PEER_SDK_STARTUP_PROTOCOL");
+        }
+        Ok(())
+    }
+
+    fn prepare_sdk_namespace(
+        pid: u32,
+        channel: &mut UnixStream,
+        account: DedicatedAccount,
+    ) -> Result<File, &'static str> {
+        readiness_byte(channel, b'N')?;
+        let ns = sdk_namespace(pid)?;
+        for (key, id) in [("uid_map", account.uid), ("gid_map", account.gid)] {
+            if id == 0 {
+                return Err("E_PEER_SDK_NAMESPACE_MAP");
+            }
+            // Only the privileged parent writes the child's exact one-ID map.
+            let mut file = io(fs::OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/{pid}/{key}")))?;
+            io(file.write_all(format!("{id} {id} 1\n").as_bytes()))?;
+        }
+        verify_sdk_namespace(pid, &ns, account)?;
+        io(channel.write_all(b"M"))?;
+        readiness_byte(channel, b'R')?;
+        Ok(ns)
+    }
+
+    fn verify_sdk_credentials(pid: u32, account: DedicatedAccount) -> Result<(), &'static str> {
+        fixture_pid(pid, account)?;
+        let status = io(fs::read_to_string(format!("/proc/{pid}/status")))?;
+        let field = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        if field("Groups:") != Some("")
+            || field("NoNewPrivs:") != Some("1")
+            || ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"]
+                .iter()
+                .any(|key| {
+                    field(key).and_then(|value| u64::from_str_radix(value, 16).ok()) != Some(0)
+                })
+        {
+            return Err("E_PEER_SDK_NAMESPACE_CREDENTIALS");
+        }
+        Ok(())
+    }
+
+    // Run in a dedicated, freshly exec'd, single-threaded root fixture
+    // process. No credential changes in a multi-threaded pre_exec callback.
+    fn launch_sdk(
+        node: &Path,
+        script: &Path,
+        socket: &Path,
+        cancel: bool,
+    ) -> Result<(), &'static str> {
+        if unsafe { libc::getuid() } != 0
+            || unsafe { libc::geteuid() } != 0
+            || env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
+            || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
+        {
+            return Err("E_PEER_PROOF_ISSUER_NOT_ROOT");
+        }
+        let account = fixture_client()?;
+        verify_sdk_image(node, account)?;
+        let mut channel = UnixStream::from(io(std::io::stdin().as_fd().try_clone_to_owned())?);
+        io(channel.set_read_timeout(Some(Duration::from_secs(5))))?;
+        io(channel.set_write_timeout(Some(Duration::from_secs(5))))?;
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            return Err("E_PEER_SDK_NAMESPACE_CREATE");
+        }
+        io(channel.write_all(b"N"))?;
+        readiness_byte(&mut channel, b'M')?;
+        if unsafe { libc::setgroups(0, ptr::null()) } != 0
+            || unsafe { libc::setresgid(account.gid, account.gid, account.gid) } != 0
+            || unsafe { libc::setresuid(account.uid, account.uid, account.uid) } != 0
+            || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) } != 0
+        {
+            return Err("E_PEER_SDK_NAMESPACE_CREDENTIALS");
+        }
+        // The original fd 0 is the private duplex readiness channel. The
+        // duplicate is closed before exec; no additional handle is inherited.
+        drop(channel);
+        let mut command = Command::new(node);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GITHUB_ACTIONS", "true")
+            .env("RUNNER_ENVIRONMENT", "github-hosted")
+            .arg(script)
+            .arg(socket);
+        if cancel {
+            command.arg("--hosted-cancel-before-commit");
+        }
+        let _error = command.exec();
+        Err("E_PEER_SDK_NAMESPACE_EXEC")
+    }
+
     fn verify_sdk_process_custody(
         node: &Path,
         pid: u32,
         pin: &OwnedFd,
+        namespace: &File,
         account: DedicatedAccount,
     ) -> Result<(), &'static str> {
         let live = || {
@@ -204,7 +370,11 @@ mod proof {
             Ok(())
         };
         live()?;
-        fixture_pid(pid, account)?;
+        verify_sdk_namespace(pid, namespace, account)?;
+        verify_sdk_credentials(pid, account)?;
+        if io(fs::read_link(format!("/proc/{pid}/exe")))? != node {
+            return Err("E_PEER_SDK_NAMESPACE_EXEC");
+        }
         label()?;
         let mut control = io(Command::new("/usr/bin/sleep")
             .arg("30")
@@ -221,6 +391,8 @@ mod proof {
         observed?;
         run_inspector(account, pid, "inspect-protected")?;
         live()?;
+        verify_sdk_namespace(pid, namespace, account)?;
+        verify_sdk_credentials(pid, account)?;
         label()?;
         eprintln!("T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE");
         Ok(())
@@ -267,6 +439,7 @@ mod proof {
             return Err("E_PEER_PROOF_ISSUER_NOT_ROOT");
         }
         let approved = fixture_client()?;
+        let mut readiness = None;
         let mut command = if let Some((node, script, cancel_before_commit)) = sdk {
             if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
                 || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
@@ -274,26 +447,40 @@ mod proof {
                 return Err("E_PEER_PROOF_ISSUED_SDK_RUNNER_REQUIRED");
             }
             verify_sdk_image(node, approved)?;
-            let mut issued = Command::new(node);
-            issued.env_clear().env("PATH", "/usr/bin:/bin");
-            issued.stdin(std::process::Stdio::null());
-            issued.arg(script).arg(client_socket);
-            if cancel_before_commit {
-                issued.arg("--hosted-cancel-before-commit");
-            }
-            issued.env("GITHUB_ACTIONS", "true");
-            issued.env("RUNNER_ENVIRONMENT", "github-hosted");
+            let (parent, child) = io(UnixStream::pair())?;
+            io(parent.set_read_timeout(Some(Duration::from_secs(5))))?;
+            io(parent.set_write_timeout(Some(Duration::from_secs(5))))?;
+            readiness = Some(parent);
+            let mut issued = Command::new(io(env::current_exe())?);
+            issued
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("GITHUB_ACTIONS", "true")
+                .env("RUNNER_ENVIRONMENT", "github-hosted")
+                .stdin(Stdio::from(OwnedFd::from(child)))
+                .arg(if cancel_before_commit {
+                    "launch-sdk-cancel"
+                } else {
+                    "launch-sdk"
+                })
+                .arg(node)
+                .arg(script)
+                .arg(client_socket);
             issued
         } else {
             let mut issued = Command::new(io(env::current_exe())?);
-            issued.arg("allow").arg(client_socket);
+            issued
+                .arg("allow")
+                .arg(client_socket)
+                .uid(approved.uid)
+                .gid(approved.gid);
             issued
         };
-        command.uid(approved.uid).gid(approved.gid);
-        // Rust CommandExt::uid already clears inherited supplementary
-        // groups via setgroups(0, NULL) before changing UID. No pre_exec
-        // callback is needed or permitted for this credential transition.
+        // Only the non-SDK control uses CommandExt::uid directly. The SDK
+        // must create its namespace while still root, before dropping IDs.
         let mut child = io(command.spawn())?;
+        // Release the builder's copy of the child-side readiness endpoint.
+        drop(command);
         let outcome = (|| {
             let raw =
                 unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0u32) };
@@ -302,11 +489,16 @@ mod proof {
             }
             let pidfd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
             if let Some((node, _, _)) = sdk {
-                verify_sdk_process_custody(node, child.id(), &pidfd, approved)?;
+                let startup = readiness.as_mut().ok_or("E_PEER_SDK_STARTUP_PROTOCOL")?;
+                let namespace = prepare_sdk_namespace(child.id(), startup, approved)?;
+                verify_sdk_process_custody(node, child.id(), &pidfd, &namespace, approved)?;
             }
             let channel = io(UnixStream::connect(issuer_socket))?;
             io(channel.set_write_timeout(Some(Duration::from_secs(3))))?;
             send_attestation(&channel, child.id(), pidfd.as_raw_fd())?;
+            if let Some(mut startup) = readiness.take() {
+                io(startup.write_all(b"A"))?;
+            }
             if !io(child.wait())?.success() {
                 return Err("E_PEER_PROOF_ISSUED_CLIENT_FAILED");
             }
@@ -538,6 +730,16 @@ mod proof {
                         Path::new(&script),
                         role == "issue-sdk-cancel",
                     )),
+                )
+            }
+            (Some(role), Some(node), Some(script), Some(socket), None)
+                if role == "launch-sdk" || role == "launch-sdk-cancel" =>
+            {
+                launch_sdk(
+                    Path::new(&node),
+                    Path::new(&script),
+                    Path::new(&socket),
+                    role == "launch-sdk-cancel",
                 )
             }
             (Some(role), Some(pid), None, None, None)

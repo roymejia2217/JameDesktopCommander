@@ -83,8 +83,10 @@ jobs:
       - name: Test filesystem authorization fail-closed behavior
         run: node --test test/test-filesystem-policy-fail-closed.js
 
+      # Match the serial policy of verify:push for bounded OS process probes.
+      # Do not let parallel test files contend for PowerShell startup.
       - name: Run distribution security tests
-        run: node --test test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js test/test-windows-protected-installation.js
+        run: node --test --test-concurrency=1 test/distribution-candidate.test.js test/test-native-portable-gate.js test/test-no-napi-portable-gate.cjs test/test-tunnel-client-release.js test/test-installer-packaging.js test/test-windows-operator-ui-bundle.js test/test-windows-protected-installation.js
 
       - name: Keep only locked runtime dependencies
         run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund

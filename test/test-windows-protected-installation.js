@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { assertInstallerProbeExit } from './security/support/installer-probe-verdict.mjs';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 const installer = read('../packaging/windows/JameDesktopCommander.iss');
@@ -107,7 +108,7 @@ test('Windows mutation probe preserves the primary error and skips unneeded clea
   const exercise = "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n$observed = @{ Undo = 0 }\nAssert-ProtectedMutationDenied {\n  param($state)\n  throw [UnauthorizedAccessException]::new()\n} { $observed.Undo++ } 'E_UNEXPECTED_SUCCESS'\nif ($observed.Undo -ne 0) { throw 'denied operation attempted cleanup' }\ntry {\n  Assert-ProtectedMutationDenied {\n    param($state)\n    $state.Changed = $true\n  } { $observed.Undo++; throw 'SYNTHETIC_CLEANUP_FAILURE' } 'E_PRIMARY_PROBE_FAILURE'\n  throw 'unexpected successful probe'\n} catch {\n  if ($_.Exception.Message -cne 'E_PRIMARY_PROBE_FAILURE') { throw }\n}\nif ($observed.Undo -ne 1) { throw 'cleanup count mismatch' }\nWrite-Output 'MUTATION_CLEANUP_PRIMARY_PRESERVED'";
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     child.slice(start, end) + '\n' + exercise], { encoding: 'utf8', timeout: 12000 });
-  assert.equal(result.status, 0, result.stderr);
+  assertInstallerProbeExit(result, 0);
   assert.match(result.stdout, /MUTATION_CLEANUP_PRIMARY_PRESERVED/);
   assert.match(result.stderr, /E_PROTECTED_MUTATION_CLEANUP_AFTER_PRIMARY_FAILURE/);
   assert.doesNotMatch(result.stderr, /SYNTHETIC_CLEANUP_FAILURE/);

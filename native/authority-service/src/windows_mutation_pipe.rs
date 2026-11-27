@@ -375,6 +375,7 @@ impl IssuerConnectedMutationPipe {
         command: &std::ffi::OsStr,
         environment: &[(&str, &str)],
         diagnostics: BorrowedHandle<'_>,
+        job: &crate::windows_sdk_job::SdkJob,
     ) -> Result<(Self, crate::windows_issued_client::IssuedClient), IdentityDenied> {
         use crate::windows_issued_client::IssuedClient;
         use windows_sys::Win32::{
@@ -389,6 +390,7 @@ impl IssuerConnectedMutationPipe {
             environment,
             endpoint.as_handle(),
             diagnostics,
+            job,
         )?;
         // Close the issuer's client-end copy before any protocol traffic.
         drop(endpoint);

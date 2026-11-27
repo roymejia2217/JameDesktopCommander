@@ -48,6 +48,7 @@ test('Windows native security CI executes the issued MCP SDK custody proof', () 
   assert.match(steps[inheritedMutation].run, /T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE/);
   assert.match(steps[inheritedMutation].run, /journaled_mutations::tests::local_windows_issued_sdk_cancelled_staged_mutation_never_publishes/);
   assert.match(steps[inheritedMutation].run, /T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE/);
+  assert.match(steps[inheritedMutation].run, /T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE/);
   const serviceHandoff = index('windows_issuer_connected_sdk_separate_service');
   assert.ok(serviceHandoff > inheritedMutation && serviceHandoff < windowsStorage,
     'separate native service handoff must execute before hosted storage acceptance');
@@ -56,6 +57,7 @@ test('Windows native security CI executes the issued MCP SDK custody proof', () 
   assert.match(steps[serviceHandoff].run, /journaled_mutations::tests::local_windows_issuer_hands_channel_to_separate_native_service/);
   assert.match(steps[serviceHandoff].run, /--ignored --exact --nocapture/);
   assert.match(steps[serviceHandoff].run, /T011_WINDOWS_SEPARATE_NATIVE_SERVICE_SDK_MUTATIONS_PASS_NONRELEASE/);
+  assert.match(steps[serviceHandoff].run, /T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE/);
   assert.equal(steps[native].if, "matrix.target == 'win32-x64'");
   assert.match(steps[installed].run, /npm ci --ignore-scripts --no-audit --no-fund/);
   assert.match(steps[native].run, /JDC_T011_NODE_BINARY/);

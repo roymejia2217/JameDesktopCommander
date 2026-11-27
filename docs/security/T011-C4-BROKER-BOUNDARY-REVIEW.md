@@ -476,6 +476,74 @@ References:
 <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes>,
 <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken>.
 
+#### Windows creation-time SDK job custody (nonrelease)
+
+The SCM observation experiment protects the issuer process and observes the
+suspended child. It does not establish that every issuer thread is protected
+against a subsequently executing child with the same virtual-account SID.
+Do not infer thread custody from a process DACL or use the writable
+rendezvous file as a grant after Node executes.
+
+The next local lifecycle proof strengthens the existing three real SDK
+mutation paths, rather than adding another mock transport. The caller owns
+an unnamed noninheritable Windows Job Object with exactly
+`JOB_OBJECT_LIMIT_ACTIVE_PROCESS` (one process) and
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, with no breakaway flags. The launcher
+adds `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
+`PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` at creation, not after resume;
+the job handle never appears in the inherited handle list. It verifies
+membership, exact limits, process count and the child's actual mitigation
+policy before returning the suspended child. Every real SDK verdict also
+requires exact terminal job accounting (one process admitted, zero active).
+The Cargo dependency features are test-only; no installed service changes.
+
+RED on physical Windows: the former SDK launcher returned child-process
+policy bit 0. The first job experiment retained CREATE_NO_WINDOW and
+the native child returned 0xC0000142; real Node also failed before readiness.
+The tested job path uses DETACHED_PROCESS with all standard handles
+explicitly supplied, retaining the one-process limit and no-child policy.
+Tests require a normal child creation positive control, actual descendant
+creation denial, and job-close termination of a still-suspended child while
+the issuer's original process handle remains open. Closing a job can report
+exit code zero; process signaling before issuer Drop, without ResumeThread,
+is the termination evidence, not an invented nonzero exit-code requirement.
+A job and child-process policy do not by themselves constitute an OS sandbox.
+
+Next integration contract, pending actual distinct-account SCM proof:
+
+- The independent authority owns a protected uniquely named job and local
+  first-instance pipe. The fixed SCM issuer receives only temporary job
+  assignment access and the exact pipe client rights. Reject existing
+  objects, untrusted owners, broad grants, and unavailable kernel state.
+- Authenticate the SCM connector before handoff. The issuer creates the
+  fixed SDK image suspended with creation-time job membership and explicit
+  handle inheritance. Authority pins the exact live process and primary
+  thread using the issuer-attested creation identities and kernel relation.
+  Only the authority may receive the narrowly scoped resume right on that
+  child's primary thread; no context, memory, or handle-duplication grants.
+- After verification, revoke the issuer's job-assignment ACE, acknowledge
+  the handoff, require the issuer to close all original endpoint, job and
+  process/thread handles, and require actual issuer-process termination
+  before the authority resumes the child. Never resume on a timeout,
+  service-status label alone or an unsigned client assertion. The existing
+  same-token live-issuer channel is not this ownership-transfer state.
+- The authority retains exclusive job custody and server endpoint; a
+  running client must be denied reopening the job or issuer, creating
+  descendants, modifying protected state, or obtaining foreign object
+  handles. On failed handoff the child remains suspended and job closure
+  terminates it. Require explicit real crash/cleanup tests for both owners.
+- Only then connect the existing admitted-volume journal and exact real
+  SDK read/mutation/cancellation/recovery plan; legacy prerequisite remains
+  mandatory until equivalent or stronger end-to-end proof exists.
+
+References:
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>.
+The distinct-account lifecycle and NTFS integration remain unproven.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

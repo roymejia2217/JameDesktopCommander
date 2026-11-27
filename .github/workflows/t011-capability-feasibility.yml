@@ -222,6 +222,7 @@ jobs:
             $result | Write-Output
             if ($code -ne 0) { exit $code }
             if (-not ($result -contains $case.Marker) -or
+                -not ($result -contains 'T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE') -or
                 -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
               throw 'E_STORAGE_LOCAL_ISSUED_SDK_VERDICT_MISSING'
             }
@@ -244,6 +245,7 @@ jobs:
           $result | Write-Output
           if ($code -ne 0) { exit $code }
           if (-not ($result -contains 'T011_WINDOWS_SEPARATE_NATIVE_SERVICE_SDK_MUTATIONS_PASS_NONRELEASE') -or
+              -not ($result -contains 'T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE') -or
               -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
             throw 'E_STORAGE_SEPARATE_NATIVE_SERVICE_VERDICT_MISSING'
           }

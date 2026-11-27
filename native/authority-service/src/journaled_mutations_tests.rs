@@ -1369,6 +1369,7 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
     );
     let system = std::env::var("SystemRoot").unwrap();
     let home_text = home.to_str().unwrap();
+    let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
     let (pipe, mut child) = IssuerConnectedMutationPipe::issue_local(
         &name,
         &node,
@@ -1380,6 +1381,7 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
             ("USERPROFILE", home_text),
         ],
         log.as_handle(),
+        &job,
     )
     .unwrap();
     // The actual creation-time process object is retained with reduced
@@ -1432,6 +1434,8 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
         .contains("T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATION_CLIENT_PASS_NONRELEASE"));
     assert_eq!(f.bytes("final.txt"), b"REWRITE-LOST");
     assert_eq!(f.state().sequence, 5);
+    job.verify_finished().unwrap();
+    println!("T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE");
     println!("T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE");
 }
 
@@ -1483,6 +1487,7 @@ fn local_windows_issued_sdk_cancelled_staged_mutation_never_publishes() {
     );
     let system = std::env::var("SystemRoot").unwrap();
     let home_text = home.to_str().unwrap();
+    let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
     let (pipe, mut child) = IssuerConnectedMutationPipe::issue_local(
         &name,
         &node,
@@ -1494,6 +1499,7 @@ fn local_windows_issued_sdk_cancelled_staged_mutation_never_publishes() {
             ("USERPROFILE", home_text),
         ],
         log.as_handle(),
+        &job,
     )
     .unwrap();
     assert!(pipe.matches_issued_process(child.process_handle()));
@@ -1574,6 +1580,8 @@ fn local_windows_issued_sdk_cancelled_staged_mutation_never_publishes() {
     child.wait_for_exit(Duration::from_secs(10)).unwrap();
     assert_eq!(child.exit_code(), Ok(0), "{}", diagnostics());
     assert!(diagnostics().contains("T011_WINDOWS_REAL_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE"));
+    job.verify_finished().unwrap();
+    println!("T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE");
     println!("T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE");
 }
 
@@ -1625,12 +1633,14 @@ fn local_windows_issuer_hands_channel_to_separate_native_service() {
         ("TMP", home_text),
         ("USERPROFILE", home_text),
     ];
+    let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
     let (pipe, mut client) = IssuerConnectedMutationPipe::issue_local(
         &name,
         &node,
         OsStr::new(&node_cmd),
         &environment,
         node_log.as_handle(),
+        &job,
     )
     .unwrap();
     assert!(pipe.matches_issued_process(client.process_handle()));
@@ -1683,6 +1693,8 @@ fn local_windows_issuer_hands_channel_to_separate_native_service() {
         .contains("T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATION_CLIENT_PASS_NONRELEASE"));
     assert_eq!(f.bytes("final.txt"), b"REWRITE-LOST");
     assert_eq!(f.state().sequence, 5);
+    job.verify_finished().unwrap();
+    println!("T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE");
     println!("T011_WINDOWS_SEPARATE_NATIVE_SERVICE_SDK_MUTATIONS_PASS_NONRELEASE");
 }
 

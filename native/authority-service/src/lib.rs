@@ -58,6 +58,8 @@ mod windows_managed_mutations;
 mod windows_managed_volume;
 #[cfg(all(windows, test))]
 mod windows_mutation_pipe;
+#[cfg(all(windows, test))]
+mod windows_sdk_job;
 
 #[cfg(windows)]
 pub mod windows_token;

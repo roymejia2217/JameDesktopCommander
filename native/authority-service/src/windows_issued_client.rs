@@ -185,15 +185,19 @@ impl IssuedClient {
         environment: &[(&str, &str)],
         endpoint: BorrowedHandle<'_>,
         diagnostics: BorrowedHandle<'_>,
+        job: &crate::windows_sdk_job::SdkJob,
     ) -> Result<Self, IdentityDenied> {
-        Self::launch_suspended_with_inherited_channel(
+        let child = Self::launch_suspended_with_inherited_channel(
             executable,
             command_line,
             environment,
             endpoint,
             diagnostics,
             None,
-        )
+            Some(job.as_handle()),
+        )?;
+        job.verify_member(child.process_handle())?;
+        Ok(child)
     }
 
     #[cfg(test)]
@@ -212,6 +216,7 @@ impl IssuedClient {
             endpoint,
             diagnostics,
             Some(client_process),
+            None,
         )
     }
 
@@ -223,6 +228,7 @@ impl IssuedClient {
         endpoint: BorrowedHandle<'_>,
         diagnostics: BorrowedHandle<'_>,
         client_process: Option<BorrowedHandle<'_>>,
+        job: Option<BorrowedHandle<'_>>,
     ) -> Result<Self, IdentityDenied> {
         use windows_sys::Win32::{
             Foundation::{
@@ -232,10 +238,12 @@ impl IssuedClient {
             Storage::FileSystem::SYNCHRONIZE,
             System::Threading::{
                 DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-                UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                UpdateProcThreadAttribute, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
                 STARTF_USESTDHANDLES, STARTUPINFOEXW,
             },
+            System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED,
         };
         if !executable.is_absolute() || !executable.is_file() {
             return Err(IdentityDenied);
@@ -323,8 +331,14 @@ impl IssuedClient {
             child_environment.push(("JDC_T011_LOCAL_ISSUER_PIN", &issuer_value));
         }
         let mut env = environment_block(&child_environment)?;
+        // Attribute values must outlive the attribute list. The job handle
+        // is not on the inheritable handle list; only the kernel associates
+        // the new process with the job during CreateProcessW.
+        let job_handles = job.map(|handle| [handle.as_raw_handle()]);
+        let child_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+        let count = if job.is_some() { 3 } else { 1 };
         let mut needed = 0usize;
-        if unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut needed) } != 0
+        if unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), count, 0, &mut needed) } != 0
             || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
             || !(1..=65536).contains(&needed)
         {
@@ -332,7 +346,7 @@ impl IssuedClient {
         }
         let mut storage = vec![0usize; needed.div_ceil(std::mem::size_of::<usize>())];
         let list = storage.as_mut_ptr().cast();
-        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut needed) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(list, count, 0, &mut needed) } == 0 {
             return Err(IdentityDenied);
         }
         struct AttributeList(*mut std::ffi::c_void);
@@ -356,6 +370,33 @@ impl IssuedClient {
         {
             return Err(IdentityDenied);
         }
+        if let Some(job_handles) = &job_handles {
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    job_handles.as_ptr().cast(),
+                    std::mem::size_of_val(job_handles),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            } == 0
+                || unsafe {
+                    UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
+                        (&child_policy as *const u32).cast(),
+                        std::mem::size_of_val(&child_policy),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                } == 0
+            {
+                return Err(IdentityDenied);
+            }
+        }
         let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -372,7 +413,9 @@ impl IssuedClient {
                 attributes.primary_thread(),
                 1,
                 CREATE_SUSPENDED
-                    | CREATE_NO_WINDOW
+                    // A console host could consume the single job slot.
+                    // All three standard handles are explicitly inherited.
+                    | if job.is_some() { DETACHED_PROCESS } else { CREATE_NO_WINDOW }
                     | CREATE_UNICODE_ENVIRONMENT
                     | EXTENDED_STARTUPINFO_PRESENT,
                 env.as_mut_ptr().cast(),
@@ -500,6 +543,137 @@ mod tests {
             &environment,
         )
         .is_err());
+    }
+
+    #[test]
+    fn inherited_sdk_child_cannot_create_descendants() {
+        use windows_sys::Win32::System::Threading::{
+            GetProcessMitigationPolicy, ProcessChildProcessPolicy,
+        };
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        let child = IssuedClient::launch_suspended_with_local_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system)],
+            nul.as_handle(),
+            nul.as_handle(),
+            &job,
+        )
+        .unwrap();
+        let mut policy = 0u32;
+        assert_ne!(
+            unsafe {
+                GetProcessMitigationPolicy(
+                    child.process_handle().as_raw_handle(),
+                    ProcessChildProcessPolicy,
+                    (&mut policy as *mut u32).cast(),
+                    std::mem::size_of::<u32>(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            policy & 1,
+            1,
+            "the actual child token must prohibit child-process creation"
+        );
+    }
+
+    #[test]
+    fn fixture_job_sdk_child_rejects_descendant() {
+        if std::env::var("JDC_T011_JOB_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.env_remove("JDC_T011_JOB_CHILD").args([
+            "--exact",
+            "windows_issued_client::tests::fixture_job_sdk_child_rejects_descendant",
+        ]);
+        match command.spawn() {
+            Ok(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("SDK job permitted a descendant");
+            }
+            Err(error) => assert!(
+                matches!(error.raw_os_error(), Some(5 | 1816 | 367)),
+                "{error}"
+            ),
+        }
+    }
+
+    #[test]
+    fn sdk_job_enforces_descendant_denial_and_terminal_cleanup() {
+        let image = std::env::current_exe().unwrap();
+        let target = "windows_issued_client::tests::fixture_job_sdk_child_rejects_descendant";
+        assert!(std::process::Command::new(&image)
+            .args(["--exact", target])
+            .env_remove("JDC_T011_JOB_CHILD")
+            .status()
+            .unwrap()
+            .success());
+        let command = format!("\"{}\" --exact {target}", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        let mut child = IssuedClient::launch_suspended_with_local_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system), ("JDC_T011_JOB_CHILD", "1")],
+            nul.as_handle(),
+            nul.as_handle(),
+            &job,
+        )
+        .unwrap();
+        child.resume().unwrap();
+        child.wait_for_exit(Duration::from_secs(5)).unwrap();
+        assert_eq!(child.exit_code(), Ok(0));
+        job.verify_finished().unwrap();
+    }
+
+    #[test]
+    fn sdk_job_close_terminates_suspended_child_before_issuer_drop() {
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        let child = IssuedClient::launch_suspended_with_local_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system)],
+            nul.as_handle(),
+            nul.as_handle(),
+            &job,
+        )
+        .unwrap();
+        job.verify_member(child.process_handle()).unwrap();
+        assert!(
+            child.exit_code().is_err(),
+            "child must remain suspended and live"
+        );
+        drop(job);
+        child.wait_for_exit(Duration::from_secs(5)).unwrap();
+        // Closing the last job handle can terminate with code zero.
+        // A live suspended child becoming signaled without ResumeThread
+        // or dropping the issuer handle is the required kernel evidence.
+        assert!(child.exit_code().is_ok());
     }
 
     #[test]

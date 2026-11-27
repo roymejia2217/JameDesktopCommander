@@ -434,6 +434,24 @@ SDK cancellation and distinct-peer rejection markers. This is hosted fixture
 evidence, not production acceptance. Windows job 140192173828 failed during
 positive NTFS admission before the first journaled mutation. Windows
 cancellation/authority claims remain independently gated.
+
+Follow-up candidate `ed3deaa1c6cac3d126aa3925f04668ac6ac26932` (run
+45906663715) identified `FindFirstVolumeMountPointW` returning Win32 error 5
+under the actual dedicated service account. Do not grant storage management
+privileges to the service and do not interpret that error as an empty volume.
+The experimental replacement enumerates local volume GUIDs and obtains each
+volume's complete DOS access-path inventory using `FindFirstVolumeW`,
+`FindNextVolumeW` and `GetVolumePathNamesForVolumeNameW`. See Microsoft Learn:
+<https://learn.microsoft.com/en-us/windows/win32/fileio/displaying-volume-paths>.
+The admitted volume must occur exactly once with only its expected drive root;
+no other volume may list a mount below that root. Unknown, incomplete or
+malformed inventories deny admission. This is an observation under the trusted
+issuer's namespace/topology assumption, not a globally atomic mount-manager
+transaction. The hosted experiment must prove the actual dedicated-token
+positive and both incoming and outgoing mount negatives with unchanged
+journal bytes, exact denial reasons, and successful readmission after removal.
+No real mount transition is performed on a developer workstation.
+
 The local proof runs with the same UID. The Node runtime must still prove protection from
 same-UID process inspection; the native Rust client's non-dumpable setting is
 not inherited as a verified post-exec Node property.

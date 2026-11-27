@@ -17,6 +17,66 @@ fn volume_guid_syntax_rejects_subpaths_and_device_names() {
 }
 
 #[test]
+fn volume_path_inventory_denies_incoming_and_outgoing_aliases() {
+    let root = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\";
+    let other = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdee}\";
+    let entries = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    let check = |mine: &[&str], outside: &[&str]| {
+        verify_mount_inventory(
+            root,
+            r"R:\",
+            &[
+                (root.to_string(), entries(mine)),
+                (other.to_string(), entries(outside)),
+            ],
+        )
+    };
+    assert!(check(&[r"R:\"], &[r"C:\"]).is_ok());
+    assert!(check(&[r"R:\"], &[]).is_ok());
+    assert!(check(&[r"R:\", r"C:\alias\"], &[r"C:\"]).is_err());
+    assert!(check(&[r"R:\"], &[r"C:\", r"r:\nested\"]).is_err());
+    assert!(check(&[r"R:\"], &[r"R:\"]).is_err());
+    assert!(check(&[], &[r"C:\"]).is_err());
+    assert!(check(&[r"R:\"], &[r"\\?\R:\hidden\"]).is_err());
+    assert!(
+        verify_mount_inventory(root, r"R:\", &[(other.to_string(), entries(&[r"C:\"]))]).is_err()
+    );
+}
+
+#[test]
+fn volume_path_multisz_requires_complete_terminated_records() {
+    let units = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+    assert_eq!(parse_mount_paths(&units("R:\\\0\0")).unwrap(), vec![r"R:\"]);
+    assert!(parse_mount_paths(&[0]).unwrap().is_empty());
+    assert!(parse_mount_paths(&[0, 0]).unwrap().is_empty());
+    for invalid in [
+        "R:\\\0",
+        "R:\\\0\0C:\\\0\0",
+        "R:relative\0\0",
+        "R:\\..\\alias\\\0\0",
+    ] {
+        assert!(parse_mount_paths(&units(invalid)).is_err());
+    }
+}
+
+#[test]
+fn actual_windows_volume_inventory_is_read_only_and_contains_current_volume() {
+    let held = open_directory(&std::env::temp_dir()).unwrap();
+    let observed = final_guid_path(&held).unwrap();
+    let close = observed.find("}\\").unwrap() + 2;
+    let guid = &observed[..close];
+    assert!(valid_guid_root(guid));
+    let inventory = enumerate_volume_paths().unwrap();
+    assert_eq!(
+        inventory
+            .iter()
+            .filter(|(g, _)| g.eq_ignore_ascii_case(guid))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn ordinary_directory_handle_is_not_volume_root() {
     let file = open_directory(&std::env::temp_dir()).unwrap();
     let observed = final_guid_path(&file).unwrap();

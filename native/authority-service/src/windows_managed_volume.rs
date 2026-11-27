@@ -3,6 +3,7 @@
 //! token issuance and all privileged accounts. No production authority.
 use crate::{managed_mutation_contract::MutationError, windows_pipe_peer::observe_process_sid};
 use std::{
+    collections::HashSet,
     ffi::c_void,
     fs::{File, OpenOptions},
     mem::{offset_of, size_of, MaybeUninit},
@@ -19,13 +20,12 @@ use windows_sys::Win32::{
         SE_DACL_PROTECTED,
     },
     Storage::FileSystem::{
-        FileIdInfo, FindFirstVolumeMountPointW, FindVolumeMountPointClose,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        GetVolumeInformationByHandleW, GetVolumePathNamesForVolumeNameW,
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        VOLUME_NAME_GUID,
+        FileIdInfo, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
+        GetVolumePathNamesForVolumeNameW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, VOLUME_NAME_GUID,
     },
 };
 const FULL: u32 = 0x1f01ff;
@@ -161,9 +161,49 @@ fn volume_identity(file: &File) -> Result<VolumeIdentity, MutationError> {
         id: id.FileId.Identifier,
     })
 }
-fn check_mounts(guid: &str, drive: &str) -> Result<(), MutationError> {
+// Mount manager DOS paths are accepted only in the documented absolute
+// drive-letter form. An unfamiliar path is not proof of an empty topology.
+fn valid_mount_path(path: &str) -> bool {
+    let Some(root) = path.get(..3) else {
+        return false;
+    };
+    if !valid_drive(root) || !path.ends_with('\\') {
+        return false;
+    }
+    let tail = &path[3..];
+    tail.is_empty()
+        || tail[..tail.len() - 1].split('\\').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with(['.', ' '])
+                && !part.contains(['/', ':', '\0'])
+        })
+}
+
+fn parse_mount_paths(units: &[u16]) -> Result<Vec<String>, MutationError> {
+    if units == [0] || units == [0, 0] {
+        return Ok(Vec::new());
+    }
+    if !units.ends_with(&[0, 0]) {
+        return Err(admission_denied("mount-paths-termination", None));
+    }
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for item in units[..units.len() - 2].split(|&u| u == 0) {
+        let path =
+            String::from_utf16(item).map_err(|_| admission_denied("mount-paths-encoding", None))?;
+        if !valid_mount_path(&path) || !seen.insert(path.to_ascii_uppercase()) {
+            return Err(admission_denied("mount-paths-invalid-record", None));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn volume_paths(guid: &str) -> Result<Vec<String>, MutationError> {
     let w = wide(guid);
-    let mut paths = vec![0u16; 32768];
+    let mut paths = vec![u16::MAX; 32768];
     let mut count = 0;
     if unsafe {
         GetVolumePathNamesForVolumeNameW(
@@ -179,23 +219,100 @@ fn check_mounts(guid: &str, drive: &str) -> Result<(), MutationError> {
             Some(unsafe { GetLastError() }),
         ));
     }
-    // Exactly the issuer's one drive letter, not an additional mounted folder.
-    let want = wide(drive);
-    if count as usize != want.len() + 1 || paths[..want.len()] != want || paths[want.len()] != 0 {
-        return Err(admission_denied("mount-paths-not-exclusive", None));
+    let count = count as usize;
+    if count == 0 || count > paths.len() {
+        return Err(admission_denied("mount-paths-length", None));
     }
-    let mut name = [0u16; 1024];
-    let handle =
-        unsafe { FindFirstVolumeMountPointW(w.as_ptr(), name.as_mut_ptr(), name.len() as u32) };
-    if handle != INVALID_HANDLE_VALUE {
-        unsafe { FindVolumeMountPointClose(handle) };
-        return Err(admission_denied("nested-mount-present", None));
+    parse_mount_paths(&paths[..count])
+}
+
+struct VolumeSearch(windows_sys::Win32::Foundation::HANDLE);
+impl Drop for VolumeSearch {
+    fn drop(&mut self) {
+        unsafe { FindVolumeClose(self.0) };
     }
-    let code = unsafe { GetLastError() };
-    if code != ERROR_NO_MORE_FILES {
-        return Err(admission_denied("nested-mount-enumeration", Some(code)));
+}
+
+// The documented enumeration of all local volumes and their mounted DOS
+// paths needs no raw disk handle. Bound both enumeration and individual
+// buffers. A failed query, truncation or duplicate GUID denies admission.
+fn enumerate_volume_paths() -> Result<Vec<(String, Vec<String>)>, MutationError> {
+    let mut name = [u16::MAX; 1024];
+    let handle = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(admission_denied(
+            "volume-enumeration-start",
+            Some(unsafe { GetLastError() }),
+        ));
+    }
+    let search = VolumeSearch(handle);
+    let mut inventory = Vec::new();
+    let mut seen = HashSet::new();
+    for _ in 0..256 {
+        let end = name
+            .iter()
+            .position(|&u| u == 0)
+            .ok_or_else(|| admission_denied("volume-enumeration-name", None))?;
+        let guid = String::from_utf16(&name[..end])
+            .map_err(|_| admission_denied("volume-enumeration-encoding", None))?;
+        if !valid_guid_root(&guid) || !seen.insert(guid.to_ascii_uppercase()) {
+            return Err(admission_denied("volume-enumeration-identity", None));
+        }
+        let paths = volume_paths(&guid)?;
+        inventory.push((guid, paths));
+        name.fill(u16::MAX);
+        if unsafe { FindNextVolumeW(search.0, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_NO_MORE_FILES {
+                return Ok(inventory);
+            }
+            return Err(admission_denied("volume-enumeration-next", Some(code)));
+        }
+    }
+    Err(admission_denied("volume-enumeration-bound", None))
+}
+
+// In the fixture's issuer-controlled DOS namespace, an exclusively mounted
+// volume has one root drive path. A mounted folder inside it is visible in
+// another volume's path inventory under that root. This is a point-in-time
+// observation, not an atomic mount-manager transaction or a shipping grant.
+fn verify_mount_inventory(
+    guid: &str,
+    drive: &str,
+    inventory: &[(String, Vec<String>)],
+) -> Result<(), MutationError> {
+    if !valid_guid_root(guid) || !valid_drive(drive) {
+        return Err(admission_denied("mount-inventory-input", None));
+    }
+    let mut seen = HashSet::new();
+    let mut found = false;
+    for (volume, paths) in inventory {
+        if !valid_guid_root(volume) || !seen.insert(volume.to_ascii_uppercase()) {
+            return Err(admission_denied("mount-inventory-identity", None));
+        }
+        if paths.iter().any(|path| !valid_mount_path(path)) {
+            return Err(admission_denied("mount-inventory-path", None));
+        }
+        if volume.eq_ignore_ascii_case(guid) {
+            if paths.len() != 1 || !paths[0].eq_ignore_ascii_case(drive) {
+                return Err(admission_denied("mount-paths-not-exclusive", None));
+            }
+            found = true;
+        } else if paths.iter().any(|p| {
+            p.get(..3)
+                .is_some_and(|root| root.eq_ignore_ascii_case(drive))
+        }) {
+            return Err(admission_denied("nested-mount-present", None));
+        }
+    }
+    if !found {
+        return Err(admission_denied("mount-inventory-root-missing", None));
     }
     Ok(())
+}
+
+fn check_mounts(guid: &str, drive: &str) -> Result<(), MutationError> {
+    verify_mount_inventory(guid, drive, &enumerate_volume_paths()?)
 }
 
 struct Local(*mut c_void);

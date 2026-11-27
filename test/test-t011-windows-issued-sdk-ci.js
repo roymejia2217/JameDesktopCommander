@@ -80,6 +80,18 @@ test('hosted Linux requires root-issued SDK cancellation on the same admitted jo
   assert.match(script, /test ! -e "\$isolated\/cancelled\.txt"/);
 });
 
+test('hosted NTFS active owner rejects real incoming and outgoing mounts before readmission', () => {
+  const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
+  const incoming = script.indexOf("Invoke-ActiveAdmissionAliasProbe $volumeGuid 'mount-paths-not-exclusive'");
+  const outgoing = script.indexOf("Invoke-ActiveAdmissionAliasProbe $outerVolumeGuid 'nested-mount-present'");
+  const marker = script.indexOf("Write-Output 'T011_WINDOWS_ACTIVE_NESTED_MOUNT_DENIED_NONRELEASE'");
+  const restored = script.indexOf("Invoke-AdmissionProbe 'journaled_mutations::tests::hosted_verified_volume_readmits_after_alias_removed'");
+  assert.ok(incoming >= 0 && outgoing > incoming && marker > outgoing && restored > marker);
+  assert.match(script, /\$errors\.Result[\s\S]*?T011_WINDOWS_VOLUME_ADMISSION_DENIED check=/);
+  assert.match(script, /\$admissionAlias = \(Join-Path \$volume '\.jdc-nested-mount'\)/);
+  assert.match(script, /E_STORAGE_NESTED_MOUNT_REJECT_CHANGED_DB/);
+});
+
 test('hosted NTFS acceptance verifies all dedicated primary tokens and denies absent issuer privileges', () => {
   const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
   const preflight = script.indexOf("Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites'");

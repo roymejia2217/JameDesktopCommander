@@ -323,7 +323,8 @@ function Confirm-AdmissionAliasRemoved {
     }
     $script:admissionAliasAttached = $false
 }
-function Invoke-ActiveAdmissionAliasProbe {
+function Invoke-ActiveAdmissionAliasProbe([string] $targetGuid,
+    [ValidateSet('mount-paths-not-exclusive','nested-mount-present')][string] $expectedCheck) {
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $admissionProbe
     $info.Arguments = '--ignored --exact journaled_mutations::tests::hosted_verified_volume_active_owner_rejects_alias --nocapture'
@@ -357,8 +358,8 @@ function Invoke-ActiveAdmissionAliasProbe {
             $ready = $line.Result -ceq 'T011_WINDOWS_ACTIVE_VOLUME_OWNER_READY_NONRELEASE'
         }
         $script:admissionAliasAttached = $true
-        Invoke-AdmissionMountVol $admissionAlias $volumeGuid | Out-Null
-        if ((Invoke-AdmissionMountVol $admissionAlias '/L') -ine $volumeGuid) {
+        Invoke-AdmissionMountVol $admissionAlias $targetGuid | Out-Null
+        if ((Invoke-AdmissionMountVol $admissionAlias '/L') -ine $targetGuid) {
             throw 'E_STORAGE_ADMISSION_ALIAS_NOT_PROVEN'
         }
         $child.StandardInput.WriteLine('CHECK')
@@ -372,6 +373,10 @@ function Invoke-ActiveAdmissionAliasProbe {
             $lines -cnotcontains 'T011_WINDOWS_ACTIVE_VOLUME_ALIAS_DENIED_NONRELEASE' -or
             -not ($lines -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
             throw 'E_STORAGE_ACTIVE_OWNER_ALIAS_CHECK_FAILED'
+        }
+        $diagnostics = @($errors.Result -split '\r?\n')
+        if ($diagnostics -cnotcontains "T011_WINDOWS_VOLUME_ADMISSION_DENIED check=$expectedCheck os_code=None") {
+            throw 'E_STORAGE_ACTIVE_OWNER_WRONG_TOPOLOGY_DENIAL'
         }
         Write-Output 'T011_WINDOWS_ACTIVE_VOLUME_ALIAS_DENIED_NONRELEASE'
     } finally {
@@ -575,11 +580,32 @@ exit
     New-Item -Path $admissionAlias -ItemType Directory | Out-Null
     # Treat a failed mount request as potentially partial until detached;
     # never recurse into a directory that may still be a volume alias.
-    Invoke-ActiveAdmissionAliasProbe
+    Invoke-ActiveAdmissionAliasProbe $volumeGuid 'mount-paths-not-exclusive'
     Invoke-AdmissionProbe 'journaled_mutations::tests::hosted_verified_volume_rejects_alternate_mount' 'T011_WINDOWS_ADMITTED_VOLUME_ALIAS_DENIED_NONRELEASE'
     if ((Get-FileHash -LiteralPath $admissionDb -Algorithm SHA256).Hash -ne $admissionHash) { throw 'E_STORAGE_ALIAS_REJECT_CHANGED_DB' }
     Invoke-AdmissionMountVol $admissionAlias '/D' | Out-Null
     Confirm-AdmissionAliasRemoved
+    # Hosted-only outgoing mount: the source directory belongs to our
+    # disposable VHD, never the system volume. The existing outside volume
+    # is only the mount target; no operation traverses this mounted path.
+    # The same cleanup guard must prove removal before VHD detachment.
+    $outerVolumeGuids = @((Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).AccessPaths | Where-Object {
+        $_ -match '^\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\$'
+    })
+    if ($outerVolumeGuids.Count -ne 1 -or $outerVolumeGuids[0] -ieq $volumeGuid) {
+        throw 'E_STORAGE_OUTSIDE_VOLUME_GUID_UNAVAILABLE'
+    }
+    $outerVolumeGuid = $outerVolumeGuids[0]
+    $admissionAlias = (Join-Path $volume '.jdc-nested-mount') + '\'
+    New-Item -Path $admissionAlias -ItemType Directory -ErrorAction Stop | Out-Null
+    Invoke-ActiveAdmissionAliasProbe $outerVolumeGuid 'nested-mount-present'
+    if ((Get-FileHash -LiteralPath $admissionDb -Algorithm SHA256).Hash -ne $admissionHash) {
+        throw 'E_STORAGE_NESTED_MOUNT_REJECT_CHANGED_DB'
+    }
+    Invoke-AdmissionMountVol $admissionAlias '/D' | Out-Null
+    Confirm-AdmissionAliasRemoved
+    [IO.Directory]::Delete($admissionAlias.TrimEnd('\'), $false)
+    Write-Output 'T011_WINDOWS_ACTIVE_NESTED_MOUNT_DENIED_NONRELEASE'
     Invoke-AdmissionProbe 'journaled_mutations::tests::hosted_verified_volume_readmits_after_alias_removed' 'T011_WINDOWS_ADMITTED_VOLUME_RESTORED_NONRELEASE'
     $serviceFile = Join-Path $volume 'service.bin'
     $outsideFile = Join-Path $outside 'outside.bin'

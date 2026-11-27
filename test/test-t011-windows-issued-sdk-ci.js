@@ -46,6 +46,8 @@ test('Windows native security CI executes the issued MCP SDK custody proof', () 
   assert.match(steps[inheritedMutation].run, /journaled_mutations::tests::local_windows_real_sdk_issuer_connected_mutation_channel/);
   assert.match(steps[inheritedMutation].run, /--ignored --exact --nocapture/);
   assert.match(steps[inheritedMutation].run, /T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE/);
+  assert.match(steps[inheritedMutation].run, /journaled_mutations::tests::local_windows_issued_sdk_cancelled_staged_mutation_never_publishes/);
+  assert.match(steps[inheritedMutation].run, /T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE/);
   const serviceHandoff = index('windows_issuer_connected_sdk_separate_service');
   assert.ok(serviceHandoff > inheritedMutation && serviceHandoff < windowsStorage,
     'separate native service handoff must execute before hosted storage acceptance');

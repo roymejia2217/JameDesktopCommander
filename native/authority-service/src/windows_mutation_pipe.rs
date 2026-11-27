@@ -22,8 +22,9 @@ use windows_sys::Win32::{
     },
     System::{
         Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
-            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+            PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+            PIPE_WAIT,
         },
         Threading::{CreateEventW, GetProcessId, WaitForSingleObject},
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
@@ -178,6 +179,31 @@ impl MutationPipe {
         finish(self.0.as_handle(), &mut ov, started, millis, |_| {})?;
         Ok(())
     }
+    // This server owns an overlapped pipe. A disconnected peer, unread
+    // input or an unobservable state must deny publication. This is a
+    // boundary observation, not atomic exclusion of a later disconnect.
+    fn peer_open_for_commit(&self) -> bool {
+        let mut available = 0;
+        let observed = unsafe {
+            PeekNamedPipe(
+                self.0.as_raw_handle(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut available,
+                ptr::null_mut(),
+            )
+        };
+        observed != 0 && available == 0
+    }
+
+    pub(super) fn commit_allowed(&self, issued: BorrowedHandle<'_>, sid: &[u8]) -> bool {
+        self.peer_open_for_commit()
+            && verify_live_issued_peer_after_read(self.0.as_handle(), issued).is_ok()
+            && observe_client_sid_after_read(self.0.as_handle()).is_ok_and(|actual| actual == sid)
+            && self.peer_open_for_commit()
+    }
+
     pub(super) fn challenge(&self, issued: BorrowedHandle<'_>) -> Result<(), IdentityDenied> {
         let mut connector = 0;
         if unsafe { GetNamedPipeClientProcessId(self.0.as_raw_handle(), &mut connector) } == 0
@@ -271,6 +297,39 @@ impl MutationPipe {
         self.read_attested(issued, sid, &mut payload, end, &mut progress)?;
         Ok(payload)
     }
+    // Test-only terminal synchronization. This is not the mutation channel
+    // and never grants authority. Verify the real issued peer on both reads.
+    pub(super) fn confirm_cancelled(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+    ) -> Result<(), IdentityDenied> {
+        let mut ready = [0u8; 1];
+        self.read_attested(
+            issued,
+            sid,
+            &mut ready,
+            deadline(Duration::from_secs(5))?,
+            &mut |_| {},
+        )?;
+        if ready != *b"R" {
+            return Err(IdentityDenied);
+        }
+        crate::windows_pipe_disclosure::write_chunk(self.0.as_handle(), b"V", 3000)?;
+        let mut ack = [0u8; 1];
+        self.read_attested(
+            issued,
+            sid,
+            &mut ack,
+            deadline(Duration::from_secs(3))?,
+            &mut |_| {},
+        )?;
+        if ack != *b"K" {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+
     pub(super) fn reply(
         &self,
         issued: BorrowedHandle<'_>,
@@ -596,6 +655,34 @@ impl IssuerConnectedMutationPipe {
             .read_checked(&mut payload, end, &mut |_| {}, || self.ensure_live())?;
         Ok(payload)
     }
+    pub(super) fn commit_allowed(&self) -> bool {
+        self.is_live() && self.pipe.peer_open_for_commit() && self.is_live()
+    }
+
+    /// Report the staged boundary and require explicit cancellation over the
+    /// inherited channel. libuv retains the original standard descriptor on
+    /// Windows, so socket destruction alone is not a reliable EOF signal.
+    /// Disconnect the native endpoint before permitting any further work.
+    pub(super) fn observe_staged_cancellation(&self) -> Result<(), IdentityDenied> {
+        self.ensure_live()?;
+        crate::windows_pipe_disclosure::write_chunk(self.pipe.0.as_handle(), b"S", 3000)?;
+        let mut cancellation = [0u8; 1];
+        self.pipe.read_checked(
+            &mut cancellation,
+            deadline(Duration::from_secs(5))?,
+            &mut |_| {},
+            || self.ensure_live(),
+        )?;
+        if cancellation != *b"X" || !self.pipe.peer_open_for_commit() {
+            return Err(IdentityDenied);
+        }
+        if unsafe { DisconnectNamedPipe(self.pipe.0.as_raw_handle()) } == 0 || self.commit_allowed()
+        {
+            return Err(IdentityDenied);
+        }
+        self.ensure_live()
+    }
+
     pub(super) fn reply(&self, byte: u8) -> Result<(), IdentityDenied> {
         self.ensure_live()?;
         if !matches!(byte, b'A' | b'D') {
@@ -628,6 +715,34 @@ mod tests {
         Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT},
         System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
+    #[test]
+    fn commit_gate_denies_closed_or_unexpected_input_even_with_live_process() {
+        let name = format!(
+            r"\\.\pipe\JDC-T011-MUTATION-{}-{}-commit",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let (pipe, endpoint) = IssuerConnectedMutationPipe::local_pair(&name).unwrap();
+        assert!(pipe.peer_open_for_commit());
+        crate::windows_pipe_disclosure::write_chunk(endpoint.as_handle(), b"X", 2000).unwrap();
+        assert!(!pipe.peer_open_for_commit());
+        let mut byte = [0];
+        pipe.read_checked(
+            &mut byte,
+            deadline(Duration::from_secs(2)).unwrap(),
+            &mut |_| {},
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(byte, *b"X");
+        assert!(pipe.peer_open_for_commit());
+        drop(endpoint);
+        assert!(!pipe.peer_open_for_commit());
+    }
+
     #[test]
     fn actual_pipe_frames_reject_wrong_sid_oversize() {
         actual_pipe_frames(0..3);

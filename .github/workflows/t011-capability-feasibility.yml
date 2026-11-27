@@ -212,13 +212,19 @@ jobs:
           if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE)) {
             throw 'E_STORAGE_NODE_PATH_NOT_ABSOLUTE'
           }
-          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_windows_real_sdk_issuer_connected_mutation_channel -- --ignored --exact --nocapture 2>&1)
-          $code = $LASTEXITCODE
-          $result | Write-Output
-          if ($code -ne 0) { exit $code }
-          if (-not ($result -contains 'T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE') -or
-              -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
-            throw 'E_STORAGE_LOCAL_ISSUED_SDK_VERDICT_MISSING'
+          $cases = @(
+            @{ Test = 'journaled_mutations::tests::local_windows_real_sdk_issuer_connected_mutation_channel'; Marker = 'T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE' },
+            @{ Test = 'journaled_mutations::tests::local_windows_issued_sdk_cancelled_staged_mutation_never_publishes'; Marker = 'T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE' }
+          )
+          foreach ($case in $cases) {
+            $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib $case.Test -- --ignored --exact --nocapture 2>&1)
+            $code = $LASTEXITCODE
+            $result | Write-Output
+            if ($code -ne 0) { exit $code }
+            if (-not ($result -contains $case.Marker) -or
+                -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+              throw 'E_STORAGE_LOCAL_ISSUED_SDK_VERDICT_MISSING'
+            }
           }
 
       # Proves actual kernel handoff to a separate native service process.

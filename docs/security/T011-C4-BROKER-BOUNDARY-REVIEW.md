@@ -428,6 +428,28 @@ is still required, and neither successful prerequisite observation nor the
 local same-token handoff replaces the actual cross-principal SDK-to-NTFS
 mutation acceptance.
 
+#### Windows request cancellation at the native publication fence (nonrelease)
+
+The local same-token SDK fixture now exercises actual MCP cancellation after
+native staging. Windows libuv duplicates the inherited standard descriptor
+when opening a pipe and does not close that original descriptor when the
+socket is destroyed. A timeout is therefore not evidence of peer closure.
+The forwarded MCP abort sends an explicit cancellation frame through the
+issuer-connected channel; the native service requires that exact frame,
+disconnects its endpoint, and verifies that publication is no longer
+admissible while the issued process remains alive.
+
+The proof requires the rejected journal sequence and digest, absent destination
+and stage, unchanged outside sentinel, rejected replay after reopening the
+journal, and no SDK resubmission. Its terminal synchronization uses a separate
+test-only channel with native peer verification. The positive Windows SDK
+paths also check the pipe state at the publication fence; this observation
+does not make later disconnection atomic with a filesystem rename.
+
+The local cancellation and positive inherited-channel cases are mandatory
+native CI checks. This evidence does not establish distinct-principal SCM
+custody, hosted NTFS acceptance, or release readiness.
+
 #### Linux request cancellation at the native publication fence (nonrelease)
 
 An actual local SDK cancellation after staging (not process termination) is

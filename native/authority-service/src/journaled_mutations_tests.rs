@@ -1243,20 +1243,6 @@ fn execute_sdk_journaled_operation(
     )
 }
 
-#[cfg(windows)]
-fn exercise_sdk_mutation_plan_common<C>(
-    domain: &JournaledDomain,
-    root: &Path,
-    db: &Path,
-    receive: impl FnMut(usize) -> (C, Vec<u8>),
-    reply: impl FnMut(&mut C, u8),
-    live: impl Fn() -> bool,
-) {
-    exercise_sdk_mutation_plan_with_commit_gate(domain, root, db, receive, reply, &live, |_| {
-        live()
-    });
-}
-
 fn exercise_sdk_mutation_plan_with_commit_gate<C>(
     domain: &JournaledDomain,
     root: &Path,
@@ -1416,7 +1402,7 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
             diagnostic()
         )
     });
-    exercise_sdk_mutation_plan_common(
+    exercise_sdk_mutation_plan_with_commit_gate(
         &domain,
         &f.0.join("objects"),
         &f.0.join("policy.sqlite3"),
@@ -1431,6 +1417,7 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
         },
         |pipe, byte| pipe.reply(byte).unwrap(),
         || pipe.is_live(),
+        |pipe| pipe.commit_allowed(),
     );
     drop(pipe); // actual peer closure after committed final operation
     child.wait_for_exit(Duration::from_secs(10)).unwrap();
@@ -1446,6 +1433,148 @@ fn local_windows_real_sdk_issuer_connected_mutation_channel() {
     assert_eq!(f.bytes("final.txt"), b"REWRITE-LOST");
     assert_eq!(f.state().sequence, 5);
     println!("T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE");
+}
+
+// Real SDK cancellation on the inherited Windows channel, before native
+// publication. Local fixture only: no SCM or admitted-volume verdict.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires repository npm build and absolute JDC_T011_NODE; local cancellation fixture"]
+fn local_windows_issued_sdk_cancelled_staged_mutation_never_publishes() {
+    use crate::{
+        windows_mutation_pipe::{IssuerConnectedMutationPipe, MutationPipe},
+        windows_pipe_peer::observe_process_sid,
+    };
+    use std::{ffi::OsStr, os::windows::io::AsHandle, time::Duration};
+    let f = Fixture::new();
+    let domain = f.open();
+    let root = f.0.join("objects");
+    let db = f.0.join("policy.sqlite3");
+    let sentinel = f.0.join("outside-sentinel");
+    fs::write(&sentinel, b"OUTSIDE").unwrap();
+    let home = f.0.join("client-state");
+    fs::create_dir(&home).unwrap();
+    let node = PathBuf::from(std::env::var_os("JDC_T011_NODE").expect("absolute Node executable"));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test/security/support/t011-issued-sdk-native-mutations.mjs");
+    assert!(node.is_absolute() && node.is_file() && script.is_file());
+    let name = format!(
+        r"\\.\pipe\JDC-T011-MUTATION-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let completion_name = format!("{name}-completion");
+    let completion = MutationPipe::create(&completion_name, true).unwrap();
+    let log_path = home.join("node-output.log");
+    let log = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&log_path)
+        .unwrap();
+    let cmd = format!(
+        r#""{}" "{}" --inherited-channel "{}" --cancel-before-commit "{}""#,
+        node.display(),
+        script.display(),
+        home.display(),
+        completion_name
+    );
+    let system = std::env::var("SystemRoot").unwrap();
+    let home_text = home.to_str().unwrap();
+    let (pipe, mut child) = IssuerConnectedMutationPipe::issue_local(
+        &name,
+        &node,
+        OsStr::new(&cmd),
+        &[
+            ("SystemRoot", &system),
+            ("TEMP", home_text),
+            ("TMP", home_text),
+            ("USERPROFILE", home_text),
+        ],
+        log.as_handle(),
+    )
+    .unwrap();
+    assert!(pipe.matches_issued_process(child.process_handle()));
+    child.resume().unwrap();
+    let diagnostics = || fs::read_to_string(&log_path).unwrap_or_default();
+    completion
+        .connect(Duration::from_secs(10))
+        .unwrap_or_else(|error| {
+            panic!(
+                "cancellation completion connection failed: {error:?}; {}",
+                diagnostics()
+            )
+        });
+    pipe.await_ready().unwrap();
+    pipe.challenge().unwrap();
+    assert_eq!(
+        pipe.receive(4096, Duration::from_secs(5)).unwrap(),
+        sdk_mutation_payload(1, b"/managed/cancelled.txt", b"MUST-NOT-PUBLISH")
+    );
+    let before = f.state();
+    assert_eq!(before.sequence, 0);
+    let sequence = before.sequence + 1;
+    let op = Operation::Create {
+        name: "cancelled.txt",
+        bytes: b"MUST-NOT-PUBLISH",
+    };
+    let digest = request_digest(ID, before.epoch, sequence, &op).unwrap();
+    let mut cancellation = None;
+    let result = execute_sdk_journaled_operation(&domain, &db, sequence, op, || {
+        assert_eq!(f.state().phase, Phase::Pending);
+        // The Windows stage is held with exclusive sharing; inspect the
+        // directory entry, not a second handle to that staged object.
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == ".jdc-stage"));
+        assert!(!root.join("cancelled.txt").exists());
+        cancellation = Some(pipe.observe_staged_cancellation());
+        // Fail closed on an unverified outcome. The same commit gate is
+        // exercised by the successful inherited-channel mutation plan.
+        cancellation == Some(Ok(())) && pipe.commit_allowed()
+    });
+    assert_eq!(result, Err(MutationError::Denied));
+    assert_eq!(
+        cancellation,
+        Some(Ok(())),
+        "actual SDK cancellation required"
+    );
+    let after = f.state();
+    assert_eq!(after.phase, Phase::Rejected);
+    assert_eq!(after.sequence, sequence);
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.request_digest, digest);
+    assert!(!root.join("cancelled.txt").exists());
+    assert!(!root.join(".jdc-stage").exists());
+    assert_eq!(fs::read(&sentinel).unwrap(), b"OUTSIDE");
+    drop(domain);
+    let reopened = f.open();
+    assert_eq!(f.state(), after);
+    assert_eq!(
+        run(
+            &reopened,
+            sequence,
+            Operation::Create {
+                name: "cancelled.txt",
+                bytes: b"MUST-NOT-PUBLISH",
+            }
+        ),
+        Err(MutationError::Denied)
+    );
+    assert_eq!(f.state(), after);
+    assert!(!root.join("cancelled.txt").exists());
+    assert!(pipe.is_live());
+    completion
+        .confirm_cancelled(child.process_handle(), &observe_process_sid().unwrap())
+        .unwrap();
+    drop(completion);
+    drop(pipe);
+    child.wait_for_exit(Duration::from_secs(10)).unwrap();
+    assert_eq!(child.exit_code(), Ok(0), "{}", diagnostics());
+    assert!(diagnostics().contains("T011_WINDOWS_REAL_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE"));
+    println!("T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE");
 }
 
 #[cfg(windows)]
@@ -1571,7 +1700,7 @@ fn local_inherited_service_mutation_fixture() {
     let db = root.join("policy.sqlite3");
     let domain = JournaledDomain::open_fixture(&objects, &db, ID).unwrap();
     pipe.await_ready().unwrap();
-    exercise_sdk_mutation_plan_common(
+    exercise_sdk_mutation_plan_with_commit_gate(
         &domain,
         &objects,
         &db,
@@ -1582,6 +1711,7 @@ fn local_inherited_service_mutation_fixture() {
         },
         |pipe, byte| pipe.reply(byte).unwrap(),
         || pipe.is_live(),
+        |pipe| pipe.commit_allowed(),
     );
     drop(domain);
     drop(pipe);
@@ -1641,7 +1771,7 @@ fn local_windows_real_jdc_sdk_to_journaled_native_mutations() {
     let live = || unsafe {
         WaitForSingleObject(child.process_handle().as_raw_handle(), 0) == WAIT_TIMEOUT
     };
-    exercise_sdk_mutation_plan_common(
+    exercise_sdk_mutation_plan_with_commit_gate(
         &domain,
         &f.0.join("objects"),
         &f.0.join("policy.sqlite3"),
@@ -1663,6 +1793,7 @@ fn local_windows_real_jdc_sdk_to_journaled_native_mutations() {
         },
         |pipe, byte| pipe.reply(child.process_handle(), &sid, byte).unwrap(),
         live,
+        |pipe| pipe.commit_allowed(child.process_handle(), &sid),
     );
     child.wait_for_exit(Duration::from_secs(10)).unwrap();
     assert_eq!(child.exit_code(), Ok(0));

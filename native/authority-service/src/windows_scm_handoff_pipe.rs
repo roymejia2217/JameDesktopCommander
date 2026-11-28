@@ -17,8 +17,9 @@ use windows_sys::Win32::{
     Foundation::INVALID_HANDLE_VALUE,
     Storage::FileSystem::{
         CreateFileW, WriteFile, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE,
-        FILE_FLAG_OVERLAPPED, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_INBOUND, READ_CONTROL,
-        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE,
+        FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING,
+        PIPE_ACCESS_INBOUND, READ_CONTROL, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+        SYNCHRONIZE,
     },
     System::{
         Pipes::{
@@ -31,7 +32,9 @@ use windows_sys::Win32::{
 #[path = "windows_bounded_pipe_io.rs"]
 mod bounded_io;
 const LIMIT: usize = 128;
-const CLIENT_RIGHTS: u32 = FILE_WRITE_DATA | READ_CONTROL | SYNCHRONIZE;
+// CreateFileW requires read-attributes access even for an inbound pipe
+// client. Keep data read, attribute write, append/instance and ACL writes out.
+const CLIENT_RIGHTS: u32 = FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 const TIMEOUT: Duration = Duration::from_secs(5);
 fn name(names: &Names) -> Result<Vec<u16>, IdentityDenied> {
     let id = names
@@ -328,6 +331,131 @@ mod tests {
         let sid = observe_process_sid().unwrap();
         let actual = server.receive(current, &sid).unwrap();
         assert_eq!(actual.encode(), handoff.encode());
+    }
+    #[test]
+    fn limited_client_acl_admits_create_file_without_generic_write() {
+        use super::super::{descriptor_for_sids, sid_string};
+        // Unlike the owner-full-access test, the current token receives
+        // ONLY the client ACE. OWNER RIGHTS suppresses implicit WRITE_DAC.
+        let sid = observe_process_sid().unwrap();
+        let mut aligned = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
+        unsafe {
+            ptr::copy_nonoverlapping(sid.as_ptr(), aligned.as_mut_ptr().cast::<u8>(), sid.len())
+        };
+        let sid = sid_string(aligned.as_mut_ptr().cast()).unwrap();
+        assert_ne!(sid, "S-1-5-18");
+        let old_rights = FILE_WRITE_DATA | READ_CONTROL | SYNCHRONIZE;
+        let old =
+            descriptor_for_sids("S-1-0-0", Some((&sid, old_rights)), FILE_ALL_ACCESS).unwrap();
+        let old_name = unique_name();
+        let _old_server = HandoffPipe::create_raw(&old_name, &attributes(&old)).unwrap();
+        // Reproduce the exact previous request, not the new access mask.
+        let raw = unsafe {
+            CreateFileW(
+                old_name.as_ptr(),
+                old_rights,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                ptr::null_mut(),
+            )
+        };
+        let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        if raw != INVALID_HANDLE_VALUE {
+            drop(owned(raw).unwrap());
+            panic!("old client ACE unexpectedly admitted CreateFileW");
+        }
+        assert_eq!(error, windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
+        let revised =
+            descriptor_for_sids("S-1-0-0", Some((&sid, CLIENT_RIGHTS)), FILE_ALL_ACCESS).unwrap();
+        use windows_sys::Win32::{
+            Foundation::{GetLastError, ERROR_ACCESS_DENIED},
+            Storage::FileSystem::{
+                FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, FILE_WRITE_EA, WRITE_DAC, WRITE_OWNER,
+            },
+        };
+        // An actual second server instance (without FIRST_PIPE_INSTANCE,
+        // with room for two) is the meaningful FILE_CREATE_PIPE_INSTANCE
+        // negative. NPFS can accept append in a client open without allowing
+        // that separate operation.
+        let instance_name = unique_name();
+        let sa = attributes(&revised);
+        let flags = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+        let _first = owned(unsafe {
+            CreateNamedPipeW(
+                instance_name.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                flags,
+                2,
+                0,
+                256,
+                0,
+                &sa,
+            )
+        })
+        .unwrap();
+        let second = unsafe {
+            CreateNamedPipeW(
+                instance_name.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                flags,
+                2,
+                0,
+                256,
+                0,
+                &sa,
+            )
+        };
+        let error = unsafe { GetLastError() };
+        if second != INVALID_HANDLE_VALUE {
+            drop(owned(second).unwrap());
+            panic!("client admitted a second server instance");
+        }
+        assert_eq!(error, ERROR_ACCESS_DENIED);
+        for forbidden in [
+            FILE_READ_DATA,
+            FILE_WRITE_ATTRIBUTES,
+            FILE_WRITE_EA,
+            WRITE_DAC,
+            WRITE_OWNER,
+        ] {
+            let name = unique_name();
+            let _server = HandoffPipe::create_raw(&name, &attributes(&revised)).unwrap();
+            let raw = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    CLIENT_RIGHTS | forbidden,
+                    0,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                    ptr::null_mut(),
+                )
+            };
+            let error = unsafe { GetLastError() };
+            if raw != INVALID_HANDLE_VALUE {
+                drop(owned(raw).unwrap());
+                panic!("forbidden client right admitted: {forbidden:#x}");
+            }
+            assert_eq!(
+                error, ERROR_ACCESS_DENIED,
+                "unexpected denial for {forbidden:#x}"
+            );
+        }
+        let name = unique_name();
+        let server = HandoffPipe::create_raw(&name, &attributes(&revised)).unwrap();
+        let pin = current_pin();
+        let expected = handoff(Stamp::capture(pin.as_handle()).unwrap());
+        let _client = send_frame(&name, expected.encode().as_bytes())
+            .expect("exact limited client ACE must admit CreateFileW");
+        assert_eq!(
+            server
+                .receive(pin.as_handle(), &observe_process_sid().unwrap())
+                .unwrap()
+                .encode(),
+            expected.encode()
+        );
     }
     #[test]
     fn protected_pipe_descriptor_is_observable_at_both_endpoints() {

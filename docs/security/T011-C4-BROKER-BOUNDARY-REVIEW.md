@@ -615,6 +615,33 @@ status cannot mask the primary observer failure. The actual cross-account
 failure remains unresolved; no change to SCM privileges or pipe rights.
 The primary-thread candidate is conserved separately until this gate passes.
 
+#### SCM client open-rights correction (nonrelease; hosted verdict pending)
+
+Hosted Native Security job 140995347278 for `5ec4ded1e919771b6a5654d26317366b1b9211b6`
+reported issuer phase 43 (open) and observer phase 23 (await frame).
+The previous local full-owner test did not exercise the restricted client
+ACE. A real NPFS fixture with only the client ACE reproduces the former
+`CreateFileW` access denial. Adding exactly `FILE_READ_ATTRIBUTES` to the
+requested access and matching role ACE enables the complete authenticated
+frame transfer. `CreateFileW` can implicitly request this metadata access;
+no generic write, append/instance-creation, data-read, attribute-write,
+ACL-write or owner-write grant is added. The existing exact descriptor,
+connector, token, job and exit checks remain mandatory.
+
+The local regression control checks the exact old access request and ACE,
+then the corrected pair. An initial negative assumption about requesting
+FILE_APPEND_DATA on the client endpoint was disproved by NPFS: that request
+can succeed without authorizing creation of another server instance. The
+replacement control exercises the actual CreateNamedPipeW operation with
+room for two instances and without FIRST_PIPE_INSTANCE on the second open;
+it must return ERROR_ACCESS_DENIED. Other forbidden open rights (data read,
+attribute/EA write, WRITE_DAC, WRITE_OWNER) must also be denied. These are
+local kernel controls, not independent SCM account acceptance. The same
+hosted authenticated handoff marker and all legacy gates remain required.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-open-modes>.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

@@ -811,7 +811,15 @@ separate ordinary principals cannot read or mutate either final file or
 journal. Each rewrite has a readable auxiliary positive control. Actual
 cross-volume hardlink errors and SHA-256 checks of final, journal and
 outside bytes remain mandatory. Existing SCM and legacy storage gates
-are unchanged and still required. New verdicts:
+are unchanged and still required. The initial integration's pre-push
+rejected feature builds inside the native artifact matrix. The opt-in
+build and VHD execution now run in a separate mandatory, artifact-free
+Windows job in the same Native Security workflow, with pinned source and
+toolchain, no cache, job outputs, dependencies, permission override or
+failure suppression. The existing artifact producer and its feature
+prohibition remain intact. The dedicated artifact policy requires the
+exact job inventory and commands and rejects early-success bypasses.
+New verdicts:
 `T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE`,
 `T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE`,
 `T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE`.

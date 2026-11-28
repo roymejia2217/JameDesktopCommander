@@ -364,27 +364,6 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-custody-acceptance.ps1
 
-      # Separate fresh VHD and SCM identity; existing legacy controls remain mandatory.
-      - name: Test Windows SCM admitted SDK storage
-        id: windows_scm_admitted_storage
-        if: matrix.target == 'win32-x64'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          cargo +1.91.1 clippy --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.91.1 build --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -ScmStorageOnly)
-          $code = $LASTEXITCODE
-          $result | Write-Output
-          if ($code -ne 0) { exit $code }
-          if ($result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE' -or
-              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE' -or
-              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE') {
-            throw 'E_STORAGE_SCM_ADMITTED_VERDICT_MISSING'
-          }
-
       - name: Test Windows storage isolation and outside-object integrity
         if: matrix.target == 'win32-x64'
         shell: pwsh
@@ -459,3 +438,71 @@ jobs:
           retention-days: 1
           if-no-files-found: error
           compression-level: 0
+
+  # Separate disposable runner: no research compilation in the artifact
+  # producer, no artifact upload/download, cache, or dependent release job.
+  scm-storage-nonrelease:
+    name: SCM admitted storage (nonrelease)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact source
+        id: scm_storage_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned Rust compiler in CI only
+        id: scm_storage_rust
+        run: rustup toolchain install 1.91.1 --profile minimal --component clippy
+
+      - name: Use official Node 24
+        id: scm_storage_node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install locked SDK runtime
+        id: scm_storage_dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build real JDC runtime
+        id: scm_storage_runtime
+        run: npm run build
+
+      - name: Build default deny-only SCM and fixed client
+        id: scm_storage_default
+        run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm --bin jdc-authority-scm-issued-client
+
+      - name: Build locked native custody controls
+        id: scm_storage_custody
+        run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml
+
+      - name: Validate isolated research library and fixed SCM proof
+        id: scm_storage_native
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +1.91.1 clippy --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --lib --bin jdc-authority-scm-issued-proof -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.1 test --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --lib --bin jdc-authority-scm-issued-proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.1 build --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Windows SCM admitted SDK storage
+        id: windows_scm_admitted_storage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -ScmStorageOnly)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if ($result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE') {
+            throw 'E_STORAGE_SCM_ADMITTED_VERDICT_MISSING'
+          }

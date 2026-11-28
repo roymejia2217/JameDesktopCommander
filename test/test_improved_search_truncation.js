@@ -1,134 +1,90 @@
-// Test script to verify improved search result behavior using new streaming API
-import fs from 'fs/promises';
-import os from 'os';
-import path from 'path';
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
 
-const originalHome = process.env.HOME;
-const originalUserProfile = process.env.USERPROFILE;
-const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-search-truncation-home-'));
-process.env.HOME = isolatedHome;
-process.env.USERPROFILE = isolatedHome;
-
-const { handleStartSearch, handleGetMoreSearchResults, handleStopSearch } =
-  await import('../dist/handlers/search-handlers.js');
-
-/**
- * Helper function to wait for search completion and get all results
- */
-async function searchAndWaitForCompletion(searchArgs, timeout = 30000) {
-  const result = await handleStartSearch(searchArgs);
-  
-  // Extract session ID from result with tighter regex
-  const sessionIdMatch = result.content[0].text.match(/Started .* session:\s*([a-zA-Z0-9_-]+)/);
-  if (!sessionIdMatch) {
-    throw new Error('Could not extract session ID from search result');
-  }
-  const sessionId = sessionIdMatch[1];
-  
+test('real streaming search preserves every match across bounded pages', async () => {
+  // This is an unrestricted-search fixture, not a test of first-run config
+  // creation or of the contents of the developer's checkout.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-search-truncation-'));
+  const previousConfig = process.env.DESKTOP_COMMANDER_CONFIG_DIR;
+  const configDir = path.join(root, 'config');
+  process.env.DESKTOP_COMMANDER_CONFIG_DIR = configDir;
+  let configManager;
+  let searchManager;
+  let stopSearchManagerCleanup;
+  let sessionId;
   try {
-    // Wait for completion by polling
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeout) {
-      const moreResults = await handleGetMoreSearchResults({ sessionId });
-      
-      if (moreResults.content[0].text.includes('✅ Search completed')) {
-        return { initialResult: result, finalResult: moreResults, sessionId };
-      }
-      
-      if (moreResults.content[0].text.includes('❌ ERROR')) {
-        throw new Error(`Search failed: ${moreResults.content[0].text}`);
-      }
-      
-      // Wait a bit before polling again
-      await new Promise(resolve => setTimeout(resolve, 100));
+    await fs.mkdir(configDir);
+    await fs.writeFile(path.join(configDir, 'config.json'), JSON.stringify({
+      allowedDirectories: [], telemetryEnabled: false,
+      welcomeOnboardingEligible: false, pendingWelcomeOnboarding: false,
+    }), { flag: 'wx' });
+    ({ configManager } = await import('../dist/config-manager.js'));
+    ({ searchManager, stopSearchManagerCleanup } = await import('../dist/search-manager.js'));
+    const { handleStartSearch, handleGetMoreSearchResults } =
+      await import('../dist/handlers/search-handlers.js');
+    assert.deepEqual(await configManager.getAllowedDirectoriesForFilesystem(), []);
+    const fixture = path.join(root, 'fixture');
+    await fs.mkdir(fixture);
+    const count = 1201;
+    const marker = 'JDC_SEARCH_PAGE_';
+    const expected = Array.from({ length: count }, (_, i) =>
+      marker + String(i + 1).padStart(4, '0'));
+    await fs.writeFile(path.join(fixture, 'matches.txt'), expected.join('\n') + '\n');
+    await fs.writeFile(path.join(fixture, 'nonmatch.txt'), 'unrelated content\n');
+
+    const result = await handleStartSearch({
+      path: fixture, pattern: marker + '[0-9]{4}', searchType: 'content',
+      filePattern: '*.txt', contextLines: 0, maxResults: count + 1,
+    });
+    assert.notEqual(result.isError, true, result.content[0].text);
+    sessionId = result.content[0].text.match(/^Started content search session: ([\w-]+)/)?.[1];
+    assert.ok(sessionId, result.content[0].text);
+
+    // Native close event, not a periodic result/status probe. Existing test
+    // code accesses the manager's fixture sessions for deterministic cleanup.
+    const session = searchManager.sessions.get(sessionId);
+    assert.ok(session);
+    if (!session.isComplete) {
+      await once(session.process, 'close', { signal: AbortSignal.timeout(30_000) });
     }
-    
-    throw new Error('Search timed out');
+    assert.equal(session.process.exitCode, 0, session.error);
+    assert.equal(session.wasIncomplete, undefined);
+    const received = [];
+    for (const [offset, length] of [[0, 1000], [1000, 201]]) {
+      const page = await handleGetMoreSearchResults({ sessionId, offset, length });
+      const text = page.content[0].text;
+      assert.notEqual(page.isError, true, text);
+      assert.ok(Buffer.byteLength(text, 'utf8') <= 1024 * 1024);
+      assert.match(text, /Status: COMPLETED/);
+      assert.match(text, /Total results found: 1201 \(1201 matches\)/);
+      assert.match(text, new RegExp('Showing results ' + offset + '-' + (offset + length - 1)));
+      if (offset === 0) assert.match(text, /offset: 1000/);
+      else assert.doesNotMatch(text, /More results available/);
+      received.push(...Array.from(text.matchAll(/JDC_SEARCH_PAGE_[0-9]{4}/g), m => m[0]));
+    }
+    assert.deepEqual(received, expected, 'no lost, duplicate or reordered results');
+    const tail = await handleGetMoreSearchResults({ sessionId, offset: -2 });
+    assert.notEqual(tail.isError, true, tail.content[0].text);
+    assert.deepEqual(Array.from(tail.content[0].text.matchAll(/JDC_SEARCH_PAGE_[0-9]{4}/g), m => m[0]),
+      expected.slice(-2));
   } finally {
-    // Always stop the search session to prevent hanging
-    try {
-      await handleStopSearch({ sessionId });
-    } catch (e) {
-      // Ignore errors when stopping - session might already be completed
+    if (searchManager && sessionId) {
+      const session = searchManager.sessions.get(sessionId);
+      if (session && !session.isComplete) {
+        const closed = once(session.process, 'close', { signal: AbortSignal.timeout(5_000) });
+        searchManager.terminateSearch(sessionId);
+        await closed;
+      }
+      searchManager.sessions.delete(sessionId);
     }
+    stopSearchManagerCleanup?.();
+    await configManager?.close();
+    if (previousConfig === undefined) delete process.env.DESKTOP_COMMANDER_CONFIG_DIR;
+    else process.env.DESKTOP_COMMANDER_CONFIG_DIR = previousConfig;
+    await fs.rm(root, { recursive: true, force: true });
   }
-}
-
-async function testImprovedSearchTruncation() {
-    try {
-        console.log('Testing improved search result behavior with streaming API...');
-        
-        // Test search that will produce many results to trigger potential limits
-        const searchArgs = {
-            path: '.',
-            pattern: '.',  // Match almost every line - this should be a lot of results
-            searchType: 'content',
-            maxResults: 50000,  // Very high limit to get lots of results, but may be capped
-            ignoreCase: true
-        };
-        
-        console.log('Searching for "." to get maximum results...');
-        const start = Date.now();
-        const { initialResult, finalResult } = await searchAndWaitForCompletion(searchArgs);
-        const end = Date.now();
-        
-        console.log(`Search completed in ${end - start}ms`);
-        console.log('Initial result type:', typeof initialResult.content[0].text);
-        console.log('Initial result length:', initialResult.content[0].text.length);
-        console.log('Final result type:', typeof finalResult.content[0].text);
-        console.log('Final result length:', finalResult.content[0].text.length);
-        
-        const totalLength = initialResult.content[0].text.length + finalResult.content[0].text.length;
-        const apiLimit = 1048576; // 1 MiB - use consistent constant
-        
-        // Check if we're within the safe limits using single source of truth
-        if (totalLength > apiLimit) {
-            console.log('❌ Results still quite large - over 1MB combined');
-        } else if (totalLength > Math.floor(0.8 * apiLimit)) {
-            console.log('⚠️  Results approaching limits but acceptable');
-        } else {
-            console.log('✅ Results well within safe limits');
-        }
-        
-        if (finalResult.content[0].text.includes('Results truncated')) {
-            console.log('✅ Results properly truncated with warning message');
-            const truncationIndex = finalResult.content[0].text.indexOf('Results truncated');
-            console.log('Truncation message:', finalResult.content[0].text.substring(truncationIndex, truncationIndex + 150));
-        } else {
-            console.log('ℹ️  Results complete, no truncation needed with new streaming API');
-        }
-        
-        console.log('First 200 characters of final result:');
-        console.log(finalResult.content[0].text.substring(0, 200));
-        
-        // Check character length safety
-        const safetyMargin = apiLimit - totalLength;
-        console.log(`\n📊 Safety Analysis:`);
-        console.log(`   Initial response: ${initialResult.content[0].text.length.toLocaleString()} characters`);
-        console.log(`   Final response: ${finalResult.content[0].text.length.toLocaleString()} characters`);
-        console.log(`   Combined size: ${totalLength.toLocaleString()} characters`);
-        console.log(`   API limit: ${apiLimit.toLocaleString()} characters`);
-        console.log(`   Safety margin: ${safetyMargin.toLocaleString()} characters`);
-        console.log(`   Utilization: ${((totalLength / apiLimit) * 100).toFixed(1)}%`);
-        
-    } catch (error) {
-        console.error('Test failed:', error);
-        throw error;
-    } finally {
-        if (originalHome === undefined) delete process.env.HOME;
-        else process.env.HOME = originalHome;
-
-        if (originalUserProfile === undefined) delete process.env.USERPROFILE;
-        else process.env.USERPROFILE = originalUserProfile;
-
-        await fs.rm(isolatedHome, { recursive: true, force: true });
-    }
-}
-
-testImprovedSearchTruncation().then(() => {
-    console.log('Improved search truncation test completed successfully.');
-    process.exit(0);
-}).catch(error => {
-    console.error('Test failed:', error);
-    process.exit(1);
 });

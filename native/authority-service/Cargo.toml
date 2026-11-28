@@ -37,10 +37,37 @@ path = "src/linux_systemd_issued_proof.rs"
 name = "jdc-authority-systemd-issued-client"
 path = "src/linux_systemd_issued_client.rs"
 
+# Opt-in, CI-only SCM storage proof. Default builds remain deny-only.
+[features]
+scm-storage-proof = ["dep:jdc-authority-store", "dep:sha2", "dep:rusqlite", "windows-sys/Wdk_Foundation", "windows-sys/Wdk_Storage_FileSystem"]
+
+[target.'cfg(windows)'.dependencies.jdc-authority-store]
+path = "../authority-store"
+optional = true
+
+[target.'cfg(windows)'.dependencies.sha2]
+version = "=0.11.0"
+default-features = false
+optional = true
+
+[target.'cfg(windows)'.dependencies.rusqlite]
+version = "=0.41.1"
+default-features = false
+features = ["bundled"]
+optional = true
+
+[dev-dependencies]
+jdc-authority-store = { path = "../authority-store" }
+sha2 = { version = "=0.11.0", default-features = false }
+rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.190"
 rustix = { version = "=1.1.6", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = { version = "=0.8.1" }
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_WindowsProgramming"] }

@@ -4,8 +4,8 @@ import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { unlink } from 'node:fs/promises';
-import { exerciseIssuedSdkRead, exerciseIssuedJdcRead } from './security/support/t011-issued-sdk-native-read.mjs';
+import { chmod, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { exerciseIssuedSdkRead, exerciseIssuedJdcRead, diagnoseNativeSocketAccess } from './security/support/t011-issued-sdk-native-read.mjs';
 import { createJdcServer } from '../dist/server.js';
 
 async function withNativeFixture(reply, evaluate) {
@@ -30,6 +30,38 @@ async function withNativeFixture(reply, evaluate) {
     if (process.platform !== 'win32') await unlink(socketPath).catch(() => {});
   }
 }
+test('Linux denied-connect diagnostic distinguishes path traversal, socket access and accessible socket', { skip: process.platform !== 'linux' || process.getuid?.() === 0 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'jdc-socket-diagnostic-'));
+  const socket = path.join(directory, 'fixture.sock');
+  const server = createServer();
+  try {
+    assert.equal(await diagnoseNativeSocketAccess(socket), 'E_NATIVE_SOCKET_NOT_FOUND');
+    await writeFile(socket, 'not a socket');
+    assert.equal(await diagnoseNativeSocketAccess(socket), 'E_NATIVE_SOCKET_WRONG_TYPE');
+    await unlink(socket);
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socket, resolve);
+    });
+    await chmod(socket, 0o600);
+    assert.equal(await diagnoseNativeSocketAccess(socket), 'E_NATIVE_SOCKET_PATH_ACCESS_OK');
+    await chmod(socket, 0o400);
+    await assert.rejects(exerciseIssuedJdcRead(socket, createJdcServer), error => {
+      assert.equal(error.message, 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_CONNECT_EACCES');
+      assert.ok(!error.message.includes(socket));
+      return true;
+    });
+    assert.equal(await diagnoseNativeSocketAccess(socket), 'E_NATIVE_SOCKET_WRITE_ACCESS_DENIED');
+    await chmod(socket, 0o600);
+    await chmod(directory, 0o600);
+    assert.equal(await diagnoseNativeSocketAccess(socket), 'E_NATIVE_SOCKET_ANCESTOR_ACCESS_DENIED');
+  } finally {
+    await chmod(directory, 0o700);
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('official MCP SDK tool returns exact native bytes over real OS stream', async () => {
   const bytes = Buffer.from([0, 255, 0x81, 0x2a, 0x4a, 0x44, 0x43, 10]);
   const length = Buffer.allocUnsafe(4);
@@ -76,4 +108,22 @@ test('real JDC dispatcher preserves every UTF-8 byte, including a leading BOM', 
       assert.deepEqual(output, bytes);
       assert.equal(output.equals(Buffer.from('SERVICE_DOMAIN_BYTES')), false);
     });
+});
+
+test('issued JDC read distinguishes real transport failure from native rejection without leaking the socket path', async () => {
+  const missing = process.platform === 'win32'
+    ? `\\\\.\\pipe\\jdc-issued-sdk-missing-${randomUUID()}`
+    : path.join(tmpdir(), `jdc-issued-sdk-missing-${randomUUID()}.sock`);
+  await assert.rejects(exerciseIssuedJdcRead(missing, createJdcServer), error => {
+    assert.equal(error.message, 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_TRANSPORT_ENOENT');
+    assert.ok(!error.message.includes(missing));
+    return true;
+  });
+  await withNativeFixture(Buffer.from('D'), async socket => {
+    await assert.rejects(exerciseIssuedJdcRead(socket, createJdcServer), error => {
+      assert.equal(error.message, 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_PROTOCOL');
+      assert.ok(!error.message.includes(socket));
+      return true;
+    });
+  });
 });

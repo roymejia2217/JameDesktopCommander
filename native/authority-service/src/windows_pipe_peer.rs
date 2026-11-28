@@ -166,6 +166,24 @@ pub fn verify_live_issued_peer_after_read(
     Ok(())
 }
 
+/// Observe the actual primary-token SID of a retained process handle.
+/// Nonshipping test fixture only; a matching SID does not grant authority.
+#[cfg(test)]
+pub(crate) fn observe_process_handle_sid(
+    process: BorrowedHandle<'_>,
+) -> Result<Vec<u8>, IdentityDenied> {
+    use windows_sys::Win32::Security::TokenPrimary;
+    let mut token = MaybeUninit::<HANDLE>::uninit();
+    if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, token.as_mut_ptr()) } == 0 {
+        return Err(IdentityDenied);
+    }
+    let token = OwnedToken(unsafe { token.assume_init() });
+    if typed_information(token.0, TokenType)? != TokenPrimary {
+        return Err(IdentityDenied);
+    }
+    token_user_sid(token.0)
+}
+
 /// Test fixture observation of the process token, NOT permission to act
 /// as the installed SCM virtual service SID.
 pub fn observe_process_sid() -> Result<Vec<u8>, IdentityDenied> {

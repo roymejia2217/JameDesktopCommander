@@ -7,9 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { parse } from 'yaml';
 import { validateInstallerInput } from '../scripts/validate-installer-input.mjs';
+import { assertInstallerProbeExit } from './security/support/installer-probe-verdict.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sha = 'b'.repeat(40);
+
 const valid = (target = 'win32-x64') => ({
   pkg: { name: '@roymejia2217/jame-desktop-commander', version: '0.2.52', private: true },
   manifest: { schemaVersion: 1, releaseEligible: false,
@@ -272,6 +274,37 @@ test('installer firewall observer executes three real host snapshots behind rest
   }
 });
 
+test('installer denial requires an actual completed process, not a timeout or spawn error', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jdc-probe-verdict-'));
+  try {
+    const options = { encoding: 'utf8', timeout: 10000 };
+    const timeout = spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'],
+      { ...options, timeout: 100 });
+    const missing = spawnSync(join(dir, 'missing-executable'), [], options);
+    const success = spawnSync(process.execPath, ['-e', 'process.exit(0)'], options);
+    const denial = spawnSync(process.execPath, ['-e', 'process.exit(1)'], options);
+    const unrelated = spawnSync(process.execPath, ['-e',
+      "process.stderr.write('SECRET_CANARY_PRIVATE_PATH'); process.exit(2)"], options);
+    assert.equal(timeout.error?.code, 'ETIMEDOUT');
+    assert.equal(missing.error?.code, 'ENOENT');
+    assert.throws(() => assertInstallerProbeExit(timeout, 1), /ETIMEDOUT/);
+    assert.throws(() => assertInstallerProbeExit(missing, 1), /ENOENT/);
+    assert.throws(() => assertInstallerProbeExit(success, 1), /EXIT_STATUS/);
+    assert.doesNotThrow(() => assertInstallerProbeExit(denial, 1));
+    assert.doesNotThrow(() => assertInstallerProbeExit(success, 0));
+    assert.throws(() => assertInstallerProbeExit(denial, 0), /EXIT_STATUS/);
+    assert.throws(() => assertInstallerProbeExit(unrelated, 1), error =>
+      /EXIT_STATUS/.test(error.message) && !error.message.includes('SECRET_CANARY'));
+    if (process.platform !== 'win32') {
+      const signaled = spawnSync(process.execPath, ['-e', "process.kill(process.pid, 'SIGTERM')"], options);
+      assert.equal(signaled.signal, 'SIGTERM');
+      assert.throws(() => assertInstallerProbeExit(signaled, 1), /E_INSTALLER_PROBE_SIGNAL/);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('an early installer child failure yields only a fixed phase code', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -289,7 +322,7 @@ test('an early installer child failure yields only a fixed phase code', {
       evidence.replaceAll("'", "''") + "'"].join('\n');
     const result = spawnSync('powershell.exe', ['-NoProfile','-NonInteractive','-Command',script],
       {encoding:'utf8',timeout:12000});
-    assert.equal(result.status, 0, result.stderr);
+    assertInstallerProbeExit(result, 0);
     assert.match(result.stdout, /E_INSTALLER_ACCEPTANCE_PHASE_INSTALL/);
     assert.match(result.stdout, /E_INSTALLER_INNO_EXIT_CODE_7/);
     assert.doesNotMatch(result.stdout + result.stderr, /SECRET_CANARY/);
@@ -328,13 +361,15 @@ test('isolated installer binds writable TEMP and TMP to the verified profile, no
     ].join('\n');
     const result = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',ps],
       {encoding:'utf8',timeout:12000});
-    assert.equal(result.status,0,result.stderr);
+    assertInstallerProbeExit(result, 0);
     assert.match(result.stdout,/ISOLATED_TEMP_BINDING_PASS/);
     const negative = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
       [helper,"Set-VerifiedProfileTemporaryDirectory -Profile '" +
         q(profile) + "' -LocalAppData '" + q(rootDir) + "'"].join('\n')],
       {encoding:'utf8',timeout:12000});
-    assert.notEqual(negative.status,0,'outside the verified profile must fail closed');
+    assertInstallerProbeExit(negative, 1);
+    assert.ok(negative.stderr.includes('E_INSTALLER_USER_TEMP_PROFILE_BOUNDARY_INVALID'),
+      'E_INSTALLER_PROBE_EXPECTED_BOUNDARY_DENIAL');
   } finally { await rm(rootDir,{recursive:true,force:true}); }
 });
 
@@ -349,12 +384,12 @@ test('real Inno exit status is disclosed as a bounded numeric code without insta
   const reject = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
     [helper,'Assert-InnoInstallerExitCode -ExitCode 7'].join('\n')],
     {encoding:'utf8',timeout:12000});
-  assert.equal(reject.status,1);
+  assertInstallerProbeExit(reject, 1);
   assert.match(reject.stderr,/E_INSTALLER_INNO_EXIT_CODE_7/);
   const accept = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
     [helper,'Assert-InnoInstallerExitCode -ExitCode 0'].join('\n')],
     {encoding:'utf8',timeout:12000});
-  assert.equal(accept.status,0,accept.stderr);
+  assertInstallerProbeExit(accept, 0);
 });
 
 test('Debian package uses declarative nFPM, not custom dpkg assembly', async () => {
@@ -404,7 +439,7 @@ test('Windows CLI accepts equivalent absolute source paths with forward slashes'
       'win32-x64',
       values.expectedCommit,
     ], { encoding: 'utf8', timeout: 10000 });
-    assert.equal(command.status, 0, command.stderr);
+    assertInstallerProbeExit(command, 0);
     assert.match(command.stdout, /"result":"PASS"/);
   } finally {
     await rm(dir, { recursive: true, force: true });

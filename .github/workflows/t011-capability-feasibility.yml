@@ -156,6 +156,10 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
 
+      - name: Test Linux namespace descriptor custody
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 test --locked --example linux_peered_read_proof --manifest-path native/authority-service/Cargo.toml
+
       - name: Build Linux epoch-store fixture
         id: linux_store_fixture
         if: matrix.target == 'linux-x64'
@@ -188,16 +192,88 @@ jobs:
           grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
 
       - name: Use pinned Node 24 for disposable issuer-to-MCP-SDK proof
-        if: matrix.target == 'linux-x64'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
+      - name: Install locked MCP SDK for protected issuer acceptance
+        id: issued_sdk_dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
       - name: Build real JDC runtime for the protected issuer acceptance
-        if: matrix.target == 'linux-x64'
+        id: issued_sdk_runtime
+        run: npm run build
+
+      # Same-token local prerequisite, not a protected cross-principal or
+      # hosted NTFS verdict. Execute the real SDK, not just a compiled test.
+      - name: Test Windows inherited SDK mutation channel (local nonrelease)
+        id: windows_issuer_connected_sdk_local_mutations
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE)) {
+            throw 'E_STORAGE_NODE_PATH_NOT_ABSOLUTE'
+          }
+          $cases = @(
+            @{ Test = 'journaled_mutations::tests::local_windows_real_sdk_issuer_connected_mutation_channel'; Marker = 'T011_WINDOWS_LOCAL_ISSUER_CONNECTED_SDK_MUTATIONS_PASS_NONRELEASE' },
+            @{ Test = 'journaled_mutations::tests::local_windows_issued_sdk_cancelled_staged_mutation_never_publishes'; Marker = 'T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE' }
+          )
+          foreach ($case in $cases) {
+            $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib $case.Test -- --ignored --exact --nocapture 2>&1)
+            $code = $LASTEXITCODE
+            $result | Write-Output
+            if ($code -ne 0) { exit $code }
+            if (-not ($result -contains $case.Marker) -or
+                -not ($result -contains 'T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE') -or
+                -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+              throw 'E_STORAGE_LOCAL_ISSUED_SDK_VERDICT_MISSING'
+            }
+          }
+
+      # Proves actual kernel handoff to a separate native service process.
+      # This same-token local proof is not the hosted distinct-principal gate.
+      - name: Test Windows issued SDK handoff to separate native service
+        id: windows_issuer_connected_sdk_separate_service
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node -ErrorAction Stop).Source
+          if (-not [System.IO.Path]::IsPathFullyQualified($env:JDC_T011_NODE)) {
+            throw 'E_STORAGE_NODE_PATH_NOT_ABSOLUTE'
+          }
+          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_windows_issuer_hands_channel_to_separate_native_service -- --ignored --exact --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if (-not ($result -contains 'T011_WINDOWS_SEPARATE_NATIVE_SERVICE_SDK_MUTATIONS_PASS_NONRELEASE') -or
+              -not ($result -contains 'T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE') -or
+              -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+            throw 'E_STORAGE_SEPARATE_NATIVE_SERVICE_VERDICT_MISSING'
+          }
+
+      # Run the real SDK against the native journal before the privileged
+      # hosted storage proof; no local result counts as admitted-mount evidence.
+      - name: Test Linux SDK native mutations and staged cancellation
+        id: linux_issued_sdk_local_mutations
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JDC_T011_NODE
+          JDC_T011_NODE="$(command -v node)"
+          [[ "$JDC_T011_NODE" = /* && -x "$JDC_T011_NODE" ]]
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_real_jdc_sdk_to_journaled_native_mutations -- --ignored --exact --nocapture 2>&1 | tee "$log"
+          grep -Fxq T011_LINUX_LOCAL_SDK_NATIVE_JOURNAL_EXACT_BYTES_PASS_NONRELEASE "$log"
+          grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
+          cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib journaled_mutations::tests::local_real_sdk_cancelled_staged_mutation_never_publishes -- --ignored --exact --nocapture 2>&1 | tee "$log"
+          grep -Fxq T011_LINUX_REAL_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$log"
+          grep -Fxq T011_LINUX_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$log"
+          grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$log"
 
       - name: Test Linux storage isolation and outside-object integrity
         if: matrix.target == 'linux-x64'
@@ -222,6 +298,43 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-scm-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+
+      - name: Test real Windows SDK read and wrong-connector denial
+        id: windows_scm_sdk_read
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE_BINARY = (Get-Command node.exe -ErrorAction Stop).Source
+          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof observation::job_fixture::sdk_read::tests::real_jdc_sdk_fixed_read_and_wrong_connector_denial -- --ignored --exact --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if (-not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) { throw 'E_SCM_LOCAL_SDK_VERDICT_MISSING' }
+
+      # Same-token, limited-client persistent channel and real native journal.
+      # This does not replace admitted-volume or cross-SCM writer acceptance.
+      - name: Test Windows fresh SDK journaled mutations
+        id: windows_fresh_sdk_local_mutations
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node.exe -ErrorAction Stop).Source
+          $cases = @(
+            @{ Test = 'journaled_mutations::tests::local_windows_real_sdk_fresh_protected_mutation_channel'; Marker = 'T011_WINDOWS_LOCAL_FRESH_SDK_JOURNALED_MUTATIONS_PASS_NONRELEASE' },
+            @{ Test = 'journaled_mutations::tests::local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes'; Marker = 'T011_WINDOWS_LOCAL_FRESH_SDK_CANCELLED_JOURNAL_PASS_NONRELEASE' }
+          )
+          foreach ($case in $cases) {
+            $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib $case.Test -- --ignored --exact --nocapture)
+            $code = $LASTEXITCODE
+            $result | Write-Output
+            if ($code -ne 0) { exit $code }
+            if (-not ($result -contains $case.Marker) -or
+                -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+              throw 'E_STORAGE_FRESH_SDK_VERDICT_MISSING'
+            }
+          }
 
       - name: Test Windows SCM service identity and startup denial
         id: windows_scm_acceptance
@@ -263,7 +376,16 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-storage-domain-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
-          pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1
+          # Keep real volume, topology and dedicated-token controls mandatory.
+          # Actual distinct-principal issuance is required in the separate SCM job.
+          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -StorageDomainOnly)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if ($result -cnotcontains 'T011_STORAGE_WINDOWS_DOMAIN_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_STORAGE_DOMAIN_DEDICATED_TOKENS_PASS_NONRELEASE') {
+            throw 'E_STORAGE_DOMAIN_VERDICT_MISSING'
+          }
 
       - name: Build deny-only native Rust Node-API addon
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml
@@ -295,11 +417,6 @@ jobs:
       # Real Windows OS custody + official SDK Client.callTool, non-shipping.
       # A disposable same-SID adversary must be rejected before native bytes
       # are released from a previously opened, issuer-owned file HANDLE.
-      - name: Install locked MCP SDK for Windows managed-client evidence
-        id: windows_issued_sdk_dependencies
-        if: matrix.target == 'win32-x64'
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
       - name: Exercise protected Windows-issued MCP SDK exact native read
         id: windows_issued_sdk_native_read
         if: matrix.target == 'win32-x64'
@@ -334,3 +451,71 @@ jobs:
           retention-days: 1
           if-no-files-found: error
           compression-level: 0
+
+  # Separate disposable runner: no research compilation in the artifact
+  # producer, no artifact upload/download, cache, or dependent release job.
+  scm-storage-nonrelease:
+    name: SCM admitted storage (nonrelease)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact source
+        id: scm_storage_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned Rust compiler in CI only
+        id: scm_storage_rust
+        run: rustup toolchain install 1.91.1 --profile minimal --component clippy
+
+      - name: Use official Node 24
+        id: scm_storage_node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install locked SDK runtime
+        id: scm_storage_dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build real JDC runtime
+        id: scm_storage_runtime
+        run: npm run build
+
+      - name: Build default deny-only SCM and fixed client
+        id: scm_storage_default
+        run: cargo +1.91.1 build --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm --bin jdc-authority-scm-issued-client
+
+      - name: Build locked native custody controls
+        id: scm_storage_custody
+        run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-store/Cargo.toml
+
+      - name: Validate isolated research library and fixed SCM proof
+        id: scm_storage_native
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +1.91.1 clippy --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --lib --bin jdc-authority-scm-issued-proof -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.1 test --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --lib --bin jdc-authority-scm-issued-proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.1 build --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Windows SCM admitted SDK storage
+        id: windows_scm_admitted_storage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -ScmStorageOnly)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if ($result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE') {
+            throw 'E_STORAGE_SCM_ADMITTED_VERDICT_MISSING'
+          }

@@ -17,6 +17,28 @@ use windows_sys::Win32::{
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 const SERVICE_NAME: &str = "NT SERVICE\\JameDesktopCommanderAuthority";
+
+/// Fixed identities for the disposable cross-principal SCM experiment.
+/// No arbitrary account string is accepted from an IPC caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScmFixtureRole {
+    Authority,
+    Issuer,
+}
+impl ScmFixtureRole {
+    pub fn service_name(self) -> &'static str {
+        match self {
+            Self::Authority => "JameDesktopCommanderAuthority",
+            Self::Issuer => "JameDesktopCommanderIssuer",
+        }
+    }
+    fn account(self) -> &'static str {
+        match self {
+            Self::Authority => SERVICE_NAME,
+            Self::Issuer => "NT SERVICE\\JameDesktopCommanderIssuer",
+        }
+    }
+}
 const MAX_INFO_BYTES: usize = 16_384;
 const MAX_SID_BYTES: u32 = 256;
 
@@ -153,7 +175,10 @@ fn query(token: HANDLE, kind: i32) -> Result<RawInfo, TokenUnverifiable> {
     })
 }
 fn service_sid() -> Result<RawInfo, TokenUnverifiable> {
-    let name: Vec<u16> = SERVICE_NAME.encode_utf16().chain(iter::once(0)).collect();
+    fixture_role_sid(ScmFixtureRole::Authority)
+}
+fn fixture_role_sid(role: ScmFixtureRole) -> Result<RawInfo, TokenUnverifiable> {
+    let name: Vec<u16> = role.account().encode_utf16().chain(iter::once(0)).collect();
     let (mut sid_bytes, mut domain_chars, mut use_type) = (0u32, 0u32, 0 as SID_NAME_USE);
     let first = unsafe {
         LookupAccountNameW(
@@ -224,7 +249,9 @@ where
     Ok(names)
 }
 
-fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> {
+fn native_privilege_records(
+    info: &RawInfo,
+) -> Result<(Vec<LUID_AND_ATTRIBUTES>, Vec<PrivilegeRecord>), TokenUnverifiable> {
     let prefix = mem::offset_of!(TOKEN_PRIVILEGES, Privileges);
     let count: u32 = info.fixed()?;
     let count = count as usize;
@@ -253,6 +280,12 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
         });
         slots.push(slot);
     }
+    validated_enabled_privilege_indices(&records).ok_or(TokenUnverifiable)?;
+    Ok((slots, records))
+}
+
+fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> {
+    let (slots, records) = native_privilege_records(info)?;
     resolve_enabled_privilege_names(&records, |index| {
         let mut buf = [0u16; 256];
         let mut chars = buf.len() as u32;
@@ -272,6 +305,10 @@ fn enabled_privileges(info: &RawInfo) -> Result<Vec<String>, TokenUnverifiable> 
         String::from_utf16(&buf[..chars as usize]).map_err(|_| TokenUnverifiable)
     })
 }
+#[cfg(test)]
+#[path = "windows_fixture_token_tests.rs"]
+mod fixture_tests;
+
 fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
     let label: TOKEN_MANDATORY_LABEL = info.fixed()?;
     // RawInfo::sid performs pointer and complete-length checks first.
@@ -282,8 +319,12 @@ fn integrity_rid(info: &RawInfo) -> Result<u32, TokenUnverifiable> {
 // Both C4g preflight and C4o SCM observation use these exact bounded
 // Windows primitives, but each independent API owns and closes its handle.
 fn open_current_process_token() -> Result<Handle, TokenUnverifiable> {
+    open_process_token(unsafe { GetCurrentProcess() })
+}
+
+fn open_process_token(process: HANDLE) -> Result<Handle, TokenUnverifiable> {
     let mut raw: HANDLE = ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
         return Err(TokenUnverifiable);
     }
     Ok(Handle(raw))
@@ -418,6 +459,62 @@ fn verified_snapshot(
         token_user_sid: matched_user_sid,
         service_account_sid,
     })
+}
+
+/// Nonrelease fixture: resolve the fixed virtual service SID from the OS,
+/// not from a serialized token or a caller-supplied account name.
+pub fn scm_fixture_sid(role: ScmFixtureRole) -> Result<Vec<u8>, TokenUnverifiable> {
+    let expected = fixture_role_sid(role)?;
+    Ok(expected
+        .sid(expected.words.as_ptr().cast_mut().cast())?
+        .to_vec())
+}
+
+/// Nonrelease fixture: independently verify the actual primary token.
+/// Only the traversal privilege may exist, even disabled.
+pub fn verify_scm_fixture_identity(role: ScmFixtureRole) -> Result<(), TokenUnverifiable> {
+    let token = open_current_process_token()?;
+    verify_scm_fixture_token(role, token.0)
+}
+
+/// Verify the fixed role using a kernel process handle, never a reported SID.
+pub fn verify_scm_fixture_process_identity(
+    role: ScmFixtureRole,
+    process: std::os::windows::io::BorrowedHandle<'_>,
+) -> Result<(), TokenUnverifiable> {
+    use std::os::windows::io::AsRawHandle;
+    let token = open_process_token(process.as_raw_handle())?;
+    verify_scm_fixture_token(role, token.0)
+}
+
+pub(crate) fn verify_scm_fixture_token(
+    role: ScmFixtureRole,
+    token: HANDLE,
+) -> Result<(), TokenUnverifiable> {
+    use windows_sys::Win32::Security::LookupPrivilegeValueW;
+    let expected = fixture_role_sid(role)?;
+    let user = token_user_matches_service(token, &expected)?.ok_or(TokenUnverifiable)?;
+    let snapshot = verified_snapshot(token, &expected, user)?;
+    if !matches!(
+        snapshot.classify(),
+        TokenFinding::ObservedDenyOnly | TokenFinding::PrivilegeBaselineUnreviewed
+    ) {
+        return Err(TokenUnverifiable);
+    }
+    let (_, records) = native_privilege_records(&query(token, TokenPrivileges)?)?;
+    let name: Vec<u16> = "SeChangeNotifyPrivilege"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut allowed = windows_sys::Win32::Foundation::LUID::default();
+    if unsafe { LookupPrivilegeValueW(ptr::null(), name.as_ptr(), &mut allowed) } == 0
+        || records.iter().any(|record| {
+            record.luid_low != allowed.LowPart || record.luid_high != allowed.HighPart
+        })
+    {
+        return Err(TokenUnverifiable);
+    }
+    Ok(())
 }
 
 /// Read actual kernel-issued process token; caller cannot supply SID or claims.

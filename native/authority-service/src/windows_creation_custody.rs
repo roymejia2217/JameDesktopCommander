@@ -5,12 +5,13 @@
 //! This API is NOT a trusted launcher, process-origin grant or broker.
 use crate::{
     token_policy::{bounded_buffer_span, bounded_sid_bytes},
+    windows_token::{scm_fixture_sid, verify_scm_fixture_token, ScmFixtureRole},
     IdentityDenied,
 };
 use std::{
     ffi::c_void,
     mem::size_of,
-    os::windows::io::{AsRawHandle, BorrowedHandle},
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     ptr,
 };
 use windows_sys::Win32::{
@@ -19,8 +20,10 @@ use windows_sys::Win32::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         },
-        GetTokenInformation, TokenOwner, TokenPrimary, TokenType, SECURITY_ATTRIBUTES, TOKEN_OWNER,
+        GetTokenInformation, SetKernelObjectSecurity, TokenOwner, TokenPrimary, TokenType,
+        DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_OWNER, TOKEN_QUERY,
     },
+    System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 struct LocalAllocation(*mut c_void);
 impl Drop for LocalAllocation {
@@ -80,10 +83,62 @@ impl OwnerRightsCreationDescriptors {
         }
         let owner = primary_token_owner_sid_text(token)?;
         Ok(Self {
-            process: descriptor(&owner, "0x21000")?,
-            primary_thread: descriptor(&owner, "RC")?,
+            process: descriptor(&owner, "0x21000", None)?,
+            primary_thread: descriptor(&owner, "RC", None)?,
         })
     }
+
+    /// Nonrelease SCM experiment: only the fixed authority service may
+    /// observe the child process. No thread, handle duplication, memory,
+    /// termination or descriptor mutation right is delegated.
+    pub(crate) fn from_scm_issuer_primary_token(
+        token: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, None)
+    }
+
+    /// The job fixture adds only query/synchronize on its primary thread.
+    /// The separate original SCM observation remains thread-inaccessible.
+    pub(crate) fn from_scm_issuer_job_primary_token(
+        token: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, Some("0x100800"))
+    }
+
+    /// Separate fixed-child resume experiment. Only the authority receives
+    /// THREAD_SUSPEND_RESUME in addition to the read-only pin rights.
+    pub(crate) fn from_scm_issuer_resume_primary_token(
+        token: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, Some("0x100802"))
+    }
+
+    fn from_scm_issuer_token(
+        token: BorrowedHandle<'_>,
+        thread_rights: Option<&str>,
+    ) -> Result<Self, IdentityDenied> {
+        verify_scm_fixture_token(ScmFixtureRole::Issuer, token.as_raw_handle())
+            .map_err(|_| IdentityDenied)?;
+        let owner = primary_token_owner_sid_text(token.as_raw_handle())?;
+        let sid = scm_fixture_sid(ScmFixtureRole::Authority).map_err(|_| IdentityDenied)?;
+        let mut aligned = vec![0usize; sid.len().div_ceil(size_of::<usize>())];
+        unsafe {
+            ptr::copy_nonoverlapping(sid.as_ptr(), aligned.as_mut_ptr().cast::<u8>(), sid.len());
+        }
+        let observer = sid_text(aligned.as_mut_ptr().cast())?;
+        if observer == owner {
+            return Err(IdentityDenied);
+        }
+        Ok(Self {
+            process: descriptor(&owner, "0x21000", Some((&observer, "0x101000")))?,
+            primary_thread: descriptor(
+                &owner,
+                "RC",
+                thread_rights.map(|rights| (observer.as_str(), rights)),
+            )?,
+        })
+    }
+
     /// Returns attributes whose lifetime is bounded by the owner of
     /// both descriptors. Keep this borrowed view alive through CreateProcess.
     pub fn borrow_attributes(&self) -> BorrowedCreationAttributes<'_> {
@@ -144,10 +199,12 @@ fn primary_token_owner_sid_text(token: HANDLE) -> Result<String, IdentityDenied>
     if bounded_sid_bytes(slice).is_none() {
         return Err(IdentityDenied);
     }
+    sid_text(token_owner.Owner)
+}
+
+fn sid_text(sid: *mut c_void) -> Result<String, IdentityDenied> {
     let mut sid_text: *mut u16 = ptr::null_mut();
-    if unsafe { ConvertSidToStringSidW(token_owner.Owner, &mut sid_text) } == 0
-        || sid_text.is_null()
-    {
+    if unsafe { ConvertSidToStringSidW(sid, &mut sid_text) } == 0 || sid_text.is_null() {
         return Err(IdentityDenied);
     }
     let _sid_text_buffer = LocalAllocation(sid_text.cast());
@@ -157,11 +214,19 @@ fn primary_token_owner_sid_text(token: HANDLE) -> Result<String, IdentityDenied>
     String::from_utf16(unsafe { std::slice::from_raw_parts(sid_text, length) })
         .map_err(|_| IdentityDenied)
 }
-fn descriptor(owner: &str, owner_permissions: &str) -> Result<LocalAllocation, IdentityDenied> {
+fn descriptor(
+    owner: &str,
+    owner_permissions: &str,
+    observer: Option<(&str, &str)>,
+) -> Result<LocalAllocation, IdentityDenied> {
     // OWNER RIGHTS (S-1-3-4) prevents implicit owner WRITE_DAC/READ_CONTROL.
     // Explicit SYSTEM control remains; neither child object grants
     // PROCESS_DUP_HANDLE nor THREAD_SET_CONTEXT to the token owner.
-    let sddl = format!("D:P(A;;GA;;;SY)(A;;{owner_permissions};;;{owner})(A;;RC;;;OW)");
+    let observation = observer.map_or_else(String::new, |(sid, rights)| {
+        format!("(A;;{rights};;;{sid})")
+    });
+    let sddl =
+        format!("D:P(A;;GA;;;SY)(A;;{owner_permissions};;;{owner})(A;;RC;;;OW){observation}");
     let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
     let mut raw = ptr::null_mut();
     if unsafe {
@@ -177,4 +242,25 @@ fn descriptor(owner: &str, owner_permissions: &str) -> Result<LocalAllocation, I
         return Err(IdentityDenied);
     }
     Ok(LocalAllocation(raw))
+}
+
+/// SCM owns creation of its service process. Before issuing a child, the
+/// isolated virtual issuer limits its own process DACL as well. The
+/// experiment assumes trusted administrative provisioning and no
+/// pre-existing untrusted process under this virtual account.
+pub fn seal_current_scm_fixture_issuer() -> Result<(), IdentityDenied> {
+    let current = unsafe { GetCurrentProcess() };
+    let mut raw = ptr::null_mut();
+    if unsafe { OpenProcessToken(current, TOKEN_QUERY, &mut raw) } == 0 || raw.is_null() {
+        return Err(IdentityDenied);
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let attributes =
+        OwnerRightsCreationDescriptors::from_scm_issuer_primary_token(token.as_handle())?;
+    if unsafe { SetKernelObjectSecurity(current, DACL_SECURITY_INFORMATION, attributes.process.0) }
+        == 0
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
 }

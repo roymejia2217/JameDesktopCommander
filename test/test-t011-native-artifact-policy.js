@@ -66,6 +66,54 @@ rejectChange('rejects altered pinned upload revision', (job) => {
 rejectChange('rejects extra native probe jobs', (_job, doc) => {
   doc.jobs.unreviewed = { 'runs-on': 'windows-latest', steps: [] };
 });
+test('SCM storage research runs in a separate mandatory artifact-free job', () => {
+  const isolated = workflow.jobs['scm-storage-nonrelease'];
+  assert.ok(isolated, 'missing isolated SCM storage job');
+  assert.equal(isolated['runs-on'], 'windows-2025');
+  assert.equal(isolated.if, undefined);
+  assert.equal(isolated['continue-on-error'], undefined);
+  assert.equal(isolated.needs, undefined);
+  assert.equal(isolated.outputs, undefined);
+  assert.equal(isolated.permissions, undefined);
+  assert.equal(isolated.steps.filter(s => s.id === 'windows_scm_admitted_storage').length, 1);
+  assert.ok(isolated.steps.every(s => !/upload-artifact|download-artifact|actions\/cache/i.test(s.uses ?? '')));
+  assert.ok(workflow.jobs['native-probe'].steps.every(s => !/--features|scm-storage-proof/.test(s.run ?? '')));
+});
+rejectChange('rejects removal of isolated SCM storage acceptance', (_job, doc) => {
+  delete doc.jobs['scm-storage-nonrelease'];
+});
+rejectChange('rejects isolated SCM job permission escalation', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease'].permissions = { contents: 'write' };
+});
+rejectChange('rejects publication from isolated SCM storage', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease'].steps.push(structuredClone(upload(doc.jobs['native-probe'])));
+});
+rejectChange('rejects optional isolated SCM acceptance', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease']['continue-on-error'] = true;
+});
+rejectChange('rejects disabling the isolated acceptance step', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease'].steps.find(s => s.id === 'windows_scm_admitted_storage').if = false;
+});
+rejectChange('rejects isolated SCM job output handoff', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease'].outputs = { unreviewed: 'value' };
+});
+rejectChange('rejects isolated SCM acceptance with a forced successful exit', (_job, doc) => {
+  const step = doc.jobs['scm-storage-nonrelease'].steps.find(s => s.id === 'windows_scm_admitted_storage');
+  step.run = 'exit 0\n' + step.run;
+});
+rejectChange('rejects isolated research build with a forced successful exit', (_job, doc) => {
+  const step = doc.jobs['scm-storage-nonrelease'].steps.find(s => s.id === 'scm_storage_native');
+  step.run = 'exit 0\n' + step.run;
+});
+rejectChange('rejects isolated job on a persistent self-hosted runner', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease']['runs-on'] = 'self-hosted';
+});
+rejectChange('rejects isolated runtime automatic package cache', (_job, doc) => {
+  doc.jobs['scm-storage-nonrelease'].steps.find(s => s.id === 'scm_storage_node').with['package-manager-cache'] = true;
+});
+rejectChange('rejects artifact producer dependency on experimental job', (job) => {
+  job.needs = ['scm-storage-nonrelease'];
+});
 rejectChange('rejects native job permission overrides', (job) => {
   job.permissions = { contents: 'write' };
 });

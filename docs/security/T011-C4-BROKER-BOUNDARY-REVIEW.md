@@ -1,11 +1,29 @@
 # T011-C4 - Out-of-process filesystem broker: security design gate
 
-**Status:** PROPOSED FOR INDEPENDENT REVIEW; NOT ACCEPTED OR IMPLEMENTED.
+**Status:** TECHNICAL-DIRECTOR REVIEW RECORDED; BOUNDED NONSHIPPING VALIDATION AUTHORIZED; PRODUCTION NOT ACCEPTED.
 **Base:** protected `main` at `a2c660aab9b3268ae525ccd1ccb4b2798318de47` (2026-11-13).
 **Scope:** #139, subject to independent #148 and #124 gates. No runtime/service/release grant.
 **Canonical inventories:** [filesystem handlers](T011-C-HANDLER-CALLGRAPH-DECISION.md),
 [object isolation](T011-HARDLINK-OBJECT-ISOLATION-DECISION.md),
 [filesystem boundary](T011-FILESYSTEM-CAPABILITY-BOUNDARY.md).
+
+## Accountable review decision (2026-11-26)
+
+The project owner explicitly authorizes the technical director to perform the
+adversarial design review and choose the next bounded implementation. There
+is no designated external reviewer; do not invent one or block research on
+a fictitious approval. The director's review is not independent external
+certification. Independent evidence means actual separately executed kernel
+and hosted CI acceptance against the exact candidate, with unchanged negative
+controls. Record assumptions, failures, limitations and the release verdict.
+The owner retains production-release authority; all #124, #139, #148,
+postmerge, provenance and fail-closed requirements remain mandatory.
+
+This decision authorizes the specific hosted AppArmor process-custody
+experiment below. It also permits technical design and bounded nonshipping
+implementation of the Windows issuer without a nonexistent reviewer.
+No production activation, privilege change on a developer host, generic
+privileged launcher, or automatic P0 closure is approved.
 
 ## 1. Evidence versus implementation
 
@@ -350,10 +368,660 @@ Official references:
    of the unsafe N-API receiver. A valid issuer alone never grants content
    access.
 
+### Windows preconnected mutation transport — nonshipping experiment
+
+The current-token local experiment passes a connected, bounded duplex pipe
+endpoint to the suspended Node process through an explicit process-creation
+handle allowlist; its diagnostics use a separate file. Node does not open the
+pipe by name. The endpoint is a channel capability, not a filesystem handle,
+global namespace grant, reusable admission credential, or proof of the writer's
+SID. The fixed SDK request plan is deliberately not a shipping protocol.
+
+A subsequent real Windows local fixture transfers the preconnected server
+endpoint to a separate native service process using an explicit inheritance
+allowlist. The issuer retains the exact created client process object, and
+passes reduced process references (query-limited-information and synchronize)
+for itself and the client. The service validates the inherited handle types,
+pipe endpoint, connector process, observed primary-token SIDs and liveness;
+original inherited handles are made non-inheritable and remain scoped to the
+service subprocess lifetime. The environment numbers only locate inherited
+handles and do not authorize a caller. The service alone executes the native
+mutation plan and owns its SQLite journal. The issuer verifies exact final
+bytes and sequence, including a committed operation whose acknowledgement is
+lost. Both fixtures use the current token; separate processes are not distinct
+security principals. The local CI gate is a prerequisite, not an admission
+or anti-delegation proof.
+
+This experiment does not revise the approved admission contract above.
+A distinct protected issuer must still establish primary-token provenance,
+same-session creation, service-side handle custody and independently verified
+attacker denial. The local default pipe DACL and same-token fixture cannot
+establish those properties. A retained process handle alone cannot establish
+per-message writer identity or prevent an intentionally cooperating issued
+client from forwarding its capability. Any production delegation policy or
+change to the earlier no-handle requirement needs independent approval.
+The hosted NTFS admission and outside-object integrity gates remain mandatory.
+
+#### Required Windows issuer environment preflight (nonrelease)
+
+Before treating the hosted issuer as eligible to launch independent primary
+tokens, the existing NTFS acceptance harness now explicitly executes native
+observations under the service, client and attacker credentials. Their actual
+TokenUser and TokenOwner must match the independently provisioned role, all
+four SIDs must differ, the primary token session must match the issuer,
+integrity must be medium, and administrator/SYSTEM membership and the
+fixture's prohibited privilege inventory must be absent (not merely disabled).
+This is a deliberately conservative disposable-fixture contract, not a
+production token allowlist.
+
+The issuer is observed separately with its own token, using the bounded native
+TokenPrivileges inventory and exact locally resolved LUIDs for
+SeAssignPrimaryTokenPrivilege and SeIncreaseQuotaPrivilege. The gate requires
+both privileges to be present; their presence alone is not proof of successful
+CreateProcessAsUserW or protected custody. The fixture does not enable or
+assign privileges, change session IDs, or attempt a less constrained fallback.
+On the local Windows validation host the former privilege is absent; the
+latter is present but disabled (session 0). The ordinary storage-domain
+verdict remains scoped to the original storage proof; the independent issuer
+prerequisite has its own mandatory marker and failure path. Hosted execution
+is still required, and neither successful prerequisite observation nor the
+local same-token handoff replaces the actual cross-principal SDK-to-NTFS
+mutation acceptance.
+
+#### Windows distinct SCM principal observation (nonrelease)
+
+The native job on `e13322027b37443102859a48eb0ec7f6191f6b7b`
+(run 45933296360, Windows job 140290627251) again rejected the old
+CreateProcessAsUserW prerequisite. Do not grant SeAssignPrimaryTokenPrivilege,
+SeIncreaseQuotaPrivilege or SeDebugPrivilege to an interactive issuer.
+
+The next bounded SCM experiment provisions the fixed authority and issuer
+virtual accounts independently, using restricted service SIDs, protected
+service-object DACLs and a RequiredPrivileges list limited to the traversal
+privilege. Actual token inspection requires the correct role, primary token,
+restricted SID, no elevated group, and no other privilege even disabled.
+The issuer creates and retains a suspended child under its own primary
+token with process and thread DACLs applied at creation. The only additional
+observer ACE is PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE for the
+fixed authority SID on the process, never the thread. Before child issuance
+the issuer also limits its own process DACL; SCM creation itself is under
+trusted administrative provisioning, not a proof against pre-existing
+same-account handles.
+
+A disposable protected rendezvous file identifies the two live kernel process
+objects by PID and creation time. The observer resolves the fixed SCM service,
+matches its live process identity, opens only the reduced process handles,
+rejects a stale creation stamp and requires exact access-denied results for
+handle duplication, memory access, termination, thread manipulation and ACL
+mutation. The issuer, not the independent observer, checks the actual primary
+token of its child using the original handle. Microsoft documents separate
+token-object access checks and a cross-account privilege limitation for
+OpenProcessToken; the observer must not receive debug privilege.
+The fixture verifies the observer cannot write the rendezvous file and
+requires explicit terminal cleanup of the suspended child and both services.
+
+This is a kernel-object observation experiment, not a production attestation
+protocol: the file is only a test rendezvous protected by administrative
+provisioning, not a durable or authenticated MCP grant. The trusted issuer's
+RUNNING state denotes test readiness only; the separate deny-only SCM binary
+is unchanged. No Node child or mutation is executed by this experiment.
+Hosted positive and negative results are still required before integrating
+the preconnected SDK channel, admitted NTFS journal and cancellation with
+these principals. Existing storage and issuer prerequisite gates stay
+mandatory; the new proof cannot replace them on the strength of a local
+unit-test result.
+
+References:
+<https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken>.
+
+#### Windows creation-time SDK job custody (nonrelease)
+
+The SCM observation experiment protects the issuer process and observes the
+suspended child. It does not establish that every issuer thread is protected
+against a subsequently executing child with the same virtual-account SID.
+Do not infer thread custody from a process DACL or use the writable
+rendezvous file as a grant after Node executes.
+
+The next local lifecycle proof strengthens the existing three real SDK
+mutation paths, rather than adding another mock transport. The caller owns
+an unnamed noninheritable Windows Job Object with exactly
+`JOB_OBJECT_LIMIT_ACTIVE_PROCESS` (one process) and
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, with no breakaway flags. The launcher
+adds `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
+`PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` at creation, not after resume;
+the job handle never appears in the inherited handle list. It verifies
+membership, exact limits, process count and the child's actual mitigation
+policy before returning the suspended child. Every real SDK verdict also
+requires exact terminal job accounting (one process admitted, zero active).
+The Cargo dependency features are test-only; no installed service changes.
+
+RED on physical Windows: the former SDK launcher returned child-process
+policy bit 0. The first job experiment retained CREATE_NO_WINDOW and
+the native child returned 0xC0000142; real Node also failed before readiness.
+The tested job path uses DETACHED_PROCESS with all standard handles
+explicitly supplied, retaining the one-process limit and no-child policy.
+Tests require a normal child creation positive control, actual descendant
+creation denial, and job-close termination of a still-suspended child while
+the issuer's original process handle remains open. Closing a job can report
+exit code zero; process signaling before issuer Drop, without ResumeThread,
+is the termination evidence, not an invented nonzero exit-code requirement.
+A job and child-process policy do not by themselves constitute an OS sandbox.
+
+Next integration contract, pending actual distinct-account SCM proof:
+
+- The independent authority owns a protected uniquely named job and local
+  first-instance pipe. The fixed SCM issuer receives only temporary job
+  assignment access and the exact pipe client rights. Reject existing
+  objects, untrusted owners, broad grants, and unavailable kernel state.
+- Authenticate the SCM connector before handoff. The issuer creates the
+  fixed SDK image suspended with creation-time job membership and explicit
+  handle inheritance. Authority pins the exact live process and primary
+  thread using the issuer-attested creation identities and kernel relation.
+  Only the authority may receive the narrowly scoped resume right on that
+  child's primary thread; no context, memory, or handle-duplication grants.
+- After verification, revoke the issuer's job-assignment ACE, acknowledge
+  the handoff, require the issuer to close all original endpoint, job and
+  process/thread handles, and require actual issuer-process termination
+  before the authority resumes the child. Never resume on a timeout,
+  service-status label alone or an unsigned client assertion. The existing
+  same-token live-issuer channel is not this ownership-transfer state.
+- The authority retains exclusive job custody and server endpoint; a
+  running client must be denied reopening the job or issuer, creating
+  descendants, modifying protected state, or obtaining foreign object
+  handles. On failed handoff the child remains suspended and job closure
+  terminates it. Require explicit real crash/cleanup tests for both owners.
+- Only then connect the existing admitted-volume journal and exact real
+  SDK read/mutation/cancellation/recovery plan; legacy prerequisite remains
+  mandatory until equivalent or stronger end-to-end proof exists.
+
+References:
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>.
+The distinct-account lifecycle and NTFS integration remain unproven.
+
+#### Windows authority-owned job handoff (nonrelease; hosted verdict pending)
+
+The next bounded SCM fixture preserves the original distinct-principal pin
+and denial checks, then adds a second fixed, never-resumed child. The
+verified authority creates a unique protected job and retains full custody;
+the verified issuer can open only `JOB_OBJECT_ASSIGN_PROCESS`. Both roles
+use protected, noninheritable events with exact role-specific access and
+reject existing named objects. The authority verifies the exact kernel
+owner, protected DACL and ACE inventory before using its job and after
+revoking the assignment ACE. The issuer independently requires access
+failure for every other job right and for a new assignment open after
+revocation. Creation-time job membership and child policy are mandatory;
+the issuer checks mitigation on its original handle because Microsoft
+requires PROCESS_QUERY_INFORMATION, which the observer is not granted.
+
+The issuer transfers only the fixed suspended fixture's lifecycle: it
+closes its creation and assignment handles, acknowledges, cleans up the
+original proof child and exits voluntarily. The authority retains both
+process pins, verifies actual issuer termination and the still-live second
+child's job membership, then closes its job and requires the child to exit.
+There is no resume, IPC filesystem grant or arbitrary launch interface.
+The test harness checks the second rendezvous record's protected custody
+and both terminal service codes; external STOP on the success path is no
+longer sufficient. Existing negative controls and legacy storage issuer
+privilege prerequisite remain mandatory. The pinned dependency version
+is unchanged; the additional Windows API features support this nonshipping
+binary. Local same-token controls are not distinct-account acceptance.
+The hosted job marker `T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE` was
+observed for candidate `f87781ecab3804b1b54f3cae92abf08e19636074`, Windows
+Native Security job 140847030543. The legacy issuer prerequisite still
+failed later in storage acceptance, so this is not a release verdict.
+
+The next proof replaces file-only handoff acceptance with a one-shot,
+first-instance local inbound named pipe. The authority verifies the exact
+protected descriptor; the issuer receives write-data, read-control and
+synchronize rights only, never generic write or instance creation. The
+issuer verifies the descriptor from its own endpoint and requests only
+SecurityIdentification. The authority verifies the actual connector PID
+against the retained issuer process and the kernel-observed client SID
+after each bounded read. The canonical frame must equal the audit record,
+and the existing job membership, revocation, issuer exit and termination
+checks still apply. Both transports share the existing deadline and
+cancel/drain primitives. The marker
+`T011_WINDOWS_SCM_AUTHENTICATED_HANDOFF_PASS_NONRELEASE` remains pending
+actual hosted execution. Local positive and negative controls are not
+cross-account proof; the connector PID alone does not attest a delegated
+writer. No production authority or resume is granted. A real SDK channel,
+independently pinned thread/resume, issuer and authority crash controls,
+and admitted NTFS journal remain required.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient>,
+<https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex>.
+
+#### SCM authenticated handoff failure evidence (nonrelease)
+
+Hosted Windows job 140989889988 for `7598232b784432a9aa008061416d9770e070ae94`
+failed at `E_SCM_DISTINCT_OBSERVER_PROOF_FAILED` before native storage.
+Service stderr was not captured by the hosted controller. The fixture now
+preserves fixed, bounded SCM service-specific failure phases without changing
+success codes 8 and 10 or any authorization check. Observer codes 9 and
+20–36 cover initial verification, job, pipe creation/descriptor, readiness,
+connection, header, connector, token, SID, body, frame, child, revocation,
+release, issuer exit, cleanup and terminal checks. Issuer codes 11 and
+40–48 cover initial verification, start, child, record, pipe open,
+descriptor, write, revocation wait, release and cleanup. The controller emits
+only allowlisted failure codes for stopped services; unavailable issuer
+status cannot mask the primary observer failure. The actual cross-account
+failure remains unresolved; no change to SCM privileges or pipe rights.
+The primary-thread candidate is conserved separately until this gate passes.
+
+#### SCM client open-rights correction (nonrelease; hosted verdict pending)
+
+Hosted Native Security job 140995347278 for `5ec4ded1e919771b6a5654d26317366b1b9211b6`
+reported issuer phase 43 (open) and observer phase 23 (await frame).
+The previous local full-owner test did not exercise the restricted client
+ACE. A real NPFS fixture with only the client ACE reproduces the former
+`CreateFileW` access denial. Adding exactly `FILE_READ_ATTRIBUTES` to the
+requested access and matching role ACE enables the complete authenticated
+frame transfer. `CreateFileW` can implicitly request this metadata access;
+no generic write, append/instance-creation, data-read, attribute-write,
+ACL-write or owner-write grant is added. The existing exact descriptor,
+connector, token, job and exit checks remain mandatory.
+
+The local regression control checks the exact old access request and ACE,
+then the corrected pair. An initial negative assumption about requesting
+FILE_APPEND_DATA on the client endpoint was disproved by NPFS: that request
+can succeed without authorizing creation of another server instance. The
+replacement control exercises the actual CreateNamedPipeW operation with
+room for two instances and without FIRST_PIPE_INSTANCE on the second open;
+it must return ERROR_ACCESS_DENIED. Other forbidden open rights (data read,
+attribute/EA write, WRITE_DAC, WRITE_OWNER) must also be denied. These are
+local kernel controls, not independent SCM account acceptance. The same
+hosted authenticated handoff marker and all legacy gates remain required.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-open-modes>.
+
+#### Windows primary-thread pin (nonrelease; hosted verdict pending)
+
+The authenticated handoff is versioned as `JDC2` and requires the creation
+identity of the exact primary thread retained by the issuer. A thread ID
+is only a locator. The authority pins the actual thread with
+`THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` for the job-bound child
+only, and checks kernel thread ID, owning process ID, creation time and
+liveness against the retained process object. A stale stamp must fail.
+The original SCM child still denies even this read-only thread open;
+context, termination, resume, full query, token, descriptor mutation and
+other thread-control rights remain denied. The job-bound child's process
+and thread must remain live after actual issuer exit and both signal when
+the authority closes the last job handle. A terminated thread cannot
+satisfy its live stamp. No resume is authorized in this experiment.
+
+`T011_WINDOWS_SCM_PRIMARY_THREAD_PIN_PASS_NONRELEASE` requires the actual
+hosted proof; local kernel controls and canonical frame tests alone do
+not establish a cross-account result. The later fixed-child resume proof
+must preserve these negative controls for the non-resumable scenario.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadtimes>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights>.
+
+#### Windows controlled fixed-child resume (nonrelease; hosted verdict pending)
+
+Hosted Windows job 141019533625 at `3a70d4f4f31bd6f3818a9938f73fc065c5fba220`
+accepted the authenticated handoff and primary-thread pin. The later legacy
+storage issuer prerequisite still failed; no storage or release acceptance.
+
+The next disposable proof retains the original observer-only scenario (8/10
+terminal service codes, resume denied, last-job-close termination) and runs
+a second fixed resume scenario (12/14 codes) under the same two independently
+verified SCM roles with separate record and kernel object names. Only the
+second fixed job child grants the authority thread QUERY_LIMITED_INFORMATION,
+SYNCHRONIZE and SUSPEND_RESUME at creation. The original child and the
+observer-only job child retain their prior DACLs. All other negative process,
+thread and job controls, authenticated handoff, revocation and issuer
+termination checks remain mandatory. No generic launcher or host privilege
+change is introduced. The authority checks that the issuer cannot satisfy
+the clean-exit gate while live, then requires actual signaled issuer exit
+with code zero and the expected stopped SCM service-specific result before
+any resume, revalidates job membership and the exact primary thread,
+opens the minimal resume handle and requires ResumeThread to return one.
+The fixed child must independently verify the restricted issuer identity
+and exit with code 17, both process and thread signaled. No data root or
+SDK channel is granted. A failed proof retains fail-closed cleanup.
+The two scenarios have distinct mandatory terminal codes and the controller
+checks custody of both pairs of audit records. New observer failure phases
+37/38 distinguish resume and child exit. The hosted marker
+`T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE` is pending. Actual SDK
+read/mutation, authenticated request writer and crash controls remain open.
+
+#### Windows fixed real JDC SDK read after controlled resume (nonrelease)
+
+Hosted Windows job 141027146188 at `05e90a7166638af8cc79f4c21667a20433a3ac9e`
+accepted the controlled-resume marker; legacy storage still failed later.
+The third mandatory SCM scenario uses separate names, audit records and
+terminal service codes 16/18, preserving observer-only 8/10 and resume
+12/14. The issuer creates only the administrator-staged fixed Node image
+and fixed SDK script with a job-bound restricted child, with a dedicated
+config/temp directory and no inherited channel or arbitrary image argument.
+The controller stages the built JDC runtime and locked dependencies,
+checks every staged entry for reparse points, exact role DACL and trusted
+owner, and hashes the Node executable, package manifest and support scripts.
+This is not a signed distribution inventory or general installed bootstrap.
+
+Before resume the authority retains the fixed test-owned sentinel file
+from its protected directory, and the actual issuer must be denied opening
+that file (ERROR_ACCESS_DENIED, not a sharing violation). Following the
+same authenticated handoff, assignment revocation, clean issuer exit,
+SCM terminal result and thread/job checks, the Node child connects to a
+fresh authority-owned local duplex pipe. The existing native peer mask
+0x0012019B excludes instance creation; local actual Node exchange and
+second CreateNamedPipeW denial were demonstrated. No generic-write ACE.
+The authority checks the retained child, thread, job and kernel-observed
+connector/SID after the exact read request, rejects extra input, and fences
+one read of the retained regular single-link object and bounded disclosure
+with a one-use policy ticket. All I/O shares an eight-second deadline.
+Only the exact test bytes are eligible for disclosure. The actual JDC
+managed adapter and official SDK must return these bytes, and the child
+must exit 19, with both process/thread signaled. The current authority
+does not equate connector PID and SID alone with nondelegable writer
+identity; the creation-time protected process/thread/job constraints and
+independent hosted adversarial acceptance remain necessary.
+
+Local integration requires the actual locked built runtime and explicitly
+selected Node, and checks a separate same-SID connector against the wrong
+retained process pin (no file response). The existing native job now runs
+that ignored-by-default integration explicitly and requires exactly one
+passing test before SCM. New hosted marker:
+`T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE`.
+Phases 39 and 50–57 distinguish SDK staging/connection/challenge/request/
+connector/token/frame/file/response. Hosted distinct-account read acceptance
+has passed (Windows job 141050855702, candidate ae5a8487). No grant to
+shipping code, durable root/epoch policy, NTFS mutation or recovery proof
+follows from that read verdict. Linux remains independently blocked.
+
+#### Windows fresh SDK journaled mutation and cancellation transport (nonrelease)
+
+Hosted Windows job 141050855702 for `ae5a8487d6c28c1ae025eb364ac9edf06a92ff51`
+accepted the third fixed real-SDK read scenario, including the previous
+SCM custody and controlled resume checks. The legacy storage issuer
+privilege check still failed later. Linux connect EACCES remains open.
+
+The next local nonrelease integration reuses the existing journaled native
+mutation engine, fixed SDK mutation plan and bounded named-pipe I/O. A fresh
+Node connector uses one persistent duplex instance, with the same limited
+client access mask 0x0012019B as the accepted SCM read (SYSTEM full,
+OWNER RIGHTS read-control, current non-SYSTEM test SID limited). No
+generic-write ACE, inherited channel or reconnect on unknown outcome.
+The local test retains the actual child process, authenticates the
+readiness byte and each request read against the connector and observed SID,
+and checks the existing publication gate. Five real committed operations
+produce REWRITE-LOST with journal sequence 5; the final acknowledgment
+is intentionally lost. The wrong retained process control leaves the
+journal unchanged and creates no managed files.
+
+The fresh cancellation scenario uses two limited local channels, the
+same MCP request cancellation and actual native staged-publication fence.
+The authenticated cancellation byte must be observed before the authority
+disconnects the mutation channel. The journal is rejected, the stage and
+target are absent, outside bytes are unchanged, the reopened journal
+rejects replay, and the authenticated completion channel confirms the
+verdict. Both real-runtime tests are explicit mandatory cases in the
+existing native-security workflow, before the SCM and hosted storage
+acceptance; no previous gate is removed. These are same-token local
+fixtures, not cross-SCM writer provenance, whole-volume admission,
+shipping broker authority, or power-loss recovery. The next integration
+must reuse the admitted-volume checks and journal under the independently
+verified SCM authority and retain the full negative controls.
+
+#### SCM admitted NTFS SDK mutation and cancellation (nonrelease; hosted acceptance observed)
+
+Hosted Windows job 141057723543 at `0d2fead3a0c354dc73a0be3519022de471086c32`
+accepted both fresh local SDK mutation/cancellation markers and the distinct
+SCM real read. The legacy issuer prerequisite still failed; Linux EACCES
+is unchanged. The new feature `scm-storage-proof` is opt-in for the CI-only
+SCM proof binary; default non-test builds exclude the mutation engine and
+journal. Existing versions and locked dependencies are reused.
+
+The shared fixed request executor is now fallible rather than dependent on
+test assertions. It authenticates every frame and repeats custody at the
+publication fence, records terminal SQLite state before acknowledgment,
+and checks exact file bytes. The separate cancellation executor requires
+the actual authenticated cancellation byte, private staging, no publication,
+terminal rejected journal and stage removal. Missing cancellation evidence fails the proof; the cancellation scenario never publishes. A post-commit verification failure never acknowledges success or authorizes replay.
+Local SDK tests exercise both shared executors with default and opt-in builds.
+
+A second existing hosted VHD-controller invocation provisions a fresh
+128 MiB non-system NTFS VHD and verifies its backing identity immediately
+before assigning root custody to the restricted SCM authority. The fixed
+administrator-created manifest remains read-only for the two roles; native
+admission reuses VerifiedVolume and the existing SQLite schema. Mutation
+mode (60/61) provisions a fresh journal, executes five fixed mutations with
+the last acknowledgment intentionally lost, reopens the admitted journal
+and rejects replay. Cancellation mode (62/63) requires the previous state,
+authenticates the cancellation and checks sequence six/rejected plus replay
+denial and unchanged final bytes. No client-provided native path is decoded.
+The authority checks the protected job, child and thread before each
+publication; the actual issuer must receive ERROR_ACCESS_DENIED for
+direct journal read/write and root write before the child is issued.
+
+The hosted controller requires both stopped services to be deleted before
+detaching the VHD, retains the volume on uncertain cleanup, and checks
+separate ordinary principals cannot read or mutate either final file or
+journal. Each rewrite has a readable auxiliary positive control. Actual
+cross-volume hardlink errors and SHA-256 checks of final, journal and
+outside bytes remain mandatory. Existing SCM and legacy storage gates
+are unchanged and still required. The initial integration's pre-push
+rejected feature builds inside the native artifact matrix. The opt-in
+build and VHD execution now run in a separate mandatory, artifact-free
+Windows job in the same Native Security workflow, with pinned source and
+toolchain, no cache, job outputs, dependencies, permission override or
+failure suppression. The existing artifact producer and its feature
+prohibition remain intact. The dedicated artifact policy requires the
+exact job inventory and commands and rejects early-success bypasses.
+New verdicts:
+`T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE`,
+`T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE`,
+`T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE`.
+All three were emitted by successful hosted job 141084882677, run
+46179258756, at `173e9e4f4a6a7fbb10d1e7ec251f8555005870e2`.
+The Windows matrix job 141084882982 passed the volume, journal and dedicated
+role observations before failing the obsolete issuer privilege prerequisite.
+The subsequent candidate keeps the mandatory real topology, journal,
+synthetic peer and three dedicated-token tests in that matrix, checks their
+fixed verdicts and exit status, and retains the legacy preflight for explicit
+legacy invocations. Actual distinct-principal issuance remains mandatory in
+the separate SCM job; no extra privileges are added to satisfy the old model.
+The new combined workflow still requires hosted validation. No shipping grant,
+durable production root/epoch administration, arbitrary request parser,
+power-loss recovery, or full nondelegable-writer proof is claimed.
+
+#### Windows request cancellation at the native publication fence (nonrelease)
+
+The local same-token SDK fixture now exercises actual MCP cancellation after
+native staging. Windows libuv duplicates the inherited standard descriptor
+when opening a pipe and does not close that original descriptor when the
+socket is destroyed. A timeout is therefore not evidence of peer closure.
+The forwarded MCP abort sends an explicit cancellation frame through the
+issuer-connected channel; the native service requires that exact frame,
+disconnects its endpoint, and verifies that publication is no longer
+admissible while the issued process remains alive.
+
+The proof requires the rejected journal sequence and digest, absent destination
+and stage, unchanged outside sentinel, rejected replay after reopening the
+journal, and no SDK resubmission. Its terminal synchronization uses a separate
+test-only channel with native peer verification. The positive Windows SDK
+paths also check the pipe state at the publication fence; this observation
+does not make later disconnection atomic with a filesystem rename.
+
+The local cancellation and positive inherited-channel cases are mandatory
+native CI checks. This evidence does not establish distinct-principal SCM
+custody, hosted NTFS acceptance, or release readiness.
+
+#### Linux request cancellation at the native publication fence (nonrelease)
+
+An actual local SDK cancellation after staging (not process termination) is
+now exercised with the issued process kept alive until the native service
+reports a terminal journal verdict. Process liveness alone was insufficient:
+the original test path could commit after the SDK closed its request socket.
+The Linux SDK mutation fixture now requires an idle, live request connection
+at the publication fence, rejecting EOF, half-close, unexpected pending data
+or a socket observation error. The actual staged cancellation must record
+Rejected with the expected sequence/digest, remove the stage, preserve the
+outside sentinel, and leave no destination object or retry. This is one
+commit-time observation, not an asynchronous revocation acknowledgement or a
+promise that a disconnect after commit admission can undo a kernel rename.
+The regular six-request SDK plan and the local cancellation case are separate
+mandatory CI checks before admitted-mount acceptance. The hosted harness also
+requires a fresh root-issued SDK child on the same admitted journal, advancing
+sequence 10 to a rejected sequence 11 without altering final.txt or the outside
+sentinel. On candidate `64c869ac82f9ae437dfbe265cb12f386111f0935`, GitHub
+Actions run 45902743027, Linux job 140192174194, completed successfully and
+emitted `T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE`, including the root-issued
+SDK cancellation and distinct-peer rejection markers. This is hosted fixture
+evidence, not production acceptance. Windows job 140192173828 failed during
+positive NTFS admission before the first journaled mutation. Windows
+cancellation/authority claims remain independently gated.
+
+Follow-up candidate `ed3deaa1c6cac3d126aa3925f04668ac6ac26932` (run
+45906663715) identified `FindFirstVolumeMountPointW` returning Win32 error 5
+under the actual dedicated service account. Do not grant storage management
+privileges to the service and do not interpret that error as an empty volume.
+The experimental replacement enumerates local volume GUIDs and obtains each
+volume's complete DOS access-path inventory using `FindFirstVolumeW`,
+`FindNextVolumeW` and `GetVolumePathNamesForVolumeNameW`. See Microsoft Learn:
+<https://learn.microsoft.com/en-us/windows/win32/fileio/displaying-volume-paths>.
+The admitted volume must occur exactly once with only its expected drive root;
+no other volume may list a mount below that root. Unknown, incomplete or
+malformed inventories deny admission. This is an observation under the trusted
+issuer's namespace/topology assumption, not a globally atomic mount-manager
+transaction. The hosted experiment must prove the actual dedicated-token
+positive and both incoming and outgoing mount negatives with unchanged
+journal bytes, exact denial reasons, and successful readmission after removal.
+No real mount transition is performed on a developer workstation.
+
+Candidate `6b21c83d0ce143149a3ad9c4b18bbef3a9a38473`, hosted native run
+45918855692, Windows job 140244473887, emitted
+`T011_WINDOWS_ADMITTED_JOURNALED_MUTATIONS_PASS_NONRELEASE` under the dedicated
+service account. The following active-owner mount transition failed, and
+cleanup masked the primary failure with alias-removal/VHD-state errors.
+Linux native job 140244474082 passed. The Windows test issuer now uses the
+Storage provider's partition access-path cmdlets, checks exact GUID and path
+ownership before removal, confirms absence and rejects unknown reparse points.
+It retains the primary failure independently of cleanup, and never detaches
+or recursively removes an unverified topology. This fixture correction is
+not evidence that either hosted mount transition has passed yet.
+
+#### Linux post-exec SDK process custody (technical decision, nonrelease)
+
+The native Rust client's non-dumpable state cannot be assumed to survive
+exec of Node. Yama scope 1 alone does not deny every ptrace READ-mode check.
+Candidate `4e034f25bc02caf2bbbbd1c7c0367e84c41b0a6b`, native run
+45931757252, Linux job 140285739378, failed the same-UID inspector with
+`E_PEER_SDK_INSPECTION_NOT_DENIED` despite the target profile being enforced.
+AppArmor's kernel tracee check can be skipped for an unconfined tracer.
+The profile is retained as defense in depth, not the process custody boundary.
+
+The selected replacement experiment creates a fresh user namespace in a
+single-threaded root fixture process before dropping credentials. Its
+privileged parent pins that namespace, checks root ownership and its exact
+parent namespace through nsfs ioctls, and writes only the one-ID UID and
+GID maps. The child clears supplementary groups, sets all real/effective/
+saved IDs to the dedicated account, sets no-new-privileges, and execs the
+root-owned byte-verified Node image without an intermediate shell. A private
+socketpair synchronizes namespace creation, mapping, Node readiness and
+release. The issuer verifies the namespace identity and maps, actual Node
+image, credential fields, empty capabilities and enforced AppArmor label
+before attesting the live pidfd. No UID 0 mapping is introduced.
+The Node fixture cannot request broker I/O before the issuer releases it.
+
+A separate lightweight kernel experiment with ordinary Node processes
+verified all five inspection denials against the root-created namespace,
+with positive READ controls against an ordinary same-UID/GID process.
+That experiment does not substitute for the hosted SDK acceptance.
+Candidate `fb041f669427cf33cbcfe82fd1e94fcdef0db078` subsequently passed
+the actual hosted Linux native job 140296781765 (run 45935227835), including
+the mandatory protected SDK read, journaled mutations and staged cancellation
+gates, and emitted `T011_STORAGE_LINUX_DOMAIN_PASS_NONRELEASE`. The Windows
+job 140296781554 passed local SDK cancellation, separate-process handoff and
+admitted NTFS mutations, but failed the old distinct issuer prerequisite.
+This is scoped nonrelease evidence, not production acceptance.
+References: Linux kernel `security/commoncap.c` and
+`security/apparmor/task.c`, user_namespaces(7), ioctl_nsfs(2).
+
+A real, explicitly unconfined second process under the dedicated client
+UID/GID must pass procfs READ-mode controls against a live ordinary same-UID process, then receive
+only EACCES/EPERM for the issued Node executable link, descriptor link,
+maps/mem opens and pidfd_getfd. Missing objects, exited processes and
+unsupported syscalls fail the test. No protected bytes are read or printed
+by the negative probe. Keep the target pidfd alive, observe its enforced
+label before and after inspection, and only then attest. Require this
+verdict for SDK read, journaled mutations and cancellation, retaining
+existing legitimate operation, same-UID/foreign-peer and outside-byte
+controls. No global Yama/sysctl changes. Remove only the unique profile
+after preventing new fixture image launches and establishing that the
+dedicated UID has no remaining processes; otherwise retain the fixture
+and fail the disposable job. Never load this profile on developer hosts.
+
+This is an experiment for the Ubuntu hosted target, not a claim of portable
+production MAC availability, protection from a trusted administrator, all
+possible process inspection interfaces, signal denial, or mutable client
+state integrity. Actual hosted profile enforcement and negative/positive
+controls are required before calling the experiment successful. Unsupported
+hosts must deny rather than use a weaker runtime. References:
+<https://manpages.ubuntu.com/manpages/noble/man5/apparmor.d.5.html>,
+<https://manpages.ubuntu.com/manpages/noble/man8/apparmor_parser.8.html>,
+<https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html>.
+
+#### Linux SDK state custody (nonrelease, hosted verdict pending)
+
+The issued SDK previously used a writable host directory shared by processes
+of the dedicated client UID. Process inspection denial alone does not
+protect that directory. The root fixture now creates a fresh mount namespace,
+makes propagation recursively private, and mounts a bounded tmpfs (16 MiB,
+4096 inodes, nosuid/nodev/noexec) at the root-owned empty state mountpoint
+before entering the root-created user namespace and dropping credentials.
+The issuer pins the mount namespace and checks its owning user namespace.
+The actual SDK must exclusively create a fixed, non-secret state canary before
+readiness. The issuer checks the real filesystem type, device, owner, mode,
+mount flags, file identity and exact bytes, then repeats the checks after
+a separate unconfined same-UID process attempts read/write opens through
+both the host path and the SDK's procfs root. The ordinary same-UID control
+must still traverse its target's procfs root. No request is attested until
+these checks pass. Read, mutations and staged cancellation each require a
+fresh private state verdict; the host state must remain empty and unmounted
+afterward. Cleanup refuses recursive deletion through a visible state mount.
+
+Hosted job 141084882865 (run 46179258756, `173e9e4f4a6a7fbb10d1e7ec251f8555005870e2`)
+passed state and post-exec custody but failed the actual pathname connection
+with E_NATIVE_READ_CONNECT_EACCES after E_NATIVE_SOCKET_PATH_ACCESS_OK.
+AppArmor pathname socket mediation can reject a disconnected mount path
+when the listener and connecting process occupy different mount namespaces
+(Linux security/apparmor/af_unix.c and path.c). The exact audit cause was
+not captured; this is a testable causal hypothesis, not a confirmed diagnosis.
+The candidate instead starts each disposable authority in a fresh private
+root-owned mount namespace. The issuer verifies the actual authority peer
+credentials, pins its kernel SO_PEERPIDFD, and passes its exact mount namespace
+FD over the existing private readiness socket. The launcher verifies the
+namespace type and owner, joins it before mounting the private state and
+creating the separate user namespace, and closes the namespace FD before exec.
+The issuer checks namespace equality, live authority, and all existing
+post-exec and same-UID controls before attestation. All three scenarios require
+T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE. No AppArmor relaxation,
+abstract-socket fallback, extra client privileges or host-state access is used.
+This only isolates ephemeral fixture client state. It does not establish
+durable policy custody, prevent denial-of-service signals, or authorize
+production deployment. The actual hosted kernel acceptance remains mandatory.
+
+The disposable Windows token observations are isolated in a private
+`cfg(test)` child module. The SCM observer retains its no-output contract;
+fixture outputs are fixed verdict markers only, not SID, session or privilege
+inventories. Neither an issuer preflight nor a marker grants launch authority.
+
 ### Mandatory decision experiment
 
-The **next non-shipping functional increment**, once its issuer/principal
-model receives independent review, is an official SDK MCP session under a
+The **next non-shipping functional increment**, under a recorded technical
+decision for its issuer/principal model, is an official SDK MCP session under a
 *real* issued managed-client process, with one broker-held regular-file read
 and exact output bytes. Its negative controls must independently demonstrate:
 
@@ -386,9 +1054,10 @@ What exact revocation and rollback evidence is required?
 
 ## 6. Acceptance sequence and review decision record
 
-1. Independent security reviewers must decide supported storage/volume/mount
-   models, service/client principals, IPC custody, anti-rollback mechanism and
-   the exact object-origin invariant; record concrete approval or rejection.
+1. The technical director must decide supported storage/volume/mount models,
+   service/client principals, IPC custody, anti-rollback mechanism and the
+   exact object-origin invariant; record concrete approval or rejection and
+   independently executed acceptance evidence.
 2. Preserve the original hard-link and namespace-swap RED evidence. On real
    disposable Linux, prove an actual `jdc-authority` server serves one valid
    bounded read, rejects a foreign client, stale/replayed/revoked operations,
@@ -408,7 +1077,7 @@ What exact revocation and rollback evidence is required?
    installers and independently checked postmerge `main`. Never bypass the
    existing production isolation gate to make research code reachable.
 
-**Open reviewer decisions:** Which operator owns immutable roots? Which
+**Open technical decisions:** Which operator owns immutable roots? Which
 filesystems and external aliases are permitted? What OS-protected monotonic
 state survives rollback/reinstall? How is the actual interactive-user MCP
 launched as a verified client without granting access to another same-UID/SID
@@ -416,9 +1085,11 @@ process? How are transferred descriptors excluded? How are previously sent
 bytes distinguished from revocation-acknowledged future sends? What evidence
 proves Windows named-pipe parity?
 
-**Disposition:** REVIEW REQUIRED / NO IMPLEMENTATION PERMISSION.
-The current `main` continues deny-only for the native authority; #124, #139
-and #148 remain P0. `releaseEligible:false` and production NO-GO remain.
+**Disposition:** BOUNDED NONSHIPPING EXPERIMENT AUTHORIZED BY TECHNICAL
+DIRECTOR; EXACT-HOST EVIDENCE REQUIRED; NO PRODUCTION IMPLEMENTATION OR
+RELEASE PERMISSION. The current `main` continues deny-only for the native
+authority; #124, #139 and #148 remain P0. `releaseEligible:false` and
+production NO-GO remain.
 
 ## Official primitive references
 

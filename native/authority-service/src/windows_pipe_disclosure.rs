@@ -23,7 +23,11 @@ const MAX_DEADLINE_MS: u128 = 30_000;
 /// Write an exact byte slice on the caller-owned, connected overlapped pipe.
 /// Uses a single event wait per pending chunk: no poll loop or unbounded
 /// per-operation deadline. The caller must close any pipe after an error.
-fn write_chunk(pipe: BorrowedHandle<'_>, chunk: &[u8], millis: u32) -> Result<(), IdentityDenied> {
+pub(crate) fn write_chunk(
+    pipe: BorrowedHandle<'_>,
+    chunk: &[u8],
+    millis: u32,
+) -> Result<(), IdentityDenied> {
     let raw_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
     if raw_event.is_null() {
         return Err(IdentityDenied);

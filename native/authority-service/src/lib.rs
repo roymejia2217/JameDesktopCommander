@@ -42,6 +42,34 @@ pub mod linux_read_disclosure;
 #[cfg(all(target_os = "linux", test))]
 mod linux_cross_principal;
 
+// The engine remains absent from default non-test builds. The explicit
+// Windows SCM storage proof feature is a nonshipping acceptance target.
+#[cfg(all(
+    test,
+    any(windows, target_os = "linux"),
+    not(all(windows, feature = "scm-storage-proof"))
+))]
+mod journaled_mutations;
+#[cfg(all(windows, feature = "scm-storage-proof"))]
+pub mod journaled_mutations;
+#[cfg(all(target_os = "linux", test))]
+mod linux_managed_mount;
+#[cfg(all(target_os = "linux", test))]
+mod linux_managed_mutations;
+#[cfg(any(
+    all(test, any(windows, target_os = "linux")),
+    all(windows, feature = "scm-storage-proof")
+))]
+mod managed_mutation_contract;
+#[cfg(all(windows, any(test, feature = "scm-storage-proof")))]
+mod windows_managed_mutations;
+#[cfg(all(windows, any(test, feature = "scm-storage-proof")))]
+mod windows_managed_volume;
+#[cfg(all(windows, any(test, feature = "scm-storage-proof")))]
+mod windows_mutation_pipe;
+#[cfg(all(windows, test))]
+mod windows_sdk_job;
+
 #[cfg(windows)]
 pub mod windows_token;
 

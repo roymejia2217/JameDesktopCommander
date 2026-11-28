@@ -1,8 +1,8 @@
 //! Disposable SCM job-owner/issuer experiment, never production IPC.
 //! The two fixed virtual accounts participate only in the hosted proof.
 use super::{
-    denied_process_rights, denied_thread_rights, open_observer_pin, open_observer_thread_pin,
-    Handoff, ProofPhase, Stamp,
+    denied_process_rights, denied_thread_control_rights, open_observer_pin,
+    open_observer_thread_pin, verify_terminal_issuer, Handoff, JobProofMode, ProofPhase, Stamp,
 };
 use jdc_authority_service::{
     windows_issued_client::IssuedClient,
@@ -70,9 +70,10 @@ fn fixture_prefix(stage: &str) -> Result<String, IdentityDenied> {
 struct Names {
     prefix: String,
     record: PathBuf,
+    mode: JobProofMode,
 }
 impl Names {
-    fn for_role(role: ScmFixtureRole) -> Result<Self, IdentityDenied> {
+    fn for_role(role: ScmFixtureRole, mode: JobProofMode) -> Result<Self, IdentityDenied> {
         verify_scm_fixture_identity(role).map_err(|_| IdentityDenied)?;
         let exe = std::env::current_exe().map_err(|_| IdentityDenied)?;
         if exe.file_name().and_then(|v| v.to_str()) != Some("jdc-authority-scm-issued-proof.exe") {
@@ -87,11 +88,14 @@ impl Names {
         )?;
         Ok(Self {
             prefix,
-            record: stage.join("handoff").join("job-issued-process.txt"),
+            record: stage
+                .join("handoff")
+                .join(mode.record("job-issued-process.txt", "resume-job-issued-process.txt")),
+            mode,
         })
     }
     fn object(&self, suffix: &str) -> Vec<u16> {
-        format!("{}-{suffix}", self.prefix)
+        format!("{}{}-{suffix}", self.prefix, self.mode.suffix())
             .encode_utf16()
             .chain(Some(0))
             .collect()
@@ -288,8 +292,8 @@ pub(super) struct IssuerJobProof {
     ack: OwnedHandle,
 }
 impl IssuerJobProof {
-    pub(super) fn prepare() -> Result<Self, IdentityDenied> {
-        let names = Names::for_role(ScmFixtureRole::Issuer)?;
+    pub(super) fn prepare(mode: JobProofMode) -> Result<Self, IdentityDenied> {
+        let names = Names::for_role(ScmFixtureRole::Issuer, mode)?;
         let start = new_event(
             &names,
             "start",
@@ -310,6 +314,7 @@ impl IssuerJobProof {
         &self,
         issuer: Stamp,
         phase: &Cell<ProofPhase>,
+        mode: JobProofMode,
     ) -> Result<(), IdentityDenied> {
         phase.set(ProofPhase::IssuerAwaitStart);
         wait(&self.start, 15000)?;
@@ -323,7 +328,11 @@ impl IssuerJobProof {
             )
         })?;
         forbidden_job_rights(&self.names)?;
-        let child = IssuedClient::launch_scm_job_fixture(assignment)?;
+        let child = if mode == JobProofMode::Resume {
+            IssuedClient::launch_scm_resume_fixture(assignment)?
+        } else {
+            IssuedClient::launch_scm_job_fixture(assignment)?
+        };
         verify_scm_fixture_process_identity(ScmFixtureRole::Issuer, child.process_handle())
             .map_err(|_| IdentityDenied)?;
         if verify_scm_fixture_process_identity(ScmFixtureRole::Authority, child.process_handle())
@@ -571,9 +580,11 @@ pub(super) fn observe(
     issuer_pin: &OwnedHandle,
     original_pin: &OwnedHandle,
     phase: &Cell<ProofPhase>,
+    mode: JobProofMode,
+    service: &windows_service::service::Service,
 ) -> Result<(), IdentityDenied> {
     phase.set(ProofPhase::ObserverJob);
-    let names = Names::for_role(ScmFixtureRole::Authority)?;
+    let names = Names::for_role(ScmFixtureRole::Authority, mode)?;
     let start = open_event(&names, "start", EVENT_MODIFY_STATE)?;
     let ack = open_event(&names, "ack", SYNCHRONIZE)?;
     let revoked = new_event(
@@ -615,12 +626,16 @@ pub(super) fn observe(
         return Err(IdentityDenied);
     }
     denied_process_rights(handoff.child.pid)?;
-    denied_thread_rights(handoff.thread)?;
+    denied_thread_control_rights(handoff.thread, mode)?;
     job.verify_child(child.as_handle())?;
     handoff.child.verify(child.as_handle())?;
     handoff
         .thread_identity()
         .verify(child.as_handle(), thread.as_handle())?;
+    // A still-live issuer must never satisfy the resume gate.
+    if require_clean_issuer_exit(issuer_pin.as_handle()).is_ok() {
+        return Err(IdentityDenied);
+    }
     phase.set(ProofPhase::ObserverRevoke);
     job.revoke()?;
     signal(&revoked)?;
@@ -636,17 +651,45 @@ pub(super) fn observe(
         return Err(IdentityDenied);
     }
     wait(issuer_pin, WAIT_MS)?;
-    if unsafe { GetExitCodeProcess(issuer_pin.as_raw_handle(), &mut exit) } == 0 || exit != 0 {
-        return Err(IdentityDenied);
-    }
+    require_clean_issuer_exit(issuer_pin.as_handle())?;
+    verify_terminal_issuer(service, mode)?;
     handoff.child.verify(child.as_handle())?;
     handoff
         .thread_identity()
         .verify(child.as_handle(), thread.as_handle())?;
     job.verify_child(child.as_handle())?;
+    if mode == JobProofMode::Resume {
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+        };
+        phase.set(ProofPhase::ObserverResume);
+        require_clean_issuer_exit(issuer_pin.as_handle())?;
+        let resume = owned(unsafe {
+            OpenThread(
+                THREAD_QUERY_LIMITED_INFORMATION | THREAD_SUSPEND_RESUME | SYNCHRONIZE,
+                0,
+                handoff.thread,
+            )
+        })?;
+        handoff
+            .thread_identity()
+            .verify(child.as_handle(), resume.as_handle())?;
+        if unsafe { ResumeThread(resume.as_raw_handle()) } != 1 {
+            return Err(IdentityDenied);
+        }
+        drop(resume);
+        phase.set(ProofPhase::ObserverChildExit);
+        wait(&child, WAIT_MS)?;
+        wait(&thread, WAIT_MS)?;
+        let mut exit = u32::MAX;
+        if unsafe { GetExitCodeProcess(child.as_raw_handle(), &mut exit) } == 0 || exit != 17 {
+            return Err(IdentityDenied);
+        }
+    }
     phase.set(ProofPhase::ObserverCleanup);
     drop(job);
-    // No child code ran. Last-job-handle closure must signal both objects.
+    // The observer-only child never ran; last job close must signal both.
+    // In the resume scenario both must already have exited with the fixed code.
     wait(&child, WAIT_MS)?;
     wait(&thread, WAIT_MS)?;
     if handoff
@@ -659,9 +702,51 @@ pub(super) fn observe(
     Ok(())
 }
 
+fn require_clean_issuer_exit(issuer: BorrowedHandle<'_>) -> Result<(), IdentityDenied> {
+    let mut code = u32::MAX;
+    if unsafe { WaitForSingleObject(issuer.as_raw_handle(), 0) } != WAIT_OBJECT_0
+        || unsafe { GetExitCodeProcess(issuer.as_raw_handle(), &mut code) } == 0
+        || code != 0
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resume_gate_requires_a_real_cleanly_exited_issuer() {
+        use std::process::Command;
+        let raw = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION
+                    | SYNCHRONIZE,
+                0,
+                std::process::id(),
+            )
+        };
+        let current = owned(raw).unwrap();
+        assert!(require_clean_issuer_exit(current.as_handle()).is_err());
+        let image = std::env::current_exe().unwrap();
+        let mut child = Command::new(&image)
+            .args([
+                "--exact",
+                "observation::job_fixture::tests::job_names_are_bound_to_the_unique_fixture_stage",
+            ])
+            .spawn()
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        use std::os::windows::io::AsHandle;
+        assert!(require_clean_issuer_exit(child.as_handle()).is_ok());
+        let mut failed = Command::new(&image)
+            .arg("--not-a-valid-test-argument")
+            .spawn()
+            .unwrap();
+        assert!(!failed.wait().unwrap().success());
+        assert!(require_clean_issuer_exit(failed.as_handle()).is_err());
+    }
     #[test]
     fn job_names_are_bound_to_the_unique_fixture_stage() {
         let stage = "JDC-T011-SCM-0123456789abcdef0123456789abcdef";
@@ -736,7 +821,9 @@ mod tests {
     }
     #[test]
     fn ordinary_process_cannot_enter_fixture_roles() {
-        assert!(Names::for_role(ScmFixtureRole::Issuer).is_err());
-        assert!(Names::for_role(ScmFixtureRole::Authority).is_err());
+        for mode in [JobProofMode::Observe, JobProofMode::Resume] {
+            assert!(Names::for_role(ScmFixtureRole::Issuer, mode).is_err());
+            assert!(Names::for_role(ScmFixtureRole::Authority, mode).is_err());
+        }
     }
 }

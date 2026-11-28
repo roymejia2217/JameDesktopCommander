@@ -150,7 +150,7 @@ pub struct IssuedClient {
     terminate_on_drop: bool,
 }
 
-/// The fixed, never-resumed SCM fixture child holds only its own creation
+/// The fixed, suspended SCM fixture child holds only its own creation
 /// handles and the issuer's temporary assignment handle. Ordinary process
 /// launchers cannot construct this type or relinquish their cleanup duty.
 pub struct ScmJobFixtureChild {
@@ -169,7 +169,7 @@ impl ScmJobFixtureChild {
     }
     /// Only called after the separately verified job owner acknowledges
     /// membership and revokes new assignments. Job close is the fail-safe.
-    /// This fixture never grants a resume right or arbitrary launch authority.
+    /// The issuer relinquishes all creation handles; this wrapper never resumes the child.
     pub fn relinquish(self) -> Result<(), IdentityDenied> {
         crate::windows_token::verify_scm_fixture_identity(
             crate::windows_token::ScmFixtureRole::Issuer,
@@ -212,7 +212,14 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
     ) -> Result<Self, IdentityDenied> {
-        Self::launch_suspended_with_observation(executable, command_line, environment, false, None)
+        Self::launch_suspended_with_observation(
+            executable,
+            command_line,
+            environment,
+            false,
+            None,
+            false,
+        )
     }
 
     /// Only the fixed SCM issuer role may create an observable proof child.
@@ -222,13 +229,35 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
     ) -> Result<Self, IdentityDenied> {
-        Self::launch_suspended_with_observation(executable, command_line, environment, true, None)
+        Self::launch_suspended_with_observation(
+            executable,
+            command_line,
+            environment,
+            true,
+            None,
+            false,
+        )
     }
 
     /// Disposable SCM proof only: the verified fixed issuer may associate its
     /// suspended fixture image with an already-open assignment-only job.
     /// No inherited handles, resume or service authority are granted here.
     pub fn launch_scm_job_fixture(job: OwnedHandle) -> Result<ScmJobFixtureChild, IdentityDenied> {
+        Self::launch_fixed_scm_job_child(job, false)
+    }
+
+    /// Separate disposable proof, fixed image and fixed role check only.
+    /// Never exposes a general-purpose launcher or a resume handle.
+    pub fn launch_scm_resume_fixture(
+        job: OwnedHandle,
+    ) -> Result<ScmJobFixtureChild, IdentityDenied> {
+        Self::launch_fixed_scm_job_child(job, true)
+    }
+
+    fn launch_fixed_scm_job_child(
+        job: OwnedHandle,
+        resume_fixture: bool,
+    ) -> Result<ScmJobFixtureChild, IdentityDenied> {
         crate::windows_token::verify_scm_fixture_identity(
             crate::windows_token::ScmFixtureRole::Issuer,
         )
@@ -255,6 +284,9 @@ impl IssuedClient {
         let mut command = std::ffi::OsString::from("\"");
         command.push(image.as_os_str());
         command.push(OsStr::new("\""));
+        if resume_fixture {
+            command.push(OsStr::new(" --fixed-resume-proof"));
+        }
         let system = std::env::var("SystemRoot").map_err(|_| IdentityDenied)?;
         let child = Self::launch_suspended_with_observation(
             &image,
@@ -262,6 +294,7 @@ impl IssuedClient {
             &[("SystemRoot", &system)],
             true,
             Some(job.as_handle()),
+            resume_fixture,
         )?;
         Ok(ScmJobFixtureChild {
             child,
@@ -275,7 +308,11 @@ impl IssuedClient {
         environment: &[(&str, &str)],
         observable: bool,
         job: Option<BorrowedHandle<'_>>,
+        resume_fixture: bool,
     ) -> Result<Self, IdentityDenied> {
+        if resume_fixture && (!observable || job.is_none()) {
+            return Err(IdentityDenied);
+        }
         if !executable.is_absolute() || !executable.is_file() {
             return Err(IdentityDenied);
         }
@@ -287,7 +324,9 @@ impl IssuedClient {
             return Err(IdentityDenied);
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let descriptors = if observable && job.is_some() {
+        let descriptors = if resume_fixture {
+            OwnerRightsCreationDescriptors::from_scm_issuer_resume_primary_token(token.as_handle())?
+        } else if observable && job.is_some() {
             OwnerRightsCreationDescriptors::from_scm_issuer_job_primary_token(token.as_handle())?
         } else if observable {
             OwnerRightsCreationDescriptors::from_scm_issuer_primary_token(token.as_handle())?
@@ -1089,6 +1128,10 @@ mod tests {
     fn sdk_job_ordinary_caller_cannot_relinquish_cleanup() {
         let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
         assert!(IssuedClient::launch_scm_job_fixture(
+            job.as_handle().try_clone_to_owned().unwrap()
+        )
+        .is_err());
+        assert!(IssuedClient::launch_scm_resume_fixture(
             job.as_handle().try_clone_to_owned().unwrap()
         )
         .is_err());

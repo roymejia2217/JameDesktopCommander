@@ -666,6 +666,35 @@ References: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsa
 <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>,
 <https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights>.
 
+#### Windows controlled fixed-child resume (nonrelease; hosted verdict pending)
+
+Hosted Windows job 141019533625 at `3a70d4f4f31bd6f3818a9938f73fc065c5fba220`
+accepted the authenticated handoff and primary-thread pin. The later legacy
+storage issuer prerequisite still failed; no storage or release acceptance.
+
+The next disposable proof retains the original observer-only scenario (8/10
+terminal service codes, resume denied, last-job-close termination) and runs
+a second fixed resume scenario (12/14 codes) under the same two independently
+verified SCM roles with separate record and kernel object names. Only the
+second fixed job child grants the authority thread QUERY_LIMITED_INFORMATION,
+SYNCHRONIZE and SUSPEND_RESUME at creation. The original child and the
+observer-only job child retain their prior DACLs. All other negative process,
+thread and job controls, authenticated handoff, revocation and issuer
+termination checks remain mandatory. No generic launcher or host privilege
+change is introduced. The authority checks that the issuer cannot satisfy
+the clean-exit gate while live, then requires actual signaled issuer exit
+with code zero and the expected stopped SCM service-specific result before
+any resume, revalidates job membership and the exact primary thread,
+opens the minimal resume handle and requires ResumeThread to return one.
+The fixed child must independently verify the restricted issuer identity
+and exit with code 17, both process and thread signaled. No data root or
+SDK channel is granted. A failed proof retains fail-closed cleanup.
+The two scenarios have distinct mandatory terminal codes and the controller
+checks custody of both pairs of audit records. New observer failure phases
+37/38 distinguish resume and child exit. The hosted marker
+`T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE` is pending. Actual SDK
+read/mutation, authenticated request writer and crash controls remain open.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

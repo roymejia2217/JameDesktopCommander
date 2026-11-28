@@ -94,7 +94,7 @@ impl OwnerRightsCreationDescriptors {
     pub(crate) fn from_scm_issuer_primary_token(
         token: BorrowedHandle<'_>,
     ) -> Result<Self, IdentityDenied> {
-        Self::from_scm_issuer_token(token, false)
+        Self::from_scm_issuer_token(token, None)
     }
 
     /// The job fixture adds only query/synchronize on its primary thread.
@@ -102,12 +102,20 @@ impl OwnerRightsCreationDescriptors {
     pub(crate) fn from_scm_issuer_job_primary_token(
         token: BorrowedHandle<'_>,
     ) -> Result<Self, IdentityDenied> {
-        Self::from_scm_issuer_token(token, true)
+        Self::from_scm_issuer_token(token, Some("0x100800"))
+    }
+
+    /// Separate fixed-child resume experiment. Only the authority receives
+    /// THREAD_SUSPEND_RESUME in addition to the read-only pin rights.
+    pub(crate) fn from_scm_issuer_resume_primary_token(
+        token: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, Some("0x100802"))
     }
 
     fn from_scm_issuer_token(
         token: BorrowedHandle<'_>,
-        observe_thread: bool,
+        thread_rights: Option<&str>,
     ) -> Result<Self, IdentityDenied> {
         verify_scm_fixture_token(ScmFixtureRole::Issuer, token.as_raw_handle())
             .map_err(|_| IdentityDenied)?;
@@ -126,7 +134,7 @@ impl OwnerRightsCreationDescriptors {
             primary_thread: descriptor(
                 &owner,
                 "RC",
-                observe_thread.then_some((&observer, "0x100800")),
+                thread_rights.map(|rights| (observer.as_str(), rights)),
             )?,
         })
     }

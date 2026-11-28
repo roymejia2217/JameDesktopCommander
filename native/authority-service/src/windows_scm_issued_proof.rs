@@ -6,6 +6,7 @@
 mod observation;
 #[cfg(windows)]
 mod proof {
+    use super::observation::JobProofMode;
     use jdc_authority_service::{
         windows_issued_client::IssuedClient, windows_token::ScmFixtureRole, IdentityDenied,
     };
@@ -28,23 +29,33 @@ mod proof {
     #[derive(Clone, Copy)]
     enum Mode {
         Legacy,
-        Issuer,
-        Observer,
+        Issuer(JobProofMode),
+        Observer(JobProofMode),
     }
     impl Mode {
         fn from_args() -> Option<Self> {
             let mut args = std::env::args_os().skip(1);
             match (args.next().as_deref(), args.next()) {
                 (None, None) => Some(Self::Legacy),
-                (Some(arg), None) if arg == "--issuer-observer-proof" => Some(Self::Issuer),
-                (Some(arg), None) if arg == "--authority-observer-proof" => Some(Self::Observer),
+                (Some(arg), None) if arg == "--issuer-observer-proof" => {
+                    Some(Self::Issuer(JobProofMode::Observe))
+                }
+                (Some(arg), None) if arg == "--authority-observer-proof" => {
+                    Some(Self::Observer(JobProofMode::Observe))
+                }
+                (Some(arg), None) if arg == "--issuer-resume-proof" => {
+                    Some(Self::Issuer(JobProofMode::Resume))
+                }
+                (Some(arg), None) if arg == "--authority-resume-proof" => {
+                    Some(Self::Observer(JobProofMode::Resume))
+                }
                 _ => None,
             }
         }
         fn name(self) -> &'static str {
             match self {
-                Self::Issuer => ScmFixtureRole::Issuer.service_name(),
-                Self::Legacy | Self::Observer => NAME,
+                Self::Issuer(_) => ScmFixtureRole::Issuer.service_name(),
+                Self::Legacy | Self::Observer(_) => NAME,
             }
         }
     }
@@ -66,8 +77,8 @@ mod proof {
         };
         let result = match mode {
             Mode::Legacy => report_proof(),
-            Mode::Issuer => report_issuer(),
-            Mode::Observer => report_observer(),
+            Mode::Issuer(mode) => report_issuer(mode),
+            Mode::Observer(mode) => report_observer(mode),
         };
         if result.is_err() {
             eprintln!("E_SCM_ISSUER_STATUS_UNAVAILABLE");
@@ -96,21 +107,25 @@ mod proof {
         Ok(())
     }
 
-    fn report_observer() -> windows_service::Result<()> {
+    fn report_observer(mode: JobProofMode) -> windows_service::Result<()> {
         let handler = service_control_handler::register(NAME, |command| match command {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         })?;
         let phase = std::cell::Cell::new(super::observation::ProofPhase::ObserverInitial);
-        let reason = if super::observation::observe(&phase).is_ok() {
-            8
+        let reason = if super::observation::observe(&phase, mode).is_ok() {
+            if mode == JobProofMode::Resume {
+                12
+            } else {
+                8
+            }
         } else {
             phase.get().code()
         };
         terminal(&handler, reason)
     }
 
-    fn report_issuer() -> windows_service::Result<()> {
+    fn report_issuer(mode: JobProofMode) -> windows_service::Result<()> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let handler = service_control_handler::register(
             ScmFixtureRole::Issuer.service_name(),
@@ -124,8 +139,12 @@ mod proof {
             },
         )?;
         let phase = std::cell::Cell::new(super::observation::ProofPhase::IssuerInitial);
-        let reason = if super::observation::issue(&handler, receiver, &phase).is_ok() {
-            10
+        let reason = if super::observation::issue(&handler, receiver, &phase, mode).is_ok() {
+            if mode == JobProofMode::Resume {
+                14
+            } else {
+                10
+            }
         } else {
             phase.get().code()
         };

@@ -48,10 +48,12 @@ fn name(names: &Names) -> Result<Vec<u16>, IdentityDenied> {
     {
         return Err(IdentityDenied);
     }
-    Ok(format!(r"\\.\pipe\JDC-T011-SCM-HANDOFF-{id}")
-        .encode_utf16()
-        .chain(Some(0))
-        .collect())
+    Ok(
+        format!(r"\\.\pipe\JDC-T011-SCM-HANDOFF-{id}{}", names.mode.suffix())
+            .encode_utf16()
+            .chain(Some(0))
+            .collect(),
+    )
 }
 fn client(name: &[u16]) -> Result<OwnedHandle, IdentityDenied> {
     let raw = unsafe {

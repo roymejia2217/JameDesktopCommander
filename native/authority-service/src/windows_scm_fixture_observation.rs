@@ -20,7 +20,7 @@ use std::{
 };
 use windows_service::{
     service::{
-        ServiceAccess, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        Service, ServiceAccess, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType,
     },
     service_control_handler::ServiceStatusHandle,
@@ -41,8 +41,31 @@ use windows_sys::Win32::{
 };
 const OBSERVE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum JobProofMode {
+    Observe,
+    Resume,
+}
+impl JobProofMode {
+    fn record(self, observer: &str, resume: &str) -> PathBuf {
+        PathBuf::from(if self == Self::Resume {
+            resume
+        } else {
+            observer
+        })
+    }
+    fn suffix(self) -> &'static str {
+        if self == Self::Resume {
+            "-resume"
+        } else {
+            ""
+        }
+    }
+}
+
 // Fixed nonshipping SCM service-specific denial codes. Never contain paths,
-// credentials, kernel handles, or untrusted error text. Success remains 8/10.
+// credentials, kernel handles, or untrusted error text. Observer-only
+// success remains 8/10; separate resume success uses 12/14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ProofPhase {
@@ -65,6 +88,8 @@ pub enum ProofPhase {
     ObserverIssuerExit = 34,
     ObserverCleanup = 35,
     ObserverTerminal = 36,
+    ObserverResume = 37,
+    ObserverChildExit = 38,
     IssuerAwaitStart = 40,
     IssuerChild = 41,
     IssuerRecord = 42,
@@ -173,13 +198,13 @@ impl Handoff {
     }
 }
 
-fn fixture_path() -> Result<PathBuf, IdentityDenied> {
+fn fixture_path(mode: JobProofMode) -> Result<PathBuf, IdentityDenied> {
     let exe = std::env::current_exe().map_err(|_| IdentityDenied)?;
     Ok(exe
         .parent()
         .ok_or(IdentityDenied)?
         .join("handoff")
-        .join("issued-process.txt"))
+        .join(mode.record("issued-process.txt", "resume-issued-process.txt")))
 }
 
 fn open_observer_pin(stamp: Stamp) -> Result<OwnedHandle, IdentityDenied> {
@@ -248,6 +273,9 @@ fn denied_process_rights(pid: u32) -> Result<(), IdentityDenied> {
     Ok(())
 }
 fn denied_thread_rights(tid: u32) -> Result<(), IdentityDenied> {
+    denied_thread_control_rights(tid, JobProofMode::Observe)
+}
+fn denied_thread_control_rights(tid: u32, mode: JobProofMode) -> Result<(), IdentityDenied> {
     for access in [
         THREAD_GET_CONTEXT,
         THREAD_SET_CONTEXT,
@@ -262,6 +290,9 @@ fn denied_thread_rights(tid: u32) -> Result<(), IdentityDenied> {
         0x0004_0000,
         0x0008_0000,
     ] {
+        if mode == JobProofMode::Resume && access == THREAD_SUSPEND_RESUME {
+            continue;
+        }
         let raw = unsafe { OpenThread(access, 0, tid) };
         let error = unsafe { GetLastError() };
         if !raw.is_null() {
@@ -279,10 +310,11 @@ pub fn issue(
     handler: &ServiceStatusHandle,
     stop: Receiver<()>,
     phase: &Cell<ProofPhase>,
+    mode: JobProofMode,
 ) -> Result<(), IdentityDenied> {
     verify_scm_fixture_identity(ScmFixtureRole::Issuer).map_err(|_| IdentityDenied)?;
     seal_current_scm_fixture_issuer()?;
-    let path = fixture_path()?;
+    let path = fixture_path(mode)?;
     let child_image = path
         .parent()
         .and_then(|p| p.parent())
@@ -313,7 +345,7 @@ pub fn issue(
         thread: child.tid(),
         thread_creation: child.primary_thread_identity()?.creation,
     };
-    let job_proof = job_fixture::IssuerJobProof::prepare()?;
+    let job_proof = job_fixture::IssuerJobProof::prepare(mode)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -336,7 +368,7 @@ pub fn issue(
             process_id: None,
         })
         .map_err(|_| IdentityDenied)?;
-    job_proof.run(handoff.issuer, phase)?;
+    job_proof.run(handoff.issuer, phase, mode)?;
     phase.set(ProofPhase::IssuerCleanup);
     // A successful handoff requires issuer process exit, not a later
     // external stop request. Any premature STOP is a failed proof.
@@ -354,7 +386,7 @@ pub fn issue(
     Ok(())
 }
 
-pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
+pub fn observe(phase: &Cell<ProofPhase>, mode: JobProofMode) -> Result<(), IdentityDenied> {
     verify_scm_fixture_identity(ScmFixtureRole::Authority).map_err(|_| IdentityDenied)?;
     let manager = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)
         .map_err(|_| IdentityDenied)?;
@@ -364,7 +396,7 @@ pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
             ServiceAccess::QUERY_STATUS,
         )
         .map_err(|_| IdentityDenied)?;
-    let record = fixture_path()?;
+    let record = fixture_path(mode)?;
     // A successful read-only pin must not imply writable attestation state.
     match OpenOptions::new().write(true).open(&record) {
         Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {}
@@ -419,12 +451,25 @@ pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
     }
     handoff.issuer.verify(issuer.as_handle())?;
     handoff.child.verify(child.as_handle())?;
-    job_fixture::observe(handoff.issuer, handoff.child, &issuer, &child, phase)?;
+    job_fixture::observe(
+        handoff.issuer,
+        handoff.child,
+        &issuer,
+        &child,
+        phase,
+        mode,
+        &service,
+    )?;
     phase.set(ProofPhase::ObserverTerminal);
+    verify_terminal_issuer(&service, mode)
+}
+
+fn verify_terminal_issuer(service: &Service, mode: JobProofMode) -> Result<(), IdentityDenied> {
     let status = service.query_status().map_err(|_| IdentityDenied)?;
     if status.current_state != ServiceState::Stopped
         || status.process_id.is_some()
-        || status.exit_code != ServiceExitCode::ServiceSpecific(10)
+        || status.exit_code
+            != ServiceExitCode::ServiceSpecific(if mode == JobProofMode::Resume { 14 } else { 10 })
     {
         return Err(IdentityDenied);
     }

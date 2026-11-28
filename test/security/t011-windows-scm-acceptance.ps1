@@ -315,6 +315,17 @@ try {
     $handoff = Join-Path $stage 'handoff'
     New-Item -ItemType Directory -Path $handoff -ErrorAction Stop | Out-Null
     Set-DualRoleAcl $handoff $true $virtualSid $issuerSid $modify
+    # Both experiments are required. The second uses distinct fixed mode,
+    # records and kernel object names, never a reused observer success code.
+    foreach ($scenario in @('observer', 'resume')) {
+    $issuerCommand = '"' + $proofBinary + '" --issuer-' + $scenario + '-proof'
+    $observerCommand = '"' + $proofBinary + '" --authority-' + $scenario + '-proof'
+    $expectedObserver = if ($scenario -eq 'resume') { 12 } else { 8 }
+    $expectedIssuer = if ($scenario -eq 'resume') { 14 } else { 10 }
+    $recordName = if ($scenario -eq 'resume') { 'resume-issued-process.txt' } else { 'issued-process.txt' }
+    $jobRecordName = if ($scenario -eq 'resume') { 'resume-job-issued-process.txt' } else { 'job-issued-process.txt' }
+    & $sc config $issuerName 'binPath=' $issuerCommand | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_IMAGE_CONFIGURATION_FAILED' }
     & $sc config $serviceName 'binPath=' $observerCommand | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_OBSERVER_IMAGE_CONFIGURATION_FAILED' }
     $issuerConfig = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
@@ -330,7 +341,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_START_FAILED' }
     $issuerController = Get-Service -Name $issuerName -ErrorAction Stop
     $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [timespan]::FromSeconds(15))
-    $record = Join-Path $handoff 'issued-process.txt'
+    $record = Join-Path $handoff $recordName
     $recordItem = Get-Item -LiteralPath $record -ErrorAction Stop
     if ($recordItem.PSIsContainer -or ($recordItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
         $recordItem.Length -gt 128 -or (Get-Acl -LiteralPath $record).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $issuerSid.Value) {
@@ -342,12 +353,12 @@ try {
     $controller.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
     $observerState = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $observerState -or $observerState.State -ne 'Stopped' -or
-        $observerState.ExitCode -ne 1066 -or $observerState.ServiceSpecificExitCode -ne 8 -or
+        $observerState.ExitCode -ne 1066 -or $observerState.ServiceSpecificExitCode -ne $expectedObserver -or
         $observerState.ProcessId -ne 0) {
         # SCM is the transport for fixed proof failures; service stderr is
         # not available to this hosted controller. Never echo arbitrary values.
         if ($null -ne $observerState -and $observerState.State -eq 'Stopped' -and $observerState.ExitCode -eq 1066 -and
-            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..36))) {
+            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..38))) {
             Write-Output ('E_SCM_OBSERVER_PHASE_' + $observerState.ServiceSpecificExitCode)
         }
         try {
@@ -365,9 +376,9 @@ try {
     $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
     $issuerState = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
     if ($null -eq $issuerState -or $issuerState.State -ne 'Stopped' -or
-        $issuerState.ExitCode -ne 1066 -or $issuerState.ServiceSpecificExitCode -ne 10 -or
+        $issuerState.ExitCode -ne 1066 -or $issuerState.ServiceSpecificExitCode -ne $expectedIssuer -or
         $issuerState.ProcessId -ne 0) { throw 'E_SCM_ISSUER_CLEANUP_FAILED' }
-    $jobRecord = Join-Path $handoff 'job-issued-process.txt'
+    $jobRecord = Join-Path $handoff $jobRecordName
     $jobRecordItem = Get-Item -LiteralPath $jobRecord -ErrorAction Stop
     if ($jobRecordItem.PSIsContainer -or ($jobRecordItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
         $jobRecordItem.Length -gt 128 -or (Get-Acl -LiteralPath $jobRecord).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $issuerSid.Value) {
@@ -376,6 +387,7 @@ try {
     Assert-DualRoleAcl $jobRecord $virtualSid $issuerSid $modify $false
     if ((Get-ScmDescriptor) -ne $baselineDescriptor) { throw 'E_SCM_PROOF_SERVICE_DACL_CHANGED' }
     Assert-ScmDacl (Get-ScmDescriptor $issuerName)
+    }
     & $sc config $serviceName 'binPath=' $binary | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ORIGINAL_IMAGE_RESTORE_FAILED' }
 }
@@ -433,3 +445,4 @@ Write-Output 'T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_AUTHENTICATED_HANDOFF_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_PRIMARY_THREAD_PIN_PASS_NONRELEASE'
+Write-Output 'T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE'

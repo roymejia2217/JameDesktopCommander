@@ -1,7 +1,8 @@
 //! Disposable SCM job-owner/issuer experiment, never production IPC.
 //! The two fixed virtual accounts participate only in the hosted proof.
 use super::{
-    denied_process_rights, denied_thread_rights, open_observer_pin, Handoff, ProofPhase, Stamp,
+    denied_process_rights, denied_thread_rights, open_observer_pin, open_observer_thread_pin,
+    Handoff, ProofPhase, Stamp,
 };
 use jdc_authority_service::{
     windows_issued_client::IssuedClient,
@@ -348,6 +349,7 @@ impl IssuerJobProof {
             issuer,
             child: Stamp::capture(child.process_handle())?,
             thread: child.tid(),
+            thread_creation: child.primary_thread_identity()?.creation,
         };
         phase.set(ProofPhase::IssuerRecord);
         write_record(&self.names.record, handoff)?;
@@ -598,10 +600,27 @@ pub(super) fn observe(
         return Err(IdentityDenied);
     }
     let child = open_observer_pin(handoff.child)?;
+    let thread = open_observer_thread_pin(handoff, child.as_handle())?;
+    // Reject the same live TID with stale creation identity, even though
+    // the exact original read-only thread handle remains pinned.
+    if open_observer_thread_pin(
+        Handoff {
+            thread_creation: handoff.thread_creation ^ 1,
+            ..handoff
+        },
+        child.as_handle(),
+    )
+    .is_ok()
+    {
+        return Err(IdentityDenied);
+    }
     denied_process_rights(handoff.child.pid)?;
     denied_thread_rights(handoff.thread)?;
     job.verify_child(child.as_handle())?;
     handoff.child.verify(child.as_handle())?;
+    handoff
+        .thread_identity()
+        .verify(child.as_handle(), thread.as_handle())?;
     phase.set(ProofPhase::ObserverRevoke);
     job.revoke()?;
     signal(&revoked)?;
@@ -621,11 +640,23 @@ pub(super) fn observe(
         return Err(IdentityDenied);
     }
     handoff.child.verify(child.as_handle())?;
+    handoff
+        .thread_identity()
+        .verify(child.as_handle(), thread.as_handle())?;
     job.verify_child(child.as_handle())?;
     phase.set(ProofPhase::ObserverCleanup);
     drop(job);
-    // No child code ran. Last-job-handle closure must signal its process.
-    wait(&child, WAIT_MS)
+    // No child code ran. Last-job-handle closure must signal both objects.
+    wait(&child, WAIT_MS)?;
+    wait(&thread, WAIT_MS)?;
+    if handoff
+        .thread_identity()
+        .verify(child.as_handle(), thread.as_handle())
+        .is_ok()
+    {
+        return Err(IdentityDenied);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -296,6 +296,7 @@ mod tests {
                 creation: issuer.creation,
             },
             thread: 1,
+            thread_creation: issuer.creation,
         }
     }
     fn send_frame(name: &[u16], bytes: &[u8]) -> Result<OwnedHandle, IdentityDenied> {

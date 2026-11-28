@@ -94,6 +94,21 @@ impl OwnerRightsCreationDescriptors {
     pub(crate) fn from_scm_issuer_primary_token(
         token: BorrowedHandle<'_>,
     ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, false)
+    }
+
+    /// The job fixture adds only query/synchronize on its primary thread.
+    /// The separate original SCM observation remains thread-inaccessible.
+    pub(crate) fn from_scm_issuer_job_primary_token(
+        token: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        Self::from_scm_issuer_token(token, true)
+    }
+
+    fn from_scm_issuer_token(
+        token: BorrowedHandle<'_>,
+        observe_thread: bool,
+    ) -> Result<Self, IdentityDenied> {
         verify_scm_fixture_token(ScmFixtureRole::Issuer, token.as_raw_handle())
             .map_err(|_| IdentityDenied)?;
         let owner = primary_token_owner_sid_text(token.as_raw_handle())?;
@@ -107,8 +122,12 @@ impl OwnerRightsCreationDescriptors {
             return Err(IdentityDenied);
         }
         Ok(Self {
-            process: descriptor(&owner, "0x21000", Some(&observer))?,
-            primary_thread: descriptor(&owner, "RC", None)?,
+            process: descriptor(&owner, "0x21000", Some((&observer, "0x101000")))?,
+            primary_thread: descriptor(
+                &owner,
+                "RC",
+                observe_thread.then_some((&observer, "0x100800")),
+            )?,
         })
     }
 
@@ -190,12 +209,14 @@ fn sid_text(sid: *mut c_void) -> Result<String, IdentityDenied> {
 fn descriptor(
     owner: &str,
     owner_permissions: &str,
-    observer: Option<&str>,
+    observer: Option<(&str, &str)>,
 ) -> Result<LocalAllocation, IdentityDenied> {
     // OWNER RIGHTS (S-1-3-4) prevents implicit owner WRITE_DAC/READ_CONTROL.
     // Explicit SYSTEM control remains; neither child object grants
     // PROCESS_DUP_HANDLE nor THREAD_SET_CONTEXT to the token owner.
-    let observation = observer.map_or_else(String::new, |sid| format!("(A;;0x101000;;;{sid})"));
+    let observation = observer.map_or_else(String::new, |(sid, rights)| {
+        format!("(A;;{rights};;;{sid})")
+    });
     let sddl =
         format!("D:P(A;;GA;;;SY)(A;;{owner_permissions};;;{owner})(A;;RC;;;OW){observation}");
     let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();

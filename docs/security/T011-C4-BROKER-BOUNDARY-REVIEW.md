@@ -642,6 +642,30 @@ hosted authenticated handoff marker and all legacy gates remain required.
 References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights>,
 <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-open-modes>.
 
+#### Windows primary-thread pin (nonrelease; hosted verdict pending)
+
+The authenticated handoff is versioned as `JDC2` and requires the creation
+identity of the exact primary thread retained by the issuer. A thread ID
+is only a locator. The authority pins the actual thread with
+`THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` for the job-bound child
+only, and checks kernel thread ID, owning process ID, creation time and
+liveness against the retained process object. A stale stamp must fail.
+The original SCM child still denies even this read-only thread open;
+context, termination, resume, full query, token, descriptor mutation and
+other thread-control rights remain denied. The job-bound child's process
+and thread must remain live after actual issuer exit and both signal when
+the authority closes the last job handle. A terminated thread cannot
+satisfy its live stamp. No resume is authorized in this experiment.
+
+`T011_WINDOWS_SCM_PRIMARY_THREAD_PIN_PASS_NONRELEASE` requires the actual
+hosted proof; local kernel controls and canonical frame tests alone do
+not establish a cross-account result. The later fixed-child resume proof
+must preserve these negative controls for the non-resumable scenario.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadtimes>,
+<https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>,
+<https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights>.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

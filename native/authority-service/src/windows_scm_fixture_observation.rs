@@ -2,7 +2,7 @@
 //! The protected handoff file is a fixture rendezvous, NOT production IPC.
 use jdc_authority_service::{
     windows_creation_custody::seal_current_scm_fixture_issuer,
-    windows_issued_client::IssuedClient,
+    windows_issued_client::{IssuedClient, ThreadIdentity},
     windows_token::{
         verify_scm_fixture_identity, verify_scm_fixture_process_identity, ScmFixtureRole,
     },
@@ -33,8 +33,10 @@ use windows_sys::Win32::{
         GetProcessId, GetProcessTimes, OpenProcess, OpenThread, TerminateProcess,
         WaitForSingleObject, PROCESS_CREATE_THREAD, PROCESS_DUP_HANDLE,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_OPERATION,
-        PROCESS_VM_READ, PROCESS_VM_WRITE, THREAD_GET_CONTEXT, THREAD_SET_CONTEXT,
-        THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
+        PROCESS_VM_READ, PROCESS_VM_WRITE, THREAD_DIRECT_IMPERSONATION, THREAD_GET_CONTEXT,
+        THREAD_IMPERSONATE, THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
+        THREAD_SET_CONTEXT, THREAD_SET_INFORMATION, THREAD_SET_LIMITED_INFORMATION,
+        THREAD_SET_THREAD_TOKEN, THREAD_SUSPEND_RESUME, THREAD_TERMINATE,
     },
 };
 const OBSERVE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
@@ -123,17 +125,24 @@ struct Handoff {
     issuer: Stamp,
     child: Stamp,
     thread: u32,
+    thread_creation: u64,
 }
 impl Handoff {
     fn encode(self) -> String {
         format!(
-            "JDC1\n{}\n{}\n{}\n{}\n{}\n",
-            self.issuer.pid, self.issuer.creation, self.child.pid, self.child.creation, self.thread
+            "JDC2\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            self.issuer.pid,
+            self.issuer.creation,
+            self.child.pid,
+            self.child.creation,
+            self.thread,
+            self.thread_creation
         )
     }
     fn parse(text: &str) -> Result<Self, IdentityDenied> {
         let fields: Vec<_> = text.lines().collect();
-        let ["JDC1", issuer, issuer_creation, child, child_creation, thread] = fields.as_slice()
+        let ["JDC2", issuer, issuer_creation, child, child_creation, thread, thread_creation] =
+            fields.as_slice()
         else {
             return Err(IdentityDenied);
         };
@@ -147,6 +156,7 @@ impl Handoff {
                 creation: child_creation.parse().map_err(|_| IdentityDenied)?,
             },
             thread: thread.parse().map_err(|_| IdentityDenied)?,
+            thread_creation: thread_creation.parse().map_err(|_| IdentityDenied)?,
         };
         if result.issuer.pid == 0
             || result.child.pid == 0
@@ -154,6 +164,7 @@ impl Handoff {
             || result.issuer.pid == result.child.pid
             || result.issuer.creation == 0
             || result.child.creation < result.issuer.creation
+            || result.thread_creation < result.child.creation
             || result.encode() != text
         {
             return Err(IdentityDenied);
@@ -182,6 +193,35 @@ fn open_observer_pin(stamp: Stamp) -> Result<OwnedHandle, IdentityDenied> {
     // The observer must not require cross-account OpenProcessToken or SeDebug.
     stamp.verify(pin.as_handle())?;
     Ok(pin)
+}
+
+fn open_observer_thread_pin(
+    handoff: Handoff,
+    process: BorrowedHandle<'_>,
+) -> Result<OwnedHandle, IdentityDenied> {
+    let raw = unsafe {
+        OpenThread(
+            THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            0,
+            handoff.thread,
+        )
+    };
+    if raw.is_null() {
+        return Err(IdentityDenied);
+    }
+    let pin = unsafe { OwnedHandle::from_raw_handle(raw) };
+    handoff.thread_identity().verify(process, pin.as_handle())?;
+    Ok(pin)
+}
+
+impl Handoff {
+    fn thread_identity(self) -> ThreadIdentity {
+        ThreadIdentity {
+            pid: self.child.pid,
+            tid: self.thread,
+            creation: self.thread_creation,
+        }
+    }
 }
 
 fn denied_process_rights(pid: u32) -> Result<(), IdentityDenied> {
@@ -213,6 +253,12 @@ fn denied_thread_rights(tid: u32) -> Result<(), IdentityDenied> {
         THREAD_SET_CONTEXT,
         THREAD_SUSPEND_RESUME,
         THREAD_TERMINATE,
+        THREAD_QUERY_INFORMATION,
+        THREAD_SET_INFORMATION,
+        THREAD_SET_LIMITED_INFORMATION,
+        THREAD_SET_THREAD_TOKEN,
+        THREAD_IMPERSONATE,
+        THREAD_DIRECT_IMPERSONATION,
         0x0004_0000,
         0x0008_0000,
     ] {
@@ -265,6 +311,7 @@ pub fn issue(
         issuer: Stamp::capture(current)?,
         child: Stamp::capture(child.process_handle())?,
         thread: child.tid(),
+        thread_creation: child.primary_thread_identity()?.creation,
     };
     let job_proof = job_fixture::IssuerJobProof::prepare()?;
     let mut file = OpenOptions::new()
@@ -353,6 +400,23 @@ pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
     denied_process_rights(handoff.issuer.pid)?;
     denied_process_rights(handoff.child.pid)?;
     denied_thread_rights(handoff.thread)?;
+    // The original child has no thread-observation grant. The job child
+    // alone receives the deliberately limited read-only authority pin.
+    let raw = unsafe {
+        OpenThread(
+            THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            0,
+            handoff.thread,
+        )
+    };
+    let error = unsafe { GetLastError() };
+    if !raw.is_null() {
+        unsafe { CloseHandle(raw) };
+        return Err(IdentityDenied);
+    }
+    if error != ERROR_ACCESS_DENIED {
+        return Err(IdentityDenied);
+    }
     handoff.issuer.verify(issuer.as_handle())?;
     handoff.child.verify(child.as_handle())?;
     job_fixture::observe(handoff.issuer, handoff.child, &issuer, &child, phase)?;
@@ -371,16 +435,32 @@ pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
 mod tests {
     use super::*;
     #[test]
+    fn thread_creation_is_mandatory_in_canonical_handoff() {
+        let valid = "JDC2\n10\n100\n20\n101\n30\n102\n";
+        let parsed = Handoff::parse(valid).unwrap();
+        assert_eq!(parsed.thread_creation, 102);
+        assert_eq!(parsed.encode(), valid);
+        for bad in [
+            "JDC1\n10\n100\n20\n101\n30\n",
+            "JDC2\n10\n100\n20\n101\n30\n99\n",
+            "JDC2\n10\n100\n20\n101\n30\n0\n",
+            "JDC2\n10\n100\n20\n101\n30\n0102\n",
+        ] {
+            assert!(Handoff::parse(bad).is_err());
+        }
+    }
+
+    #[test]
     fn handoff_rejects_ambiguous_or_invalid_locators() {
-        let valid = "JDC1\n10\n100\n20\n101\n30\n";
+        let valid = "JDC2\n10\n100\n20\n101\n30\n102\n";
         assert_eq!(Handoff::parse(valid).unwrap().encode(), valid);
         for bad in [
-            "JDC1\n10\n100\n10\n101\n30\n",
-            "JDC1\n10\n100\n20\n99\n30\n",
-            "JDC1\n0\n100\n20\n101\n30\n",
-            "JDC1\n10\n100\n20\n101\n0\n",
-            "JDC1\n010\n100\n20\n101\n30\n",
-            "JDC1\n10\n100\n20\n101\n30\nextra\n",
+            "JDC2\n10\n100\n10\n101\n30\n102\n",
+            "JDC2\n10\n100\n20\n99\n30\n102\n",
+            "JDC2\n0\n100\n20\n101\n30\n102\n",
+            "JDC2\n10\n100\n20\n101\n0\n102\n",
+            "JDC2\n010\n100\n20\n101\n30\n102\n",
+            "JDC2\n10\n100\n20\n101\n30\n102\nextra\n",
         ] {
             assert!(Handoff::parse(bad).is_err());
         }

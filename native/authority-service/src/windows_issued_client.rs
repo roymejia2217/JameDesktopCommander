@@ -72,6 +72,73 @@ fn environment_block(pairs: &[(&str, &str)]) -> Result<Vec<u16>, IdentityDenied>
     Ok(block)
 }
 
+/// Read-only kernel observation; a matching stamp is not an authorization or
+/// permission to resume a thread. The caller must retain both real handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadIdentity {
+    pub pid: u32,
+    pub tid: u32,
+    pub creation: u64,
+}
+impl ThreadIdentity {
+    pub fn capture(
+        process: BorrowedHandle<'_>,
+        thread: BorrowedHandle<'_>,
+    ) -> Result<Self, IdentityDenied> {
+        use windows_sys::Win32::{
+            Foundation::{FILETIME, INVALID_HANDLE_VALUE, WAIT_TIMEOUT},
+            System::Threading::{GetProcessId, GetProcessIdOfThread, GetThreadId, GetThreadTimes},
+        };
+        let process = process.as_raw_handle();
+        let thread = thread.as_raw_handle();
+        if [process, thread]
+            .iter()
+            .any(|&h| h.is_null() || h == INVALID_HANDLE_VALUE)
+        {
+            return Err(IdentityDenied);
+        }
+        let live = || unsafe {
+            WaitForSingleObject(process, 0) == WAIT_TIMEOUT
+                && WaitForSingleObject(thread, 0) == WAIT_TIMEOUT
+        };
+        if !live() {
+            return Err(IdentityDenied);
+        }
+        let pid = unsafe { GetProcessId(process) };
+        let tid = unsafe { GetThreadId(thread) };
+        let (mut creation, mut exit, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        if pid == 0
+            || tid == 0
+            || unsafe { GetProcessIdOfThread(thread) } != pid
+            || unsafe { GetThreadTimes(thread, &mut creation, &mut exit, &mut kernel, &mut user) }
+                == 0
+        {
+            return Err(IdentityDenied);
+        }
+        let creation =
+            (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        if creation == 0 || !live() {
+            return Err(IdentityDenied);
+        }
+        Ok(Self { pid, tid, creation })
+    }
+    pub fn verify(
+        self,
+        process: BorrowedHandle<'_>,
+        thread: BorrowedHandle<'_>,
+    ) -> Result<(), IdentityDenied> {
+        if Self::capture(process, thread)? != self {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+}
+
 /// The issuer alone retains both creation-time OS object handles. There is
 /// deliberately no public constructor from a numeric PID or an arbitrary HANDLE.
 pub struct IssuedClient {
@@ -96,6 +163,9 @@ impl ScmJobFixtureChild {
     }
     pub fn tid(&self) -> u32 {
         self.child.tid()
+    }
+    pub fn primary_thread_identity(&self) -> Result<ThreadIdentity, IdentityDenied> {
+        self.child.primary_thread_identity()
     }
     /// Only called after the separately verified job owner acknowledges
     /// membership and revokes new assignments. Job close is the fail-safe.
@@ -217,7 +287,9 @@ impl IssuedClient {
             return Err(IdentityDenied);
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let descriptors = if observable {
+        let descriptors = if observable && job.is_some() {
+            OwnerRightsCreationDescriptors::from_scm_issuer_job_primary_token(token.as_handle())?
+        } else if observable {
             OwnerRightsCreationDescriptors::from_scm_issuer_primary_token(token.as_handle())?
         } else {
             OwnerRightsCreationDescriptors::from_primary_token(token.as_handle())?
@@ -662,6 +734,17 @@ impl IssuedClient {
     pub fn tid(&self) -> u32 {
         self.tid
     }
+    pub fn primary_thread_identity(&self) -> Result<ThreadIdentity, IdentityDenied> {
+        if self.resumed {
+            return Err(IdentityDenied);
+        }
+        let stamp =
+            ThreadIdentity::capture(self.process.as_handle(), self.primary_thread.as_handle())?;
+        if stamp.pid != self.pid || stamp.tid != self.tid {
+            return Err(IdentityDenied);
+        }
+        Ok(stamp)
+    }
 
     pub fn resume(&mut self) -> Result<(), IdentityDenied> {
         if self.resumed || unsafe { ResumeThread(self.primary_thread.as_raw_handle()) } != 1 {
@@ -712,6 +795,62 @@ impl Drop for IssuedClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actual_primary_thread_identity_rejects_other_process_and_stale_creation() {
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let launch = || {
+            IssuedClient::launch_suspended(&image, OsStr::new(&command), &[("SystemRoot", &system)])
+                .unwrap()
+        };
+        let child = launch();
+        let other = launch();
+        let stamp = child.primary_thread_identity().unwrap();
+        assert_eq!(stamp.tid, child.tid());
+        assert_eq!(stamp.pid, child.pid());
+        use windows_sys::Win32::{
+            Foundation::{DuplicateHandle, GetLastError, ERROR_ACCESS_DENIED},
+            Storage::FileSystem::SYNCHRONIZE,
+            System::Threading::THREAD_QUERY_LIMITED_INFORMATION,
+        };
+        let current = unsafe { GetCurrentProcess() };
+        let mut raw = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    child.primary_thread.as_raw_handle(),
+                    current,
+                    &mut raw,
+                    THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        let pin = unsafe { OwnedHandle::from_raw_handle(raw) };
+        assert_eq!(unsafe { ResumeThread(pin.as_raw_handle()) }, u32::MAX);
+        assert_eq!(unsafe { GetLastError() }, ERROR_ACCESS_DENIED);
+        let process = child.process_handle().try_clone_to_owned().unwrap();
+        stamp.verify(process.as_handle(), pin.as_handle()).unwrap();
+        assert!(stamp
+            .verify(other.process_handle(), pin.as_handle())
+            .is_err());
+        assert!(stamp
+            .verify(process.as_handle(), other.primary_thread.as_handle())
+            .is_err());
+        assert!(ThreadIdentity {
+            creation: stamp.creation ^ 1,
+            ..stamp
+        }
+        .verify(process.as_handle(), pin.as_handle())
+        .is_err());
+        drop(child);
+        assert!(stamp.verify(process.as_handle(), pin.as_handle()).is_err());
+    }
+
     #[test]
     fn malformed_environment_and_duplicate_variable_names_deny() {
         assert!(environment_block(&[]).is_err());

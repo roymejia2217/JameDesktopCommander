@@ -122,6 +122,22 @@ test('hosted NTFS mount transitions verify partition ownership and preserve the 
   assert.match(script, /E_STORAGE_CLEANUP_FAILED_/);
 });
 
+test('mandatory Windows storage gate retains dedicated tokens while the SCM path owns issuer acceptance', () => {
+  const workflow = YAML.parse(readFileSync('.github/workflows/t011-capability-feasibility.yml', 'utf8'), { uniqueKeys: true });
+  const storage = workflow.jobs['native-probe'].steps.find(step => step.name === 'Test Windows storage isolation and outside-object integrity');
+  assert.match(storage.run, /t011-windows-storage-domain-acceptance\.ps1 -StorageDomainOnly/);
+  assert.match(storage.run, /T011_WINDOWS_STORAGE_DOMAIN_DEDICATED_TOKENS_PASS_NONRELEASE/);
+  assert.match(storage.run, /T011_STORAGE_WINDOWS_DOMAIN_PASS_NONRELEASE/);
+  assert.match(storage.run, /if \(\$code -ne 0\) \{ exit \$code \}/);
+  const scm = workflow.jobs['scm-storage-nonrelease'];
+  assert.equal(scm.if, undefined);
+  assert.notEqual(scm['continue-on-error'], true);
+  assert.match(scm.steps.find(step => step.id === 'windows_scm_admitted_storage').run, /T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE/);
+  const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
+  assert.match(script, /if \(\$StorageDomainOnly -and \$ScmStorageOnly\) \{ throw 'E_STORAGE_CONFLICTING_MODES' \}/);
+  assert.match(script, /Write-Output 'T011_WINDOWS_STORAGE_DOMAIN_DEDICATED_TOKENS_PASS_NONRELEASE'\s+if \(-not \$StorageDomainOnly\) \{\s+Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites'/);
+});
+
 test('hosted NTFS acceptance verifies all dedicated primary tokens and denies absent issuer privileges', () => {
   const script = readFileSync('test/security/t011-windows-storage-domain-acceptance.ps1', 'utf8');
   const preflight = script.indexOf("Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites'");

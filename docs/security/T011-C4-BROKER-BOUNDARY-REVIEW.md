@@ -774,7 +774,7 @@ shipping broker authority, or power-loss recovery. The next integration
 must reuse the admitted-volume checks and journal under the independently
 verified SCM authority and retain the full negative controls.
 
-#### SCM admitted NTFS SDK mutation and cancellation (nonrelease; hosted verdict pending)
+#### SCM admitted NTFS SDK mutation and cancellation (nonrelease; hosted acceptance observed)
 
 Hosted Windows job 141057723543 at `0d2fead3a0c354dc73a0be3519022de471086c32`
 accepted both fresh local SDK mutation/cancellation markers and the distinct
@@ -823,9 +823,18 @@ New verdicts:
 `T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE`,
 `T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE`,
 `T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE`.
-These are pending independent hosted acceptance. No shipping grant, durable
-production root/epoch administration, arbitrary request parser, power-loss
-recovery, or full nondelegable-writer proof is claimed.
+All three were emitted by successful hosted job 141084882677, run
+46179258756, at `173e9e4f4a6a7fbb10d1e7ec251f8555005870e2`.
+The Windows matrix job 141084882982 passed the volume, journal and dedicated
+role observations before failing the obsolete issuer privilege prerequisite.
+The subsequent candidate keeps the mandatory real topology, journal,
+synthetic peer and three dedicated-token tests in that matrix, checks their
+fixed verdicts and exit status, and retains the legacy preflight for explicit
+legacy invocations. Actual distinct-principal issuance remains mandatory in
+the separate SCM job; no extra privileges are added to satisfy the old model.
+The new combined workflow still requires hosted validation. No shipping grant,
+durable production root/epoch administration, arbitrary request parser,
+power-loss recovery, or full nondelegable-writer proof is claimed.
 
 #### Windows request cancellation at the native publication fence (nonrelease)
 
@@ -983,6 +992,23 @@ these checks pass. Read, mutations and staged cancellation each require a
 fresh private state verdict; the host state must remain empty and unmounted
 afterward. Cleanup refuses recursive deletion through a visible state mount.
 
+Hosted job 141084882865 (run 46179258756, `173e9e4f4a6a7fbb10d1e7ec251f8555005870e2`)
+passed state and post-exec custody but failed the actual pathname connection
+with E_NATIVE_READ_CONNECT_EACCES after E_NATIVE_SOCKET_PATH_ACCESS_OK.
+AppArmor pathname socket mediation can reject a disconnected mount path
+when the listener and connecting process occupy different mount namespaces
+(Linux security/apparmor/af_unix.c and path.c). The exact audit cause was
+not captured; this is a testable causal hypothesis, not a confirmed diagnosis.
+The candidate instead starts each disposable authority in a fresh private
+root-owned mount namespace. The issuer verifies the actual authority peer
+credentials, pins its kernel SO_PEERPIDFD, and passes its exact mount namespace
+FD over the existing private readiness socket. The launcher verifies the
+namespace type and owner, joins it before mounting the private state and
+creating the separate user namespace, and closes the namespace FD before exec.
+The issuer checks namespace equality, live authority, and all existing
+post-exec and same-UID controls before attestation. All three scenarios require
+T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE. No AppArmor relaxation,
+abstract-socket fallback, extra client privileges or host-state access is used.
 This only isolates ephemeral fixture client state. It does not establish
 durable policy custody, prevent denial-of-service signals, or authorize
 production deployment. The actual hosted kernel acceptance remains mandatory.

@@ -1,6 +1,7 @@
 //! Shared, nonshipping hosted issuer observation for the read and mutation proofs.
 use super::{observe_kernel_peer, DedicatedAccount};
 use std::{
+    ffi::CStr,
     fs,
     mem::{size_of, zeroed, MaybeUninit},
     os::{
@@ -16,12 +17,16 @@ fn io<T>(result: std::io::Result<T>) -> Result<T, &'static str> {
 
 // Resolve a fixture-only external principal through the OS, never client text.
 pub(super) fn fixture_client() -> Result<DedicatedAccount, &'static str> {
+    fixture_account(c"jdc-mcp-client")
+}
+
+pub(super) fn fixture_account(name: &CStr) -> Result<DedicatedAccount, &'static str> {
     let mut passwd = MaybeUninit::<libc::passwd>::zeroed();
     let mut found = ptr::null_mut();
     let mut scratch = [0 as libc::c_char; 16_384];
     let code = unsafe {
         libc::getpwnam_r(
-            c"jdc-mcp-client".as_ptr(),
+            name.as_ptr(),
             passwd.as_mut_ptr(),
             scratch.as_mut_ptr(),
             scratch.len(),
@@ -29,11 +34,11 @@ pub(super) fn fixture_client() -> Result<DedicatedAccount, &'static str> {
         )
     };
     if code != 0 || found.is_null() {
-        return Err("E_PEER_PROOF_CLIENT_ACCOUNT_MISSING");
+        return Err("E_PEER_PROOF_FIXTURE_ACCOUNT_MISSING");
     }
     let passwd = unsafe { passwd.assume_init() };
     if passwd.pw_uid == 0 || passwd.pw_gid == 0 {
-        return Err("E_PEER_PROOF_CLIENT_ACCOUNT_ROOT");
+        return Err("E_PEER_PROOF_FIXTURE_ACCOUNT_ROOT");
     }
     Ok(DedicatedAccount {
         uid: passwd.pw_uid,
@@ -55,11 +60,24 @@ pub(super) fn receive_attestation(listener: &UnixListener) -> Result<(u32, Owned
     if issuer.pid <= 0 || issuer.uid != 0 || issuer.gid != 0 {
         return Err("E_PEER_PROOF_UNPROTECTED_ISSUER");
     }
-    io(channel.set_read_timeout(Some(Duration::from_secs(3))))?;
+    // The root issuer now authenticates and pins the listening authority
+    // before launching the SDK. Keep its complete startup bounded.
+    io(channel.set_read_timeout(Some(Duration::from_secs(5))))?;
     receive_attestation_payload(&channel)
 }
 
 fn receive_attestation_payload(
+    channel: &std::os::unix::net::UnixStream,
+) -> Result<(u32, OwnedFd), &'static str> {
+    let (client_pid, pinned) = receive_fixture_descriptor(channel)?;
+    verify_live_pidfd(&pinned, client_pid)?;
+    Ok((client_pid, pinned))
+}
+
+// The same bounded SCM_RIGHTS decoder transfers the exact namespace FD to
+// the single-threaded privileged SDK launcher. Type-specific verification
+// is mandatory at each call site, before any privileged operation.
+pub(super) fn receive_fixture_descriptor(
     channel: &std::os::unix::net::UnixStream,
 ) -> Result<(u32, OwnedFd), &'static str> {
     let mut pid_bytes = [0u8; 4];
@@ -124,6 +142,10 @@ fn receive_attestation_payload(
     if client_pid == 0 {
         return Err("E_PEER_PROOF_ISSUER_INVALID_PID");
     }
+    Ok((client_pid, pinned))
+}
+
+pub(super) fn verify_live_pidfd(pinned: &OwnedFd, client_pid: u32) -> Result<(), &'static str> {
     // pidfd is kernel-maintained; unlike a numeric PID its identity
     // survives process exit and prevents PID-reuse authorization.
     let info = io(fs::read_to_string(format!(
@@ -145,7 +167,7 @@ fn receive_attestation_payload(
     if unsafe { libc::poll(&mut state, 1, 0) } != 0 {
         return Err("E_PEER_PROOF_ISSUER_CLIENT_NOT_LIVE");
     }
-    Ok((client_pid, pinned))
+    Ok(())
 }
 
 #[cfg(test)]

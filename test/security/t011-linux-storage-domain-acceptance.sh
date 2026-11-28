@@ -9,6 +9,7 @@ fi
 command -v mountpoint >/dev/null
 command -v findmnt >/dev/null
 command -v setpriv >/dev/null
+command -v unshare >/dev/null
 getent passwd jdc-authority >/dev/null
 getent passwd nobody >/dev/null
 getent passwd jdc-mcp-client >/dev/null
@@ -447,7 +448,8 @@ sudo -n -u jdc-mcp-client -- test -r "$base/dist/server.js"
 sdk_socket="$peer_socket_dir/sdk-accepted.sock"
 sdk_issuer_socket="$peer_socket_dir/sdk-issuer.sock"
 peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-peered.XXXXXXXX)"
-timeout --kill-after=2s 14s sudo -n -u jdc-authority -- \
+timeout --kill-after=2s 14s sudo -n -- unshare --mount --propagation private -- \
+  setpriv --reuid="$service_uid" --regid="$service_gid" --clear-groups -- \
   "$peer_binary" serve "$isolated" "$sdk_socket" "$sdk_issuer_socket" >"$peer_server_log" 2>&1 &
 peer_server_pid=$!
 peer_ready=0
@@ -472,6 +474,7 @@ fi
 grep -Fxq 'T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_PROCESS_CUSTODY_NOT_PROVEN' >&2; exit 1; }
 grep -Fxq 'T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE' <<<"$sdk_issuer_output"
+grep -Fxq 'T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE' <<<"$sdk_issuer_output"
 grep -Fq 'T011_LINUX_ROOT_ISSUED_OFFICIAL_SDK_NATIVE_BYTES_PASS_NONRELEASE' \
   <<<"$sdk_issuer_output" || { echo 'E_PEER_SDK_TOOL_NOT_PROVEN' >&2; exit 1; }
 grep -Fq 'T011_LINUX_ROOT_ISSUED_REAL_JDC_MANAGED_READ_PASS_NONRELEASE' \
@@ -519,7 +522,8 @@ sudo -n chmod 0640 "$mutation_done"
 exec {mutation_ready_fd}<>"$mutation_ready"
 exec {mutation_done_fd}<>"$mutation_done"
 peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-mutations.XXXXXXXX)"
-timeout --kill-after=2s 45s sudo -n -u jdc-authority -- env \
+timeout --kill-after=2s 45s sudo -n -- unshare --mount --propagation private -- \
+  setpriv --reuid="$service_uid" --regid="$service_gid" --clear-groups -- env \
   JDC_T011_ADMITTED_MOUNT="$isolated" JDC_T011_MUTATION_SOCKET="$mutation_socket" \
   JDC_T011_MUTATION_ISSUER_SOCKET="$mutation_issuer_socket" JDC_T011_MUTATION_READY_FIFO="$mutation_ready" \
   JDC_T011_MUTATION_PROBES_DONE_FIFO="$mutation_done" \
@@ -558,6 +562,7 @@ fi
 peer_server_pid=''
 grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_MUTATION_CLIENT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_MUTATION_LIVE_ISSUED_CLIENT_DISTINCT_PEERS_DENIED_NONRELEASE "$peer_server_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_REAL_JDC_JOURNALED_MUTATIONS_PASS_NONRELEASE "$peer_server_log"
@@ -579,7 +584,8 @@ cancel_socket="$peer_socket_dir/mutation-cancel.sock"
 cancel_issuer_socket="$peer_socket_dir/mutation-cancel-issuer.sock"
 exec {mutation_ready_fd}<>"$mutation_ready"
 peer_server_log="$(mktemp -p "${RUNNER_TEMP:?}" jdc-sdk-cancel.XXXXXXXX)"
-timeout --kill-after=2s 45s sudo -n -u jdc-authority -- env \
+timeout --kill-after=2s 45s sudo -n -- unshare --mount --propagation private -- \
+  setpriv --reuid="$service_uid" --regid="$service_gid" --clear-groups -- env \
   JDC_T011_ADMITTED_MOUNT="$isolated" JDC_T011_MUTATION_SOCKET="$cancel_socket" \
   JDC_T011_MUTATION_ISSUER_SOCKET="$cancel_issuer_socket" JDC_T011_MUTATION_READY_FIFO="$mutation_ready" \
   "$admission_probe" --ignored --exact journaled_mutations::tests::hosted_root_issued_sdk_cancelled_staged_mutation_never_publishes --nocapture \
@@ -604,6 +610,7 @@ fi
 peer_server_pid=''
 grep -Fxq T011_LINUX_SDK_POST_EXEC_CUSTODY_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_SDK_PRIVATE_STATE_PASS_NONRELEASE "$mutation_issuer_log"
+grep -Fxq T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ROOT_ISSUED_SDK_CANCELLED_BEFORE_COMMIT_PASS_NONRELEASE "$mutation_issuer_log"
 grep -Fxq T011_LINUX_ADMITTED_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE "$peer_server_log"
 grep -Eq '^test result: ok[.] 1 passed; 0 failed; 0 ignored;' "$peer_server_log"

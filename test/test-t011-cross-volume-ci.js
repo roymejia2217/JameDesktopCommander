@@ -39,6 +39,18 @@ test('hosted SDK state is private to the issued mount namespace for all three re
   assert.ok(launch.indexOf('mount_sdk_state(') < launch.indexOf('libc::unshare(libc::CLONE_NEWUSER)'));
   assert.match(issuer, /libc::CLONE_NEWNS/);
   assert.match(issuer, /libc::MS_PRIVATE/);
+  // Pathname sockets must retain their real mount identity under AppArmor.
+  // Each trusted authority starts in a fresh private mount namespace; the
+  // client joins that exact pinned namespace before creating its user ns.
+  assert.equal((harness.match(/unshare --mount --propagation private --/g) || []).length, 3);
+  assert.match(issuer, /libc::SO_PEERPIDFD/);
+  assert.match(issuer, /receive_fixture_descriptor\(&channel\)/);
+  assert.match(issuer, /libc::setns\(namespace\.as_raw_fd\(\), libc::CLONE_NEWNS\)/);
+  assert.doesNotMatch(launch, /libc::unshare\(libc::CLONE_NEWNS\)/);
+  assert.match(issuer, /same_namespace\(&mount_namespace, &authority\.namespace\)/);
+  assert.match(issuer, /T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE/);
+  assert.equal((harness.match(/grep -Fxq .*T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE/g) || []).length, 3);
+  assert.doesNotMatch(harness, /attach_disconnected|apparmor_parser\s+-C/);
   assert.match(issuer, /libc::MS_NOEXEC/);
   assert.match(issuer, /NS_GET_USERNS/);
   assert.match(issuer, /verify_sdk_state/);

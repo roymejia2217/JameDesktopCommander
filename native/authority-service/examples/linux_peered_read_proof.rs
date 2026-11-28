@@ -46,7 +46,10 @@ mod proof {
         result.map_err(|_| "E_PEER_PROOF_IO")
     }
 
-    use super::fixture_issuer::{fixture_client, receive_attestation};
+    use super::fixture_issuer::{
+        fixture_account, fixture_client, receive_attestation, receive_fixture_descriptor,
+        verify_live_pidfd,
+    };
 
     // Root-only CI issuer: the child is created under the OS-managed client
     // account, never by the interactive MCP user or a user-writable launcher.
@@ -223,6 +226,7 @@ mod proof {
     // Linux UAPI: include/uapi/linux/nsfs.h, _IO(0xb7, 2/4).
     const NS_GET_USERNS: libc::c_ulong = 0xb701;
     const NS_GET_PARENT: libc::c_ulong = 0xb702;
+    const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
     const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
 
     fn same_namespace(left: &File, right: &File) -> Result<bool, &'static str> {
@@ -252,8 +256,10 @@ mod proof {
         Ok(ns)
     }
 
-    // The host exposes only an empty root-owned mountpoint. Each issued
-    // SDK receives a fresh private tmpfs, never the previous client's state.
+    // The host exposes only an empty root-owned mountpoint. Each authority
+    // and its single issued SDK share a fresh root-owned mount namespace;
+    // no ordinary same-UID process can enter it. Only that namespace sees
+    // the client's private tmpfs.
     const STATE_PROOF: &[u8] = b"JDC_PRIVATE_SDK_STATE";
 
     fn sdk_state_path(node: &Path) -> Result<PathBuf, &'static str> {
@@ -291,11 +297,8 @@ mod proof {
             account.uid, account.gid
         ))
         .map_err(|_| "E_PEER_SDK_STATE_OPTIONS")?;
-        // Before entering the child user namespace, isolate propagation.
-        // Never mount in the host namespace or grant mount privileges to Node.
-        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
-            return Err("E_PEER_SDK_MOUNT_NAMESPACE_CREATE");
-        }
+        // The launcher has already joined the exact authority namespace.
+        // Preserve private propagation before mounting the per-client state.
         if unsafe {
             libc::mount(
                 ptr::null(),
@@ -323,11 +326,13 @@ mod proof {
         Ok(())
     }
 
-    fn sdk_mount_namespace(pid: u32) -> Result<File, &'static str> {
-        let namespace = io(File::open(format!("/proc/{pid}/ns/mnt")))?;
+    fn verify_private_mount_namespace(namespace: &File) -> Result<(), &'static str> {
+        if unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_NSTYPE) } != libc::CLONE_NEWNS {
+            return Err("E_PEER_SDK_MOUNT_NAMESPACE_TYPE");
+        }
         let issuer_mount = io(File::open("/proc/self/ns/mnt"))?;
         let issuer_user = io(File::open("/proc/self/ns/user"))?;
-        if same_namespace(&namespace, &issuer_mount)? {
+        if same_namespace(namespace, &issuer_mount)? {
             return Err("E_PEER_SDK_MOUNT_NAMESPACE_SHARED");
         }
         let raw = unsafe { libc::ioctl(namespace.as_raw_fd(), NS_GET_USERNS) };
@@ -338,7 +343,69 @@ mod proof {
         if !same_namespace(&owner, &issuer_user)? {
             return Err("E_PEER_SDK_MOUNT_NAMESPACE_OWNER");
         }
+        Ok(())
+    }
+
+    fn sdk_mount_namespace(pid: u32) -> Result<File, &'static str> {
+        let namespace = io(File::open(format!("/proc/{pid}/ns/mnt")))?;
+        verify_private_mount_namespace(&namespace)?;
         Ok(namespace)
+    }
+
+    struct SdkAuthority {
+        pid: u32,
+        pin: OwnedFd,
+        namespace: File,
+    }
+
+    impl SdkAuthority {
+        fn observe(channel: &UnixStream) -> Result<Self, &'static str> {
+            let peer = observe_kernel_peer(channel).map_err(|_| "E_PEER_SDK_AUTHORITY_IDENTITY")?;
+            let account = fixture_account(c"jdc-authority")?;
+            if peer.uid != account.uid || peer.gid != account.gid || peer.pid <= 0 {
+                return Err("E_PEER_SDK_AUTHORITY_IDENTITY");
+            }
+            // Pin the actual kernel socket peer, never reopen a nominated
+            // PID as if it identified the same process. SO_PEERPIDFD is
+            // available on the supported disposable Ubuntu runner kernel.
+            let mut raw = -1i32;
+            let mut len = size_of::<i32>() as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    channel.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERPIDFD,
+                    (&mut raw as *mut i32).cast(),
+                    &mut len,
+                )
+            } != 0
+                || raw < 0
+            {
+                return Err("E_PEER_SDK_AUTHORITY_PIDFD");
+            }
+            let pin = unsafe { OwnedFd::from_raw_fd(raw) };
+            if len as usize != size_of::<i32>() {
+                return Err("E_PEER_SDK_AUTHORITY_PIDFD");
+            }
+            let pid = peer.pid as u32;
+            verify_live_pidfd(&pin, pid)?;
+            fixture_pid(pid, account)?;
+            let namespace = sdk_mount_namespace(pid)?;
+            verify_live_pidfd(&pin, pid)?;
+            Ok(Self {
+                pid,
+                pin,
+                namespace,
+            })
+        }
+
+        fn verify(&self) -> Result<(), &'static str> {
+            verify_live_pidfd(&self.pin, self.pid)?;
+            if !same_namespace(&self.namespace, &sdk_mount_namespace(self.pid)?)? {
+                return Err("E_PEER_SDK_AUTHORITY_NAMESPACE_CHANGED");
+            }
+            verify_live_pidfd(&self.pin, self.pid)
+        }
     }
 
     fn verify_sdk_state(
@@ -496,6 +563,18 @@ mod proof {
         let mut channel = UnixStream::from(io(std::io::stdin().as_fd().try_clone_to_owned())?);
         io(channel.set_read_timeout(Some(Duration::from_secs(5))))?;
         io(channel.set_write_timeout(Some(Duration::from_secs(5))))?;
+        // The parent transfers the exact root-owned mount namespace FD of
+        // the authenticated listening authority. No caller-selected PID or
+        // path is used for setns, and no namespace FD survives Node exec.
+        let (_, namespace) = receive_fixture_descriptor(&channel)?;
+        let namespace = File::from(namespace);
+        verify_private_mount_namespace(&namespace)?;
+        if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0
+            || !same_namespace(&namespace, &io(File::open("/proc/self/ns/mnt"))?)?
+        {
+            return Err("E_PEER_SDK_AUTHORITY_NAMESPACE_JOIN");
+        }
+        drop(namespace);
         mount_sdk_state(node, account)?;
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
             return Err("E_PEER_SDK_NAMESPACE_CREATE");
@@ -634,6 +713,8 @@ mod proof {
         }
         let approved = fixture_client()?;
         let mut readiness = None;
+        let mut sdk_authority = None;
+        let mut sdk_channel = None;
         let mut command = if let Some((node, script, cancel_before_commit)) = sdk {
             if env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
                 || env::var("RUNNER_ENVIRONMENT").as_deref() != Ok("github-hosted")
@@ -641,6 +722,10 @@ mod proof {
                 return Err("E_PEER_PROOF_ISSUED_SDK_RUNNER_REQUIRED");
             }
             verify_sdk_image(node, approved)?;
+            verify_host_state(&sdk_state_path(node)?)?;
+            let channel = io(UnixStream::connect(issuer_socket))?;
+            sdk_authority = Some(SdkAuthority::observe(&channel)?);
+            sdk_channel = Some(channel);
             let (parent, child) = io(UnixStream::pair())?;
             io(parent.set_read_timeout(Some(Duration::from_secs(5))))?;
             io(parent.set_write_timeout(Some(Duration::from_secs(5))))?;
@@ -684,8 +769,16 @@ mod proof {
             let pidfd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
             if let Some((node, _, _)) = sdk {
                 let startup = readiness.as_mut().ok_or("E_PEER_SDK_STARTUP_PROTOCOL")?;
+                let authority = sdk_authority
+                    .as_ref()
+                    .ok_or("E_PEER_SDK_AUTHORITY_IDENTITY")?;
+                authority.verify()?;
+                send_attestation(startup, authority.pid, authority.namespace.as_raw_fd())?;
                 let (namespace, mount_namespace) =
                     prepare_sdk_namespace(child.id(), startup, approved)?;
+                if !same_namespace(&mount_namespace, &authority.namespace)? {
+                    return Err("E_PEER_SDK_AUTHORITY_NAMESPACE_JOIN");
+                }
                 verify_sdk_process_custody(
                     node,
                     child.id(),
@@ -694,8 +787,13 @@ mod proof {
                     &mount_namespace,
                     approved,
                 )?;
+                authority.verify()?;
+                eprintln!("T011_LINUX_SDK_SHARED_AUTHORITY_MOUNT_PASS_NONRELEASE");
             }
-            let channel = io(UnixStream::connect(issuer_socket))?;
+            let channel = match sdk_channel.take() {
+                Some(channel) => channel,
+                None => io(UnixStream::connect(issuer_socket))?,
+            };
             io(channel.set_write_timeout(Some(Duration::from_secs(3))))?;
             send_attestation(&channel, child.id(), pidfd.as_raw_fd())?;
             if let Some(mut startup) = readiness.take() {
@@ -908,6 +1006,31 @@ mod proof {
         }
         eprintln!("T011_LINUX_LEGITIMATE_CLIENT_RECEIVED_BOUND_BYTES");
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn descriptor_transfer_preserves_identity_but_rejects_host_mount() {
+            let (tx, rx) = UnixStream::pair().unwrap();
+            let host = File::open("/proc/self/ns/mnt").unwrap();
+            send_attestation(&tx, std::process::id(), host.as_raw_fd()).unwrap();
+            let (pid, fd) = receive_fixture_descriptor(&rx).unwrap();
+            assert_eq!(pid, std::process::id());
+            let received = File::from(fd);
+            assert!(same_namespace(&host, &received).unwrap());
+            assert_eq!(
+                verify_private_mount_namespace(&received),
+                Err("E_PEER_SDK_MOUNT_NAMESPACE_SHARED")
+            );
+            let user = File::open("/proc/self/ns/user").unwrap();
+            assert_eq!(
+                verify_private_mount_namespace(&user),
+                Err("E_PEER_SDK_MOUNT_NAMESPACE_TYPE")
+            );
+        }
     }
 
     pub fn main() -> ExitCode {

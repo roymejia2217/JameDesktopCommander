@@ -1,7 +1,8 @@
 # T011 #148: temporary NTFS VHD and real OS principals. NON-RELEASE.
-param([switch] $ScmStorageOnly)
+param([switch] $ScmStorageOnly, [switch] $StorageDomainOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($StorageDomainOnly -and $ScmStorageOnly) { throw 'E_STORAGE_CONFLICTING_MODES' }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
     $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $env:RUNNER_TEMP) {
     throw 'E_STORAGE_DOMAIN_HOSTED_WINDOWS_REQUIRED'
@@ -897,7 +898,13 @@ exit
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_principal_matches_expected_role' 'T011_WINDOWS_FIXTURE_SERVICE_TOKEN_PASS_NONRELEASE' $service.Credential
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_principal_matches_expected_role' 'T011_WINDOWS_FIXTURE_CLIENT_TOKEN_PASS_NONRELEASE' $client.Credential
     Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_principal_matches_expected_role' 'T011_WINDOWS_FIXTURE_ATTACKER_TOKEN_PASS_NONRELEASE' $attacker.Credential
-    Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites' 'T011_WINDOWS_DISTINCT_ISSUER_PREREQUISITES_PASS_NONRELEASE' $null
+    # Keep the legacy launch preflight executable and fail-closed for its
+    # original architecture. The mandatory storage-domain gate instead pairs
+    # with the independent SCM job, which exercises actual issuance.
+    Write-Output 'T011_WINDOWS_STORAGE_DOMAIN_DEDICATED_TOKENS_PASS_NONRELEASE'
+    if (-not $StorageDomainOnly) {
+        Invoke-AdmissionProbe 'windows_token::fixture_tests::hosted_fixture_issuer_launch_prerequisites' 'T011_WINDOWS_DISTINCT_ISSUER_PREREQUISITES_PASS_NONRELEASE' $null
+    }
 } catch {
     $primaryFailure = $_
     $code = $_.Exception.Message

@@ -156,6 +156,10 @@ jobs:
         if: matrix.target == 'linux-x64'
         run: cargo +1.91.1 build --locked --examples --manifest-path native/authority-service/Cargo.toml
 
+      - name: Test Linux namespace descriptor custody
+        if: matrix.target == 'linux-x64'
+        run: cargo +1.91.1 test --locked --example linux_peered_read_proof --manifest-path native/authority-service/Cargo.toml
+
       - name: Build Linux epoch-store fixture
         id: linux_store_fixture
         if: matrix.target == 'linux-x64'
@@ -372,7 +376,16 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-storage-domain-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
-          pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1
+          # Keep real volume, topology and dedicated-token controls mandatory.
+          # Actual distinct-principal issuance is required in the separate SCM job.
+          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -StorageDomainOnly)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if ($result -cnotcontains 'T011_STORAGE_WINDOWS_DOMAIN_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_STORAGE_DOMAIN_DEDICATED_TOKENS_PASS_NONRELEASE') {
+            throw 'E_STORAGE_DOMAIN_VERDICT_MISSING'
+          }
 
       - name: Build deny-only native Rust Node-API addon
         run: cargo +1.91.1 build --locked --release --manifest-path native/capability-probe/Cargo.toml

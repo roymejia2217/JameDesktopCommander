@@ -72,6 +72,22 @@ export async function inspectPortableCandidate(
     expected.set(item.path.toLowerCase(), item);
   }
   const seen = new Set<string>();
+  // Overlap small-file I/O without opening an unbounded number of handles or
+  // retaining entire files in memory. A failed batch is fully drained before
+  // returning, so no verification work survives a rejection.
+  const digestConcurrency = 8;
+  const pending: { absolute: string; required: RecordEntry }[] = [];
+  async function verifyBatch(): Promise<void> {
+    const results = await Promise.allSettled(pending.splice(0).map(async ({ absolute, required }) => {
+      const actual = await digest(absolute);
+      if (actual.byteLength !== required.byteLength || actual.sha256 !== required.sha256) {
+        throw new Error('Portable payload integrity mismatch');
+      }
+    }));
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+    }
+  }
   async function scan(dir: string): Promise<void> {
     for (const child of await readdir(dir, { withFileTypes: true })) {
       const absolute = join(dir, child.name);
@@ -95,14 +111,13 @@ export async function inspectPortableCandidate(
           throw new Error('Unapproved portable payload entry');
         }
         seen.add(folded);
-        const actual = await digest(absolute);
-        if (actual.byteLength !== required.byteLength || actual.sha256 !== required.sha256) {
-          throw new Error('Portable payload integrity mismatch');
-        }
+        pending.push({ absolute, required });
+        if (pending.length === digestConcurrency) await verifyBatch();
       }
     }
   }
   await scan(root);
+  await verifyBatch();
   // Match the build-time contract, including licenses and the locked runtime
   // payload. The inventory map is case-folded, so compare canonical casing too.
   const requiredFiles = [

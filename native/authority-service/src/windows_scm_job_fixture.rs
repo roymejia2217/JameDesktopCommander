@@ -55,6 +55,9 @@ mod bounded_io;
 mod handoff_pipe;
 #[path = "windows_scm_sdk_read.rs"]
 mod sdk_read;
+#[cfg(feature = "scm-storage-proof")]
+#[path = "windows_scm_storage_pipe.rs"]
+mod storage_pipe;
 
 const LIMITS: u32 = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 const WAIT_MS: u32 = 5000;
@@ -341,6 +344,15 @@ impl IssuerJobProof {
             JobProofMode::Observe => IssuedClient::launch_scm_job_fixture(assignment)?,
             JobProofMode::Resume => IssuedClient::launch_scm_resume_fixture(assignment)?,
             JobProofMode::SdkRead => IssuedClient::launch_scm_sdk_read_fixture(assignment)?,
+            #[cfg(feature = "scm-storage-proof")]
+            JobProofMode::SdkMutation | JobProofMode::SdkCancel => {
+                phase.set(ProofPhase::StorageIssuerDenied);
+                storage_pipe::verify_issuer_denied()?;
+                IssuedClient::launch_scm_sdk_mutation_fixture(
+                    assignment,
+                    mode == JobProofMode::SdkCancel,
+                )?
+            }
         };
         verify_scm_fixture_process_identity(ScmFixtureRole::Issuer, child.process_handle())
             .map_err(|_| IdentityDenied)?;
@@ -611,6 +623,16 @@ pub(super) fn observe(
     } else {
         None
     };
+    #[cfg(feature = "scm-storage-proof")]
+    let storage = if matches!(mode, JobProofMode::SdkMutation | JobProofMode::SdkCancel) {
+        phase.set(ProofPhase::StorageAdmission);
+        Some(storage_pipe::StorageProof::prepare(
+            &names,
+            mode == JobProofMode::SdkCancel,
+        )?)
+    } else {
+        None
+    };
     phase.set(ProofPhase::ObserverAwaitFrame);
     signal(&start)?;
     wait(&ack, WAIT_MS)?;
@@ -703,16 +725,29 @@ pub(super) fn observe(
                     .verify(child.as_handle(), thread.as_handle())
             })?;
         }
+        #[cfg(feature = "scm-storage-proof")]
+        if let Some(storage) = storage {
+            phase.set(ProofPhase::StorageSession);
+            storage.serve(child.as_handle(), &expected_sid, || {
+                job.verify_child(child.as_handle()).is_ok()
+                    && handoff.child.verify(child.as_handle()).is_ok()
+                    && handoff
+                        .thread_identity()
+                        .verify(child.as_handle(), thread.as_handle())
+                        .is_ok()
+            })?;
+        }
         phase.set(ProofPhase::ObserverChildExit);
         wait(&child, WAIT_MS)?;
         wait(&thread, WAIT_MS)?;
         let mut exit = u32::MAX;
         if unsafe { GetExitCodeProcess(child.as_raw_handle(), &mut exit) } == 0
             || exit
-                != if mode == JobProofMode::SdkRead {
-                    19
-                } else {
-                    17
+                != match mode {
+                    JobProofMode::SdkRead => 19,
+                    #[cfg(feature = "scm-storage-proof")]
+                    JobProofMode::SdkMutation | JobProofMode::SdkCancel => 0,
+                    _ => 17,
                 }
         {
             return Err(IdentityDenied);

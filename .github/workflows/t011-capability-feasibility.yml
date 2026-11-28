@@ -364,6 +364,27 @@ jobs:
         if: matrix.target == 'win32-x64'
         run: pwsh -NoProfile -File test/security/t011-windows-custody-acceptance.ps1
 
+      # Separate fresh VHD and SCM identity; existing legacy controls remain mandatory.
+      - name: Test Windows SCM admitted SDK storage
+        id: windows_scm_admitted_storage
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo +1.91.1 clippy --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.91.1 build --locked --features scm-storage-proof --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $result = @(pwsh -NoProfile -File test/security/t011-windows-storage-domain-acceptance.ps1 -ScmStorageOnly)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if ($result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE' -or
+              $result -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE') {
+            throw 'E_STORAGE_SCM_ADMITTED_VERDICT_MISSING'
+          }
+
       - name: Test Windows storage isolation and outside-object integrity
         if: matrix.target == 'win32-x64'
         shell: pwsh

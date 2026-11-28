@@ -34,7 +34,7 @@ use windows_sys::Win32::{
 };
 // Existing native-peer mask: no FILE_CREATE_PIPE_INSTANCE / append grant.
 // The actual Node duplex round trip and second-instance negative are tested.
-const CLIENT_RIGHTS: u32 = 0x0012019B;
+pub(super) const CLIENT_RIGHTS: u32 = 0x0012019B;
 const SENTINEL: &[u8] = b"SERVICE_DOMAIN_BYTES";
 const TIMEOUT: Duration = Duration::from_secs(8);
 fn sentinel_path() -> Result<PathBuf, IdentityDenied> {

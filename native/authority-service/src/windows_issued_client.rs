@@ -206,6 +206,10 @@ enum FixedScmChild {
     Observe,
     Resume,
     SdkRead,
+    #[cfg(feature = "scm-storage-proof")]
+    SdkMutation {
+        cancellation: bool,
+    },
 }
 
 impl IssuedClient {
@@ -266,6 +270,14 @@ impl IssuedClient {
         job: OwnedHandle,
     ) -> Result<ScmJobFixtureChild, IdentityDenied> {
         Self::launch_fixed_scm_job_child(job, FixedScmChild::SdkRead)
+    }
+
+    #[cfg(feature = "scm-storage-proof")]
+    pub fn launch_scm_sdk_mutation_fixture(
+        job: OwnedHandle,
+        cancellation: bool,
+    ) -> Result<ScmJobFixtureChild, IdentityDenied> {
+        Self::launch_fixed_scm_job_child(job, FixedScmChild::SdkMutation { cancellation })
     }
 
     fn launch_fixed_scm_job_child(
@@ -330,6 +342,53 @@ impl IssuedClient {
                     script.to_str().ok_or(IdentityDenied)?,
                     pipe
                 );
+                Self::launch_suspended_with_observation(
+                    &image,
+                    OsStr::new(&command),
+                    &[
+                        ("SystemRoot", &system),
+                        ("USERPROFILE", state),
+                        ("HOME", state),
+                        ("TEMP", state),
+                        ("TMP", state),
+                        ("DESKTOP_COMMANDER_CONFIG_DIR", state),
+                        ("DESKTOP_COMMANDER_DISABLE_TELEMETRY", "1"),
+                        ("DC_FLAG_URL", "http://127.0.0.1:9/"),
+                    ],
+                    true,
+                    Some(job.as_handle()),
+                    true,
+                )?
+            }
+            #[cfg(feature = "scm-storage-proof")]
+            FixedScmChild::SdkMutation { cancellation } => {
+                let runtime = stage.join("sdk-read");
+                let image = runtime.join("node.exe");
+                let script =
+                    runtime.join("test/security/support/t011-issued-sdk-native-mutations.mjs");
+                let state = stage.join(if cancellation {
+                    "sdk-cancel-state"
+                } else {
+                    "sdk-mutation-state"
+                });
+                if !script.is_file() || !state.is_dir() {
+                    return Err(IdentityDenied);
+                }
+                let state = state.to_str().ok_or(IdentityDenied)?;
+                let pipe = format!(
+                    r"\\.\pipe\JDC-T011-MUTATION-SCM-{id}{}-fresh",
+                    if cancellation { "-cancel" } else { "" }
+                );
+                let mut command = format!(
+                    "\"{}\" \"{}\" \"{pipe}\" \"{state}\"",
+                    image.to_str().ok_or(IdentityDenied)?,
+                    script.to_str().ok_or(IdentityDenied)?
+                );
+                if cancellation {
+                    command.push_str(&format!(" --cancel-before-commit \"{pipe}-completion\""));
+                } else {
+                    command.push_str(" --fresh-channel");
+                }
                 Self::launch_suspended_with_observation(
                     &image,
                     OsStr::new(&command),

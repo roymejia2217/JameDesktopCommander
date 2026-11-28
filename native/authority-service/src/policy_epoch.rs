@@ -101,7 +101,10 @@ impl PolicyFence {
     /// it must never modify the target or expose usable authority. The
     /// commit callback runs only with the still-current epoch fenced.
     /// Revocation can win while private preparation is in progress.
-    #[cfg(any(target_os = "linux", all(windows, test)))]
+    #[cfg(any(
+        target_os = "linux",
+        all(windows, any(test, feature = "scm-storage-proof"))
+    ))]
     pub(crate) fn prepare_and_commit_once<T, U, E>(
         &self,
         ticket: &ReadTicket,

@@ -55,6 +55,22 @@ mod proof {
                 (Some(arg), None) if arg == "--authority-sdk-read-proof" => {
                     Some(Self::Observer(JobProofMode::SdkRead))
                 }
+                #[cfg(feature = "scm-storage-proof")]
+                (Some(arg), None) if arg == "--issuer-sdk-mutation-proof" => {
+                    Some(Self::Issuer(JobProofMode::SdkMutation))
+                }
+                #[cfg(feature = "scm-storage-proof")]
+                (Some(arg), None) if arg == "--authority-sdk-mutation-proof" => {
+                    Some(Self::Observer(JobProofMode::SdkMutation))
+                }
+                #[cfg(feature = "scm-storage-proof")]
+                (Some(arg), None) if arg == "--issuer-sdk-cancel-proof" => {
+                    Some(Self::Issuer(JobProofMode::SdkCancel))
+                }
+                #[cfg(feature = "scm-storage-proof")]
+                (Some(arg), None) if arg == "--authority-sdk-cancel-proof" => {
+                    Some(Self::Observer(JobProofMode::SdkCancel))
+                }
                 _ => None,
             }
         }

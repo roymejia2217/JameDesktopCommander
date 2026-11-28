@@ -774,6 +774,51 @@ shipping broker authority, or power-loss recovery. The next integration
 must reuse the admitted-volume checks and journal under the independently
 verified SCM authority and retain the full negative controls.
 
+#### SCM admitted NTFS SDK mutation and cancellation (nonrelease; hosted verdict pending)
+
+Hosted Windows job 141057723543 at `0d2fead3a0c354dc73a0be3519022de471086c32`
+accepted both fresh local SDK mutation/cancellation markers and the distinct
+SCM real read. The legacy issuer prerequisite still failed; Linux EACCES
+is unchanged. The new feature `scm-storage-proof` is opt-in for the CI-only
+SCM proof binary; default non-test builds exclude the mutation engine and
+journal. Existing versions and locked dependencies are reused.
+
+The shared fixed request executor is now fallible rather than dependent on
+test assertions. It authenticates every frame and repeats custody at the
+publication fence, records terminal SQLite state before acknowledgment,
+and checks exact file bytes. The separate cancellation executor requires
+the actual authenticated cancellation byte, private staging, no publication,
+terminal rejected journal and stage removal. Missing cancellation evidence fails the proof; the cancellation scenario never publishes. A post-commit verification failure never acknowledges success or authorizes replay.
+Local SDK tests exercise both shared executors with default and opt-in builds.
+
+A second existing hosted VHD-controller invocation provisions a fresh
+128 MiB non-system NTFS VHD and verifies its backing identity immediately
+before assigning root custody to the restricted SCM authority. The fixed
+administrator-created manifest remains read-only for the two roles; native
+admission reuses VerifiedVolume and the existing SQLite schema. Mutation
+mode (60/61) provisions a fresh journal, executes five fixed mutations with
+the last acknowledgment intentionally lost, reopens the admitted journal
+and rejects replay. Cancellation mode (62/63) requires the previous state,
+authenticates the cancellation and checks sequence six/rejected plus replay
+denial and unchanged final bytes. No client-provided native path is decoded.
+The authority checks the protected job, child and thread before each
+publication; the actual issuer must receive ERROR_ACCESS_DENIED for
+direct journal read/write and root write before the child is issued.
+
+The hosted controller requires both stopped services to be deleted before
+detaching the VHD, retains the volume on uncertain cleanup, and checks
+separate ordinary principals cannot read or mutate either final file or
+journal. Each rewrite has a readable auxiliary positive control. Actual
+cross-volume hardlink errors and SHA-256 checks of final, journal and
+outside bytes remain mandatory. Existing SCM and legacy storage gates
+are unchanged and still required. New verdicts:
+`T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE`,
+`T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE`,
+`T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE`.
+These are pending independent hosted acceptance. No shipping grant, durable
+production root/epoch administration, arbitrary request parser, power-loss
+recovery, or full nondelegable-writer proof is claimed.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

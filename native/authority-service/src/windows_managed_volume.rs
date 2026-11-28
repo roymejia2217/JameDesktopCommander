@@ -41,7 +41,7 @@ fn admission_denied(check: &'static str, code: Option<u32>) -> MutationError {
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
-fn valid_guid_root(s: &str) -> bool {
+pub(super) fn valid_guid_root(s: &str) -> bool {
     let Some(id) = s
         .strip_prefix(r"\\?\Volume{")
         .and_then(|x| x.strip_suffix("}\\"))
@@ -57,7 +57,7 @@ fn valid_guid_root(s: &str) -> bool {
             }
         })
 }
-fn valid_drive(s: &str) -> bool {
+pub(super) fn valid_drive(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'
 }
@@ -584,5 +584,6 @@ impl VerifiedVolume {
     }
 }
 
+#[cfg(test)]
 #[path = "windows_managed_volume_tests.rs"]
 mod tests;

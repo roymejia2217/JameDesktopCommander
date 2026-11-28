@@ -7,32 +7,56 @@ use crate::{
     IdentityDenied,
 };
 use std::{
-    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle},
     ptr,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{INVALID_HANDLE_VALUE, WAIT_TIMEOUT},
-    Storage::FileSystem::{
-        ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
-    },
+    Foundation::WAIT_TIMEOUT,
     System::{
-        Pipes::{
-            CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, PeekNamedPipe,
-            PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
-        },
+        Pipes::{DisconnectNamedPipe, GetNamedPipeClientProcessId, PeekNamedPipe},
         Threading::{GetProcessId, WaitForSingleObject},
-        IO::OVERLAPPED,
     },
 };
 pub(super) struct MutationPipe(OwnedHandle);
 #[path = "windows_bounded_pipe_io.rs"]
 mod bounded_io;
-use bounded_io::{deadline, event, finish, Progress};
+use bounded_io::{deadline, Progress};
+#[cfg(test)]
+use bounded_io::{event, finish};
+#[cfg(test)]
+use std::os::windows::io::FromRawHandle;
+#[cfg(test)]
+use windows_sys::Win32::{
+    Foundation::INVALID_HANDLE_VALUE,
+    Storage::FileSystem::{
+        ReadFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+    },
+    System::{
+        Pipes::{
+            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+            PIPE_WAIT,
+        },
+        IO::OVERLAPPED,
+    },
+};
 impl MutationPipe {
+    #[cfg(feature = "scm-storage-proof")]
+    pub(super) fn from_scm_fixture(handle: OwnedHandle) -> Result<Self, IdentityDenied> {
+        crate::windows_token::verify_scm_fixture_identity(
+            crate::windows_token::ScmFixtureRole::Authority,
+        )
+        .map_err(|_| IdentityDenied)?;
+        // The fixed proof controller has already checked the actual
+        // descriptor, first-instance creation and noninheritability.
+        Ok(Self(handle))
+    }
+
+    #[cfg(test)]
     pub(super) fn create(name: &str, first: bool) -> Result<Self, IdentityDenied> {
         Self::create_with_instances(name, first, 2)
     }
+    #[cfg(test)]
     fn create_with_instances(
         name: &str,
         first: bool,
@@ -41,6 +65,7 @@ impl MutationPipe {
         Self::create_with_descriptor(name, first, instances, ptr::null())
     }
 
+    #[cfg(test)]
     fn create_with_descriptor(
         name: &str,
         first: bool,
@@ -82,6 +107,7 @@ impl MutationPipe {
     // Same-token local experiment with the exact admitted SCM read client
     // mask. The creator retains the server handle, but the client principal
     // has no generic-write or instance-creation ACE. Not an SCM grant.
+    #[cfg(test)]
     pub(super) fn create_limited_local(name: &str) -> Result<Self, IdentityDenied> {
         use windows_sys::Win32::{
             Foundation::LocalFree,
@@ -363,12 +389,14 @@ impl MutationPipe {
 /// experiment does not establish protected issuer or distinct-token custody.
 /// The channel retains the exact creation-time process object with reduced
 /// rights; callers cannot substitute another process for individual requests.
+#[cfg(test)]
 pub(super) struct IssuerConnectedMutationPipe {
     pipe: MutationPipe,
     issued_process: OwnedHandle,
     issuer_process: Option<OwnedHandle>,
 }
 
+#[cfg(test)]
 impl IssuerConnectedMutationPipe {
     pub(super) fn issue_local(
         name: &str,

@@ -13,7 +13,7 @@ const hostedCancellation = process.argv.length === 4 && localHome === '--hosted-
 const hosted = process.argv.length === 3 || hostedCancellation;
 const inherited = socketPath === '--inherited-channel';
 const freshPath = process.platform === 'win32' && !hosted && !inherited &&
-  /^\\\\\.\\pipe\\JDC-T011-MUTATION-\d+-\d+-fresh$/.test(socketPath ?? '');
+  /^\\\\\.\\pipe\\JDC-T011-MUTATION-(?:\d+-\d+|SCM-[0-9a-f]{32}(?:-cancel)?)-fresh$/.test(socketPath ?? '');
 const freshCancellation = freshPath && scenario === '--cancel-before-commit' &&
   process.argv.length === 6 && completionPath === socketPath + '-completion';
 const windowsCancellation = freshCancellation ||

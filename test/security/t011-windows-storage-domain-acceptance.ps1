@@ -1,4 +1,5 @@
 # T011 #148: temporary NTFS VHD and real OS principals. NON-RELEASE.
+param([switch] $ScmStorageOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or
@@ -604,6 +605,54 @@ exit
     if ($volumeGuids.Count -ne 1) { throw 'E_STORAGE_VOLUME_GUID_UNAVAILABLE' }
     $volumeGuid = $volumeGuids[0]
     $volumeOwner = (Get-Acl -LiteralPath $volume).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($ScmStorageOnly) {
+        # Separate freshly provisioned VHD. Never reuse the legacy domain or
+        # detach while a service may still hold its object handles.
+        $scmOutside = Join-Path $outside 'scm-outside.bin'
+        Require-UserSuccess 'SCM_ATTACKER_OWN_POSITIVE' $attacker.Credential $probe @('canary', $scmOutside, $scmOutside)
+        $outsideBefore = (Get-FileHash -LiteralPath $scmOutside -Algorithm SHA256).Hash
+        $processStateUncertain = $true
+        & (Join-Path (Get-Location).Path 'test/security/t011-windows-scm-acceptance.ps1') -StorageDrive $volume -StorageGuid $volumeGuid -StorageImage $vhd | Tee-Object -Variable scmResult
+        if ((Get-Service -Name 'JameDesktopCommanderAuthority' -ErrorAction SilentlyContinue) -or
+            (Get-Service -Name 'JameDesktopCommanderIssuer' -ErrorAction SilentlyContinue)) {
+            throw 'E_STORAGE_SCM_CLEANUP_UNVERIFIED'
+        }
+        $processStateUncertain = $false
+        if ($scmResult -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE' -or
+            $scmResult -cnotcontains 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE') {
+            throw 'E_STORAGE_SCM_ADMITTED_VERDICT_MISSING'
+        }
+        Assert-IssuerBackingAcl $imageDir $true
+        Assert-IssuerBackingAcl $vhd $false
+        $final = Join-Path $volume 'final.txt'
+        $db = Join-Path $volume '.jdc-state/policy.sqlite3'
+        $aux = Join-Path $bin 'scm-aux.bin'
+        [IO.File]::WriteAllBytes($aux, [Text.Encoding]::ASCII.GetBytes('SCM_NEGATIVE_CONTROL'))
+        $finalBefore = (Get-FileHash -LiteralPath $final -Algorithm SHA256).Hash
+        $dbBefore = (Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash
+        foreach ($principal in @(
+            @{ Label = 'ATTACKER'; Identity = $attacker.Credential },
+            @{ Label = 'CLIENT'; Identity = $client.Credential },
+            @{ Label = 'OLD_SERVICE'; Identity = $service.Credential }
+        )) {
+            # A rewrite denial cannot be attributed to an inaccessible source.
+            Require-UserSuccess ("SCM_" + $principal.Label + "_READ_AUX") $principal.Identity $probe @('read', $aux, $aux)
+            foreach ($operation in @('read', 'append', 'rewrite', 'rename', 'unlink')) {
+                Require-UserDenial ("SCM_" + $principal.Label + "_FINAL_" + $operation.ToUpperInvariant()) $principal.Identity $probe @($operation, $final, $aux)
+                Require-UserDenial ("SCM_" + $principal.Label + "_JOURNAL_" + $operation.ToUpperInvariant()) $principal.Identity $probe @($operation, $db, $aux)
+            }
+            Require-UserDenial ("SCM_" + $principal.Label + "_CREATE") $principal.Identity $probe @('create', $final, $scmOutside)
+        }
+        Require-AdminCrossVolumeDenial 'scm-outside-to-domain' $scmOutside (Join-Path $volume 'scm-admin-link.bin')
+        Require-AdminCrossVolumeDenial 'scm-domain-to-outside' $final (Join-Path $outside 'scm-reverse-link.bin')
+        if ((Get-FileHash -LiteralPath $scmOutside -Algorithm SHA256).Hash -ne $outsideBefore -or
+            (Get-FileHash -LiteralPath $final -Algorithm SHA256).Hash -ne $finalBefore -or
+            (Get-FileHash -LiteralPath $db -Algorithm SHA256).Hash -ne $dbBefore) {
+            throw 'E_STORAGE_SCM_OBJECT_BYTES_CHANGED'
+        }
+        Write-Output 'T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE'
+        return
+    }
     $artifactLines = & cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib --no-run --message-format=json
     if ($LASTEXITCODE -ne 0) { throw 'E_STORAGE_ADMISSION_BUILD_FAILED' }
     $artifacts = @($artifactLines | ForEach-Object { ConvertFrom-Json -InputObject $_ } | Where-Object {

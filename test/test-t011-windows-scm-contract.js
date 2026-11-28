@@ -60,6 +60,25 @@ test('SCM distinct-principal observation is a mandatory nonrelease experiment', 
   assert.match(acceptance, /T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE/);
   assert.match(proof, /--issuer-sdk-read-proof/);
   assert.match(proof, /--authority-sdk-read-proof/);
+  assert.match(crate, /scm-storage-proof = \[/);
+  assert.doesNotMatch(crate, /^default\s*=.*scm-storage-proof/m);
+  for (const scenario of ['sdk-mutation', 'sdk-cancel']) {
+    assert.ok(proof.includes('--issuer-' + scenario + '-proof'));
+    assert.ok(proof.includes('--authority-' + scenario + '-proof'));
+  }
+  assert.match(acceptance, /'sdk-mutation' \{ 60 \} 'sdk-cancel' \{ 62 \}/);
+  assert.match(acceptance, /'sdk-mutation' \{ 61 \} 'sdk-cancel' \{ 63 \}/);
+  assert.match(acceptance, /T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE/);
+  assert.match(acceptance, /T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE/);
+  const storage = fs.readFileSync(path.join(root, 'test/security/t011-windows-storage-domain-acceptance.ps1'), 'utf8');
+  assert.match(storage, /-StorageDrive \$volume -StorageGuid \$volumeGuid -StorageImage \$vhd/);
+  assert.match(storage, /E_STORAGE_SCM_CLEANUP_UNVERIFIED/);
+  assert.match(storage, /T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE/);
+  assert.match(storage, /Require-UserSuccess .*_READ_AUX/);
+  assert.match(workflow, /id: windows_scm_admitted_storage/);
+  assert.match(workflow, /--features scm-storage-proof/);
+  assert.match(workflow, /t011-windows-storage-domain-acceptance\.ps1 -ScmStorageOnly/);
+  assert.match(workflow, /T011_WINDOWS_SCM_ADMITTED_OUTSIDE_INTEGRITY_PASS_NONRELEASE/);
   assert.match(acceptance, /Assert-DualRoleAcl \$entry.FullName \$virtualSid \$issuerSid \$rx \$false/);
   assert.match(acceptance, /Set-RestrictedAcl \$sentinel \$false \$virtualSid/);
   assert.match(workflow, /observation::job_fixture::sdk_read::tests::real_jdc_sdk_fixed_read_and_wrong_connector_denial -- --ignored --exact --nocapture/);

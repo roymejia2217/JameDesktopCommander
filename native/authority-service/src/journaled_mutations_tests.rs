@@ -10,17 +10,7 @@ const ID: [u8; 32] = [7; 32];
 
 fn provision(path: &Path) {
     let conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch(
-        "PRAGMA application_id=0x4A444331;
-         PRAGMA user_version=2;
-         CREATE TABLE protected_state (slot INTEGER PRIMARY KEY CHECK(slot=1), domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=32), epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8), digest BLOB NOT NULL CHECK(typeof(digest)='blob' AND length(digest)=32), sequence BLOB NOT NULL CHECK(typeof(sequence)='blob' AND length(sequence)=8), phase INTEGER NOT NULL CHECK(phase IN (0,1,2,3)), operation_epoch BLOB NOT NULL CHECK(typeof(operation_epoch)='blob' AND length(operation_epoch)=8), request_digest BLOB NOT NULL CHECK(typeof(request_digest)='blob' AND length(request_digest)=32));
-         INSERT INTO protected_state VALUES(1,zeroblob(32),x'0000000000000001',zeroblob(32),zeroblob(8),0,zeroblob(8),zeroblob(32));"
-    ).unwrap();
-    conn.execute(
-        "UPDATE protected_state SET domain=?1 WHERE slot=1",
-        [ID.as_slice()],
-    )
-    .unwrap();
+    provision_fixture_journal(&conn, ID).unwrap();
 }
 
 struct Fixture(PathBuf);
@@ -1208,15 +1198,6 @@ fn exercise_sdk_mutation_plan(
     );
 }
 
-fn sdk_mutation_payload(tag: u8, first: &[u8], second: &[u8]) -> Vec<u8> {
-    let mut data = vec![tag];
-    for field in [first, second] {
-        data.extend_from_slice(&(field.len() as u32).to_be_bytes());
-        data.extend_from_slice(field);
-    }
-    data
-}
-
 fn execute_sdk_journaled_operation(
     domain: &JournaledDomain,
     db: &Path,
@@ -1252,47 +1233,8 @@ fn exercise_sdk_mutation_plan_with_commit_gate<C>(
     live: impl Fn() -> bool,
     commit_gate: impl Fn(&C) -> bool,
 ) {
-    let payload = sdk_mutation_payload;
-    // A trusted fixture plan specifies the complete allowed requests;
-    // exact matching means no client-selected root, grant or sequence.
-    let plan = [
-        (payload(1, b"/managed/ungranted.txt", b"never"), None),
-        (
-            payload(1, b"/managed/report.txt", b"BEGIN"),
-            Some(Operation::Create {
-                name: "report.txt",
-                bytes: b"BEGIN",
-            }),
-        ),
-        (
-            payload(2, b"/managed/report.txt", b"-APPEND"),
-            Some(Operation::Append {
-                name: "report.txt",
-                bytes: b"-APPEND",
-            }),
-        ),
-        (
-            payload(1, b"/managed/report.txt", b"REWRITE"),
-            Some(Operation::Rewrite {
-                name: "report.txt",
-                bytes: b"REWRITE",
-            }),
-        ),
-        (
-            payload(3, b"/managed/report.txt", b"/managed/final.txt"),
-            Some(Operation::Rename {
-                from: "report.txt",
-                to: "final.txt",
-            }),
-        ),
-        (
-            payload(2, b"/managed/final.txt", b"-LOST"),
-            Some(Operation::Append {
-                name: "final.txt",
-                bytes: b"-LOST",
-            }),
-        ),
-    ];
+    // Reuse the exact fixed grant plan; no caller-selected native paths.
+    let plan = fixed_sdk_mutation_plan();
     let initial = Journal::open_existing(db, ID).unwrap().snapshot().unwrap();
     let snapshot = || Journal::open_existing(db, ID).unwrap().snapshot().unwrap();
     for (index, (expected, op)) in plan.into_iter().enumerate() {
@@ -1815,23 +1757,17 @@ fn local_windows_real_sdk_fresh_protected_mutation_channel() {
             assert!(!f.0.join("objects/ungranted.txt").exists());
             continue;
         }
-        exercise_sdk_mutation_plan_with_commit_gate(
+        super::serve_fresh_sdk_mutations(
             &domain,
             &f.0.join("objects"),
-            &f.0.join("policy.sqlite3"),
-            |_| {
-                pipe.challenge(child.process_handle()).unwrap();
-                let frame = pipe
-                    .receive(child.process_handle(), &sid, 4096, Duration::from_secs(5))
-                    .unwrap();
-                (&pipe, frame)
-            },
-            |pipe, byte| pipe.reply(child.process_handle(), &sid, byte).unwrap(),
+            &pipe,
+            child.process_handle(),
+            &sid,
             || unsafe {
                 WaitForSingleObject(child.process_handle().as_raw_handle(), 0) == WAIT_TIMEOUT
             },
-            |pipe| pipe.commit_allowed(child.process_handle(), &sid),
-        );
+        )
+        .unwrap();
         // Deliberate EOF after the fifth journaled commit. No reconnect/retry.
         drop(pipe);
         child.wait_for_exit(Duration::from_secs(10)).unwrap();
@@ -1900,12 +1836,6 @@ fn local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes() {
     completion.connect(Duration::from_secs(10)).unwrap();
     pipe.connect(Duration::from_secs(10)).unwrap();
     pipe.await_ready(child.process_handle(), &sid).unwrap();
-    pipe.challenge(child.process_handle()).unwrap();
-    assert_eq!(
-        pipe.receive(child.process_handle(), &sid, 4096, Duration::from_secs(5))
-            .unwrap(),
-        sdk_mutation_payload(1, b"/managed/cancelled.txt", b"MUST-NOT-PUBLISH")
-    );
     let before = f.state();
     assert_eq!(before.sequence, 0);
     let sequence = before.sequence + 1;
@@ -1914,21 +1844,32 @@ fn local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes() {
         bytes: b"MUST-NOT-PUBLISH",
     };
     let digest = request_digest(ID, before.epoch, sequence, &op).unwrap();
-    let mut cancellation = None;
-    let result = execute_sdk_journaled_operation(&domain, &db, sequence, op, || {
-        assert_eq!(f.state().phase, Phase::Pending);
-        assert!(fs::read_dir(&root)
-            .unwrap()
-            .any(|entry| entry.unwrap().file_name() == ".jdc-stage"));
-        assert!(!root.join("cancelled.txt").exists());
-        cancellation = Some(pipe.observe_staged_cancellation(child.process_handle(), &sid));
-        cancellation == Some(Ok(())) && pipe.commit_allowed(child.process_handle(), &sid)
-    });
-    assert_eq!(result, Err(MutationError::Denied));
-    assert_eq!(
-        cancellation,
-        Some(Ok(())),
-        "actual authenticated SDK cancellation required"
+    let pending_observed = std::cell::Cell::new(false);
+    super::serve_fresh_sdk_cancellation(
+        &domain,
+        &root,
+        &pipe,
+        child.process_handle(),
+        &sid,
+        || {
+            if root.join(".jdc-stage").exists() {
+                assert_eq!(
+                    Journal::open_existing(&db, ID)
+                        .unwrap()
+                        .snapshot()
+                        .unwrap()
+                        .phase,
+                    Phase::Pending
+                );
+                pending_observed.set(true);
+            }
+            true
+        },
+    )
+    .unwrap();
+    assert!(
+        pending_observed.get(),
+        "real SDK cancellation must follow the persisted pending intent"
     );
     let after = f.state();
     assert_eq!(after.phase, Phase::Rejected);

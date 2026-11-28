@@ -37,6 +37,25 @@ path = "src/linux_systemd_issued_proof.rs"
 name = "jdc-authority-systemd-issued-client"
 path = "src/linux_systemd_issued_client.rs"
 
+# Opt-in, CI-only SCM storage proof. Default builds remain deny-only.
+[features]
+scm-storage-proof = ["dep:jdc-authority-store", "dep:sha2", "dep:rusqlite", "windows-sys/Wdk_Foundation", "windows-sys/Wdk_Storage_FileSystem"]
+
+[target.'cfg(windows)'.dependencies.jdc-authority-store]
+path = "../authority-store"
+optional = true
+
+[target.'cfg(windows)'.dependencies.sha2]
+version = "=0.11.0"
+default-features = false
+optional = true
+
+[target.'cfg(windows)'.dependencies.rusqlite]
+version = "=0.41.1"
+default-features = false
+features = ["bundled"]
+optional = true
+
 [dev-dependencies]
 jdc-authority-store = { path = "../authority-store" }
 sha2 = { version = "=0.11.0", default-features = false }

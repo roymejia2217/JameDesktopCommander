@@ -1,10 +1,36 @@
 # C4m: CI-only SCM acceptance. Not a production installer.
+param([string] $StorageDrive, [string] $StorageGuid, [string] $StorageImage)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
     $env:RUNNER_OS -ne 'Windows' -or -not $env:ProgramData) {
     throw 'E_SCM_EPHEMERAL_WINDOWS_RUNNER_REQUIRED'
 }
+$storageOnly = [bool]$StorageDrive
+if ($storageOnly -ne [bool]$StorageGuid -or $storageOnly -ne [bool]$StorageImage) {
+    throw 'E_SCM_STORAGE_INPUT_INCOMPLETE'
+}
+function Assert-ScmStorageVolume {
+    # Accept only the disposable VHD created by the existing hosted controller.
+    $imageRoot = [IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\') + '\'
+    $imagePath = [IO.Path]::GetFullPath($StorageImage)
+    if (-not $imagePath.StartsWith($imageRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $imagePath.Substring($imageRoot.Length) -notmatch '^JDC-148-STORAGE-(?<id>[0-9a-f]{32})\\backing-image\\JDC-148-\k<id>\.vhdx$' -or
+        $StorageDrive -notmatch '^[R-W]:\\$' -or $StorageGuid -notmatch '^\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\$') {
+        throw 'E_SCM_STORAGE_FIXTURE_IDENTITY'
+    }
+    $image = Get-DiskImage -ImagePath $imagePath -ErrorAction Stop
+    $disks = @($image | Get-Disk -ErrorAction Stop)
+    $part = Get-Partition -DriveLetter $StorageDrive.Substring(0,1) -ErrorAction Stop
+    if (-not $image.Attached -or $disks.Count -ne 1 -or
+        $disks[0].IsBoot -or $disks[0].IsSystem -or $disks[0].Size -ne 128MB -or
+        $disks[0].Number -ne $part.DiskNumber -or $StorageGuid -notin $part.AccessPaths -or
+        (Get-Volume -DriveLetter $StorageDrive.Substring(0,1)).FileSystem -ne 'NTFS' -or
+        (Test-Path -LiteralPath (Join-Path $StorageDrive '.jdc-state'))) {
+        throw 'E_SCM_STORAGE_FIXTURE_NOT_FRESH'
+    }
+}
+if ($storageOnly) { Assert-ScmStorageVolume }
 $serviceName = 'JameDesktopCommanderAuthority'
 $virtualAccount = "NT SERVICE\$serviceName"
 $sc = (Get-Command sc.exe -ErrorAction Stop).Source
@@ -351,9 +377,40 @@ try {
         if ($sourceEntries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) { throw 'E_SCM_SDK_SOURCE_REPARSE' }
         Copy-Item -LiteralPath $source -Destination (Join-Path $sdk $tree) -Recurse -Force -ErrorAction Stop
     }
+    if ($storageOnly) {
+        # Reconfirm backing identity immediately before touching the ACL.
+        Assert-ScmStorageVolume
+        $acl = Get-Acl -LiteralPath $StorageDrive
+        $owner = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        $acl.SetOwner($owner)
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+            $acl.RemoveAccessRuleSpecific($rule)
+        }
+        $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        foreach ($entry in @(
+            @{ Sid = $owner; Rights = 'FullControl' },
+            @{ Sid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'); Rights = 'FullControl' },
+            @{ Sid = $virtualSid; Rights = 'Modify' }
+        )) {
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+                $entry.Sid, [System.Security.AccessControl.FileSystemRights]$entry.Rights, $inherit,
+                [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow))
+        }
+        Set-Acl -LiteralPath $StorageDrive -AclObject $acl
+        $manifest = Join-Path $sdk 'scm-storage-input.txt'
+        [IO.File]::WriteAllLines($manifest, [string[]]@($StorageDrive, $StorageGuid, $virtualSid.Value, $owner.Value), [Text.UTF8Encoding]::new($false))
+        foreach ($stateName in @('sdk-mutation-state', 'sdk-cancel-state')) {
+            $stateDir = Join-Path $stage $stateName
+            New-Item -ItemType Directory -Path $stateDir -ErrorAction Stop | Out-Null
+            Set-DualRoleAcl $stateDir $true $virtualSid $issuerSid $modify
+        }
+    }
     $support = Join-Path $sdk 'test/security/support'
     New-Item -ItemType Directory -Path $support -Force -ErrorAction Stop | Out-Null
-    foreach ($name in @('t011-issued-sdk-native-read.mjs', 't011-windows-scm-sdk-client.mjs')) {
+    $supportFiles = @('t011-issued-sdk-native-read.mjs', 't011-windows-scm-sdk-client.mjs')
+    if ($storageOnly) { $supportFiles += 't011-issued-sdk-native-mutations.mjs' }
+    foreach ($name in $supportFiles) {
         $source = Join-Path (Get-Location).Path ('test/security/support/' + $name)
         $destination = Join-Path $support $name
         Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
@@ -366,11 +423,16 @@ try {
         Assert-DualRoleAcl $entry.FullName $virtualSid $issuerSid $rx $false $trustedOwners
     }
     # All three distinct experiments are mandatory.
-    foreach ($scenario in @('observer', 'resume', 'sdk-read')) {
+    $scenarios = if ($storageOnly) { @('sdk-mutation', 'sdk-cancel') } else { @('observer', 'resume', 'sdk-read') }
+    foreach ($scenario in $scenarios) {
     $issuerCommand = '"' + $proofBinary + '" --issuer-' + $scenario + '-proof'
     $observerCommand = '"' + $proofBinary + '" --authority-' + $scenario + '-proof'
     $expectedObserver = switch ($scenario) { 'observer' { 8 } 'resume' { 12 } 'sdk-read' { 16 } }
     $expectedIssuer = switch ($scenario) { 'observer' { 10 } 'resume' { 14 } 'sdk-read' { 18 } }
+    if ($storageOnly) {
+        $expectedObserver = switch ($scenario) { 'sdk-mutation' { 60 } 'sdk-cancel' { 62 } }
+        $expectedIssuer = switch ($scenario) { 'sdk-mutation' { 61 } 'sdk-cancel' { 63 } }
+    }
     $recordName = if ($scenario -eq 'observer') { 'issued-process.txt' } else { $scenario + '-issued-process.txt' }
     $jobRecordName = if ($scenario -eq 'observer') { 'job-issued-process.txt' } else { $scenario + '-job-issued-process.txt' }
     & $sc config $issuerName 'binPath=' $issuerCommand | Out-Null
@@ -407,13 +469,13 @@ try {
         # SCM is the transport for fixed proof failures; service stderr is
         # not available to this hosted controller. Never echo arbitrary values.
         if ($null -ne $observerState -and $observerState.State -eq 'Stopped' -and $observerState.ExitCode -eq 1066 -and
-            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..39) -or $observerState.ServiceSpecificExitCode -in (50..57))) {
+            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..39) -or $observerState.ServiceSpecificExitCode -in (50..57) -or $observerState.ServiceSpecificExitCode -in @(64,65))) {
             Write-Output ('E_SCM_OBSERVER_PHASE_' + $observerState.ServiceSpecificExitCode)
         }
         try {
             $issuerFailure = Get-CimInstance Win32_Service -Filter "Name='$issuerName'" -ErrorAction Stop
             if ($null -ne $issuerFailure -and $issuerFailure.State -eq 'Stopped' -and $issuerFailure.ExitCode -eq 1066 -and
-                ($issuerFailure.ServiceSpecificExitCode -eq 11 -or $issuerFailure.ServiceSpecificExitCode -in (40..48))) {
+                ($issuerFailure.ServiceSpecificExitCode -eq 11 -or $issuerFailure.ServiceSpecificExitCode -in (40..48) -or $issuerFailure.ServiceSpecificExitCode -eq 66)) {
                 Write-Output ('E_SCM_ISSUER_PHASE_' + $issuerFailure.ServiceSpecificExitCode)
             }
         } catch { Write-Warning 'E_SCM_ISSUER_PHASE_UNAVAILABLE' }
@@ -437,6 +499,15 @@ try {
     if ((Get-ScmDescriptor) -ne $baselineDescriptor) { throw 'E_SCM_PROOF_SERVICE_DACL_CHANGED' }
     Assert-ScmDacl (Get-ScmDescriptor $issuerName)
     }
+    if ($storageOnly) {
+        $final = Join-Path $StorageDrive 'final.txt'
+        if ([IO.File]::ReadAllText($final) -cne 'REWRITE-LOST' -or
+            (Test-Path -LiteralPath (Join-Path $StorageDrive 'cancelled.txt')) -or
+            (Test-Path -LiteralPath (Join-Path $StorageDrive '.jdc-stage')) -or
+            (Test-Path -LiteralPath (Join-Path $StorageDrive 'ungranted.txt'))) {
+            throw 'E_SCM_STORAGE_TERMINAL_BYTES'
+        }
+    }
     & $sc config $serviceName 'binPath=' $binary | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ORIGINAL_IMAGE_RESTORE_FAILED' }
 }
@@ -457,6 +528,7 @@ finally {
             if ($null -eq $issuerState -or $issuerState.State -ne 'Stopped' -or $issuerState.ProcessId -ne 0) {
                 throw 'E_SCM_ISSUER_CLEANUP_FAILED'
             }
+            $issuerController.Dispose()
             & $sc delete $issuerName | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_CLEANUP_FAILED' }
         }
@@ -471,6 +543,7 @@ finally {
             if ($null -eq $state -or $state.State -ne 'Stopped' -or $state.ProcessId -ne 0) {
                 throw 'E_SCM_AUTHORITY_CLEANUP_FAILED'
             }
+            $controller.Dispose()
             & $sc delete $serviceName | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'E_SCM_AUTHORITY_CLEANUP_FAILED' }
         }
@@ -490,6 +563,11 @@ finally {
     }
 }
 if ($null -ne $primaryFailure) { throw $primaryFailure }
+if ($storageOnly) {
+    Write-Output 'T011_WINDOWS_SCM_ADMITTED_SDK_MUTATIONS_PASS_NONRELEASE'
+    Write-Output 'T011_WINDOWS_SCM_ADMITTED_SDK_CANCEL_REPLAY_PASS_NONRELEASE'
+    return
+}
 Write-Output 'T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_AUTHENTICATED_HANDOFF_PASS_NONRELEASE'

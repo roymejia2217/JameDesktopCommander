@@ -5,14 +5,10 @@ use crate::{
     policy_epoch::{PolicyFence, ReadTicket},
 };
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     mem::{offset_of, size_of, MaybeUninit},
-    os::windows::{
-        fs::OpenOptionsExt,
-        io::{AsRawHandle, FromRawHandle},
-    },
-    path::Path,
+    os::windows::io::{AsRawHandle, FromRawHandle},
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -39,12 +35,19 @@ use windows_sys::{
         Storage::FileSystem::{
             GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
             DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE, VOLUME_NAME_NONE,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, SYNCHRONIZE, VOLUME_NAME_NONE,
         },
         System::IO::IO_STATUS_BLOCK,
     },
+};
+
+#[cfg(test)]
+use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt, path::Path};
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
 
 const LOCK: &str = ".jdc-lock";
@@ -307,6 +310,7 @@ enum Prepared<'a> {
 }
 
 impl Domain {
+    #[cfg(test)]
     pub(super) fn new_fixture(path: &Path, revision: u64) -> Result<Self, MutationError> {
         // Fixture only; a production root must be independently admitted.
         // Do not share DELETE for this directory handle.
@@ -546,5 +550,6 @@ impl Domain {
     }
 }
 
+#[cfg(test)]
 #[path = "windows_managed_mutations_tests.rs"]
 mod tests;

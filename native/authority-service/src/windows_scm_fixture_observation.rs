@@ -46,6 +46,10 @@ pub enum JobProofMode {
     Observe,
     Resume,
     SdkRead,
+    #[cfg(feature = "scm-storage-proof")]
+    SdkMutation,
+    #[cfg(feature = "scm-storage-proof")]
+    SdkCancel,
 }
 impl JobProofMode {
     fn record(self, observer: &str, resume: &str, sdk: &str) -> PathBuf {
@@ -53,6 +57,10 @@ impl JobProofMode {
             Self::Observe => observer,
             Self::Resume => resume,
             Self::SdkRead => sdk,
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkMutation => return PathBuf::from(format!("sdk-mutation-{observer}")),
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkCancel => return PathBuf::from(format!("sdk-cancel-{observer}")),
         })
     }
     fn suffix(self) -> &'static str {
@@ -60,6 +68,10 @@ impl JobProofMode {
             Self::Observe => "",
             Self::Resume => "-resume",
             Self::SdkRead => "-sdk-read",
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkMutation => "-sdk-mutation",
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkCancel => "-sdk-cancel",
         }
     }
     fn allows_resume(self) -> bool {
@@ -70,6 +82,10 @@ impl JobProofMode {
             Self::Observe => 8,
             Self::Resume => 12,
             Self::SdkRead => 16,
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkMutation => 60,
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkCancel => 62,
         }
     }
     pub fn issuer_success(self) -> u32 {
@@ -77,6 +93,10 @@ impl JobProofMode {
             Self::Observe => 10,
             Self::Resume => 14,
             Self::SdkRead => 18,
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkMutation => 61,
+            #[cfg(feature = "scm-storage-proof")]
+            Self::SdkCancel => 63,
         }
     }
 }
@@ -126,6 +146,12 @@ pub enum ProofPhase {
     SdkFrame = 55,
     SdkFile = 56,
     SdkReply = 57,
+    #[cfg(feature = "scm-storage-proof")]
+    StorageAdmission = 64,
+    #[cfg(feature = "scm-storage-proof")]
+    StorageSession = 65,
+    #[cfg(feature = "scm-storage-proof")]
+    StorageIssuerDenied = 66,
 }
 impl ProofPhase {
     pub fn code(self) -> u32 {

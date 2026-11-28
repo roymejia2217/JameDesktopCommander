@@ -308,6 +308,30 @@ jobs:
           if ($code -ne 0) { exit $code }
           if (-not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) { throw 'E_SCM_LOCAL_SDK_VERDICT_MISSING' }
 
+      # Same-token, limited-client persistent channel and real native journal.
+      # This does not replace admitted-volume or cross-SCM writer acceptance.
+      - name: Test Windows fresh SDK journaled mutations
+        id: windows_fresh_sdk_local_mutations
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE = (Get-Command node.exe -ErrorAction Stop).Source
+          $cases = @(
+            @{ Test = 'journaled_mutations::tests::local_windows_real_sdk_fresh_protected_mutation_channel'; Marker = 'T011_WINDOWS_LOCAL_FRESH_SDK_JOURNALED_MUTATIONS_PASS_NONRELEASE' },
+            @{ Test = 'journaled_mutations::tests::local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes'; Marker = 'T011_WINDOWS_LOCAL_FRESH_SDK_CANCELLED_JOURNAL_PASS_NONRELEASE' }
+          )
+          foreach ($case in $cases) {
+            $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --lib $case.Test -- --ignored --exact --nocapture)
+            $code = $LASTEXITCODE
+            $result | Write-Output
+            if ($code -ne 0) { exit $code }
+            if (-not ($result -contains $case.Marker) -or
+                -not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) {
+              throw 'E_STORAGE_FRESH_SDK_VERDICT_MISSING'
+            }
+          }
+
       - name: Test Windows SCM service identity and startup denial
         id: windows_scm_acceptance
         if: matrix.target == 'win32-x64'

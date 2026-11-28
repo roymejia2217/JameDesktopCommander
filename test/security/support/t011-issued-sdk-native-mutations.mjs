@@ -12,18 +12,24 @@ const [socketPath, localHome, scenario, completionPath] = process.argv.slice(2);
 const hostedCancellation = process.argv.length === 4 && localHome === '--hosted-cancel-before-commit';
 const hosted = process.argv.length === 3 || hostedCancellation;
 const inherited = socketPath === '--inherited-channel';
-const windowsCancellation = process.platform === 'win32' && inherited && !hosted &&
-  scenario === '--cancel-before-commit' && process.argv.length === 6 &&
-  /^\\\\\.\\pipe\\JDC-T011-MUTATION-\d+-\d+-completion$/.test(completionPath ?? '');
+const freshPath = process.platform === 'win32' && !hosted && !inherited &&
+  /^\\\\\.\\pipe\\JDC-T011-MUTATION-\d+-\d+-fresh$/.test(socketPath ?? '');
+const freshCancellation = freshPath && scenario === '--cancel-before-commit' &&
+  process.argv.length === 6 && completionPath === socketPath + '-completion';
+const windowsCancellation = freshCancellation ||
+  (process.platform === 'win32' && inherited && !hosted &&
+   scenario === '--cancel-before-commit' && process.argv.length === 6 &&
+   /^\\\\\.\\pipe\\JDC-T011-MUTATION-\d+-\d+-completion$/.test(completionPath ?? ''));
 const localCancellation = scenario === '--cancel-before-commit' && !hosted &&
   ((process.platform === 'linux' && !inherited) || windowsCancellation);
+const fresh = freshPath && ((scenario === '--fresh-channel' && process.argv.length === 5) || freshCancellation);
 const cancelBeforeCommit = hostedCancellation || localCancellation;
-if (scenario && !localCancellation) throw Error('E_MUTATION_FIXTURE_SCENARIO');
+if (scenario && !localCancellation && !fresh) throw Error('E_MUTATION_FIXTURE_SCENARIO');
 if (inherited && (process.platform !== 'win32' || hosted)) throw Error('E_INHERITED_FIXTURE_PLATFORM');
 if (!['linux', 'win32'].includes(process.platform) || !socketPath ||
     (hosted ? (process.platform !== 'linux' || process.getuid?.() === 0 ||
         process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted')
-      : (!localHome || process.argv.length !== (windowsCancellation ? 6 : localCancellation ? 5 : 4)))) {
+      : (!localHome || process.argv.length !== (windowsCancellation ? 6 : (localCancellation || fresh) ? 5 : 4)))) {
   throw Error('E_MUTATION_FIXTURE_ARGS');
 }
 const home = hosted ? fileURLToPath(new URL('../../../client-state/', import.meta.url)) : localHome;
@@ -65,18 +71,28 @@ let submitted = 0;
 let lostAckObserved = false;
 let stagedCancellationObserved = false;
 const cancellation = cancelBeforeCommit ? new AbortController() : undefined;
-// The issuer supplies an already connected duplex endpoint as fd 0.
-// No path open, and stdout/stderr remain separate diagnostic channels.
-const issuedChannel = inherited ? new Socket({ fd: 0, readable: true, writable: true }) : undefined;
-const issuedReader = issuedChannel?.[Symbol.asyncIterator]();
+// Inherited mode uses the issuer-supplied duplex endpoint as fd 0.
+// Fresh mode opens its fixed limited pipe once at the first SDK request.
+// stdout/stderr remain separate diagnostic channels.
+let issuedChannel = inherited ? new Socket({ fd: 0, readable: true, writable: true }) : undefined;
+let issuedReader = issuedChannel?.[Symbol.asyncIterator]();
 let issuedReady = false;
-async function mutateInherited(request, signal) {
+async function mutatePersistent(request, signal) {
+  if (fresh && !issuedChannel) {
+    issuedChannel = connect({ path: socketPath });
+    issuedReader = issuedChannel[Symbol.asyncIterator]();
+  }
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(25000)]);
   const cancel = addAbortListener(bounded, () => {
     // On Windows libuv retains the original standard descriptor. Send an
     // explicit cancellation only for the forwarded MCP abort, not a timeout.
     if (windowsCancellation && stagedCancellationObserved && signal.aborted) {
-      issuedChannel.write('X', () => issuedChannel.destroy(new Error('E_CHANNEL_CANCELLED')));
+      // Fresh channels stay open until the native peer acknowledges the
+      // cancellation by disconnecting. The inherited fixture retains its
+      // original close semantics.
+      issuedChannel.write('X', error => {
+        if (!fresh || error) issuedChannel.destroy(new Error('E_CHANNEL_CANCELLED'));
+      });
     } else {
       issuedChannel.destroy(new Error('E_CHANNEL_CANCELLED'));
     }
@@ -122,7 +138,7 @@ async function mutateInherited(request, signal) {
 }
 async function mutate(request, signal) {
   submitted++;
-  if (inherited) return mutateInherited(request, signal);
+  if (inherited || fresh) return mutatePersistent(request, signal);
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(process.platform === 'win32' ? 25000 : hosted ? 12000 : 5000)]);
   const channel = connect({ path: socketPath, signal: bounded });
   let challenged = false;

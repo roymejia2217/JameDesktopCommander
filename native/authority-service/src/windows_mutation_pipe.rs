@@ -38,6 +38,15 @@ impl MutationPipe {
         first: bool,
         instances: u32,
     ) -> Result<Self, IdentityDenied> {
+        Self::create_with_descriptor(name, first, instances, ptr::null())
+    }
+
+    fn create_with_descriptor(
+        name: &str,
+        first: bool,
+        instances: u32,
+        security: *const windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+    ) -> Result<Self, IdentityDenied> {
         if !name.starts_with(r"\\.\pipe\JDC-T011-MUTATION-")
             || name.len() > 200
             || name.contains('\0')
@@ -62,7 +71,7 @@ impl MutationPipe {
                 8192,
                 8192,
                 0,
-                ptr::null(),
+                security,
             )
         };
         if raw.is_null() || raw == INVALID_HANDLE_VALUE {
@@ -70,6 +79,96 @@ impl MutationPipe {
         }
         Ok(Self(unsafe { OwnedHandle::from_raw_handle(raw) }))
     }
+    // Same-token local experiment with the exact admitted SCM read client
+    // mask. The creator retains the server handle, but the client principal
+    // has no generic-write or instance-creation ACE. Not an SCM grant.
+    pub(super) fn create_limited_local(name: &str) -> Result<Self, IdentityDenied> {
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::{
+                    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                },
+                SECURITY_ATTRIBUTES,
+            },
+        };
+        struct Local(*mut std::ffi::c_void);
+        impl Drop for Local {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe {
+                        LocalFree(self.0);
+                    }
+                }
+            }
+        }
+        if !(name.ends_with("-fresh") || name.ends_with("-fresh-completion")) {
+            return Err(IdentityDenied);
+        }
+        let sid = crate::windows_pipe_peer::observe_process_sid()?;
+        let mut aligned = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
+        unsafe {
+            ptr::copy_nonoverlapping(sid.as_ptr(), aligned.as_mut_ptr().cast::<u8>(), sid.len());
+        }
+        let mut text = ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(aligned.as_mut_ptr().cast(), &mut text) } == 0
+            || text.is_null()
+        {
+            return Err(IdentityDenied);
+        }
+        let _text = Local(text.cast());
+        let len = (0..=184)
+            .find(|&i| unsafe { *text.add(i) == 0 })
+            .ok_or(IdentityDenied)?;
+        let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(text, len) })
+            .map_err(|_| IdentityDenied)?;
+        // SYSTEM would be a full-access control, not a limited-client proof.
+        if sid == "S-1-5-18" {
+            return Err(IdentityDenied);
+        }
+        let sddl = format!("D:P(A;;GA;;;SY)(A;;RC;;;OW)(A;;0x0012019B;;;{sid})");
+        let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut raw = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                1,
+                &mut raw,
+                ptr::null_mut(),
+            )
+        } == 0
+            || raw.is_null()
+        {
+            return Err(IdentityDenied);
+        }
+        let sd = Local(raw);
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd.0,
+            bInheritHandle: 0,
+        };
+        Self::create_with_descriptor(name, true, 1, &sa)
+    }
+
+    pub(super) fn await_ready(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+    ) -> Result<(), IdentityDenied> {
+        let mut ready = [0u8; 1];
+        self.read_attested(
+            issued,
+            sid,
+            &mut ready,
+            deadline(Duration::from_secs(5))?,
+            &mut |_| {},
+        )?;
+        if ready != *b"R" {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+
     pub(super) fn connect(&self, timeout: Duration) -> Result<(), IdentityDenied> {
         bounded_io::connect(self.0.as_handle(), deadline(timeout)?)
     }
@@ -165,6 +264,40 @@ impl MutationPipe {
         self.read_attested(issued, sid, &mut payload, end, &mut progress)?;
         Ok(payload)
     }
+    // Fresh connector: verify actual cancellation from the pinned process
+    // at the staged boundary before disconnecting. Never accept an unrelated
+    // close, timeout, or an unauthenticated cancellation byte as proof.
+    pub(super) fn observe_staged_cancellation(
+        &self,
+        issued: BorrowedHandle<'_>,
+        sid: &[u8],
+    ) -> Result<(), IdentityDenied> {
+        if !self.commit_allowed(issued, sid) {
+            return Err(IdentityDenied);
+        }
+        crate::windows_pipe_disclosure::write_chunk(self.0.as_handle(), b"S", 3000)?;
+        let mut cancellation = [0u8; 1];
+        self.read_attested(
+            issued,
+            sid,
+            &mut cancellation,
+            deadline(Duration::from_secs(5))?,
+            &mut |_| {},
+        )?;
+        if cancellation != *b"X" || !self.commit_allowed(issued, sid) {
+            return Err(IdentityDenied);
+        }
+        if unsafe { DisconnectNamedPipe(self.0.as_raw_handle()) } == 0
+            || self.commit_allowed(issued, sid)
+        {
+            return Err(IdentityDenied);
+        }
+        if unsafe { WaitForSingleObject(issued.as_raw_handle(), 0) } != WAIT_TIMEOUT {
+            return Err(IdentityDenied);
+        }
+        Ok(())
+    }
+
     // Test-only terminal synchronization. This is not the mutation channel
     // and never grants authority. Verify the real issued peer on both reads.
     pub(super) fn confirm_cancelled(

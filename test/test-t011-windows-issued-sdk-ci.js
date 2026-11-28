@@ -49,6 +49,19 @@ test('Windows native security CI executes the issued MCP SDK custody proof', () 
   assert.match(steps[inheritedMutation].run, /journaled_mutations::tests::local_windows_issued_sdk_cancelled_staged_mutation_never_publishes/);
   assert.match(steps[inheritedMutation].run, /T011_WINDOWS_NATIVE_JOURNAL_CANCELLED_STAGED_SDK_MUTATION_PASS_NONRELEASE/);
   assert.match(steps[inheritedMutation].run, /T011_WINDOWS_SDK_JOB_EMPTY_PASS_NONRELEASE/);
+  const freshMutation = index('windows_fresh_sdk_local_mutations');
+  assert.ok(freshMutation > built && freshMutation < windowsStorage,
+    'fresh restricted SDK channel must exercise the native journal before hosted acceptance');
+  assert.equal(steps[freshMutation].if, "matrix.target == 'win32-x64'");
+  assert.equal(steps[freshMutation].shell, 'pwsh');
+  assert.ok(!steps[freshMutation]['continue-on-error']);
+  assert.match(steps[freshMutation].run, /JDC_T011_NODE/);
+  assert.match(steps[freshMutation].run, /journaled_mutations::tests::local_windows_real_sdk_fresh_protected_mutation_channel/);
+  assert.match(steps[freshMutation].run, /--lib \$case.Test -- --ignored --exact --nocapture/);
+  assert.match(steps[freshMutation].run, /T011_WINDOWS_LOCAL_FRESH_SDK_JOURNALED_MUTATIONS_PASS_NONRELEASE/);
+  assert.match(steps[freshMutation].run, /journaled_mutations::tests::local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes/);
+  assert.match(steps[freshMutation].run, /T011_WINDOWS_LOCAL_FRESH_SDK_CANCELLED_JOURNAL_PASS_NONRELEASE/);
+  assert.match(steps[freshMutation].run, /E_STORAGE_FRESH_SDK_VERDICT_MISSING/);
   const serviceHandoff = index('windows_issuer_connected_sdk_separate_service');
   assert.ok(serviceHandoff > inheritedMutation && serviceHandoff < windowsStorage,
     'separate native service handoff must execute before hosted storage acceptance');

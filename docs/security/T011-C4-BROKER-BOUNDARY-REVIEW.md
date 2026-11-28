@@ -735,9 +735,44 @@ that ignored-by-default integration explicitly and requires exactly one
 passing test before SCM. New hosted marker:
 `T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE`.
 Phases 39 and 50–57 distinguish SDK staging/connection/challenge/request/
-connector/token/frame/file/response. Hosted distinct-account acceptance
-is pending; no grant to shipping code, no durable root/epoch policy, no
-NTFS mutation or recovery proof. Linux remains independently blocked.
+connector/token/frame/file/response. Hosted distinct-account read acceptance
+has passed (Windows job 141050855702, candidate ae5a8487). No grant to
+shipping code, durable root/epoch policy, NTFS mutation or recovery proof
+follows from that read verdict. Linux remains independently blocked.
+
+#### Windows fresh SDK journaled mutation and cancellation transport (nonrelease)
+
+Hosted Windows job 141050855702 for `ae5a8487d6c28c1ae025eb364ac9edf06a92ff51`
+accepted the third fixed real-SDK read scenario, including the previous
+SCM custody and controlled resume checks. The legacy storage issuer
+privilege check still failed later. Linux connect EACCES remains open.
+
+The next local nonrelease integration reuses the existing journaled native
+mutation engine, fixed SDK mutation plan and bounded named-pipe I/O. A fresh
+Node connector uses one persistent duplex instance, with the same limited
+client access mask 0x0012019B as the accepted SCM read (SYSTEM full,
+OWNER RIGHTS read-control, current non-SYSTEM test SID limited). No
+generic-write ACE, inherited channel or reconnect on unknown outcome.
+The local test retains the actual child process, authenticates the
+readiness byte and each request read against the connector and observed SID,
+and checks the existing publication gate. Five real committed operations
+produce REWRITE-LOST with journal sequence 5; the final acknowledgment
+is intentionally lost. The wrong retained process control leaves the
+journal unchanged and creates no managed files.
+
+The fresh cancellation scenario uses two limited local channels, the
+same MCP request cancellation and actual native staged-publication fence.
+The authenticated cancellation byte must be observed before the authority
+disconnects the mutation channel. The journal is rejected, the stage and
+target are absent, outside bytes are unchanged, the reopened journal
+rejects replay, and the authenticated completion channel confirms the
+verdict. Both real-runtime tests are explicit mandatory cases in the
+existing native-security workflow, before the SCM and hosted storage
+acceptance; no previous gate is removed. These are same-token local
+fixtures, not cross-SCM writer provenance, whole-volume admission,
+shipping broker authority, or power-loss recovery. The next integration
+must reuse the admitted-volume checks and journal under the independently
+verified SCM authority and retain the full negative controls.
 
 #### Windows request cancellation at the native publication fence (nonrelease)
 

@@ -1733,6 +1733,240 @@ fn local_inherited_service_mutation_fixture() {
 #[cfg(windows)]
 #[test]
 #[ignore = "requires repository npm build and absolute JDC_T011_NODE; same-token local fixture only"]
+fn local_windows_real_sdk_fresh_protected_mutation_channel() {
+    use crate::{
+        windows_issued_client::IssuedClient, windows_mutation_pipe::MutationPipe,
+        windows_pipe_peer::observe_process_sid,
+    };
+    use std::{
+        ffi::OsStr,
+        os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
+        time::Duration,
+    };
+    use windows_sys::Win32::{
+        Foundation::WAIT_TIMEOUT,
+        Storage::FileSystem::SYNCHRONIZE,
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    let node = PathBuf::from(std::env::var_os("JDC_T011_NODE").expect("absolute Node executable"));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test/security/support/t011-issued-sdk-native-mutations.mjs");
+    assert!(node.is_absolute() && node.is_file() && script.is_file());
+    let sid = observe_process_sid().unwrap();
+    let system = std::env::var("SystemRoot").unwrap();
+    for wrong_connector in [false, true] {
+        let f = Fixture::new();
+        let initial = f.state();
+        let domain = f.open();
+        let home = f.0.join("client-state");
+        fs::create_dir(&home).unwrap();
+        let name = format!(
+            r"\\.\pipe\JDC-T011-MUTATION-{}-{}-fresh",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        // One fresh, restricted instance throughout the complete SDK plan.
+        let pipe = MutationPipe::create_limited_local(&name).unwrap();
+        let cmd = format!(
+            r#""{}" "{}" "{}" "{}" --fresh-channel"#,
+            node.display(),
+            script.display(),
+            name,
+            home.display()
+        );
+        let home_text = home.to_str().unwrap();
+        let mut child = IssuedClient::launch_suspended(
+            &node,
+            OsStr::new(&cmd),
+            &[
+                ("SystemRoot", &system),
+                ("TEMP", home_text),
+                ("TMP", home_text),
+                ("USERPROFILE", home_text),
+            ],
+        )
+        .unwrap();
+        child.resume().unwrap();
+        pipe.connect(Duration::from_secs(10)).unwrap();
+        pipe.await_ready(child.process_handle(), &sid).unwrap();
+        if wrong_connector {
+            let raw = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                    0,
+                    std::process::id(),
+                )
+            };
+            assert!(!raw.is_null());
+            let wrong = unsafe { OwnedHandle::from_raw_handle(raw) };
+            pipe.challenge(child.process_handle()).unwrap();
+            assert!(pipe
+                .receive(wrong.as_handle(), &sid, 4096, Duration::from_secs(5))
+                .is_err());
+            drop(pipe);
+            child.wait_for_exit(Duration::from_secs(10)).unwrap();
+            assert_ne!(child.exit_code(), Ok(0));
+            assert_eq!(f.state(), initial);
+            assert!(!f.0.join("objects/report.txt").exists());
+            assert!(!f.0.join("objects/final.txt").exists());
+            assert!(!f.0.join("objects/ungranted.txt").exists());
+            continue;
+        }
+        exercise_sdk_mutation_plan_with_commit_gate(
+            &domain,
+            &f.0.join("objects"),
+            &f.0.join("policy.sqlite3"),
+            |_| {
+                pipe.challenge(child.process_handle()).unwrap();
+                let frame = pipe
+                    .receive(child.process_handle(), &sid, 4096, Duration::from_secs(5))
+                    .unwrap();
+                (&pipe, frame)
+            },
+            |pipe, byte| pipe.reply(child.process_handle(), &sid, byte).unwrap(),
+            || unsafe {
+                WaitForSingleObject(child.process_handle().as_raw_handle(), 0) == WAIT_TIMEOUT
+            },
+            |pipe| pipe.commit_allowed(child.process_handle(), &sid),
+        );
+        // Deliberate EOF after the fifth journaled commit. No reconnect/retry.
+        drop(pipe);
+        child.wait_for_exit(Duration::from_secs(10)).unwrap();
+        assert_eq!(child.exit_code(), Ok(0));
+        assert_eq!(f.bytes("final.txt"), b"REWRITE-LOST");
+        assert_eq!(f.state().sequence, 5);
+    }
+    println!("T011_WINDOWS_LOCAL_FRESH_SDK_JOURNALED_MUTATIONS_PASS_NONRELEASE");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires repository npm build and absolute JDC_T011_NODE; local fresh cancellation fixture"]
+fn local_windows_fresh_sdk_cancelled_staged_mutation_never_publishes() {
+    use crate::{
+        windows_issued_client::IssuedClient, windows_mutation_pipe::MutationPipe,
+        windows_pipe_peer::observe_process_sid,
+    };
+    use std::{ffi::OsStr, time::Duration};
+    let f = Fixture::new();
+    let domain = f.open();
+    let root = f.0.join("objects");
+    let db = f.0.join("policy.sqlite3");
+    let sentinel = f.0.join("outside-sentinel");
+    fs::write(&sentinel, b"OUTSIDE").unwrap();
+    let home = f.0.join("client-state");
+    fs::create_dir(&home).unwrap();
+    let node = PathBuf::from(std::env::var_os("JDC_T011_NODE").expect("absolute Node executable"));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test/security/support/t011-issued-sdk-native-mutations.mjs");
+    assert!(node.is_absolute() && node.is_file() && script.is_file());
+    let name = format!(
+        r"\\.\pipe\JDC-T011-MUTATION-{}-{}-fresh",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let completion_name = format!("{name}-completion");
+    let pipe = MutationPipe::create_limited_local(&name).unwrap();
+    let completion = MutationPipe::create_limited_local(&completion_name).unwrap();
+    let cmd = format!(
+        r#""{}" "{}" "{}" "{}" --cancel-before-commit "{}""#,
+        node.display(),
+        script.display(),
+        name,
+        home.display(),
+        completion_name
+    );
+    let system = std::env::var("SystemRoot").unwrap();
+    let home_text = home.to_str().unwrap();
+    let mut child = IssuedClient::launch_suspended(
+        &node,
+        OsStr::new(&cmd),
+        &[
+            ("SystemRoot", &system),
+            ("TEMP", home_text),
+            ("TMP", home_text),
+            ("USERPROFILE", home_text),
+        ],
+    )
+    .unwrap();
+    let sid = observe_process_sid().unwrap();
+    child.resume().unwrap();
+    completion.connect(Duration::from_secs(10)).unwrap();
+    pipe.connect(Duration::from_secs(10)).unwrap();
+    pipe.await_ready(child.process_handle(), &sid).unwrap();
+    pipe.challenge(child.process_handle()).unwrap();
+    assert_eq!(
+        pipe.receive(child.process_handle(), &sid, 4096, Duration::from_secs(5))
+            .unwrap(),
+        sdk_mutation_payload(1, b"/managed/cancelled.txt", b"MUST-NOT-PUBLISH")
+    );
+    let before = f.state();
+    assert_eq!(before.sequence, 0);
+    let sequence = before.sequence + 1;
+    let op = Operation::Create {
+        name: "cancelled.txt",
+        bytes: b"MUST-NOT-PUBLISH",
+    };
+    let digest = request_digest(ID, before.epoch, sequence, &op).unwrap();
+    let mut cancellation = None;
+    let result = execute_sdk_journaled_operation(&domain, &db, sequence, op, || {
+        assert_eq!(f.state().phase, Phase::Pending);
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == ".jdc-stage"));
+        assert!(!root.join("cancelled.txt").exists());
+        cancellation = Some(pipe.observe_staged_cancellation(child.process_handle(), &sid));
+        cancellation == Some(Ok(())) && pipe.commit_allowed(child.process_handle(), &sid)
+    });
+    assert_eq!(result, Err(MutationError::Denied));
+    assert_eq!(
+        cancellation,
+        Some(Ok(())),
+        "actual authenticated SDK cancellation required"
+    );
+    let after = f.state();
+    assert_eq!(after.phase, Phase::Rejected);
+    assert_eq!(after.sequence, sequence);
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.request_digest, digest);
+    assert!(!root.join("cancelled.txt").exists());
+    assert!(!root.join(".jdc-stage").exists());
+    assert_eq!(fs::read(&sentinel).unwrap(), b"OUTSIDE");
+    drop(domain);
+    let reopened = f.open();
+    assert_eq!(f.state(), after);
+    assert_eq!(
+        run(
+            &reopened,
+            sequence,
+            Operation::Create {
+                name: "cancelled.txt",
+                bytes: b"MUST-NOT-PUBLISH"
+            }
+        ),
+        Err(MutationError::Denied)
+    );
+    assert_eq!(f.state(), after);
+    assert!(!root.join("cancelled.txt").exists());
+    completion
+        .confirm_cancelled(child.process_handle(), &sid)
+        .unwrap();
+    drop(completion);
+    drop(pipe);
+    child.wait_for_exit(Duration::from_secs(10)).unwrap();
+    assert_eq!(child.exit_code(), Ok(0));
+    println!("T011_WINDOWS_LOCAL_FRESH_SDK_CANCELLED_JOURNAL_PASS_NONRELEASE");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires repository npm build and absolute JDC_T011_NODE; same-token local fixture only"]
 fn local_windows_real_jdc_sdk_to_journaled_native_mutations() {
     use crate::{
         windows_issued_client::IssuedClient, windows_mutation_pipe::MutationPipe,

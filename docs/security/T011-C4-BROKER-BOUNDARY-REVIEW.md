@@ -544,6 +544,38 @@ References:
 <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessidofthread>.
 The distinct-account lifecycle and NTFS integration remain unproven.
 
+#### Windows authority-owned job handoff (nonrelease; hosted verdict pending)
+
+The next bounded SCM fixture preserves the original distinct-principal pin
+and denial checks, then adds a second fixed, never-resumed child. The
+verified authority creates a unique protected job and retains full custody;
+the verified issuer can open only `JOB_OBJECT_ASSIGN_PROCESS`. Both roles
+use protected, noninheritable events with exact role-specific access and
+reject existing named objects. The authority verifies the exact kernel
+owner, protected DACL and ACE inventory before using its job and after
+revoking the assignment ACE. The issuer independently requires access
+failure for every other job right and for a new assignment open after
+revocation. Creation-time job membership and child policy are mandatory;
+the issuer checks mitigation on its original handle because Microsoft
+requires PROCESS_QUERY_INFORMATION, which the observer is not granted.
+
+The issuer transfers only the fixed suspended fixture's lifecycle: it
+closes its creation and assignment handles, acknowledges, cleans up the
+original proof child and exits voluntarily. The authority retains both
+process pins, verifies actual issuer termination and the still-live second
+child's job membership, then closes its job and requires the child to exit.
+There is no resume, IPC filesystem grant or arbitrary launch interface.
+The test harness checks the second rendezvous record's protected custody
+and both terminal service codes; external STOP on the success path is no
+longer sufficient. Existing negative controls and legacy storage issuer
+privilege prerequisite remain mandatory. The pinned dependency version
+is unchanged; the additional Windows API features support this nonshipping
+binary. Local same-token controls are not distinct-account acceptance.
+The hosted job marker `T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE` must
+be observed before any claim of successful cross-account handoff. A real
+SDK channel, independently pinned thread/resume, issuer and authority crash
+controls, and admitted NTFS journal remain required. No production grant.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

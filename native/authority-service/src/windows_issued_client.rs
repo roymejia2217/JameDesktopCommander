@@ -80,6 +80,56 @@ pub struct IssuedClient {
     pid: u32,
     tid: u32,
     resumed: bool,
+    terminate_on_drop: bool,
+}
+
+/// The fixed, never-resumed SCM fixture child holds only its own creation
+/// handles and the issuer's temporary assignment handle. Ordinary process
+/// launchers cannot construct this type or relinquish their cleanup duty.
+pub struct ScmJobFixtureChild {
+    child: IssuedClient,
+    assignment: OwnedHandle,
+}
+impl ScmJobFixtureChild {
+    pub fn process_handle(&self) -> BorrowedHandle<'_> {
+        self.child.process_handle()
+    }
+    pub fn tid(&self) -> u32 {
+        self.child.tid()
+    }
+    /// Only called after the separately verified job owner acknowledges
+    /// membership and revokes new assignments. Job close is the fail-safe.
+    /// This fixture never grants a resume right or arbitrary launch authority.
+    pub fn relinquish(self) -> Result<(), IdentityDenied> {
+        crate::windows_token::verify_scm_fixture_identity(
+            crate::windows_token::ScmFixtureRole::Issuer,
+        )
+        .map_err(|_| IdentityDenied)?;
+        self.finish_verified_handoff()
+    }
+
+    fn finish_verified_handoff(mut self) -> Result<(), IdentityDenied> {
+        if self.child.resumed
+            || unsafe { WaitForSingleObject(self.child.process_handle().as_raw_handle(), 0) }
+                != windows_sys::Win32::Foundation::WAIT_TIMEOUT
+        {
+            return Err(IdentityDenied);
+        }
+        let mut flags = 0;
+        if unsafe {
+            windows_sys::Win32::Foundation::GetHandleInformation(
+                self.assignment.as_raw_handle(),
+                &mut flags,
+            )
+        } == 0
+            || flags & windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT != 0
+        {
+            return Err(IdentityDenied);
+        }
+        self.child.terminate_on_drop = false;
+        // Drop closes the original process/thread and assignment handles.
+        Ok(())
+    }
 }
 
 impl IssuedClient {
@@ -92,7 +142,7 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
     ) -> Result<Self, IdentityDenied> {
-        Self::launch_suspended_with_observation(executable, command_line, environment, false)
+        Self::launch_suspended_with_observation(executable, command_line, environment, false, None)
     }
 
     /// Only the fixed SCM issuer role may create an observable proof child.
@@ -102,7 +152,51 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
     ) -> Result<Self, IdentityDenied> {
-        Self::launch_suspended_with_observation(executable, command_line, environment, true)
+        Self::launch_suspended_with_observation(executable, command_line, environment, true, None)
+    }
+
+    /// Disposable SCM proof only: the verified fixed issuer may associate its
+    /// suspended fixture image with an already-open assignment-only job.
+    /// No inherited handles, resume or service authority are granted here.
+    pub fn launch_scm_job_fixture(job: OwnedHandle) -> Result<ScmJobFixtureChild, IdentityDenied> {
+        crate::windows_token::verify_scm_fixture_identity(
+            crate::windows_token::ScmFixtureRole::Issuer,
+        )
+        .map_err(|_| IdentityDenied)?;
+        let image = std::env::current_exe().map_err(|_| IdentityDenied)?;
+        if image.file_name().and_then(|v| v.to_str()) != Some("jdc-authority-scm-issued-proof.exe")
+        {
+            return Err(IdentityDenied);
+        }
+        let stage = image.parent().ok_or(IdentityDenied)?;
+        let id = stage
+            .file_name()
+            .and_then(|v| v.to_str())
+            .and_then(|v| v.strip_prefix("JDC-T011-SCM-"))
+            .ok_or(IdentityDenied)?;
+        if id.len() != 32
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(IdentityDenied);
+        }
+        let image = stage.join("jdc-authority-scm-issued-client.exe");
+        let mut command = std::ffi::OsString::from("\"");
+        command.push(image.as_os_str());
+        command.push(OsStr::new("\""));
+        let system = std::env::var("SystemRoot").map_err(|_| IdentityDenied)?;
+        let child = Self::launch_suspended_with_observation(
+            &image,
+            &command,
+            &[("SystemRoot", &system)],
+            true,
+            Some(job.as_handle()),
+        )?;
+        Ok(ScmJobFixtureChild {
+            child,
+            assignment: job,
+        })
     }
 
     fn launch_suspended_with_observation(
@@ -110,6 +204,7 @@ impl IssuedClient {
         command_line: &OsStr,
         environment: &[(&str, &str)],
         observable: bool,
+        job: Option<BorrowedHandle<'_>>,
     ) -> Result<Self, IdentityDenied> {
         if !executable.is_absolute() || !executable.is_file() {
             return Err(IdentityDenied);
@@ -128,6 +223,102 @@ impl IssuedClient {
             OwnerRightsCreationDescriptors::from_primary_token(token.as_handle())?
         };
         let attributes = descriptors.borrow_attributes();
+
+        if let Some(job) = job {
+            use windows_sys::Win32::{
+                Foundation::{
+                    GetHandleInformation, GetLastError, ERROR_INSUFFICIENT_BUFFER,
+                    HANDLE_FLAG_INHERIT,
+                },
+                System::{
+                    Threading::{
+                        DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+                        UpdateProcThreadAttribute, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT,
+                        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                        STARTUPINFOEXW,
+                    },
+                    WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED,
+                },
+            };
+            let mut flags = 0;
+            if !observable
+                || unsafe { GetHandleInformation(job.as_raw_handle(), &mut flags) } == 0
+                || flags & HANDLE_FLAG_INHERIT != 0
+            {
+                return Err(IdentityDenied);
+            }
+            let job_handles = [job.as_raw_handle()];
+            let child_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+            let mut needed = 0usize;
+            if unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut needed) } != 0
+                || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
+                || !(1..=65536).contains(&needed)
+            {
+                return Err(IdentityDenied);
+            }
+            let mut storage = vec![0usize; needed.div_ceil(std::mem::size_of::<usize>())];
+            let list = storage.as_mut_ptr().cast();
+            if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut needed) } == 0 {
+                return Err(IdentityDenied);
+            }
+            struct Attributes(*mut std::ffi::c_void);
+            impl Drop for Attributes {
+                fn drop(&mut self) {
+                    unsafe { DeleteProcThreadAttributeList(self.0) };
+                }
+            }
+            let _list = Attributes(list);
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    job_handles.as_ptr().cast(),
+                    std::mem::size_of_val(&job_handles),
+                    ptr::null_mut(),
+                    ptr::null(),
+                )
+            } == 0
+                || unsafe {
+                    UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
+                        (&child_policy as *const u32).cast(),
+                        std::mem::size_of::<u32>(),
+                        ptr::null_mut(),
+                        ptr::null(),
+                    )
+                } == 0
+            {
+                return Err(IdentityDenied);
+            }
+            let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+            startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            startup.lpAttributeList = list;
+            let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe {
+                CreateProcessW(
+                    app.as_ptr(),
+                    command.as_mut_ptr(),
+                    attributes.process(),
+                    attributes.primary_thread(),
+                    0,
+                    CREATE_SUSPENDED
+                        | DETACHED_PROCESS
+                        | CREATE_UNICODE_ENVIRONMENT
+                        | EXTENDED_STARTUPINFO_PRESENT,
+                    env.as_mut_ptr().cast(),
+                    ptr::null(),
+                    &startup.StartupInfo,
+                    &mut info,
+                )
+            } == 0
+            {
+                return Err(IdentityDenied);
+            }
+            return Self::from_process_information(info);
+        }
 
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -173,6 +364,7 @@ impl IssuedClient {
             pid: info.dwProcessId,
             tid: info.dwThreadId,
             resumed: false,
+            terminate_on_drop: true,
         })
     }
 
@@ -506,7 +698,9 @@ impl IssuedClient {
 
 impl Drop for IssuedClient {
     fn drop(&mut self) {
-        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } != WAIT_OBJECT_0 {
+        if self.terminate_on_drop
+            && unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } != WAIT_OBJECT_0
+        {
             unsafe { TerminateProcess(self.process.as_raw_handle(), 1) };
             // Bound shutdown: never leave our test/managed child detached.
             // The process HANDLE still closes even if the wait fails.
@@ -640,6 +834,152 @@ mod tests {
         child.resume().unwrap();
         child.wait_for_exit(Duration::from_secs(5)).unwrap();
         assert_eq!(child.exit_code(), Ok(0));
+        job.verify_finished().unwrap();
+    }
+
+    // Discriminating nonrelease proof: the existing creation-time launcher
+    // must accept an assignment-only job handle, not require authority's
+    // control handle. This is a same-token kernel experiment, not SCM origin.
+    #[test]
+    fn sdk_job_assignment_handle_is_sufficient_without_control_rights() {
+        use windows_sys::Win32::{
+            Foundation::{DuplicateHandle, GetLastError, ERROR_ACCESS_DENIED},
+            System::JobObjects::{
+                JobObjectBasicAccountingInformation, QueryInformationJobObject,
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            },
+            System::SystemServices::JOB_OBJECT_ASSIGN_PROCESS,
+        };
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        let current = unsafe { GetCurrentProcess() };
+        let mut raw = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    job.as_handle().as_raw_handle(),
+                    current,
+                    &mut raw,
+                    JOB_OBJECT_ASSIGN_PROCESS,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert!(!raw.is_null());
+        let assignment = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut counts = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        assert_eq!(
+            unsafe {
+                QueryInformationJobObject(
+                    assignment.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut counts as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { GetLastError() }, ERROR_ACCESS_DENIED);
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let child = IssuedClient::launch_suspended_with_inherited_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system)],
+            nul.as_handle(),
+            nul.as_handle(),
+            None,
+            Some(assignment.as_handle()),
+        )
+        .expect("assignment-only handle must be sufficient for creation-time membership");
+        job.verify_member(child.process_handle()).unwrap();
+        drop(assignment);
+        assert!(child.exit_code().is_err());
+        drop(job);
+        child.wait_for_exit(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn sdk_job_handoff_preserves_child_until_authority_closes_last_handle() {
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        let child = IssuedClient::launch_suspended_with_local_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system)],
+            nul.as_handle(),
+            nul.as_handle(),
+            &job,
+        )
+        .unwrap();
+        let pin = child.process_handle().try_clone_to_owned().unwrap();
+        let wrapper = ScmJobFixtureChild {
+            child,
+            assignment: job.as_handle().try_clone_to_owned().unwrap(),
+        };
+        wrapper.finish_verified_handoff().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(pin.as_raw_handle(), 0) },
+            windows_sys::Win32::Foundation::WAIT_TIMEOUT
+        );
+        job.verify_member(pin.as_handle()).unwrap();
+        drop(job);
+        assert_eq!(
+            unsafe { WaitForSingleObject(pin.as_raw_handle(), 5000) },
+            WAIT_OBJECT_0
+        );
+    }
+
+    #[test]
+    fn sdk_job_ordinary_caller_cannot_relinquish_cleanup() {
+        let job = crate::windows_sdk_job::SdkJob::new_local().unwrap();
+        assert!(IssuedClient::launch_scm_job_fixture(
+            job.as_handle().try_clone_to_owned().unwrap()
+        )
+        .is_err());
+        let image = std::env::current_exe().unwrap();
+        let command = format!("\"{}\"", image.display());
+        let system = std::env::var("SystemRoot").unwrap();
+        let nul = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .unwrap();
+        let child = IssuedClient::launch_suspended_with_local_channel(
+            &image,
+            OsStr::new(&command),
+            &[("SystemRoot", &system)],
+            nul.as_handle(),
+            nul.as_handle(),
+            &job,
+        )
+        .unwrap();
+        let pin = child.process_handle().try_clone_to_owned().unwrap();
+        let wrapper = ScmJobFixtureChild {
+            child,
+            assignment: job.as_handle().try_clone_to_owned().unwrap(),
+        };
+        assert!(wrapper.relinquish().is_err());
+        assert_eq!(
+            unsafe { WaitForSingleObject(pin.as_raw_handle(), 5000) },
+            WAIT_OBJECT_0
+        );
         job.verify_finished().unwrap();
     }
 

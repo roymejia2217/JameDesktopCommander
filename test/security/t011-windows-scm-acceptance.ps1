@@ -345,13 +345,20 @@ try {
         $observerState.ExitCode -ne 1066 -or $observerState.ServiceSpecificExitCode -ne 8 -or
         $observerState.ProcessId -ne 0) { throw 'E_SCM_DISTINCT_OBSERVER_PROOF_FAILED' }
 
-    & $sc stop $issuerName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_STOP_FAILED' }
+    # The observer retained the issuer's actual process object through its
+    # voluntary exit; issuing a STOP here would mask an incomplete handoff.
     $issuerController.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(15))
     $issuerState = Get-CimInstance Win32_Service -Filter "Name='$issuerName'"
     if ($null -eq $issuerState -or $issuerState.State -ne 'Stopped' -or
         $issuerState.ExitCode -ne 1066 -or $issuerState.ServiceSpecificExitCode -ne 10 -or
         $issuerState.ProcessId -ne 0) { throw 'E_SCM_ISSUER_CLEANUP_FAILED' }
+    $jobRecord = Join-Path $handoff 'job-issued-process.txt'
+    $jobRecordItem = Get-Item -LiteralPath $jobRecord -ErrorAction Stop
+    if ($jobRecordItem.PSIsContainer -or ($jobRecordItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $jobRecordItem.Length -gt 128 -or (Get-Acl -LiteralPath $jobRecord).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $issuerSid.Value) {
+        throw 'E_SCM_JOB_HANDOFF_RECORD_CUSTODY'
+    }
+    Assert-DualRoleAcl $jobRecord $virtualSid $issuerSid $modify $false
     if ((Get-ScmDescriptor) -ne $baselineDescriptor) { throw 'E_SCM_PROOF_SERVICE_DACL_CHANGED' }
     Assert-ScmDacl (Get-ScmDescriptor $issuerName)
     & $sc config $serviceName 'binPath=' $binary | Out-Null
@@ -408,3 +415,4 @@ finally {
 }
 if ($null -ne $primaryFailure) { throw $primaryFailure }
 Write-Output 'T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE'
+Write-Output 'T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE'

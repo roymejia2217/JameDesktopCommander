@@ -49,6 +49,8 @@ test('SCM distinct-principal observation is a mandatory nonrelease experiment', 
   assert.match(proof, /--authority-observer-proof/);
   assert.match(acceptance, /JameDesktopCommanderIssuer/);
   assert.match(acceptance, /T011_WINDOWS_SCM_DISTINCT_PRINCIPAL_PIN_PASS_NONRELEASE/);
+  assert.match(acceptance, /T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE/);
+  assert.match(acceptance, /E_SCM_JOB_HANDOFF_RECORD_CUSTODY/);
   assert.match(acceptance, /ServiceSpecificExitCode -ne 8/);
   assert.match(acceptance, /ServiceSpecificExitCode -ne 10/);
   assert.match(acceptance, /privs.*SeChangeNotifyPrivilege/);

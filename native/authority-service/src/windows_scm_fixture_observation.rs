@@ -38,6 +38,9 @@ use windows_sys::Win32::{
 };
 const OBSERVE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
 
+#[path = "windows_scm_job_fixture.rs"]
+mod job_fixture;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     pid: u32,
@@ -218,6 +221,7 @@ pub fn issue(handler: &ServiceStatusHandle, stop: Receiver<()>) -> Result<(), Id
         child: Stamp::capture(child.process_handle())?,
         thread: child.tid(),
     };
+    let job_proof = job_fixture::IssuerJobProof::prepare()?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -240,8 +244,12 @@ pub fn issue(handler: &ServiceStatusHandle, stop: Receiver<()>) -> Result<(), Id
             process_id: None,
         })
         .map_err(|_| IdentityDenied)?;
-    stop.recv_timeout(Duration::from_secs(45))
-        .map_err(|_| IdentityDenied)?;
+    job_proof.run(handoff.issuer)?;
+    // A successful handoff requires issuer process exit, not a later
+    // external stop request. Any premature STOP is a failed proof.
+    if !matches!(stop.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+        return Err(IdentityDenied);
+    }
     // The suspended proof child is never executed. Require exact cleanup.
     if unsafe { TerminateProcess(child.process_handle().as_raw_handle(), 1) } == 0 {
         return Err(IdentityDenied);
@@ -301,9 +309,11 @@ pub fn observe() -> Result<(), IdentityDenied> {
     denied_thread_rights(handoff.thread)?;
     handoff.issuer.verify(issuer.as_handle())?;
     handoff.child.verify(child.as_handle())?;
+    job_fixture::observe(handoff.issuer, handoff.child, &issuer, &child)?;
     let status = service.query_status().map_err(|_| IdentityDenied)?;
-    if status.current_state != ServiceState::Running
-        || status.process_id != Some(handoff.issuer.pid)
+    if status.current_state != ServiceState::Stopped
+        || status.process_id.is_some()
+        || status.exit_code != ServiceExitCode::ServiceSpecific(10)
     {
         return Err(IdentityDenied);
     }

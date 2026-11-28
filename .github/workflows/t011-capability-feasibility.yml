@@ -295,8 +295,8 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'test/security/t011-windows-scm-acceptance.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
 
-      - name: Test Windows SCM service identity and startup denial
-        id: windows_scm_acceptance
+      - name: Test real Windows SDK read and wrong-connector denial
+        id: windows_scm_sdk_read
         if: matrix.target == 'win32-x64'
         shell: pwsh
         run: |
@@ -307,8 +307,11 @@ jobs:
           $result | Write-Output
           if ($code -ne 0) { exit $code }
           if (-not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) { throw 'E_SCM_LOCAL_SDK_VERDICT_MISSING' }
-          pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Windows SCM service identity and startup denial
+        id: windows_scm_acceptance
+        if: matrix.target == 'win32-x64'
+        run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
 
       - name: Build Windows custody fixtures
         id: windows_custody_fixture

@@ -14,6 +14,15 @@ test('Windows SCM acceptance runs within the native security matrix',()=>{
   assert.ok(step, 'Native Windows SCM acceptance step is required');
   assert.equal(step.if, "matrix.target == 'win32-x64'");
   assert.equal(step.run, 'pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1');
+  const steps = YAML.parse(workflow).jobs['native-probe'].steps;
+  const sdk = steps.find(item => item.id === 'windows_scm_sdk_read');
+  assert.ok(sdk, 'Real SDK integration requires a separate mandatory step');
+  assert.equal(sdk.if, step.if);
+  assert.equal(sdk.shell, 'pwsh');
+  assert.ok(steps.indexOf(sdk) < steps.findIndex(item => item.id === step.id));
+  assert.ok(!sdk['continue-on-error']);
+  assert.match(sdk.run, /observation::job_fixture::sdk_read::tests::real_jdc_sdk_fixed_read_and_wrong_connector_denial -- --ignored --exact --nocapture/);
+  assert.match(sdk.run, /E_SCM_LOCAL_SDK_VERDICT_MISSING/);
   assert.ok(workflow.includes('cargo +1.91.1 build --locked --bin jdc-authority-scm'));
 });
 test('SCM acceptance guards ephemeral host and verifies service-specific denial and cleanup',()=>{

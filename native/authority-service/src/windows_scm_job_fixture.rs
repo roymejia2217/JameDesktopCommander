@@ -1,6 +1,8 @@
 //! Disposable SCM job-owner/issuer experiment, never production IPC.
 //! The two fixed virtual accounts participate only in the hosted proof.
-use super::{denied_process_rights, denied_thread_rights, open_observer_pin, Handoff, Stamp};
+use super::{
+    denied_process_rights, denied_thread_rights, open_observer_pin, Handoff, ProofPhase, Stamp,
+};
 use jdc_authority_service::{
     windows_issued_client::IssuedClient,
     windows_token::{
@@ -9,6 +11,7 @@ use jdc_authority_service::{
     },
     IdentityDenied,
 };
+use std::cell::Cell;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -302,8 +305,14 @@ impl IssuerJobProof {
         )?;
         Ok(Self { names, start, ack })
     }
-    pub(super) fn run(&self, issuer: Stamp) -> Result<(), IdentityDenied> {
+    pub(super) fn run(
+        &self,
+        issuer: Stamp,
+        phase: &Cell<ProofPhase>,
+    ) -> Result<(), IdentityDenied> {
+        phase.set(ProofPhase::IssuerAwaitStart);
         wait(&self.start, 15000)?;
+        phase.set(ProofPhase::IssuerChild);
         let revoked = open_event(&self.names, "revoked", SYNCHRONIZE)?;
         let assignment = owned(unsafe {
             OpenJobObjectW(
@@ -340,13 +349,16 @@ impl IssuerJobProof {
             child: Stamp::capture(child.process_handle())?,
             thread: child.tid(),
         };
+        phase.set(ProofPhase::IssuerRecord);
         write_record(&self.names.record, handoff)?;
-        let channel = handoff_pipe::send(&self.names, handoff)?;
+        let channel = handoff_pipe::send(&self.names, handoff, phase)?;
+        phase.set(ProofPhase::IssuerAwaitRevoke);
         signal(&self.ack)?;
         wait(&revoked, WAIT_MS)?;
         // A DACL update cannot revoke an already-open handle. Relinquish
         // the assignment and creation handles together. Only the authority's
         // job keeps the never-resumed fixture alive after issuer exit.
+        phase.set(ProofPhase::IssuerRelease);
         denied_job_open(&self.names, JOB_OBJECT_ASSIGN_PROCESS)?;
         forbidden_job_rights(&self.names)?;
         drop(channel);
@@ -556,7 +568,9 @@ pub(super) fn observe(
     original_child: Stamp,
     issuer_pin: &OwnedHandle,
     original_pin: &OwnedHandle,
+    phase: &Cell<ProofPhase>,
 ) -> Result<(), IdentityDenied> {
+    phase.set(ProofPhase::ObserverJob);
     let names = Names::for_role(ScmFixtureRole::Authority)?;
     let start = open_event(&names, "start", EVENT_MODIFY_STATE)?;
     let ack = open_event(&names, "ack", SYNCHRONIZE)?;
@@ -568,11 +582,13 @@ pub(super) fn observe(
         SYNCHRONIZE,
     )?;
     let job = AuthorityJob::new(&names)?;
-    let channel = handoff_pipe::HandoffPipe::create(&names)?;
+    let channel = handoff_pipe::HandoffPipe::create(&names, phase)?;
+    phase.set(ProofPhase::ObserverAwaitFrame);
     signal(&start)?;
     wait(&ack, WAIT_MS)?;
     let expected_sid = scm_fixture_sid(ScmFixtureRole::Issuer).map_err(|_| IdentityDenied)?;
-    let handoff = channel.receive(issuer_pin.as_handle(), &expected_sid)?;
+    let handoff = channel.receive_traced(issuer_pin.as_handle(), &expected_sid, phase)?;
+    phase.set(ProofPhase::ObserverChild);
     // The record is retained only for independent hosted custody evidence.
     // It cannot authorize a handoff without the live authenticated channel.
     if handoff.encode() != read_record(&names.record)?.encode()
@@ -586,9 +602,12 @@ pub(super) fn observe(
     denied_thread_rights(handoff.thread)?;
     job.verify_child(child.as_handle())?;
     handoff.child.verify(child.as_handle())?;
+    phase.set(ProofPhase::ObserverRevoke);
     job.revoke()?;
     signal(&revoked)?;
+    phase.set(ProofPhase::ObserverAwaitRelease);
     wait(&ack, WAIT_MS)?;
+    phase.set(ProofPhase::ObserverIssuerExit);
     // An acknowledgment alone is insufficient. The live child must survive
     // the actual issuer process exit, while the authority retains the job.
     handoff.child.verify(child.as_handle())?;
@@ -603,6 +622,7 @@ pub(super) fn observe(
     }
     handoff.child.verify(child.as_handle())?;
     job.verify_child(child.as_handle())?;
+    phase.set(ProofPhase::ObserverCleanup);
     drop(job);
     // No child code ran. Last-job-handle closure must signal its process.
     wait(&child, WAIT_MS)

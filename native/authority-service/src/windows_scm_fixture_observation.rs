@@ -9,6 +9,7 @@ use jdc_authority_service::{
     IdentityDenied,
 };
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -37,6 +38,46 @@ use windows_sys::Win32::{
     },
 };
 const OBSERVE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
+
+// Fixed nonshipping SCM service-specific denial codes. Never contain paths,
+// credentials, kernel handles, or untrusted error text. Success remains 8/10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ProofPhase {
+    ObserverInitial = 9,
+    IssuerInitial = 11,
+    ObserverJob = 20,
+    ObserverPipeCreate = 21,
+    ObserverPipeDescriptor = 22,
+    ObserverAwaitFrame = 23,
+    ObserverConnect = 24,
+    ObserverHeader = 25,
+    ObserverConnector = 26,
+    ObserverToken = 27,
+    ObserverPeerSid = 28,
+    ObserverBody = 29,
+    ObserverFrame = 30,
+    ObserverChild = 31,
+    ObserverRevoke = 32,
+    ObserverAwaitRelease = 33,
+    ObserverIssuerExit = 34,
+    ObserverCleanup = 35,
+    ObserverTerminal = 36,
+    IssuerAwaitStart = 40,
+    IssuerChild = 41,
+    IssuerRecord = 42,
+    IssuerPipeOpen = 43,
+    IssuerPipeDescriptor = 44,
+    IssuerPipeWrite = 45,
+    IssuerAwaitRevoke = 46,
+    IssuerRelease = 47,
+    IssuerCleanup = 48,
+}
+impl ProofPhase {
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
 
 #[path = "windows_scm_job_fixture.rs"]
 mod job_fixture;
@@ -188,7 +229,11 @@ fn denied_thread_rights(tid: u32) -> Result<(), IdentityDenied> {
     Ok(())
 }
 
-pub fn issue(handler: &ServiceStatusHandle, stop: Receiver<()>) -> Result<(), IdentityDenied> {
+pub fn issue(
+    handler: &ServiceStatusHandle,
+    stop: Receiver<()>,
+    phase: &Cell<ProofPhase>,
+) -> Result<(), IdentityDenied> {
     verify_scm_fixture_identity(ScmFixtureRole::Issuer).map_err(|_| IdentityDenied)?;
     seal_current_scm_fixture_issuer()?;
     let path = fixture_path()?;
@@ -244,7 +289,8 @@ pub fn issue(handler: &ServiceStatusHandle, stop: Receiver<()>) -> Result<(), Id
             process_id: None,
         })
         .map_err(|_| IdentityDenied)?;
-    job_proof.run(handoff.issuer)?;
+    job_proof.run(handoff.issuer, phase)?;
+    phase.set(ProofPhase::IssuerCleanup);
     // A successful handoff requires issuer process exit, not a later
     // external stop request. Any premature STOP is a failed proof.
     if !matches!(stop.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
@@ -261,7 +307,7 @@ pub fn issue(handler: &ServiceStatusHandle, stop: Receiver<()>) -> Result<(), Id
     Ok(())
 }
 
-pub fn observe() -> Result<(), IdentityDenied> {
+pub fn observe(phase: &Cell<ProofPhase>) -> Result<(), IdentityDenied> {
     verify_scm_fixture_identity(ScmFixtureRole::Authority).map_err(|_| IdentityDenied)?;
     let manager = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)
         .map_err(|_| IdentityDenied)?;
@@ -309,7 +355,8 @@ pub fn observe() -> Result<(), IdentityDenied> {
     denied_thread_rights(handoff.thread)?;
     handoff.issuer.verify(issuer.as_handle())?;
     handoff.child.verify(child.as_handle())?;
-    job_fixture::observe(handoff.issuer, handoff.child, &issuer, &child)?;
+    job_fixture::observe(handoff.issuer, handoff.child, &issuer, &child, phase)?;
+    phase.set(ProofPhase::ObserverTerminal);
     let status = service.query_status().map_err(|_| IdentityDenied)?;
     if status.current_state != ServiceState::Stopped
         || status.process_id.is_some()

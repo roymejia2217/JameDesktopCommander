@@ -343,7 +343,22 @@ try {
     $observerState = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $observerState -or $observerState.State -ne 'Stopped' -or
         $observerState.ExitCode -ne 1066 -or $observerState.ServiceSpecificExitCode -ne 8 -or
-        $observerState.ProcessId -ne 0) { throw 'E_SCM_DISTINCT_OBSERVER_PROOF_FAILED' }
+        $observerState.ProcessId -ne 0) {
+        # SCM is the transport for fixed proof failures; service stderr is
+        # not available to this hosted controller. Never echo arbitrary values.
+        if ($null -ne $observerState -and $observerState.State -eq 'Stopped' -and $observerState.ExitCode -eq 1066 -and
+            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..36))) {
+            Write-Output ('E_SCM_OBSERVER_PHASE_' + $observerState.ServiceSpecificExitCode)
+        }
+        try {
+            $issuerFailure = Get-CimInstance Win32_Service -Filter "Name='$issuerName'" -ErrorAction Stop
+            if ($null -ne $issuerFailure -and $issuerFailure.State -eq 'Stopped' -and $issuerFailure.ExitCode -eq 1066 -and
+                ($issuerFailure.ServiceSpecificExitCode -eq 11 -or $issuerFailure.ServiceSpecificExitCode -in (40..48))) {
+                Write-Output ('E_SCM_ISSUER_PHASE_' + $issuerFailure.ServiceSpecificExitCode)
+            }
+        } catch { Write-Warning 'E_SCM_ISSUER_PHASE_UNAVAILABLE' }
+        throw 'E_SCM_DISTINCT_OBSERVER_PROOF_FAILED'
+    }
 
     # The observer retained the issuer's actual process object through its
     # voluntary exit; issuing a STOP here would mask an incomplete handoff.

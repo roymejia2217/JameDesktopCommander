@@ -56,6 +56,10 @@ test('SCM distinct-principal observation is a mandatory nonrelease experiment', 
   assert.match(acceptance, /ServiceSpecificExitCode -ne 10/);
   assert.match(acceptance, /privs.*SeChangeNotifyPrivilege/);
   assert.match(acceptance, /E_SCM_ISSUER_CLEANUP_FAILED/);
+  assert.match(acceptance, /E_SCM_OBSERVER_PHASE_/);
+  assert.match(acceptance, /E_SCM_ISSUER_PHASE_/);
+  assert.match(acceptance, /ServiceSpecificExitCode -in \(20\.\.36\)/);
+  assert.match(acceptance, /ServiceSpecificExitCode -in \(40\.\.48\)/);
   const denyOnly = fs.readFileSync(path.join(root, binaryPath), 'utf8');
   assert.doesNotMatch(denyOnly, /ServiceState::Running|ServiceControlAccept::STOP/);
 });

@@ -1,12 +1,13 @@
 //! Disposable SCM handoff IPC; no broker permissions or data operations.
 //! The issuer sends one bounded canonical handoff directly. The authority
 //! authenticates the actual pinned SCM connector and last writer's token.
-use super::{attributes, descriptor, owned, role_sid, verify_security, Handoff, Names};
+use super::{attributes, descriptor, owned, role_sid, verify_security, Handoff, Names, ProofPhase};
 use jdc_authority_service::{
     windows_pipe_peer::{observe_client_sid_after_read, verify_live_issued_peer_after_read},
     windows_token::ScmFixtureRole,
     IdentityDenied,
 };
+use std::cell::Cell;
 use std::{
     os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle},
     ptr,
@@ -98,7 +99,12 @@ fn write_frame(client: &OwnedHandle, bytes: &[u8]) -> Result<(), IdentityDenied>
     frame.extend_from_slice(bytes);
     write_bytes(client, &frame)
 }
-pub(super) fn send(names: &Names, handoff: Handoff) -> Result<OwnedHandle, IdentityDenied> {
+pub(super) fn send(
+    names: &Names,
+    handoff: Handoff,
+    phase: &Cell<ProofPhase>,
+) -> Result<OwnedHandle, IdentityDenied> {
+    phase.set(ProofPhase::IssuerPipeOpen);
     // Only the fixed SCM issuer is allowed to reach this call site.
     let expected = descriptor(
         ScmFixtureRole::Authority,
@@ -106,11 +112,13 @@ pub(super) fn send(names: &Names, handoff: Handoff) -> Result<OwnedHandle, Ident
         FILE_ALL_ACCESS,
     )?;
     let client = client(&name(names)?)?;
+    phase.set(ProofPhase::IssuerPipeDescriptor);
     verify_security(
         client.as_handle(),
         &role_sid(ScmFixtureRole::Authority)?,
         &expected,
     )?;
+    phase.set(ProofPhase::IssuerPipeWrite);
     write_frame(&client, handoff.encode().as_bytes())?;
     Ok(client)
 }
@@ -137,13 +145,15 @@ impl HandoffPipe {
         }
         Ok(Self(owned(raw)?))
     }
-    pub(super) fn create(names: &Names) -> Result<Self, IdentityDenied> {
+    pub(super) fn create(names: &Names, phase: &Cell<ProofPhase>) -> Result<Self, IdentityDenied> {
+        phase.set(ProofPhase::ObserverPipeCreate);
         let sd = descriptor(
             ScmFixtureRole::Authority,
             Some((ScmFixtureRole::Issuer, CLIENT_RIGHTS)),
             FILE_ALL_ACCESS,
         )?;
         let pipe = Self::create_raw(&name(names)?, &attributes(&sd))?;
+        phase.set(ProofPhase::ObserverPipeDescriptor);
         verify_security(
             pipe.0.as_handle(),
             &role_sid(ScmFixtureRole::Authority)?,
@@ -151,46 +161,71 @@ impl HandoffPipe {
         )?;
         Ok(pipe)
     }
-    pub(super) fn receive(
+    #[cfg(test)]
+    fn receive(self, issuer: BorrowedHandle<'_>, sid: &[u8]) -> Result<Handoff, IdentityDenied> {
+        self.receive_traced(issuer, sid, &Cell::new(ProofPhase::ObserverInitial))
+    }
+    pub(super) fn receive_traced(
         self,
         issuer: BorrowedHandle<'_>,
         sid: &[u8],
+        phase: &Cell<ProofPhase>,
     ) -> Result<Handoff, IdentityDenied> {
-        self.receive_until(issuer, sid, bounded_io::deadline(TIMEOUT)?)
+        self.receive_until(issuer, sid, bounded_io::deadline(TIMEOUT)?, phase)
     }
     fn receive_until(
         self,
         issuer: BorrowedHandle<'_>,
         sid: &[u8],
         end: Instant,
+        phase: &Cell<ProofPhase>,
     ) -> Result<Handoff, IdentityDenied> {
+        phase.set(ProofPhase::ObserverConnect);
         if sid.is_empty() {
             return Err(IdentityDenied);
         }
         let pipe = self.0.as_handle();
         bounded_io::connect(pipe, end).inspect_err(|_| eprintln!("E_SCM_HANDOFF_CONNECT"))?;
         let attest = || {
+            phase.set(ProofPhase::ObserverConnector);
             verify_live_issued_peer_after_read(pipe, issuer)
                 .inspect_err(|_| eprintln!("E_SCM_HANDOFF_CONNECTOR"))?;
-            if observe_client_sid_after_read(pipe)
-                .inspect_err(|_| eprintln!("E_SCM_HANDOFF_TOKEN"))?
-                != sid
-            {
+            phase.set(ProofPhase::ObserverToken);
+            let observed = observe_client_sid_after_read(pipe)
+                .inspect_err(|_| eprintln!("E_SCM_HANDOFF_TOKEN"))?;
+            phase.set(ProofPhase::ObserverPeerSid);
+            if observed != sid {
                 eprintln!("E_SCM_HANDOFF_SID");
                 return Err(IdentityDenied);
             }
             Ok(())
         };
         let mut header = [0u8; 4];
-        bounded_io::read_checked(pipe, &mut header, end, &mut |_| {}, attest)
-            .inspect_err(|_| eprintln!("E_SCM_HANDOFF_HEADER"))?;
+        phase.set(ProofPhase::ObserverHeader);
+        bounded_io::read_checked(
+            pipe,
+            &mut header,
+            end,
+            &mut |_| phase.set(ProofPhase::ObserverHeader),
+            attest,
+        )
+        .inspect_err(|_| eprintln!("E_SCM_HANDOFF_HEADER"))?;
+        phase.set(ProofPhase::ObserverFrame);
         let length = u32::from_be_bytes(header) as usize;
         if !(1..=LIMIT).contains(&length) {
             return Err(IdentityDenied);
         }
         let mut payload = vec![0u8; length];
-        bounded_io::read_checked(pipe, &mut payload, end, &mut |_| {}, attest)
-            .inspect_err(|_| eprintln!("E_SCM_HANDOFF_BODY"))?;
+        phase.set(ProofPhase::ObserverBody);
+        bounded_io::read_checked(
+            pipe,
+            &mut payload,
+            end,
+            &mut |_| phase.set(ProofPhase::ObserverBody),
+            attest,
+        )
+        .inspect_err(|_| eprintln!("E_SCM_HANDOFF_BODY"))?;
+        phase.set(ProofPhase::ObserverFrame);
         let mut extra = 0u32;
         if unsafe {
             PeekNamedPipe(
@@ -264,6 +299,22 @@ mod tests {
         let client = client(name)?;
         write_frame(&client, bytes)?;
         Ok(client)
+    }
+    #[test]
+    fn hosted_failure_phase_preserves_the_actual_identity_denial() {
+        let pin = current_pin();
+        let expected = handoff(Stamp::capture(pin.as_handle()).unwrap());
+        let mut sid = observe_process_sid().unwrap();
+        *sid.last_mut().unwrap() ^= 1;
+        let name = unique_name();
+        let server = HandoffPipe::local_test(&name).unwrap();
+        let _client = send_frame(&name, expected.encode().as_bytes()).unwrap();
+        let phase = Cell::new(ProofPhase::ObserverInitial);
+        assert!(server
+            .receive_traced(pin.as_handle(), &sid, &phase)
+            .is_err());
+        assert_eq!(phase.get(), ProofPhase::ObserverPeerSid);
+        assert_eq!(phase.get().code(), 28);
     }
     #[test]
     fn real_handoff_requires_live_connector_and_exact_frame() {
@@ -360,7 +411,14 @@ mod tests {
         let _client = client(&name).unwrap();
         let start = Instant::now();
         let end = bounded_io::deadline(Duration::from_millis(200)).unwrap();
-        assert!(server.receive_until(pin.as_handle(), &sid, end).is_err());
+        assert!(server
+            .receive_until(
+                pin.as_handle(),
+                &sid,
+                end,
+                &Cell::new(ProofPhase::ObserverInitial)
+            )
+            .is_err());
         assert!(start.elapsed() >= Duration::from_millis(50));
         assert!(start.elapsed() < Duration::from_secs(6));
     }

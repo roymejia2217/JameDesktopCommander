@@ -101,10 +101,11 @@ mod proof {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         })?;
-        let reason = if super::observation::observe().is_ok() {
+        let phase = std::cell::Cell::new(super::observation::ProofPhase::ObserverInitial);
+        let reason = if super::observation::observe(&phase).is_ok() {
             8
         } else {
-            9
+            phase.get().code()
         };
         terminal(&handler, reason)
     }
@@ -122,10 +123,11 @@ mod proof {
                 _ => ServiceControlHandlerResult::NotImplemented,
             },
         )?;
-        let reason = if super::observation::issue(&handler, receiver).is_ok() {
+        let phase = std::cell::Cell::new(super::observation::ProofPhase::IssuerInitial);
+        let reason = if super::observation::issue(&handler, receiver, &phase).is_ok() {
             10
         } else {
-            11
+            phase.get().code()
         };
         terminal(&handler, reason)
     }

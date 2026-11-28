@@ -598,6 +598,23 @@ References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-secu
 <https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient>,
 <https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex>.
 
+#### SCM authenticated handoff failure evidence (nonrelease)
+
+Hosted Windows job 140989889988 for `7598232b784432a9aa008061416d9770e070ae94`
+failed at `E_SCM_DISTINCT_OBSERVER_PROOF_FAILED` before native storage.
+Service stderr was not captured by the hosted controller. The fixture now
+preserves fixed, bounded SCM service-specific failure phases without changing
+success codes 8 and 10 or any authorization check. Observer codes 9 and
+20–36 cover initial verification, job, pipe creation/descriptor, readiness,
+connection, header, connector, token, SID, body, frame, child, revocation,
+release, issuer exit, cleanup and terminal checks. Issuer codes 11 and
+40–48 cover initial verification, start, child, record, pipe open,
+descriptor, write, revocation wait, release and cleanup. The controller emits
+only allowlisted failure codes for stopped services; unavailable issuer
+status cannot mask the primary observer failure. The actual cross-account
+failure remains unresolved; no change to SCM privileges or pipe rights.
+The primary-thread candidate is conserved separately until this gate passes.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

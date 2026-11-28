@@ -1,7 +1,9 @@
 // Non-shipping SDK/native integration. Identity is attested by the Rust
 // kernel-peer fixture, never by this JavaScript module or its MCP input.
 import { connect } from 'node:net';
-import { readSync, writeSync, writeFileSync } from 'node:fs';
+import { constants, readSync, writeSync, writeFileSync } from 'node:fs';
+import { access, lstat } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,12 +14,50 @@ const LIMIT = 1024 * 1024;
 // propagate a native exception message, path, stack, or response bytes.
 function nativeReadFailure(error) {
   if (error?.message === 'E_NATIVE_READ_DENIED') return 'E_NATIVE_READ_PROTOCOL';
+  if (error?.code === 'EACCES' && error?.syscall === 'connect') return 'E_NATIVE_READ_CONNECT_EACCES';
   if (['EACCES', 'EPERM', 'ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTCONN', 'ETIMEDOUT', 'ABORT_ERR'].includes(error?.code)) {
     return `E_NATIVE_READ_TRANSPORT_${error.code}`;
   }
   if (error?.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return 'E_NATIVE_READ_ENCODING';
   return 'E_NATIVE_READ_UNCLASSIFIED';
 }
+// Diagnostic only, after a failed hosted connect. These are observations,
+// not a DAC/LSM attribution, authorization check, retry, or policy change.
+export async function diagnoseNativeSocketAccess(socketPath) {
+  if (process.platform !== 'linux' || typeof socketPath !== 'string' || !path.isAbsolute(socketPath) || path.normalize(socketPath) !== socketPath) return 'E_NATIVE_SOCKET_DIAGNOSTIC_UNAVAILABLE';
+  const ancestors = [];
+  let directory = path.dirname(socketPath);
+  while (true) {
+    ancestors.push(directory);
+    if (ancestors.length > 16) return 'E_NATIVE_SOCKET_DIAGNOSTIC_UNAVAILABLE';
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  for (const ancestor of ancestors.reverse()) {
+    try { await access(ancestor, constants.X_OK); }
+    catch (error) {
+      if (error?.code === 'EACCES' || error?.code === 'EPERM') return 'E_NATIVE_SOCKET_ANCESTOR_ACCESS_DENIED';
+      if (error?.code === 'ENOENT') return 'E_NATIVE_SOCKET_NOT_FOUND';
+      return 'E_NATIVE_SOCKET_DIAGNOSTIC_UNAVAILABLE';
+    }
+  }
+  try {
+    if (!(await lstat(socketPath)).isSocket()) return 'E_NATIVE_SOCKET_WRONG_TYPE';
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'E_NATIVE_SOCKET_NOT_FOUND';
+    if (error?.code === 'EACCES' || error?.code === 'EPERM') return 'E_NATIVE_SOCKET_METADATA_ACCESS_DENIED';
+    return 'E_NATIVE_SOCKET_DIAGNOSTIC_UNAVAILABLE';
+  }
+  try { await access(socketPath, constants.W_OK); }
+  catch (error) {
+    if (error?.code === 'EACCES' || error?.code === 'EPERM') return 'E_NATIVE_SOCKET_WRITE_ACCESS_DENIED';
+    if (error?.code === 'ENOENT') return 'E_NATIVE_SOCKET_NOT_FOUND';
+    return 'E_NATIVE_SOCKET_DIAGNOSTIC_UNAVAILABLE';
+  }
+  return 'E_NATIVE_SOCKET_PATH_ACCESS_OK';
+}
+
 async function readAttestedNative(socketPath, timeoutMs, signal) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 10000) {
     throw Error('E_NATIVE_INVALID_TIMEOUT');
@@ -161,7 +201,15 @@ if (process.argv[1]?.endsWith('t011-issued-sdk-native-read.mjs') && process.argv
   process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
   process.env.DC_FLAG_URL = 'http://127.0.0.1:9/';
   const { createJdcServer } = await import('./dist/server.js');
-  const bytes = await exerciseIssuedJdcRead(process.argv[2], createJdcServer);
+  let bytes;
+  try {
+    bytes = await exerciseIssuedJdcRead(process.argv[2], createJdcServer);
+  } catch (error) {
+    if (error?.message === 'E_REAL_JDC_NATIVE_READ_DENIED: E_NATIVE_READ_CONNECT_EACCES') {
+      console.error(await diagnoseNativeSocketAccess(process.argv[2]));
+    }
+    throw error;
+  }
   if (!bytes.equals(Buffer.from('SERVICE_DOMAIN_BYTES'))) {
     throw Error('E_T011_SDK_NATIVE_BYTES_MISMATCH');
   }

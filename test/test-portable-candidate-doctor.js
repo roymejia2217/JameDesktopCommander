@@ -64,6 +64,21 @@ test('portable doctor rejects modified or injected bytes and files', async () =>
   });
 });
 
+test('portable doctor verifies every file across inventory batches, including same-size corruption', async () => {
+  await fixture(async ({ destination }) => {
+    for (const name of ['payload-0.txt', 'payload-104.txt', 'payload-99.txt']) {
+      const path = join(destination, 'dist', name);
+      const original = await readFile(path);
+      const corrupted = Buffer.from(original);
+      corrupted[0] ^= 1;
+      await writeFile(path, corrupted);
+      await assert.rejects(inspectPortableCandidate(destination, 'linux-x64'), /integrity/);
+      await writeFile(path, original);
+    }
+    assert.equal((await inspectPortableCandidate(destination, 'linux-x64')).result, 'PASS');
+  });
+});
+
 test('both candidate verifiers reject undeclared top-level candidate directories', async () => {
   await fixture(async ({ destination, target, sourceCommit, runId, attempt }) => {
     const verifyOptions = { destination, target, sourceCommit, runId, attempt };

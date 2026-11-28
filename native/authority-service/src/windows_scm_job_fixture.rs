@@ -45,6 +45,9 @@ use windows_sys::Win32::{
         },
     },
 };
+#[path = "windows_scm_handoff_pipe.rs"]
+mod handoff_pipe;
+
 const LIMITS: u32 = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 const WAIT_MS: u32 = 5000;
 // WinNT JOB_OBJECT_ALL_ACCESS: standard rights, synchronization and all six job-specific rights.
@@ -332,14 +335,13 @@ impl IssuerJobProof {
             return Err(IdentityDenied);
         }
         issuer.verify(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })?;
-        write_record(
-            &self.names.record,
-            Handoff {
-                issuer,
-                child: Stamp::capture(child.process_handle())?,
-                thread: child.tid(),
-            },
-        )?;
+        let handoff = Handoff {
+            issuer,
+            child: Stamp::capture(child.process_handle())?,
+            thread: child.tid(),
+        };
+        write_record(&self.names.record, handoff)?;
+        let channel = handoff_pipe::send(&self.names, handoff)?;
         signal(&self.ack)?;
         wait(&revoked, WAIT_MS)?;
         // A DACL update cannot revoke an already-open handle. Relinquish
@@ -347,6 +349,7 @@ impl IssuerJobProof {
         // job keeps the never-resumed fixture alive after issuer exit.
         denied_job_open(&self.names, JOB_OBJECT_ASSIGN_PROCESS)?;
         forbidden_job_rights(&self.names)?;
+        drop(channel);
         child.relinquish()?;
         signal(&self.ack)
     }
@@ -565,10 +568,17 @@ pub(super) fn observe(
         SYNCHRONIZE,
     )?;
     let job = AuthorityJob::new(&names)?;
+    let channel = handoff_pipe::HandoffPipe::create(&names)?;
     signal(&start)?;
     wait(&ack, WAIT_MS)?;
-    let handoff = read_record(&names.record)?;
-    if handoff.issuer != issuer || handoff.child == original_child {
+    let expected_sid = scm_fixture_sid(ScmFixtureRole::Issuer).map_err(|_| IdentityDenied)?;
+    let handoff = channel.receive(issuer_pin.as_handle(), &expected_sid)?;
+    // The record is retained only for independent hosted custody evidence.
+    // It cannot authorize a handoff without the live authenticated channel.
+    if handoff.encode() != read_record(&names.record)?.encode()
+        || handoff.issuer != issuer
+        || handoff.child == original_child
+    {
         return Err(IdentityDenied);
     }
     let child = open_observer_pin(handoff.child)?;

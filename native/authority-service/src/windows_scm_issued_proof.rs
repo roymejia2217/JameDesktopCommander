@@ -1,6 +1,6 @@
 //! CI-only SCM issuer-origin and distinct-principal process-custody proof.
 //! The fixed rendezvous file carries fixture metadata, never broker grants.
-//! This is NOT a production SCM image, IPC authentication or an MCP read.
+//! This is NOT a production SCM image, shipping IPC authority or an MCP read.
 #[cfg(windows)]
 #[path = "windows_scm_fixture_observation.rs"]
 mod observation;

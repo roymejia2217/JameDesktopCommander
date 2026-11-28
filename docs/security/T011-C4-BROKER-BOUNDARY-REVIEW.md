@@ -571,10 +571,32 @@ longer sufficient. Existing negative controls and legacy storage issuer
 privilege prerequisite remain mandatory. The pinned dependency version
 is unchanged; the additional Windows API features support this nonshipping
 binary. Local same-token controls are not distinct-account acceptance.
-The hosted job marker `T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE` must
-be observed before any claim of successful cross-account handoff. A real
-SDK channel, independently pinned thread/resume, issuer and authority crash
-controls, and admitted NTFS journal remain required. No production grant.
+The hosted job marker `T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE` was
+observed for candidate `f87781ecab3804b1b54f3cae92abf08e19636074`, Windows
+Native Security job 140847030543. The legacy issuer prerequisite still
+failed later in storage acceptance, so this is not a release verdict.
+
+The next proof replaces file-only handoff acceptance with a one-shot,
+first-instance local inbound named pipe. The authority verifies the exact
+protected descriptor; the issuer receives write-data, read-control and
+synchronize rights only, never generic write or instance creation. The
+issuer verifies the descriptor from its own endpoint and requests only
+SecurityIdentification. The authority verifies the actual connector PID
+against the retained issuer process and the kernel-observed client SID
+after each bounded read. The canonical frame must equal the audit record,
+and the existing job membership, revocation, issuer exit and termination
+checks still apply. Both transports share the existing deadline and
+cancel/drain primitives. The marker
+`T011_WINDOWS_SCM_AUTHENTICATED_HANDOFF_PASS_NONRELEASE` remains pending
+actual hosted execution. Local positive and negative controls are not
+cross-account proof; the connector PID alone does not attest a delegated
+writer. No production authority or resume is granted. A real SDK channel,
+independently pinned thread/resume, issuer and authority crash controls,
+and admitted NTFS journal remain required.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights>,
+<https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient>,
+<https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex>.
 
 #### Windows request cancellation at the native publication fence (nonrelease)
 

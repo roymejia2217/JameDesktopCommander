@@ -298,7 +298,17 @@ jobs:
       - name: Test Windows SCM service identity and startup denial
         id: windows_scm_acceptance
         if: matrix.target == 'win32-x64'
-        run: pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:JDC_T011_NODE_BINARY = (Get-Command node.exe -ErrorAction Stop).Source
+          $result = @(cargo +1.91.1 test --locked --manifest-path native/authority-service/Cargo.toml --bin jdc-authority-scm-issued-proof observation::job_fixture::sdk_read::tests::real_jdc_sdk_fixed_read_and_wrong_connector_denial -- --ignored --exact --nocapture 2>&1)
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          if ($code -ne 0) { exit $code }
+          if (-not ($result -match '^test result: ok[.] 1 passed; 0 failed; 0 ignored;')) { throw 'E_SCM_LOCAL_SDK_VERDICT_MISSING' }
+          pwsh -NoProfile -File test/security/t011-windows-scm-acceptance.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows custody fixtures
         id: windows_custody_fixture

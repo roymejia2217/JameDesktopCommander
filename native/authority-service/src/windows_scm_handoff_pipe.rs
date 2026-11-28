@@ -1,6 +1,7 @@
 //! Disposable SCM handoff IPC; no broker permissions or data operations.
 //! The issuer sends one bounded canonical handoff directly. The authority
 //! authenticates the actual pinned SCM connector and last writer's token.
+use super::bounded_io;
 use super::{attributes, descriptor, owned, role_sid, verify_security, Handoff, Names, ProofPhase};
 use jdc_authority_service::{
     windows_pipe_peer::{observe_client_sid_after_read, verify_live_issued_peer_after_read},
@@ -29,8 +30,6 @@ use windows_sys::Win32::{
         IO::OVERLAPPED,
     },
 };
-#[path = "windows_bounded_pipe_io.rs"]
-mod bounded_io;
 const LIMIT: usize = 128;
 // CreateFileW requires read-attributes access even for an inbound pipe
 // client. Keep data read, attribute write, append/instance and ACL writes out.
@@ -73,10 +72,16 @@ fn client(name: &[u16]) -> Result<OwnedHandle, IdentityDenied> {
     owned(raw)
 }
 fn write_bytes(client: &OwnedHandle, bytes: &[u8]) -> Result<(), IdentityDenied> {
+    write_bytes_until(client, bytes, bounded_io::deadline(TIMEOUT)?)
+}
+pub(super) fn write_bytes_until(
+    client: &OwnedHandle,
+    bytes: &[u8],
+    end: Instant,
+) -> Result<(), IdentityDenied> {
     if bytes.is_empty() || bytes.len() > LIMIT + 4 {
         return Err(IdentityDenied);
     }
-    let end = bounded_io::deadline(TIMEOUT)?;
     let event = bounded_io::event()?;
     let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
     ov.hEvent = event.as_raw_handle();

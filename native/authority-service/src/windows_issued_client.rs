@@ -202,6 +202,12 @@ impl ScmJobFixtureChild {
     }
 }
 
+enum FixedScmChild {
+    Observe,
+    Resume,
+    SdkRead,
+}
+
 impl IssuedClient {
     /// Create a suspended child using the *current process* primary token;
     /// matching these DACLs to a separately supplied/forged token is forbidden.
@@ -243,7 +249,7 @@ impl IssuedClient {
     /// suspended fixture image with an already-open assignment-only job.
     /// No inherited handles, resume or service authority are granted here.
     pub fn launch_scm_job_fixture(job: OwnedHandle) -> Result<ScmJobFixtureChild, IdentityDenied> {
-        Self::launch_fixed_scm_job_child(job, false)
+        Self::launch_fixed_scm_job_child(job, FixedScmChild::Observe)
     }
 
     /// Separate disposable proof, fixed image and fixed role check only.
@@ -251,12 +257,20 @@ impl IssuedClient {
     pub fn launch_scm_resume_fixture(
         job: OwnedHandle,
     ) -> Result<ScmJobFixtureChild, IdentityDenied> {
-        Self::launch_fixed_scm_job_child(job, true)
+        Self::launch_fixed_scm_job_child(job, FixedScmChild::Resume)
+    }
+
+    /// Disposable fixed SDK proof only. No caller-provided image, script,
+    /// pipe, environment, or command line is accepted.
+    pub fn launch_scm_sdk_read_fixture(
+        job: OwnedHandle,
+    ) -> Result<ScmJobFixtureChild, IdentityDenied> {
+        Self::launch_fixed_scm_job_child(job, FixedScmChild::SdkRead)
     }
 
     fn launch_fixed_scm_job_child(
         job: OwnedHandle,
-        resume_fixture: bool,
+        kind: FixedScmChild,
     ) -> Result<ScmJobFixtureChild, IdentityDenied> {
         crate::windows_token::verify_scm_fixture_identity(
             crate::windows_token::ScmFixtureRole::Issuer,
@@ -280,22 +294,61 @@ impl IssuedClient {
         {
             return Err(IdentityDenied);
         }
-        let image = stage.join("jdc-authority-scm-issued-client.exe");
-        let mut command = std::ffi::OsString::from("\"");
-        command.push(image.as_os_str());
-        command.push(OsStr::new("\""));
-        if resume_fixture {
-            command.push(OsStr::new(" --fixed-resume-proof"));
-        }
         let system = std::env::var("SystemRoot").map_err(|_| IdentityDenied)?;
-        let child = Self::launch_suspended_with_observation(
-            &image,
-            &command,
-            &[("SystemRoot", &system)],
-            true,
-            Some(job.as_handle()),
-            resume_fixture,
-        )?;
+        let child = match kind {
+            FixedScmChild::Observe | FixedScmChild::Resume => {
+                let image = stage.join("jdc-authority-scm-issued-client.exe");
+                let mut command = std::ffi::OsString::from("\"");
+                command.push(image.as_os_str());
+                command.push(OsStr::new("\""));
+                let resume = matches!(kind, FixedScmChild::Resume);
+                if resume {
+                    command.push(OsStr::new(" --fixed-resume-proof"));
+                }
+                Self::launch_suspended_with_observation(
+                    &image,
+                    &command,
+                    &[("SystemRoot", &system)],
+                    true,
+                    Some(job.as_handle()),
+                    resume,
+                )?
+            }
+            FixedScmChild::SdkRead => {
+                let runtime = stage.join("sdk-read");
+                let image = runtime.join("node.exe");
+                let script = runtime.join("test/security/support/t011-windows-scm-sdk-client.mjs");
+                let state = stage.join("sdk-state");
+                if !script.is_file() || !state.is_dir() {
+                    return Err(IdentityDenied);
+                }
+                let state = state.to_str().ok_or(IdentityDenied)?;
+                let pipe = format!(r"\\.\pipe\JDC-T011-SCM-SDK-{id}");
+                let command = format!(
+                    "\"{}\" \"{}\" \"{}\"",
+                    image.to_str().ok_or(IdentityDenied)?,
+                    script.to_str().ok_or(IdentityDenied)?,
+                    pipe
+                );
+                Self::launch_suspended_with_observation(
+                    &image,
+                    OsStr::new(&command),
+                    &[
+                        ("SystemRoot", &system),
+                        ("USERPROFILE", state),
+                        ("HOME", state),
+                        ("TEMP", state),
+                        ("TMP", state),
+                        ("DESKTOP_COMMANDER_CONFIG_DIR", state),
+                        ("DESKTOP_COMMANDER_DISABLE_TELEMETRY", "1"),
+                        ("DC_FLAG_URL", "http://127.0.0.1:9/"),
+                    ],
+                    true,
+                    Some(job.as_handle()),
+                    true,
+                )?
+            }
+        };
         Ok(ScmJobFixtureChild {
             child,
             assignment: job,
@@ -1132,6 +1185,10 @@ mod tests {
         )
         .is_err());
         assert!(IssuedClient::launch_scm_resume_fixture(
+            job.as_handle().try_clone_to_owned().unwrap()
+        )
+        .is_err());
+        assert!(IssuedClient::launch_scm_sdk_read_fixture(
             job.as_handle().try_clone_to_owned().unwrap()
         )
         .is_err());

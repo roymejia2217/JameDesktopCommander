@@ -93,8 +93,9 @@ function Assert-ScmDacl([string] $sddl) {
 }
 # The proof rendezvous is administrator-owned; only the fixed issuer may
 # write inside handoff, and the independent authority is a read-only observer.
-function Assert-DualRoleAcl([string] $target, $authoritySid, $issuerSid, [System.Security.AccessControl.FileSystemRights] $issuerRights, [bool] $protected) {
+function Assert-DualRoleAcl([string] $target, $authoritySid, $issuerSid, [System.Security.AccessControl.FileSystemRights] $issuerRights, [bool] $protected, [string[]] $owners = @()) {
     $acl = Get-Acl -LiteralPath $target
+    if ($owners.Count -ne 0 -and $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $owners) { throw 'E_SCM_SDK_STAGE_OWNER' }
     if ($protected -and -not $acl.AreAccessRulesProtected) { throw 'E_SCM_HANDOFF_ACL_INHERITED' }
     $sync = [System.Security.AccessControl.FileSystemRights]::Synchronize
     $expected = @{
@@ -315,15 +316,63 @@ try {
     $handoff = Join-Path $stage 'handoff'
     New-Item -ItemType Directory -Path $handoff -ErrorAction Stop | Out-Null
     Set-DualRoleAcl $handoff $true $virtualSid $issuerSid $modify
-    # Both experiments are required. The second uses distinct fixed mode,
-    # records and kernel object names, never a reused observer success code.
-    foreach ($scenario in @('observer', 'resume')) {
+    # Stage exact built runtime and locked dependencies before the third
+    # scenario. No code or module directory is writable by either role.
+    $sdk = Join-Path $stage 'sdk-read'
+    $sdkState = Join-Path $stage 'sdk-state'
+    $authorityRead = Join-Path $stage 'authority-read'
+    foreach ($directory in @($sdk, $sdkState, $authorityRead)) {
+        New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+    }
+    Set-DualRoleAcl $sdk $true $virtualSid $issuerSid $rx
+    Set-DualRoleAcl $sdkState $true $virtualSid $issuerSid $modify
+    Set-RestrictedAcl $authorityRead $true $virtualSid
+    $sentinel = Join-Path $authorityRead 'sentinel.bin'
+    [IO.File]::WriteAllBytes($sentinel, [Text.Encoding]::ASCII.GetBytes('SERVICE_DOMAIN_BYTES'))
+    Set-RestrictedAcl $sentinel $false $virtualSid
+    $node = (Get-Command node.exe -ErrorAction Stop).Source
+    if (-not [IO.Path]::IsPathFullyQualified($node)) { throw 'E_SCM_SDK_NODE_NOT_ABSOLUTE' }
+    $runtimeFiles = @(
+        @{ Source = $node; Destination = (Join-Path $sdk 'node.exe') },
+        @{ Source = (Join-Path (Get-Location).Path 'package.json'); Destination = (Join-Path $sdk 'package.json') }
+    )
+    foreach ($entry in $runtimeFiles) {
+        $item = Get-Item -LiteralPath $entry.Source -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'E_SCM_SDK_IMAGE_CUSTODY' }
+        Copy-Item -LiteralPath $entry.Source -Destination $entry.Destination -ErrorAction Stop
+        Assert-DualRoleAcl $entry.Destination $virtualSid $issuerSid $rx $false
+        if ((Get-FileHash -LiteralPath $entry.Source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $entry.Destination -Algorithm SHA256).Hash) { throw 'E_SCM_SDK_IMAGE_PROVENANCE' }
+    }
+    foreach ($tree in @('dist', 'node_modules')) {
+        $source = Join-Path (Get-Location).Path $tree
+        $sourceItem = Get-Item -LiteralPath $source -ErrorAction Stop
+        if (-not $sourceItem.PSIsContainer -or ($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'E_SCM_SDK_SOURCE_CUSTODY' }
+        $sourceEntries = @(Get-ChildItem -LiteralPath $source -Recurse -Force -ErrorAction Stop)
+        if ($sourceEntries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) { throw 'E_SCM_SDK_SOURCE_REPARSE' }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $sdk $tree) -Recurse -Force -ErrorAction Stop
+    }
+    $support = Join-Path $sdk 'test/security/support'
+    New-Item -ItemType Directory -Path $support -Force -ErrorAction Stop | Out-Null
+    foreach ($name in @('t011-issued-sdk-native-read.mjs', 't011-windows-scm-sdk-client.mjs')) {
+        $source = Join-Path (Get-Location).Path ('test/security/support/' + $name)
+        $destination = Join-Path $support $name
+        Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) { throw 'E_SCM_SDK_SCRIPT_PROVENANCE' }
+    }
+    $trustedOwners = @('S-1-5-18', 'S-1-5-32-544', [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    Assert-DualRoleAcl $sdk $virtualSid $issuerSid $rx $true $trustedOwners
+    foreach ($entry in @(Get-ChildItem -LiteralPath $sdk -Recurse -Force -ErrorAction Stop)) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'E_SCM_SDK_STAGE_REPARSE' }
+        Assert-DualRoleAcl $entry.FullName $virtualSid $issuerSid $rx $false $trustedOwners
+    }
+    # All three distinct experiments are mandatory.
+    foreach ($scenario in @('observer', 'resume', 'sdk-read')) {
     $issuerCommand = '"' + $proofBinary + '" --issuer-' + $scenario + '-proof'
     $observerCommand = '"' + $proofBinary + '" --authority-' + $scenario + '-proof'
-    $expectedObserver = if ($scenario -eq 'resume') { 12 } else { 8 }
-    $expectedIssuer = if ($scenario -eq 'resume') { 14 } else { 10 }
-    $recordName = if ($scenario -eq 'resume') { 'resume-issued-process.txt' } else { 'issued-process.txt' }
-    $jobRecordName = if ($scenario -eq 'resume') { 'resume-job-issued-process.txt' } else { 'job-issued-process.txt' }
+    $expectedObserver = switch ($scenario) { 'observer' { 8 } 'resume' { 12 } 'sdk-read' { 16 } }
+    $expectedIssuer = switch ($scenario) { 'observer' { 10 } 'resume' { 14 } 'sdk-read' { 18 } }
+    $recordName = if ($scenario -eq 'observer') { 'issued-process.txt' } else { $scenario + '-issued-process.txt' }
+    $jobRecordName = if ($scenario -eq 'observer') { 'job-issued-process.txt' } else { $scenario + '-job-issued-process.txt' }
     & $sc config $issuerName 'binPath=' $issuerCommand | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'E_SCM_ISSUER_IMAGE_CONFIGURATION_FAILED' }
     & $sc config $serviceName 'binPath=' $observerCommand | Out-Null
@@ -358,7 +407,7 @@ try {
         # SCM is the transport for fixed proof failures; service stderr is
         # not available to this hosted controller. Never echo arbitrary values.
         if ($null -ne $observerState -and $observerState.State -eq 'Stopped' -and $observerState.ExitCode -eq 1066 -and
-            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..38))) {
+            ($observerState.ServiceSpecificExitCode -eq 9 -or $observerState.ServiceSpecificExitCode -in (20..39) -or $observerState.ServiceSpecificExitCode -in (50..57))) {
             Write-Output ('E_SCM_OBSERVER_PHASE_' + $observerState.ServiceSpecificExitCode)
         }
         try {
@@ -446,3 +495,4 @@ Write-Output 'T011_WINDOWS_SCM_JOB_HANDOFF_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_AUTHENTICATED_HANDOFF_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_PRIMARY_THREAD_PIN_PASS_NONRELEASE'
 Write-Output 'T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE'
+Write-Output 'T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE'

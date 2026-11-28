@@ -55,8 +55,15 @@ test('SCM distinct-principal observation is a mandatory nonrelease experiment', 
   assert.match(acceptance, /E_SCM_JOB_HANDOFF_RECORD_CUSTODY/);
   assert.match(acceptance, /ServiceSpecificExitCode -ne \$expectedObserver/);
   assert.match(acceptance, /ServiceSpecificExitCode -ne \$expectedIssuer/);
-  assert.match(acceptance, /\$expectedObserver = if \(\$scenario -eq 'resume'\) \{ 12 \} else \{ 8 \}/);
-  assert.match(acceptance, /\$expectedIssuer = if \(\$scenario -eq 'resume'\) \{ 14 \} else \{ 10 \}/);
+  assert.match(acceptance, /\$expectedObserver = switch \(\$scenario\) \{ 'observer' \{ 8 \} 'resume' \{ 12 \} 'sdk-read' \{ 16 \} \}/);
+  assert.match(acceptance, /\$expectedIssuer = switch \(\$scenario\) \{ 'observer' \{ 10 \} 'resume' \{ 14 \} 'sdk-read' \{ 18 \} \}/);
+  assert.match(acceptance, /T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE/);
+  assert.match(proof, /--issuer-sdk-read-proof/);
+  assert.match(proof, /--authority-sdk-read-proof/);
+  assert.match(acceptance, /Assert-DualRoleAcl \$entry.FullName \$virtualSid \$issuerSid \$rx \$false/);
+  assert.match(acceptance, /Set-RestrictedAcl \$sentinel \$false \$virtualSid/);
+  assert.match(workflow, /observation::job_fixture::sdk_read::tests::real_jdc_sdk_fixed_read_and_wrong_connector_denial -- --ignored --exact --nocapture/);
+  assert.match(workflow, /E_SCM_LOCAL_SDK_VERDICT_MISSING/);
   assert.match(acceptance, /T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE/);
   assert.match(proof, /--issuer-resume-proof/);
   assert.match(proof, /--authority-resume-proof/);
@@ -64,7 +71,7 @@ test('SCM distinct-principal observation is a mandatory nonrelease experiment', 
   assert.match(acceptance, /E_SCM_ISSUER_CLEANUP_FAILED/);
   assert.match(acceptance, /E_SCM_OBSERVER_PHASE_/);
   assert.match(acceptance, /E_SCM_ISSUER_PHASE_/);
-  assert.match(acceptance, /ServiceSpecificExitCode -in \(20\.\.38\)/);
+  assert.match(acceptance, /ServiceSpecificExitCode -in \(20\.\.39\)/);
   assert.match(acceptance, /ServiceSpecificExitCode -in \(40\.\.48\)/);
   const denyOnly = fs.readFileSync(path.join(root, binaryPath), 'utf8');
   assert.doesNotMatch(denyOnly, /ServiceState::Running|ServiceControlAccept::STOP/);

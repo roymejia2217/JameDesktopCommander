@@ -695,6 +695,50 @@ checks custody of both pairs of audit records. New observer failure phases
 `T011_WINDOWS_SCM_CONTROLLED_RESUME_PASS_NONRELEASE` is pending. Actual SDK
 read/mutation, authenticated request writer and crash controls remain open.
 
+#### Windows fixed real JDC SDK read after controlled resume (nonrelease)
+
+Hosted Windows job 141027146188 at `05e90a7166638af8cc79f4c21667a20433a3ac9e`
+accepted the controlled-resume marker; legacy storage still failed later.
+The third mandatory SCM scenario uses separate names, audit records and
+terminal service codes 16/18, preserving observer-only 8/10 and resume
+12/14. The issuer creates only the administrator-staged fixed Node image
+and fixed SDK script with a job-bound restricted child, with a dedicated
+config/temp directory and no inherited channel or arbitrary image argument.
+The controller stages the built JDC runtime and locked dependencies,
+checks every staged entry for reparse points, exact role DACL and trusted
+owner, and hashes the Node executable, package manifest and support scripts.
+This is not a signed distribution inventory or general installed bootstrap.
+
+Before resume the authority retains the fixed test-owned sentinel file
+from its protected directory, and the actual issuer must be denied opening
+that file (ERROR_ACCESS_DENIED, not a sharing violation). Following the
+same authenticated handoff, assignment revocation, clean issuer exit,
+SCM terminal result and thread/job checks, the Node child connects to a
+fresh authority-owned local duplex pipe. The existing native peer mask
+0x0012019B excludes instance creation; local actual Node exchange and
+second CreateNamedPipeW denial were demonstrated. No generic-write ACE.
+The authority checks the retained child, thread, job and kernel-observed
+connector/SID after the exact read request, rejects extra input, and fences
+one read of the retained regular single-link object and bounded disclosure
+with a one-use policy ticket. All I/O shares an eight-second deadline.
+Only the exact test bytes are eligible for disclosure. The actual JDC
+managed adapter and official SDK must return these bytes, and the child
+must exit 19, with both process/thread signaled. The current authority
+does not equate connector PID and SID alone with nondelegable writer
+identity; the creation-time protected process/thread/job constraints and
+independent hosted adversarial acceptance remain necessary.
+
+Local integration requires the actual locked built runtime and explicitly
+selected Node, and checks a separate same-SID connector against the wrong
+retained process pin (no file response). The existing native job now runs
+that ignored-by-default integration explicitly and requires exactly one
+passing test before SCM. New hosted marker:
+`T011_WINDOWS_SCM_REAL_JDC_MANAGED_READ_PASS_NONRELEASE`.
+Phases 39 and 50–57 distinguish SDK staging/connection/challenge/request/
+connector/token/frame/file/response. Hosted distinct-account acceptance
+is pending; no grant to shipping code, no durable root/epoch policy, no
+NTFS mutation or recovery proof. Linux remains independently blocked.
+
 #### Windows request cancellation at the native publication fence (nonrelease)
 
 The local same-token SDK fixture now exercises actual MCP cancellation after

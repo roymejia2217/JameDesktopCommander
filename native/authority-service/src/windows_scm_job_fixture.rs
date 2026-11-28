@@ -49,8 +49,12 @@ use windows_sys::Win32::{
         },
     },
 };
+#[path = "windows_bounded_pipe_io.rs"]
+mod bounded_io;
 #[path = "windows_scm_handoff_pipe.rs"]
 mod handoff_pipe;
+#[path = "windows_scm_sdk_read.rs"]
+mod sdk_read;
 
 const LIMITS: u32 = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 const WAIT_MS: u32 = 5000;
@@ -88,9 +92,11 @@ impl Names {
         )?;
         Ok(Self {
             prefix,
-            record: stage
-                .join("handoff")
-                .join(mode.record("job-issued-process.txt", "resume-job-issued-process.txt")),
+            record: stage.join("handoff").join(mode.record(
+                "job-issued-process.txt",
+                "resume-job-issued-process.txt",
+                "sdk-read-job-issued-process.txt",
+            )),
             mode,
         })
     }
@@ -328,10 +334,13 @@ impl IssuerJobProof {
             )
         })?;
         forbidden_job_rights(&self.names)?;
-        let child = if mode == JobProofMode::Resume {
-            IssuedClient::launch_scm_resume_fixture(assignment)?
-        } else {
-            IssuedClient::launch_scm_job_fixture(assignment)?
+        if mode == JobProofMode::SdkRead {
+            sdk_read::verify_issuer_cannot_open_sentinel()?;
+        }
+        let child = match mode {
+            JobProofMode::Observe => IssuedClient::launch_scm_job_fixture(assignment)?,
+            JobProofMode::Resume => IssuedClient::launch_scm_resume_fixture(assignment)?,
+            JobProofMode::SdkRead => IssuedClient::launch_scm_sdk_read_fixture(assignment)?,
         };
         verify_scm_fixture_process_identity(ScmFixtureRole::Issuer, child.process_handle())
             .map_err(|_| IdentityDenied)?;
@@ -596,6 +605,12 @@ pub(super) fn observe(
     )?;
     let job = AuthorityJob::new(&names)?;
     let channel = handoff_pipe::HandoffPipe::create(&names, phase)?;
+    let sdk_channel = if mode == JobProofMode::SdkRead {
+        phase.set(ProofPhase::ObserverSdkRead);
+        Some(sdk_read::SdkRead::create(&names)?)
+    } else {
+        None
+    };
     phase.set(ProofPhase::ObserverAwaitFrame);
     signal(&start)?;
     wait(&ack, WAIT_MS)?;
@@ -658,7 +673,7 @@ pub(super) fn observe(
         .thread_identity()
         .verify(child.as_handle(), thread.as_handle())?;
     job.verify_child(child.as_handle())?;
-    if mode == JobProofMode::Resume {
+    if mode.allows_resume() {
         use windows_sys::Win32::System::Threading::{
             OpenThread, ResumeThread, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
         };
@@ -678,11 +693,28 @@ pub(super) fn observe(
             return Err(IdentityDenied);
         }
         drop(resume);
+        if let Some(sdk) = sdk_channel {
+            phase.set(ProofPhase::ObserverSdkRead);
+            sdk.serve(child.as_handle(), &expected_sid, phase, || {
+                job.verify_child(child.as_handle())?;
+                handoff.child.verify(child.as_handle())?;
+                handoff
+                    .thread_identity()
+                    .verify(child.as_handle(), thread.as_handle())
+            })?;
+        }
         phase.set(ProofPhase::ObserverChildExit);
         wait(&child, WAIT_MS)?;
         wait(&thread, WAIT_MS)?;
         let mut exit = u32::MAX;
-        if unsafe { GetExitCodeProcess(child.as_raw_handle(), &mut exit) } == 0 || exit != 17 {
+        if unsafe { GetExitCodeProcess(child.as_raw_handle(), &mut exit) } == 0
+            || exit
+                != if mode == JobProofMode::SdkRead {
+                    19
+                } else {
+                    17
+                }
+        {
             return Err(IdentityDenied);
         }
     }
@@ -821,7 +853,11 @@ mod tests {
     }
     #[test]
     fn ordinary_process_cannot_enter_fixture_roles() {
-        for mode in [JobProofMode::Observe, JobProofMode::Resume] {
+        for mode in [
+            JobProofMode::Observe,
+            JobProofMode::Resume,
+            JobProofMode::SdkRead,
+        ] {
             assert!(Names::for_role(ScmFixtureRole::Issuer, mode).is_err());
             assert!(Names::for_role(ScmFixtureRole::Authority, mode).is_err());
         }

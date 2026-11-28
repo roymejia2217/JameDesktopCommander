@@ -45,27 +45,45 @@ const OBSERVE_ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE;
 pub enum JobProofMode {
     Observe,
     Resume,
+    SdkRead,
 }
 impl JobProofMode {
-    fn record(self, observer: &str, resume: &str) -> PathBuf {
-        PathBuf::from(if self == Self::Resume {
-            resume
-        } else {
-            observer
+    fn record(self, observer: &str, resume: &str, sdk: &str) -> PathBuf {
+        PathBuf::from(match self {
+            Self::Observe => observer,
+            Self::Resume => resume,
+            Self::SdkRead => sdk,
         })
     }
     fn suffix(self) -> &'static str {
-        if self == Self::Resume {
-            "-resume"
-        } else {
-            ""
+        match self {
+            Self::Observe => "",
+            Self::Resume => "-resume",
+            Self::SdkRead => "-sdk-read",
+        }
+    }
+    fn allows_resume(self) -> bool {
+        self != Self::Observe
+    }
+    pub fn observer_success(self) -> u32 {
+        match self {
+            Self::Observe => 8,
+            Self::Resume => 12,
+            Self::SdkRead => 16,
+        }
+    }
+    pub fn issuer_success(self) -> u32 {
+        match self {
+            Self::Observe => 10,
+            Self::Resume => 14,
+            Self::SdkRead => 18,
         }
     }
 }
 
 // Fixed nonshipping SCM service-specific denial codes. Never contain paths,
 // credentials, kernel handles, or untrusted error text. Observer-only
-// success remains 8/10; separate resume success uses 12/14.
+// success remains 8/10; resume uses 12/14; SDK read uses 16/18.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ProofPhase {
@@ -90,6 +108,7 @@ pub enum ProofPhase {
     ObserverTerminal = 36,
     ObserverResume = 37,
     ObserverChildExit = 38,
+    ObserverSdkRead = 39,
     IssuerAwaitStart = 40,
     IssuerChild = 41,
     IssuerRecord = 42,
@@ -99,6 +118,14 @@ pub enum ProofPhase {
     IssuerAwaitRevoke = 46,
     IssuerRelease = 47,
     IssuerCleanup = 48,
+    SdkConnect = 50,
+    SdkChallenge = 51,
+    SdkRequest = 52,
+    SdkConnector = 53,
+    SdkToken = 54,
+    SdkFrame = 55,
+    SdkFile = 56,
+    SdkReply = 57,
 }
 impl ProofPhase {
     pub fn code(self) -> u32 {
@@ -204,7 +231,11 @@ fn fixture_path(mode: JobProofMode) -> Result<PathBuf, IdentityDenied> {
         .parent()
         .ok_or(IdentityDenied)?
         .join("handoff")
-        .join(mode.record("issued-process.txt", "resume-issued-process.txt")))
+        .join(mode.record(
+            "issued-process.txt",
+            "resume-issued-process.txt",
+            "sdk-read-issued-process.txt",
+        )))
 }
 
 fn open_observer_pin(stamp: Stamp) -> Result<OwnedHandle, IdentityDenied> {
@@ -290,7 +321,7 @@ fn denied_thread_control_rights(tid: u32, mode: JobProofMode) -> Result<(), Iden
         0x0004_0000,
         0x0008_0000,
     ] {
-        if mode == JobProofMode::Resume && access == THREAD_SUSPEND_RESUME {
+        if mode.allows_resume() && access == THREAD_SUSPEND_RESUME {
             continue;
         }
         let raw = unsafe { OpenThread(access, 0, tid) };
@@ -468,8 +499,7 @@ fn verify_terminal_issuer(service: &Service, mode: JobProofMode) -> Result<(), I
     let status = service.query_status().map_err(|_| IdentityDenied)?;
     if status.current_state != ServiceState::Stopped
         || status.process_id.is_some()
-        || status.exit_code
-            != ServiceExitCode::ServiceSpecific(if mode == JobProofMode::Resume { 14 } else { 10 })
+        || status.exit_code != ServiceExitCode::ServiceSpecific(mode.issuer_success())
     {
         return Err(IdentityDenied);
     }

@@ -49,6 +49,12 @@ mod proof {
                 (Some(arg), None) if arg == "--authority-resume-proof" => {
                     Some(Self::Observer(JobProofMode::Resume))
                 }
+                (Some(arg), None) if arg == "--issuer-sdk-read-proof" => {
+                    Some(Self::Issuer(JobProofMode::SdkRead))
+                }
+                (Some(arg), None) if arg == "--authority-sdk-read-proof" => {
+                    Some(Self::Observer(JobProofMode::SdkRead))
+                }
                 _ => None,
             }
         }
@@ -114,11 +120,7 @@ mod proof {
         })?;
         let phase = std::cell::Cell::new(super::observation::ProofPhase::ObserverInitial);
         let reason = if super::observation::observe(&phase, mode).is_ok() {
-            if mode == JobProofMode::Resume {
-                12
-            } else {
-                8
-            }
+            mode.observer_success()
         } else {
             phase.get().code()
         };
@@ -140,11 +142,7 @@ mod proof {
         )?;
         let phase = std::cell::Cell::new(super::observation::ProofPhase::IssuerInitial);
         let reason = if super::observation::issue(&handler, receiver, &phase, mode).is_ok() {
-            if mode == JobProofMode::Resume {
-                14
-            } else {
-                10
-            }
+            mode.issuer_success()
         } else {
             phase.get().code()
         };
